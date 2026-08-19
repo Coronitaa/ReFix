@@ -24,9 +24,11 @@ echo [*] Building steam_api64.dll proxy...
 cl /nologo /O2 /EHsc /LD src\steam_proxy.cpp src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib /link /DEF:src\steam_api64.def
 
 if %ERRORLEVEL% equ 0 (
-    echo [*] Digitally Signing All Proxy DLLs with Authenticode Certificate...
-    powershell -ExecutionPolicy Bypass -File sign_dlls.ps1
-    echo [OK] All ReFix DLL proxies successfully built and digitally signed in build\
+    if exist sign_dlls.ps1 (
+        echo [*] Digitally Signing All Proxy DLLs with Authenticode Certificate...
+        powershell -ExecutionPolicy Bypass -File sign_dlls.ps1
+    )
+    echo [OK] All ReFix DLL proxies successfully built in build\
 ) else (
     echo [!] Build had errors! Check output above.
 )
