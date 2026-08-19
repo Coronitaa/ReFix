@@ -3174,5 +3174,11 @@ SteamInternal_GameServer_Init_proxy ENDP
 g_pSteamClientGameServer_proxy PROC
     jmp QWORD PTR [g_steamProcs + 8432]
 g_pSteamClientGameServer_proxy ENDP
+SteamInternal_SteamAPI_Init_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8440]
+SteamInternal_SteamAPI_Init_proxy ENDP
+SteamInternal_GameServer_Init_V2_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8448]
+SteamInternal_GameServer_Init_V2_proxy ENDP
 END
 

@@ -1,6 +1,13 @@
 # Build and deployment directories
 build/
 deploy/
+ReFix_deploy/
+ReFix_src/
+ReFix_Release.zip
+
+# Submodule/vendor clone repos (source headers/libs are in imgui/ and minhook/)
+src/imgui_repo/
+src/minhook_repo/
 
 # Executables, libraries, and symbol files
 *.exe

@@ -1,0 +1,44 @@
+Microsoft (R) COFF/PE Dumper Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file build\steam_api64.dll
+
+File Type: DLL
+
+  Section contains the following exports for steam_api64.dll
+
+    00000000 characteristics
+    FFFFFFFF time date stamp
+        0.00 version
+           1 ordinal base
+          16 number of functions
+          16 number of names
+
+    ordinal hint RVA      name
+
+          1    0 00002D00 SteamAPI_ISteamGameServer_UserHasLicenseForApp
+          2    1 00002D20 SteamAPI_ISteamMatchmakingServers_RequestFavoritesServerList
+          3    2 00002DB0 SteamAPI_ISteamMatchmakingServers_RequestFriendsServerList
+          4    3 00002E40 SteamAPI_ISteamMatchmakingServers_RequestHistoryServerList
+          5    4 00002ED0 SteamAPI_ISteamMatchmakingServers_RequestInternetServerList
+          6    5 00002F60 SteamAPI_ISteamMatchmakingServers_RequestLANServerList
+          7    6 00002FB0 SteamAPI_ISteamMatchmakingServers_RequestSpectatorServerList
+          8    7 00003040 SteamAPI_ISteamMatchmaking_AddFavoriteGame
+          9    8 000030B0 SteamAPI_ISteamUser_UserHasLicenseForApp
+         10    9 000030D0 SteamAPI_Init
+         11    A 00003140 SteamAPI_InitAnonymousUser
+         12    B 000031A0 SteamAPI_InitSafe
+         13    C 00003200 SteamAPI_RestartAppIfNecessary
+         14    D 00003210 SteamGameServer_InitSafe
+         15    E 00003250 SteamInternal_GameServer_Init
+         16    F 0003FD40 g_steamProcs
+
+  Summary
+
+        6000 .data
+        1000 .fptable
+        2000 .pdata
+       1C000 .rdata
+        1000 .reloc
+       20000 .text

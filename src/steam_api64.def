@@ -1,5 +1,7 @@
 LIBRARY steam_api64
 EXPORTS
+    ReFix_NotifyLobbyID
+    ReFix_NotifyLobbyMemberChange
     GetHSteamPipe=GetHSteamPipe_proxy
     GetHSteamUser=GetHSteamUser_proxy
     SteamAPI_GetHSteamPipe=SteamAPI_GetHSteamPipe_proxy
@@ -1055,6 +1057,8 @@ EXPORTS
     SteamInternal_FindOrCreateUserInterface=SteamInternal_FindOrCreateUserInterface_proxy
     SteamInternal_GameServer_Init
     g_pSteamClientGameServer=g_pSteamClientGameServer_proxy
+    SteamInternal_SteamAPI_Init
+    SteamInternal_GameServer_Init_V2=SteamInternal_GameServer_Init_V2_proxy
     SteamAPI_Init
     SteamAPI_InitSafe
     SteamAPI_InitAnonymousUser

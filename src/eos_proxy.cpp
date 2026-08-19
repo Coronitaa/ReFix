@@ -8,18 +8,49 @@
 //   3. Retaining deferred callback queueing via Tick.
 // =============================================================================
 
+#include "upnp_firewall.h"
 #include <windows.h>
 #include <cstring>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <unordered_map>
+#include <thread>
+#include <atomic>
 #include <stdarg.h>
+
+// Steam P2P peer notification — calls into steam_api64.dll (loaded in same process)
+// We use GetProcAddress to avoid a cross-DLL link dependency.
+static void ReFix_NotifyLobbyID(uint64_t lobbyID) {
+    static bool resolved = false;
+    static void (*pfn)(uint64_t) = nullptr;
+    if (!resolved) {
+        resolved = true;
+        HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+        if (hSteam) pfn = (void(*)(uint64_t))GetProcAddress(hSteam, "ReFix_NotifyLobbyID");
+    }
+    if (pfn) pfn(lobbyID);
+}
+
+static void ReFix_NotifyLobbyMemberChange(uint64_t lobbyID) {
+    static bool resolved = false;
+    static void (*pfn)(uint64_t) = nullptr;
+    if (!resolved) {
+        resolved = true;
+        HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+        if (hSteam) pfn = (void(*)(uint64_t))GetProcAddress(hSteam, "ReFix_NotifyLobbyMemberChange");
+    }
+    if (pfn) pfn(lobbyID);
+}
+
+
 
 // =============================================================================
 // EOS TYPES
 // =============================================================================
 typedef int32_t EOS_EResult;
 #define EOS_Success              0
+#define EOS_InvalidParameters    2
 #define EOS_NoConnection         3
 #define EOS_NotFound             14
 #define EOS_AlreadyConfigured    30
@@ -36,11 +67,70 @@ typedef void* (*fn_SteamFriends_t)();
 typedef int (*fn_GetFriendCount_t)(void* self, int friendFlags);
 typedef uint64_t (*fn_GetFriendByIndex_t)(void* self, int index, int friendFlags);
 typedef const char* (*fn_GetFriendPersonaName_t)(void* self, uint64_t steamIDFriend);
+typedef const char* (*fn_GetPersonaName_t)(void* self);
+typedef const char* (*fn_GetFriendRichPresence_t)(void* self, uint64_t steamIDFriend, const char* pchKey);
 
 static fn_SteamFriends_t g_pfn_SteamFriends = nullptr;
 static fn_GetFriendCount_t g_pfn_GetFriendCount = nullptr;
 static fn_GetFriendByIndex_t g_pfn_GetFriendByIndex = nullptr;
 static fn_GetFriendPersonaName_t g_pfn_GetFriendPersonaName = nullptr;
+static fn_GetPersonaName_t g_pfn_GetPersonaName = nullptr;
+static fn_GetFriendRichPresence_t g_pfn_GetFriendRichPresence = nullptr;
+
+// Steam Matchmaking Interface Typedefs (for real lobby backend)
+typedef void* (*fn_SteamMatchmaking_t)();
+typedef uint64_t (*fn_MM_CreateLobby_t)(void* self, int eLobbyType, int cMaxMembers);
+typedef uint64_t (*fn_MM_RequestLobbyList_t)(void* self);
+typedef uint64_t (*fn_MM_JoinLobby_t)(void* self, uint64_t steamIDLobby);
+typedef void (*fn_MM_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
+typedef bool (*fn_MM_SetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
+typedef const char* (*fn_MM_GetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey);
+typedef uint64_t (*fn_MM_GetLobbyByIndex_t)(void* self, int iLobby);
+typedef void (*fn_MM_AddStringFilter_t)(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType);
+typedef void (*fn_MM_AddResultCountFilter_t)(void* self, int cMaxResults);
+typedef int (*fn_MM_GetNumLobbyMembers_t)(void* self, uint64_t steamIDLobby);
+typedef void (*fn_MM_SetLobbyType_t)(void* self, uint64_t steamIDLobby, int eLobbyType);
+typedef bool (*fn_MM_SetLobbyJoinable_t)(void* self, uint64_t steamIDLobby, bool bLobbyJoinable);
+
+static fn_SteamMatchmaking_t g_pfn_SteamMatchmaking = nullptr;
+static fn_MM_CreateLobby_t g_pfn_MM_CreateLobby = nullptr;
+static fn_MM_RequestLobbyList_t g_pfn_MM_RequestLobbyList = nullptr;
+static fn_MM_JoinLobby_t g_pfn_MM_JoinLobby = nullptr;
+static fn_MM_LeaveLobby_t g_pfn_MM_LeaveLobby = nullptr;
+static fn_MM_SetLobbyData_t g_pfn_MM_SetLobbyData = nullptr;
+static fn_MM_GetLobbyData_t g_pfn_MM_GetLobbyData = nullptr;
+static fn_MM_GetLobbyByIndex_t g_pfn_MM_GetLobbyByIndex = nullptr;
+static fn_MM_AddStringFilter_t g_pfn_MM_AddStringFilter = nullptr;
+static fn_MM_AddResultCountFilter_t g_pfn_MM_AddResultCountFilter = nullptr;
+static fn_MM_GetNumLobbyMembers_t g_pfn_MM_GetNumLobbyMembers = nullptr;
+static fn_MM_SetLobbyType_t g_pfn_MM_SetLobbyType = nullptr;
+static fn_MM_SetLobbyJoinable_t g_pfn_MM_SetLobbyJoinable = nullptr;
+
+// Steam Matchmaking state
+static void* g_steamMatchmakingInterface = nullptr;
+static std::atomic<uint64_t> g_currentSteamLobbyId{0}; // Steam lobby ID of the lobby we created/joined
+static char g_gameFilter[128] = ""; // configurable lobby filter tag
+
+// Lobby data cache: maps Steam lobby IDs to their host connection info
+struct SteamLobbyInfo {
+    uint64_t steamLobbyId;
+    char hostIP[64];
+    char hostPort[16];
+    char eosLobbyId[64]; // The EOS lobby ID the game uses
+};
+static std::vector<SteamLobbyInfo> g_steamLobbies;
+
+typedef bool (*fn_SetRichPresence_t)(void* self, const char* pchKey, const char* pchValue);
+static fn_SetRichPresence_t g_pfn_SetRichPresence = nullptr;
+static std::string g_activeSessionName = "RefixSession";
+
+// Steam callback runner
+typedef void (*fn_SteamAPI_RunCallbacks_t)();
+typedef void (*fn_SteamAPI_RegisterCallResult_t)(void* pCallback, uint64_t hAPICall);
+static fn_SteamAPI_RunCallbacks_t g_pfn_SteamRunCallbacks = nullptr;
+static fn_SteamAPI_RegisterCallResult_t g_pfn_SteamRegisterCallResult = nullptr;
+
+static void* GetSteamMatchmakingInterface();
 
 #define EOS_LS_NotLoggedIn       0
 #define EOS_LS_UsingLocalProfile 1
@@ -54,32 +144,180 @@ static char g_productUserIdStr[64] = "000102030405060708090a0b0c0d0e0f";
 static char g_epicAccountIdStr[64] = "f0e0d0c0b0a009080706050403020100";
 static void* GetSteamFriendsInterface();
 
+// Forward declaration (defined below in DEBUG LOGGING section)
+static void Log(const char* format, ...);
+
+// Read game_filter from environment (set by winmm_proxy from ReFix.ini)
+static void LoadGameFilterConfig() {
+    char buf[128] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_GAME_FILTER", buf, sizeof(buf)) > 0 && buf[0] != '\0') {
+        strncpy_s(g_gameFilter, sizeof(g_gameFilter), buf, _TRUNCATE);
+    } else {
+        char exePath[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string iniPath(exePath);
+        size_t pos = iniPath.find_last_of("\\/");
+        if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
+
+        char iniFilter[128] = { 0 };
+        GetPrivateProfileStringA("Network", "GameFilter", "", iniFilter, sizeof(iniFilter), iniPath.c_str());
+
+        char realAppId[64] = { 0 };
+        GetPrivateProfileStringA("Steam", "RealAppId", "", realAppId, sizeof(realAppId), iniPath.c_str());
+
+        if (iniFilter[0] != '\0') {
+            strncpy_s(g_gameFilter, sizeof(g_gameFilter), iniFilter, _TRUNCATE);
+        } else if (realAppId[0] != '\0' && strcmp(realAppId, "0") != 0) {
+            sprintf_s(g_gameFilter, sizeof(g_gameFilter), "refix_game_%s", realAppId);
+        } else {
+            char appId[64] = "480";
+            if (GetEnvironmentVariableA("SteamAppId", appId, sizeof(appId)) > 0 && appId[0] != '\0' && strcmp(appId, "0") != 0) {
+                sprintf_s(g_gameFilter, sizeof(g_gameFilter), "refix_game_%s", appId);
+            } else {
+                strcpy_s(g_gameFilter, "refix_game_default");
+            }
+        }
+    }
+    Log("Dynamic Game filter for lobby matching: %s", g_gameFilter);
+}
+
 // =============================================================================
 // DEBUG LOGGING
-// =============================================================================
+static bool g_enableEosLog = false;
+static bool g_eosLogConfigLoaded = false;
+
+static void LoadEOSLogConfig() {
+    if (g_eosLogConfigLoaded) return;
+    g_eosLogConfigLoaded = true;
+
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string iniPath(exePath);
+    size_t pos = iniPath.find_last_of("\\/");
+    if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
+
+    char buf[64];
+    GetPrivateProfileStringA("Debug", "EnableLog", "false", buf, sizeof(buf), iniPath.c_str());
+    g_enableEosLog = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
+}
+
 static void Log(const char* format, ...) {
+    LoadEOSLogConfig();
     va_list args;
     va_start(args, format);
     char buf[1024];
     vsprintf_s(buf, sizeof(buf), format, args);
     va_end(args);
     
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    HWND hCons = GetConsoleWindow();
+    if (hCons) {
+        printf("[%02d:%02d:%02d.%03d] [EOSSDK] %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+        fflush(stdout);
+    }
+
+    if (!g_enableEosLog) return;
+
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
     std::string logPath(exePath);
     size_t pos = logPath.find_last_of("\\/");
     if (pos != std::string::npos) {
-        logPath = logPath.substr(0, pos + 1) + "ReFix_eos_debug.log";
+        logPath = logPath.substr(0, pos + 1) + "ReFix.log";
     } else {
-        logPath = "ReFix_eos_debug.log";
+        logPath = "ReFix.log";
     }
     
     FILE* f = nullptr;
     fopen_s(&f, logPath.c_str(), "a");
     if (f) {
-        fprintf(f, "[%lu] %s\n", GetTickCount(), buf);
+        fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [EOSSDK] %s\n",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
         fclose(f);
     }
+}
+
+extern "C" __declspec(dllexport) void ReFix_EOS_SetLobbyID(uint64_t lobbyID) {
+    if (lobbyID != 0) {
+        g_currentSteamLobbyId.store(lobbyID);
+        Log("ReFix_EOS_SetLobbyID: Active Steam Lobby ID set to %llu", lobbyID);
+    }
+}
+
+static char g_cachedPublicIP[64] = "";
+static bool g_fetchingPublicIP = false;
+
+static void FetchPublicIPAsync() {
+    if (g_fetchingPublicIP || g_cachedPublicIP[0] != '\0') return;
+    g_fetchingPublicIP = true;
+    std::thread([]() {
+        std::string pub = ReFixNet::GetPublicIP();
+        if (!pub.empty() && pub != "127.0.0.1" && pub != "0.0.0.0") {
+            strncpy_s(g_cachedPublicIP, sizeof(g_cachedPublicIP), pub.c_str(), _TRUNCATE);
+            Log("Async Public IP resolved: %s", g_cachedPublicIP);
+        }
+        g_fetchingPublicIP = false;
+    }).detach();
+}
+
+static void GetBestLocalIP(char* outIP, size_t outIPSize) {
+    outIP[0] = '\0';
+    GetEnvironmentVariableA("REFIX_PUBLIC_IP", outIP, (DWORD)outIPSize);
+    if (outIP[0] != '\0') return;
+
+    if (g_cachedPublicIP[0] != '\0') {
+        strncpy_s(outIP, outIPSize, g_cachedPublicIP, _TRUNCATE);
+        return;
+    }
+
+    // Trigger async fetch in background thread so main thread NEVER blocks
+    FetchPublicIPAsync();
+
+    GetEnvironmentVariableA("REFIX_LOCAL_IP", outIP, (DWORD)outIPSize);
+    if (outIP[0] != '\0') return;
+
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s != INVALID_SOCKET) {
+        sockaddr_in target;
+        memset(&target, 0, sizeof(target));
+        target.sin_family = AF_INET;
+        target.sin_addr.s_addr = inet_addr("1.1.1.1");
+        target.sin_port = htons(53);
+
+        if (connect(s, (sockaddr*)&target, sizeof(target)) != SOCKET_ERROR) {
+            sockaddr_in name;
+            int namelen = sizeof(name);
+            if (getsockname(s, (sockaddr*)&name, &namelen) != SOCKET_ERROR) {
+                const char* ipStr = inet_ntoa(name.sin_addr);
+                if (ipStr && strcmp(ipStr, "127.0.0.1") != 0 && strcmp(ipStr, "0.0.0.0") != 0) {
+                    strncpy_s(outIP, outIPSize, ipStr, _TRUNCATE);
+                    closesocket(s);
+                    return;
+                }
+            }
+        }
+        closesocket(s);
+    }
+
+    char hostName[256] = {0};
+    if (gethostname(hostName, sizeof(hostName)) == 0) {
+        struct hostent* host = gethostbyname(hostName);
+        if (host && host->h_addr_list && host->h_addr_list[0]) {
+            for (int i = 0; host->h_addr_list[i] != nullptr; ++i) {
+                struct in_addr addr;
+                memcpy(&addr, host->h_addr_list[i], sizeof(struct in_addr));
+                const char* ipStr = inet_ntoa(addr);
+                if (ipStr && strncmp(ipStr, "127.", 4) != 0 && strcmp(ipStr, "0.0.0.0") != 0) {
+                    strncpy_s(outIP, outIPSize, ipStr, _TRUNCATE);
+                    return;
+                }
+            }
+        }
+    }
+
+    strcpy_s(outIP, outIPSize, "127.0.0.1");
 }
 
 // =============================================================================
@@ -115,6 +353,8 @@ static char s_handles[64] = {};
 #define HANDLE_PROGRESSION      ((void*)&s_handles[26])
 #define HANDLE_LOBBY_SEARCH     ((void*)&s_handles[27])
 #define HANDLE_LOBBY_MODIFICATION ((void*)&s_handles[28])
+#define HANDLE_SESSION_MODIFICATION ((void*)&s_handles[29])
+#define HANDLE_INTEGRATED_PLATFORM  ((void*)&s_handles[30])
 
 static char s_fakeProductUserId[64]  = "refix_product_user_00001";
 static char s_fakeEpicAccountId[64]  = "refix_epic_account_00001";
@@ -241,7 +481,10 @@ static EOS_Connect_ExternalAccountInfo* CreateSteamExternalAccountInfo(void* pui
     
     std::string extId = FindExternalId(puid);
     if (extId.empty()) extId = g_productUserIdStr;
-    std::string dispName = GetDisplayNameForExternalId(extId);
+    std::string dispName = g_userName;
+    if (dispName.empty() || dispName == "Player" || dispName == "ReFix User") {
+        dispName = GetDisplayNameForExternalId(extId);
+    }
     
     info->ApiVersion = 1;
     info->ProductUserId = puid;
@@ -313,6 +556,18 @@ static FakeIdToken s_fakeIdToken = {
     "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZWZpeCJ9.fake_signature"
 };
 
+struct FakeConnectIdToken {
+    int32_t     ApiVersion;
+    void*       ProductUserId;
+    const char* JsonWebToken;
+};
+
+static FakeConnectIdToken s_fakeConnectIdToken = {
+    1,
+    FAKE_PRODUCT_USER_ID,
+    "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyZWZpeF9wdWlkIn0.fake_signature"
+};
+
 // =============================================================================
 // DEFERRED CALLBACK QUEUE
 // =============================================================================
@@ -368,6 +623,20 @@ static void FlushCallbacks() {
 // CALLBACK INFO STRUCTS
 // =============================================================================
 #pragma pack(push, 8)
+struct CB_Auth_LoginStatusChanged {
+    void*   ClientData;
+    void*   LocalUserId;
+    int32_t PrevStatus;
+    int32_t CurrentStatus;
+};
+
+struct CB_Connect_LoginStatusChanged {
+    void*   ClientData;
+    void*   LocalUserId;
+    int32_t PrevStatus;
+    int32_t CurrentStatus;
+};
+
 struct CB_Auth_Login {
     EOS_EResult ResultCode;
     int32_t     _pad0;
@@ -476,7 +745,10 @@ struct Trampoline {
 static Trampoline* g_trampolines = nullptr;
 
 extern "C" int64_t CommonStubHandler(int64_t index) {
-    Log("Generic stub called: %s (index %lld)", g_eosNames[index], index);
+    Log("Generic stub called: %s (index %lld, ptr=%p, tramp=%p)", g_eosNames[index], index, (index < EOS_FORWARD_COUNT ? g_eosProcs[index] : nullptr), (g_trampolines ? &g_trampolines[index] : nullptr));
+    if (g_eosNames[index] && strstr(g_eosNames[index], "AddNotify")) {
+        return (int64_t)(s_nextNotifId++);
+    }
     return 0; // return EOS_Success
 }
 
@@ -506,6 +778,42 @@ static EOS_EResult eos_Initialize(void* Options) {
     return EOS_Success;
 }
 
+static uint64_t GetMachineUniqueHash() {
+    static uint64_t s_hash = 0;
+    if (s_hash != 0) return s_hash;
+
+    char compName[MAX_COMPUTERNAME_LENGTH + 1] = { 0 };
+    DWORD compLen = sizeof(compName);
+    GetComputerNameA(compName, &compLen);
+
+    DWORD volSerial = 0;
+    GetVolumeInformationA("C:\\", NULL, 0, &volSerial, NULL, NULL, NULL, 0);
+
+    // FNV-1a 64-bit hash
+    uint64_t h = 14695981039346656037ULL;
+    for (const char* p = compName; *p; ++p) {
+        h ^= (uint8_t)*p;
+        h *= 1099511628211ULL;
+    }
+    h ^= volSerial;
+    h *= 1099511628211ULL;
+
+    s_hash = h ? h : 0x123456789ABCDEF0ULL;
+    return s_hash;
+}
+
+static uint64_t GetMachineUniqueSteamID() {
+    char envBuf[64] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_STEAM_ID", envBuf, sizeof(envBuf)) > 0) {
+        uint64_t sid = _strtoui64(envBuf, nullptr, 10);
+        if (sid != 0) return sid;
+    }
+    uint64_t mHash = GetMachineUniqueHash();
+    uint32_t accountId = (uint32_t)(mHash & 0x0FFFFFFF);
+    if (accountId == 0) accountId = 100001;
+    return 76561197960265728ULL + accountId;
+}
+
 // Re-check Steam persona name and SteamId (set by steam_proxy after SteamAPI_Init)
 // Called lazily since EOS DllMain runs before SteamAPI_Init
 static bool g_userNameRefreshed = false;
@@ -526,14 +834,12 @@ static void RefreshUserName() {
         refreshed = true; // User set a custom name
     }
     
-    // Refresh SteamId if still using hardcoded fallback
-    if (strcmp(g_productUserIdStr, "76561197960287930") == 0) {
-        char envBuf[64] = {0};
-        if (GetEnvironmentVariableA("REFIX_STEAM_ID", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
-            strcpy_s(g_productUserIdStr, sizeof(g_productUserIdStr), envBuf);
-            Log("RefreshUserName: Updated SteamId from real Steam account: %s", g_productUserIdStr);
-        }
-    }
+    // Refresh SteamId and PUID with unique Steam ID per PC
+    uint64_t uniqueSteamId = GetMachineUniqueSteamID();
+    sprintf_s(g_productUserIdStr, sizeof(g_productUserIdStr), "%llu", uniqueSteamId);
+    sprintf_s(s_fakeProductUserId, sizeof(s_fakeProductUserId), "%llu", uniqueSteamId);
+    sprintf_s(s_fakeEpicAccountId, sizeof(s_fakeEpicAccountId), "epic_%llu", uniqueSteamId);
+    Log("RefreshUserName: Unique SteamId & PUID for PC: %s", g_productUserIdStr);
     
     g_userNameRefreshed = refreshed;
 }
@@ -547,6 +853,7 @@ static void* eos_Platform_Create(void* Options) {
     Log("EOS_Platform_Create called");
     // Re-check Steam persona name (may have been set by steam_proxy after SteamAPI_Init)
     RefreshUserName();
+    ReFixNet::AutoOpenPorts();
     return HANDLE_PLATFORM;
 }
 
@@ -556,6 +863,115 @@ static void eos_Platform_Tick(void* Handle) {
 
 static void eos_Platform_Release(void* Handle) {
     Log("EOS_Platform_Release called");
+}
+
+static EOS_EResult eos_Platform_CheckForLauncherAndRestart(void* Handle) {
+    Log("EOS_Platform_CheckForLauncherAndRestart called -> EOS_Success");
+    return EOS_Success;
+}
+
+static int32_t eos_Platform_GetApplicationStatus(void* Handle) {
+    return 3; // EOS_AS_Foreground
+}
+
+static EOS_EResult eos_Platform_SetApplicationStatus(void* Handle, int32_t Status) {
+    return EOS_Success;
+}
+
+static int32_t eos_Platform_GetNetworkStatus(void* Handle) {
+    return 2; // EOS_NS_Online
+}
+
+static EOS_EResult eos_Platform_SetNetworkStatus(void* Handle, int32_t Status) {
+    return EOS_Success;
+}
+
+static EOS_EResult eos_Platform_GetActiveCountryCode(void* Handle, void* LocalUserId, char* OutBuffer, int32_t* InOutBufferLength) {
+    if (OutBuffer && InOutBufferLength && *InOutBufferLength >= 3) {
+        strcpy_s(OutBuffer, *InOutBufferLength, "US");
+        *InOutBufferLength = 2;
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_Platform_GetActiveLocaleCode(void* Handle, void* LocalUserId, char* OutBuffer, int32_t* InOutBufferLength) {
+    if (OutBuffer && InOutBufferLength && *InOutBufferLength >= 6) {
+        strcpy_s(OutBuffer, *InOutBufferLength, "en-US");
+        *InOutBufferLength = 5;
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_Platform_GetOverrideCountryCode(void* Handle, char* OutBuffer, int32_t* InOutBufferLength) {
+    if (OutBuffer && InOutBufferLength && *InOutBufferLength >= 3) {
+        strcpy_s(OutBuffer, *InOutBufferLength, "US");
+        *InOutBufferLength = 2;
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_Platform_GetOverrideLocaleCode(void* Handle, char* OutBuffer, int32_t* InOutBufferLength) {
+    if (OutBuffer && InOutBufferLength && *InOutBufferLength >= 6) {
+        strcpy_s(OutBuffer, *InOutBufferLength, "en-US");
+        *InOutBufferLength = 5;
+    }
+    return EOS_Success;
+}
+
+static int32_t eos_Platform_GetDesktopCrossplayStatus(void* Handle, void* Options, void* OutDesktopCrossplayStatusInfo) {
+    return EOS_Success;
+}
+
+static EOS_EResult eos_ByteArray_ToString(const uint8_t* ByteArray, const uint32_t Length, char* OutBuffer, uint32_t* InOutBufferLength) {
+    Log("EOS_ByteArray_ToString called (Length=%u)", Length);
+    if (!ByteArray || !InOutBufferLength) return EOS_InvalidParameters;
+    uint32_t needed = Length * 2 + 1;
+    if (!OutBuffer || *InOutBufferLength < needed) {
+        *InOutBufferLength = needed;
+        return EOS_LimitExceeded;
+    }
+    static const char hexDigits[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < Length; ++i) {
+        OutBuffer[i * 2]     = hexDigits[(ByteArray[i] >> 4) & 0x0F];
+        OutBuffer[i * 2 + 1] = hexDigits[ByteArray[i] & 0x0F];
+    }
+    OutBuffer[Length * 2] = '\0';
+    *InOutBufferLength = needed;
+    return EOS_Success;
+}
+
+static EOS_EResult eos_ByteArray_FromString(const char* HexString, uint8_t* OutBuffer, uint32_t* InOutBufferLength) {
+    Log("EOS_ByteArray_FromString called");
+    if (!HexString || !InOutBufferLength) return EOS_InvalidParameters;
+    size_t len = strlen(HexString);
+    if (len % 2 != 0) return EOS_InvalidParameters;
+    uint32_t needed = (uint32_t)(len / 2);
+    if (!OutBuffer || *InOutBufferLength < needed) {
+        *InOutBufferLength = needed;
+        return EOS_LimitExceeded;
+    }
+    auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < needed; ++i) {
+        int h = hexVal(HexString[i * 2]);
+        int l = hexVal(HexString[i * 2 + 1]);
+        if (h < 0 || l < 0) return EOS_InvalidParameters;
+        OutBuffer[i] = (uint8_t)((h << 4) | l);
+    }
+    *InOutBufferLength = needed;
+    return EOS_Success;
+}
+
+extern "C" __declspec(dllexport) EOS_EResult EOS_ByteArray_ToString(const uint8_t* ByteArray, const uint32_t Length, char* OutBuffer, uint32_t* InOutBufferLength) {
+    return eos_ByteArray_ToString(ByteArray, Length, OutBuffer, InOutBufferLength);
+}
+
+extern "C" __declspec(dllexport) EOS_EResult EOS_ByteArray_FromString(const char* HexString, uint8_t* OutBuffer, uint32_t* InOutBufferLength) {
+    return eos_ByteArray_FromString(HexString, OutBuffer, InOutBufferLength);
 }
 
 static void* eos_GetAuthInterface(void* h)              { return HANDLE_AUTH; }
@@ -584,9 +1000,28 @@ static void* eos_GetRTCInterface(void* h)                { return HANDLE_RTC; }
 static void* eos_GetRTCAdminInterface(void* h)           { return HANDLE_RTC_ADMIN; }
 static void* eos_GetKWSInterface(void* h)                { return HANDLE_KWS; }
 static void* eos_GetProgressionSnapshotInterface(void* h){ return HANDLE_PROGRESSION; }
+static void* eos_GetIntegratedPlatformInterface(void* h) { return HANDLE_INTEGRATED_PLATFORM; }
+
+// --- IntegratedPlatform Interface ---
+static EOS_NotificationId eos_IntegratedPlatform_AddNotifyUserLoginStatusChanged(void* H, void* O, void* C, void* Cb) {
+    return s_nextNotifId++;
+}
+static void eos_IntegratedPlatform_RemoveNotifyUserLoginStatusChanged(void* H, EOS_NotificationId Id) { }
+static EOS_EResult eos_IntegratedPlatform_SetUserLoginStatus(void* H, void* O) {
+    return EOS_Success;
+}
+static EOS_EResult eos_IntegratedPlatform_CreateIntegratedPlatformOptionsContainer(void* O, void** OutContainer) {
+    if (OutContainer) *OutContainer = (void*)0x12345678;
+    return EOS_Success;
+}
+static EOS_EResult eos_IntegratedPlatformOptionsContainer_Add(void* H, void* O) {
+    return EOS_Success;
+}
+static void eos_IntegratedPlatformOptionsContainer_Release(void* H) { }
 
 // --- Auth Interface ---
 static EOS_NotificationId eos_Auth_AddNotifyLoginStatusChanged(void* Handle, void* Options, void* ClientData, void* Callback) {
+    Log("EOS_Auth_AddNotifyLoginStatusChanged registered (id=%llu)", s_nextNotifId);
     return s_nextNotifId++;
 }
 
@@ -625,6 +1060,7 @@ static int32_t eos_Auth_GetLoggedInAccountsCount(void* Handle) {
 }
 
 static int32_t eos_Auth_GetLoginStatus(void* Handle, void* LocalUserId) {
+    Log("EOS_Auth_GetLoginStatus (LocalUserId=%p) -> EOS_LS_LoggedIn", LocalUserId);
     return EOS_LS_LoggedIn;
 }
 
@@ -700,8 +1136,19 @@ static void eos_Auth_VerifyUserAuth(void* Handle, void* Options, void* ClientDat
 
 // --- Connect Interface ---
 static EOS_NotificationId eos_Connect_AddNotifyAuthExpiration(void* H, void* O, void* C, void* Cb) { return s_nextNotifId++; }
-static EOS_NotificationId eos_Connect_AddNotifyLoginStatusChanged(void* H, void* O, void* C, void* Cb) { return s_nextNotifId++; }
-static EOS_EResult eos_Connect_CopyIdToken(void* H, void* O, void** Out) { return EOS_NotFound; }
+static EOS_NotificationId eos_Connect_AddNotifyLoginStatusChanged(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Connect_AddNotifyLoginStatusChanged registered (id=%llu)", s_nextNotifId);
+    return s_nextNotifId++;
+}
+
+static EOS_EResult eos_Connect_CopyIdToken(void* H, void* O, FakeConnectIdToken** Out) {
+    Log("EOS_Connect_CopyIdToken called");
+    if (Out) {
+        s_fakeConnectIdToken.ProductUserId = FAKE_PRODUCT_USER_ID;
+        *Out = &s_fakeConnectIdToken;
+    }
+    return EOS_Success;
+}
 
 static void eos_Connect_CreateDeviceId(void* H, void* O, void* C, void* Cb) {
     Log("EOS_Connect_CreateDeviceId called");
@@ -751,11 +1198,8 @@ static void* eos_Connect_GetLoggedInUserByIndex(void* H, int32_t Idx) {
 
 static int32_t eos_Connect_GetLoggedInUsersCount(void* H) { return 1; }
 static int32_t eos_Connect_GetLoginStatus(void* H, void* UserId) {
-    if (UserId == FAKE_PRODUCT_USER_ID) return EOS_LS_LoggedIn;
-    for (auto& pair : g_puidMap) {
-        if (pair.second == UserId) return EOS_LS_LoggedIn;
-    }
-    return 0; // EOS_LS_NotLoggedIn
+    Log("EOS_Connect_GetLoginStatus (UserId=%p) -> EOS_LS_LoggedIn", UserId);
+    return EOS_LS_LoggedIn;
 }
 
 static uint32_t eos_Connect_GetProductUserExternalAccountCount(void* H, void* O) {
@@ -763,7 +1207,20 @@ static uint32_t eos_Connect_GetProductUserExternalAccountCount(void* H, void* O)
     return 2;
 }
 
-static EOS_EResult eos_Connect_GetProductUserIdMapping(void* H, void* O, char* Buf, int32_t* Len) { return EOS_NotFound; }
+static EOS_EResult eos_Connect_GetProductUserIdMapping(void* H, void* O, char* OutBuffer, int32_t* InOutBufferLength) {
+    Log("EOS_Connect_GetProductUserIdMapping called");
+    if (!InOutBufferLength) return EOS_InvalidParameters;
+    const char* puidStr = g_productUserIdStr;
+    if (!puidStr || puidStr[0] == '\0') puidStr = "000102030405060708090a0b0c0d0e0f";
+    int32_t requiredLen = (int32_t)strlen(puidStr) + 1;
+    if (!OutBuffer || *InOutBufferLength < requiredLen) {
+        *InOutBufferLength = requiredLen;
+        return EOS_LimitExceeded;
+    }
+    strcpy_s(OutBuffer, *InOutBufferLength, puidStr);
+    *InOutBufferLength = requiredLen - 1;
+    return EOS_Success;
+}
 static void eos_Connect_IdToken_Release(void* T) { }
 
 static void eos_Connect_LinkAccount(void* H, void* O, void* C, void* Cb) {
@@ -1329,7 +1786,7 @@ struct CB_Lobby_CreateLobby {
 };
 
 // Search Parameter Capturing & Dynamic Lying for Matchmaking
-struct EOS_Lobby_AttributeValue {
+union EOS_Lobby_AttributeValue {
     int64_t AsInt64;
     double AsDouble;
     int32_t bAsBool;
@@ -1340,7 +1797,7 @@ struct EOS_Lobby_AttributeData {
     int32_t ApiVersion;
     const char* Key;
     EOS_Lobby_AttributeValue Value;
-    int32_t ValueType;
+    int32_t ValueType; // 0=Bool, 1=Int64, 2=Double, 3=String (EOS_AT_STRING)
 };
 
 static std::vector<EOS_Lobby_AttributeData> g_capturedSearchParameters;
@@ -1348,7 +1805,7 @@ static std::vector<EOS_Lobby_AttributeData> g_capturedSearchParameters;
 static void FreeCapturedSearchParameters() {
     for (auto& param : g_capturedSearchParameters) {
         if (param.Key) free((void*)param.Key);
-        if (param.ValueType == 4 && param.Value.AsUtf8) { // String type
+        if ((param.ValueType == 3 || param.ValueType == 4) && param.Value.AsUtf8) { // String type
             free((void*)param.Value.AsUtf8);
         }
     }
@@ -1360,10 +1817,10 @@ static void CaptureSearchParameter(const EOS_Lobby_AttributeData* data) {
     
     for (auto& param : g_capturedSearchParameters) {
         if (strcmp(param.Key, data->Key) == 0) {
-            if (param.ValueType == 4 && param.Value.AsUtf8) free((void*)param.Value.AsUtf8);
+            if ((param.ValueType == 3 || param.ValueType == 4) && param.Value.AsUtf8) free((void*)param.Value.AsUtf8);
             param.ValueType = data->ValueType;
             param.Value = data->Value;
-            if (data->ValueType == 4 && data->Value.AsUtf8) {
+            if ((data->ValueType == 3 || data->ValueType == 4) && data->Value.AsUtf8) {
                 param.Value.AsUtf8 = _strdup(data->Value.AsUtf8);
             }
             return;
@@ -1372,7 +1829,7 @@ static void CaptureSearchParameter(const EOS_Lobby_AttributeData* data) {
     
     EOS_Lobby_AttributeData clone = *data;
     clone.Key = _strdup(data->Key);
-    if (data->ValueType == 4 && data->Value.AsUtf8) {
+    if ((data->ValueType == 3 || data->ValueType == 4) && data->Value.AsUtf8) {
         clone.Value.AsUtf8 = _strdup(data->Value.AsUtf8);
     }
     g_capturedSearchParameters.push_back(clone);
@@ -1403,9 +1860,193 @@ static void eos_LobbySearch_Release(void* H) {
 
 static std::vector<std::string> g_foundLobbies;
 
+static void CreateAndTagRealSteamLobbyAsync() {
+    static std::atomic<bool> s_creatingLobby{false};
+    bool expected = false;
+    if (!s_creatingLobby.compare_exchange_strong(expected, true)) return;
+    if (g_currentSteamLobbyId.load() != 0) { s_creatingLobby.store(false); return; }
+
+    std::thread([]() {
+        void* mm = GetSteamMatchmakingInterface();
+        if (!mm || !g_pfn_MM_CreateLobby) {
+            Log("CreateAndTagRealSteamLobbyAsync: Steam Matchmaking interface not available");
+            s_creatingLobby.store(false);
+            return;
+        }
+
+        Log("CreateAndTagRealSteamLobbyAsync: Creating real Valve Steam lobby in background...");
+        uint64_t hAPICall = g_pfn_MM_CreateLobby(mm, 2 /*k_ELobbyTypePublic*/, 4);
+        Log("  CreateLobby SteamAPICall_t handle: %llu", hAPICall);
+
+        // --- Capture the lobby ID via LobbyCreated_t callback ---
+        // The Steamworks SDK fires LobbyCreated_t (iCallback=513) when CreateLobby completes.
+        // Since we're in an emulated environment (Goldberg/GSE), the callback is dispatched
+        // synchronously during RunCallbacks(). We use a CCallResult-style struct to poll.
+
+        // LobbyCreated_t struct layout:
+        //   EResult m_eResult;      // offset 0, 4 bytes
+        //   uint64  m_ulSteamIDLobby; // offset 8, 8 bytes (aligned)
+        struct LobbyCreated_t {
+            int32_t m_eResult;
+            int32_t _pad;
+            uint64_t m_ulSteamIDLobby;
+        };
+
+        // Also try using RegisterCallResult if available
+        // This is a lightweight CCallResult-compatible struct for Goldberg GSE
+        struct CallbackPoll {
+            void* vtable[4];    // CCallbackBase vtable (dummy)
+            uint8_t flags;
+            int32_t iCallback;
+            LobbyCreated_t result;
+            bool fired;
+        };
+
+        uint64_t steamLobbyId = 0;
+
+        // Strategy: pump RunCallbacks and check if our lobby is now available.
+        // Goldberg emulator processes CreateLobby synchronously in most cases,
+        // so the lobby should appear in the internal state after a few RunCallbacks calls.
+        if (g_pfn_SteamRunCallbacks) {
+            // First approach: run callbacks to process the creation
+            for (int attempt = 0; attempt < 50; attempt++) {
+                Sleep(50);
+                g_pfn_SteamRunCallbacks();
+
+                // After CreateLobby completes, the lobby appears in the matchmaking list.
+                // We need to do a fresh RequestLobbyList to find it.
+                // But first, check if Goldberg already set our lobby ID via the callback
+                // by checking g_currentSteamLobbyId (which may be set by other code paths).
+                if (g_currentSteamLobbyId.load() != 0) {
+                    steamLobbyId = g_currentSteamLobbyId.load();
+                    Log("  Lobby ID captured from external notification: %llu", steamLobbyId);
+                    break;
+                }
+            }
+
+            // If we still don't have a lobby ID, do a lobby list request to find our own lobby
+            if (steamLobbyId == 0 && g_pfn_MM_RequestLobbyList && g_pfn_MM_GetLobbyByIndex) {
+                Log("  Lobby ID not captured via callback, searching via RequestLobbyList...");
+                
+                // Request ALL lobbies with our game filter
+                if (g_pfn_MM_AddStringFilter) {
+                    g_pfn_MM_AddStringFilter(mm, "game_filter", g_gameFilter, 0 /*k_ELobbyComparisonEqual*/);
+                }
+                g_pfn_MM_RequestLobbyList(mm);
+                
+                // Wait for results
+                for (int i = 0; i < 30; i++) {
+                    Sleep(30);
+                    g_pfn_SteamRunCallbacks();
+                    uint64_t id = g_pfn_MM_GetLobbyByIndex(mm, 0);
+                    if (id != 0) {
+                        steamLobbyId = id;
+                        Log("  Found lobby via RequestLobbyList fallback: %llu", steamLobbyId);
+                        break;
+                    }
+                }
+            }
+
+            // Last resort: if Goldberg assigned the lobby synchronously, 
+            // try requesting with no filter and take the first result
+            if (steamLobbyId == 0 && g_pfn_MM_RequestLobbyList && g_pfn_MM_GetLobbyByIndex) {
+                Log("  Last resort: requesting unfiltered lobby list...");
+                g_pfn_MM_RequestLobbyList(mm);
+                for (int i = 0; i < 20; i++) {
+                    Sleep(50);
+                    g_pfn_SteamRunCallbacks();
+                    uint64_t id = g_pfn_MM_GetLobbyByIndex(mm, 0);
+                    if (id != 0) {
+                        steamLobbyId = id;
+                        Log("  Found lobby via unfiltered list: %llu", steamLobbyId);
+                        break;
+                    }
+                }
+            }
+        }
+
+        char pubIP[64] = "127.0.0.1";
+        GetBestLocalIP(pubIP, sizeof(pubIP));
+
+        if (steamLobbyId == 0) {
+            char envSteamId[32] = "";
+            GetEnvironmentVariableA("REFIX_STEAM_ID", envSteamId, sizeof(envSteamId));
+            uint64_t userSteamID = envSteamId[0] != '\0' ? _strtoui64(envSteamId, nullptr, 10) : 76561198362393833ULL;
+            steamLobbyId = 0x0110000100000000ULL | (userSteamID & 0xFFFFFFFFULL);
+            Log("WARNING: CreateAndTagRealSteamLobbyAsync: Steam API returned 0, assigned Synthetic Lobby ID=%llu", steamLobbyId);
+        } else {
+            Log("CreateAndTagRealSteamLobbyAsync: Steam Lobby ID=%llu (HostIP=%s:7777)", steamLobbyId, pubIP);
+        }
+
+        g_currentSteamLobbyId.store(steamLobbyId);
+
+        if (g_pfn_MM_SetLobbyData) {
+            g_pfn_MM_SetLobbyData(mm, steamLobbyId, "game_filter", g_gameFilter);
+            g_pfn_MM_SetLobbyData(mm, steamLobbyId, "HOST_IP", pubIP);
+            g_pfn_MM_SetLobbyData(mm, steamLobbyId, "SERVER_IP", pubIP);
+            g_pfn_MM_SetLobbyData(mm, steamLobbyId, "HOST_PORT", "7777");
+            g_pfn_MM_SetLobbyData(mm, steamLobbyId, "SERVER_PORT", "7777");
+            g_pfn_MM_SetLobbyData(mm, steamLobbyId, "eos_lobby_id", g_productUserIdStr);
+            g_pfn_MM_SetLobbyData(mm, steamLobbyId, "session_name", g_activeSessionName.c_str());
+
+            if (g_pfn_MM_SetLobbyType) g_pfn_MM_SetLobbyType(mm, steamLobbyId, 2 /*k_ELobbyTypePublic*/);
+            if (g_pfn_MM_SetLobbyJoinable) g_pfn_MM_SetLobbyJoinable(mm, steamLobbyId, true);
+
+            Log("  Successfully tagged Steam lobby %llu with game_filter=%s, HOST_IP=%s:7777",
+                steamLobbyId, g_gameFilter, pubIP);
+        }
+
+        // Notify P2P hook so Winsock sendto is redirected through Steam relay
+        ReFix_NotifyLobbyID(steamLobbyId);
+
+        void* steamFriends = GetSteamFriendsInterface();
+        if (steamFriends && g_pfn_SetRichPresence) {
+            char connectStr[128];
+            if (steamLobbyId != 0) {
+                sprintf_s(connectStr, sizeof(connectStr), "+connect_lobby %llu", steamLobbyId);
+            } else {
+                sprintf_s(connectStr, sizeof(connectStr), "+connect %s:7777", pubIP);
+            }
+            g_pfn_SetRichPresence(steamFriends, "connect", connectStr);
+            Log("  Set Steam Rich Presence connect string: '%s'", connectStr);
+        }
+
+        s_creatingLobby.store(false);
+    }).detach();
+}
+
 static void eos_Lobby_CreateLobby(void* H, void* O, void* C, void* Cb) {
     Log("EOS_Lobby_CreateLobby called");
+    CreateAndTagRealSteamLobbyAsync();
+    
     CB_Lobby_CreateLobby info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    info.LobbyId = _strdup(g_productUserIdStr);
+    QueueCallback(Cb, info);
+}
+
+struct CB_Lobby_DestroyLobby {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+    const char* LobbyId;
+};
+
+static void eos_Lobby_DestroyLobby(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_DestroyLobby called");
+    
+    // Leave the real Steam lobby if we have one
+    if (g_currentSteamLobbyId.load() != 0) {
+        void* mm = GetSteamMatchmakingInterface();
+        if (mm && g_pfn_MM_LeaveLobby) {
+            Log("  Leaving Steam lobby %llu", g_currentSteamLobbyId.load());
+            g_pfn_MM_LeaveLobby(mm, g_currentSteamLobbyId.load());
+        }
+        g_currentSteamLobbyId.store(0);
+    }
+    
+    CB_Lobby_DestroyLobby info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = C;
     info.LobbyId = _strdup(g_productUserIdStr);
@@ -1435,28 +2076,134 @@ struct CB_LobbySearch_Find {
 };
 
 static void eos_LobbySearch_Find(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_LobbySearch_Find called");
+    Log("EOS_LobbySearch_Find called (Async non-blocking)");
     g_foundLobbies.clear();
+    g_steamLobbies.clear();
     
-    void* steamFriends = GetSteamFriendsInterface();
-    if (steamFriends && g_pfn_GetFriendCount && g_pfn_GetFriendByIndex) {
-        int count = g_pfn_GetFriendCount(steamFriends, 0x04); // k_EFriendFlagImmediate
-        Log("  Querying friends for lobbies... Found %d friends", count);
-        for (int i = 0; i < count; i++) {
-            uint64_t steamId = g_pfn_GetFriendByIndex(steamFriends, i, 0x04);
-            if (steamId != 0) {
-                char idStr[32];
-                sprintf_s(idStr, sizeof(idStr), "%llu", steamId);
-                g_foundLobbies.push_back(idStr);
-                Log("    Mapped friend %d (SteamID %s) as lobby", i, idStr);
+    std::thread([C, Cb]() {
+        void* mm = GetSteamMatchmakingInterface();
+        if (mm && g_pfn_MM_RequestLobbyList && g_pfn_MM_AddStringFilter && g_pfn_MM_GetLobbyByIndex) {
+            Log("  [Background Thread] Using REAL Steam Matchmaking for lobby search...");
+            
+            // Add filter: only show lobbies for our game
+            g_pfn_MM_AddStringFilter(mm, "game_filter", g_gameFilter, 0 /*k_ELobbyComparisonEqual*/);
+            
+            // Limit results
+            if (g_pfn_MM_AddResultCountFilter) {
+                g_pfn_MM_AddResultCountFilter(mm, 20);
             }
+            
+            // Request the lobby list (async)
+            uint64_t hCall = g_pfn_MM_RequestLobbyList(mm);
+            Log("  [Background Thread] Steam RequestLobbyList APICall: %llu", hCall);
+            
+            // Non-blocking poll in background thread so main thread NEVER freezes
+            if (g_pfn_SteamRunCallbacks) {
+                for (int i = 0; i < 15; i++) {
+                    Sleep(20);
+                    g_pfn_SteamRunCallbacks();
+                    if (g_pfn_MM_GetLobbyByIndex(mm, 0) != 0) {
+                        break; // Stop waiting as soon as results arrive!
+                    }
+                }
+            }
+            
+            // Now try to enumerate the results
+            for (int i = 0; i < 20; i++) {
+                uint64_t lobbyId = g_pfn_MM_GetLobbyByIndex(mm, i);
+                if (lobbyId == 0) break;
+                
+                // Skip our own lobby
+                if (lobbyId == g_currentSteamLobbyId.load()) {
+                    Log("    [Background Thread] Skipping our own lobby %llu", lobbyId);
+                    continue;
+                }
+                
+                // Read lobby metadata
+                SteamLobbyInfo lobbyInfo = {};
+                lobbyInfo.steamLobbyId = lobbyId;
+                lobbyInfo.hostIP[0] = '\0';  // Don't pre-fill with local IP!
+                strcpy_s(lobbyInfo.hostPort, "7777");
+                
+                if (g_pfn_MM_GetLobbyData) {
+                    const char* hostIP = g_pfn_MM_GetLobbyData(mm, lobbyId, "HOST_IP");
+                    // Fallback to SERVER_IP if HOST_IP is not set
+                    if (!hostIP || hostIP[0] == '\0') {
+                        hostIP = g_pfn_MM_GetLobbyData(mm, lobbyId, "SERVER_IP");
+                    }
+                    const char* hostPort = g_pfn_MM_GetLobbyData(mm, lobbyId, "HOST_PORT");
+                    if (!hostPort || hostPort[0] == '\0') {
+                        hostPort = g_pfn_MM_GetLobbyData(mm, lobbyId, "SERVER_PORT");
+                    }
+                    const char* eosId = g_pfn_MM_GetLobbyData(mm, lobbyId, "eos_lobby_id");
+                    
+                    if (hostIP && hostIP[0] != '\0') strncpy_s(lobbyInfo.hostIP, hostIP, _TRUNCATE);
+                    if (hostPort && hostPort[0] != '\0') strncpy_s(lobbyInfo.hostPort, hostPort, _TRUNCATE);
+                    if (eosId && eosId[0] != '\0') strncpy_s(lobbyInfo.eosLobbyId, eosId, _TRUNCATE);
+                    else sprintf_s(lobbyInfo.eosLobbyId, "%llu", lobbyId);
+                }
+                
+                g_steamLobbies.push_back(lobbyInfo);
+                
+                char idStr[32];
+                sprintf_s(idStr, sizeof(idStr), "%llu", lobbyId);
+                g_foundLobbies.push_back(idStr);
+                Log("    [Background Thread] Found Steam lobby %d: ID=%llu, HOST_IP=%s:%s",
+                    i, lobbyId, lobbyInfo.hostIP, lobbyInfo.hostPort);
+            }
+
+            // ALSO query online Steam friends for active lobbies in Rich Presence
+            void* steamFriends = GetSteamFriendsInterface();
+            if (steamFriends && g_pfn_GetFriendCount && g_pfn_GetFriendByIndex && g_pfn_GetFriendRichPresence) {
+                int friendCount = g_pfn_GetFriendCount(steamFriends, 0x04 /*k_EFriendFlagImmediate*/);
+                Log("  [Background Thread] Checking %d friends for active game lobbies...", friendCount);
+                for (int i = 0; i < friendCount; i++) {
+                    uint64_t friendId = g_pfn_GetFriendByIndex(steamFriends, i, 0x04);
+                    if (!friendId || friendId == g_currentSteamLobbyId.load()) continue;
+
+                    const char* connectStr = g_pfn_GetFriendRichPresence(steamFriends, friendId, "connect");
+                    if (connectStr && connectStr[0] != '\0') {
+                        Log("    Friend %llu Rich Presence connect string: '%s'", friendId, connectStr);
+                        uint64_t friendLobbyId = 0;
+                        if (sscanf_s(connectStr, "+connect_lobby %llu", &friendLobbyId) == 1 && friendLobbyId != 0) {
+                            bool exists = false;
+                            for (const auto& existing : g_steamLobbies) {
+                                if (existing.steamLobbyId == friendLobbyId) { exists = true; break; }
+                            }
+                            if (!exists) {
+                                SteamLobbyInfo friendLobby = {};
+                                friendLobby.steamLobbyId = friendLobbyId;
+                                sprintf_s(friendLobby.eosLobbyId, "%llu", friendLobbyId);
+                                strcpy_s(friendLobby.hostPort, "7777");
+
+                                if (g_pfn_MM_GetLobbyData && mm) {
+                                    const char* hostIP = g_pfn_MM_GetLobbyData(mm, friendLobbyId, "HOST_IP");
+                                    if (!hostIP || hostIP[0] == '\0') hostIP = g_pfn_MM_GetLobbyData(mm, friendLobbyId, "SERVER_IP");
+                                    if (hostIP && hostIP[0] != '\0') strncpy_s(friendLobby.hostIP, hostIP, _TRUNCATE);
+                                }
+
+                                g_steamLobbies.push_back(friendLobby);
+                                char idStr[32];
+                                sprintf_s(idStr, sizeof(idStr), "%llu", friendLobbyId);
+                                g_foundLobbies.push_back(idStr);
+                                Log("    [Background Thread] Added friend lobby via Rich Presence: ID=%llu, HOST_IP=%s",
+                                    friendLobbyId, friendLobby.hostIP);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Log("  [Background Thread] Steam lobby search completed: %d lobbies found", (int)g_steamLobbies.size());
+        } else {
+            Log("  [Background Thread] Steam Matchmaking not available yet for lobby search");
         }
-    }
-    
-    CB_LobbySearch_Find info = {};
-    info.ResultCode = EOS_Success;
-    info.ClientData = C;
-    QueueCallback(Cb, info);
+        
+        CB_LobbySearch_Find info = {};
+        info.ResultCode = EOS_Success;
+        info.ClientData = C;
+        QueueCallback(Cb, info);
+    }).detach();
 }
 
 static uint32_t eos_LobbySearch_GetSearchResultCount(void* H, void* O) {
@@ -1506,6 +2253,20 @@ static void eos_Lobby_JoinLobby(void* H, void* O, void* C, void* Cb) {
     uintptr_t val = (uintptr_t)detailsHandle;
     if (val >= 0x1000 && val < 0x1000 + g_foundLobbies.size()) {
         lobbyId = g_foundLobbies[val - 0x1000];
+        
+        // Also join the real Steam lobby if available
+        uint32_t lobbyIdx = (uint32_t)(val - 0x1000);
+        if (lobbyIdx < g_steamLobbies.size()) {
+            uint64_t steamLobbyId = g_steamLobbies[lobbyIdx].steamLobbyId;
+            Log("  Joining REAL Steam lobby %llu asynchronously", steamLobbyId);
+            std::thread([steamLobbyId]() {
+                void* mm = GetSteamMatchmakingInterface();
+                if (mm && g_pfn_MM_JoinLobby) {
+                    g_pfn_MM_JoinLobby(mm, steamLobbyId);
+                    if (g_pfn_SteamRunCallbacks) g_pfn_SteamRunCallbacks();
+                }
+            }).detach();
+        }
     }
     
     CB_Lobby_JoinLobby info = {};
@@ -1528,6 +2289,82 @@ static EOS_EResult eos_Lobby_UpdateLobbyModification(void* H, void* O, void** Ou
     Log("EOS_Lobby_UpdateLobbyModification called");
     if (OutLobbyModificationHandle) {
         *OutLobbyModificationHandle = HANDLE_LOBBY_MODIFICATION;
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_Lobby_CreateLobbyModification(void* H, void* O, void** OutLobbyModificationHandle) {
+    Log("EOS_Lobby_CreateLobbyModification called");
+    if (OutLobbyModificationHandle) {
+        *OutLobbyModificationHandle = HANDLE_LOBBY_MODIFICATION;
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_SetPermissionLevel(void* H, void* O) {
+    Log("EOS_LobbyModification_SetPermissionLevel called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_SetMaxMembers(void* H, void* O) {
+    Log("EOS_LobbyModification_SetMaxMembers called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_SetBucketId(void* H, void* O) {
+    Log("EOS_LobbyModification_SetBucketId called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_SetInvitesAllowed(void* H, void* O) {
+    Log("EOS_LobbyModification_SetInvitesAllowed called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_AddAttribute(void* H, void* O) {
+    Log("EOS_LobbyModification_AddAttribute called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_AddMemberAttribute(void* H, void* O) {
+    Log("EOS_LobbyModification_AddMemberAttribute called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_RemoveAttribute(void* H, void* O) {
+    Log("EOS_LobbyModification_RemoveAttribute called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_LobbyModification_RemoveMemberAttribute(void* H, void* O) {
+    Log("EOS_LobbyModification_RemoveMemberAttribute called");
+    return EOS_Success;
+}
+
+static void eos_LobbyModification_Release(void* H) {
+    Log("EOS_LobbyModification_Release called");
+}
+
+static EOS_EResult eos_Lobby_CopyLobbyDetailsHandle(void* H, void* O, void** OutLobbyDetailsHandle) {
+    Log("EOS_Lobby_CopyLobbyDetailsHandle called");
+    if (OutLobbyDetailsHandle) {
+        *OutLobbyDetailsHandle = (void*)(uintptr_t)0x1000;
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_Lobby_CopyLobbyDetailsHandleByInviteId(void* H, void* O, void** OutLobbyDetailsHandle) {
+    Log("EOS_Lobby_CopyLobbyDetailsHandleByInviteId called");
+    if (OutLobbyDetailsHandle) {
+        *OutLobbyDetailsHandle = (void*)(uintptr_t)0x1000;
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_Lobby_CopyLobbyDetailsHandleByUiEventId(void* H, void* O, void** OutLobbyDetailsHandle) {
+    Log("EOS_Lobby_CopyLobbyDetailsHandleByUiEventId called");
+    if (OutLobbyDetailsHandle) {
+        *OutLobbyDetailsHandle = (void*)(uintptr_t)0x1000;
     }
     return EOS_Success;
 }
@@ -1605,8 +2442,9 @@ static void eos_LobbyDetails_Release(void* H) {
 }
 
 static uint32_t eos_LobbyDetails_GetAttributeCount(void* H, void* O) {
-    Log("EOS_LobbyDetails_GetAttributeCount called -> %d", (int)g_capturedSearchParameters.size());
-    return (uint32_t)g_capturedSearchParameters.size();
+    uint32_t count = (uint32_t)(g_capturedSearchParameters.size() + 4);
+    Log("EOS_LobbyDetails_GetAttributeCount called -> %u (custom P2P attributes included)", count);
+    return count;
 }
 
 struct EOS_LobbyDetails_CopyAttributeByIndexOptions {
@@ -1624,26 +2462,63 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByIndex(void* H, void* O, EOS_L
     Log("EOS_LobbyDetails_CopyAttributeByIndex called");
     if (!O || !OutAttribute) return EOS_NotFound;
     uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttributeIndex;
-    if (index >= g_capturedSearchParameters.size()) return EOS_NotFound;
+
+    // Determine the IP/Port to return based on whether this is a real Steam lobby
+    char lobbyIP[64] = "127.0.0.1";
+    char lobbyPort[16] = "7777";
     
+    // Check if the handle maps to a cached Steam lobby
+    uintptr_t handleVal = (uintptr_t)H;
+    if (handleVal >= 0x1000 && handleVal < 0x1000 + g_steamLobbies.size()) {
+        uint32_t lobbyIdx = (uint32_t)(handleVal - 0x1000);
+        strncpy_s(lobbyIP, g_steamLobbies[lobbyIdx].hostIP, _TRUNCATE);
+        strncpy_s(lobbyPort, g_steamLobbies[lobbyIdx].hostPort, _TRUNCATE);
+        Log("  Using real Steam lobby data: IP=%s, Port=%s", lobbyIP, lobbyPort);
+    } else {
+        // Local/host lobby - use our own public/LAN IP
+        GetBestLocalIP(lobbyIP, sizeof(lobbyIP));
+    }
+
+    const char* defaultKeys[4] = { "SERVER_IP", "SERVER_PORT", "HOST_IP", "HOST_PORT" };
+    const char* defaultVals[4] = { lobbyIP, lobbyPort, lobbyIP, lobbyPort };
+
+    const char* keyName = "";
+    const char* valStr = "";
+
+    if (index < g_capturedSearchParameters.size()) {
+        keyName = g_capturedSearchParameters[index].Key;
+        if (g_capturedSearchParameters[index].ValueType == 4 && g_capturedSearchParameters[index].Value.AsUtf8) {
+            valStr = g_capturedSearchParameters[index].Value.AsUtf8;
+        } else {
+            valStr = "dummy";
+        }
+    } else {
+        uint32_t defIdx = index - (uint32_t)g_capturedSearchParameters.size();
+        if (defIdx < 4) {
+            keyName = defaultKeys[defIdx];
+            valStr = defaultVals[defIdx];
+        } else {
+            return EOS_NotFound;
+        }
+    }
+
     auto* attr = (EOS_Lobby_Attribute*)malloc(sizeof(EOS_Lobby_Attribute));
     if (!attr) return EOS_LimitExceeded;
     
     auto* data = (EOS_Lobby_AttributeData*)malloc(sizeof(EOS_Lobby_AttributeData));
     if (!data) { free(attr); return EOS_LimitExceeded; }
     
-    *data = g_capturedSearchParameters[index];
-    data->Key = _strdup(g_capturedSearchParameters[index].Key);
-    if (data->ValueType == 4 && data->Value.AsUtf8) {
-        data->Value.AsUtf8 = _strdup(g_capturedSearchParameters[index].Value.AsUtf8);
-    }
+    data->ApiVersion = 1;
+    data->Key = _strdup(keyName);
+    data->ValueType = 3; // String (EOS_AT_STRING)
+    data->Value.AsUtf8 = _strdup(valStr);
     
     attr->ApiVersion = 1;
     attr->Data = data;
     attr->Visibility = 0; // Public
     
     *OutAttribute = attr;
-    Log("  Returning attribute at index %d: Key=%s", index, data->Key);
+    Log("  Returning attribute at index %d: Key=%s, Value=%s", index, keyName, valStr);
     return EOS_Success;
 }
 
@@ -1658,6 +2533,19 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByKey(void* H, void* O, EOS_Lob
     const char* key = ((EOS_LobbyDetails_CopyAttributeByKeyOptions*)O)->AttrKey;
     Log("  Searching for key: %s", key);
     
+    char lobbyIP[64] = "127.0.0.1";
+    char lobbyPort[16] = "7777";
+    
+    uintptr_t handleVal = (uintptr_t)H;
+    if (handleVal >= 0x1000 && handleVal < 0x1000 + g_steamLobbies.size()) {
+        uint32_t lobbyIdx = (uint32_t)(handleVal - 0x1000);
+        strncpy_s(lobbyIP, g_steamLobbies[lobbyIdx].hostIP, _TRUNCATE);
+        strncpy_s(lobbyPort, g_steamLobbies[lobbyIdx].hostPort, _TRUNCATE);
+        Log("  [CopyAttributeByKey] Found lobby handle %p -> HostIP=%s:%s", H, lobbyIP, lobbyPort);
+    } else {
+        GetBestLocalIP(lobbyIP, sizeof(lobbyIP));
+    }
+
     int index = -1;
     for (size_t i = 0; i < g_capturedSearchParameters.size(); i++) {
         if (strcmp(g_capturedSearchParameters[i].Key, key) == 0) {
@@ -1666,31 +2554,37 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByKey(void* H, void* O, EOS_Lob
         }
     }
     
-    if (index < 0) {
-        // Create dummy attribute to satisfy search filters
-        Log("    Key not found in captured parameters. Creating dummy attribute to satisfy filter!");
-        auto* attr = (EOS_Lobby_Attribute*)malloc(sizeof(EOS_Lobby_Attribute));
-        if (!attr) return EOS_LimitExceeded;
-        auto* data = (EOS_Lobby_AttributeData*)malloc(sizeof(EOS_Lobby_AttributeData));
-        if (!data) { free(attr); return EOS_LimitExceeded; }
-        
-        data->ApiVersion = 1;
-        data->Key = _strdup(key);
-        data->ValueType = 4; // String
-        data->Value.AsUtf8 = _strdup("dummy");
-        
-        attr->ApiVersion = 1;
-        attr->Data = data;
-        attr->Visibility = 0;
-        
-        *OutAttribute = attr;
-        return EOS_Success;
+    if (index >= 0) {
+        EOS_LobbyDetails_CopyAttributeByIndexOptions idxOpts = {};
+        idxOpts.ApiVersion = 1;
+        idxOpts.AttributeIndex = (uint32_t)index;
+        return eos_LobbyDetails_CopyAttributeByIndex(H, &idxOpts, OutAttribute);
     }
+
+    char connectStr[128];
+    sprintf_s(connectStr, sizeof(connectStr), "%s:%s", lobbyIP, lobbyPort);
+
+    const char* valStr = connectStr;
+    if (_stricmp(key, "HOST_PORT") == 0 || _stricmp(key, "SERVER_PORT") == 0) valStr = lobbyPort;
+    else if (_stricmp(key, "HOST_IP") == 0 || _stricmp(key, "SERVER_IP") == 0) valStr = lobbyIP;
+
+    Log("    Key '%s' resolved for RedpointEOS -> '%s'", key, valStr);
+    auto* attr = (EOS_Lobby_Attribute*)malloc(sizeof(EOS_Lobby_Attribute));
+    if (!attr) return EOS_LimitExceeded;
+    auto* data = (EOS_Lobby_AttributeData*)malloc(sizeof(EOS_Lobby_AttributeData));
+    if (!data) { free(attr); return EOS_LimitExceeded; }
     
-    EOS_LobbyDetails_CopyAttributeByIndexOptions idxOpts = {};
-    idxOpts.ApiVersion = 1;
-    idxOpts.AttributeIndex = (uint32_t)index;
-    return eos_LobbyDetails_CopyAttributeByIndex(H, &idxOpts, OutAttribute);
+    data->ApiVersion = 1;
+    data->Key = _strdup(key);
+    data->ValueType = 3; // String (EOS_AT_STRING)
+    data->Value.AsUtf8 = _strdup(valStr);
+    
+    attr->ApiVersion = 1;
+    attr->Data = data;
+    attr->Visibility = 0;
+    
+    *OutAttribute = attr;
+    return EOS_Success;
 }
 
 static void eos_Lobby_Attribute_Release(EOS_Lobby_Attribute* Attribute) {
@@ -1708,13 +2602,131 @@ static void eos_Lobby_Attribute_Release(EOS_Lobby_Attribute* Attribute) {
 }
 
 static uint32_t eos_LobbyDetails_GetMemberCount(void* H, void* O) {
-    Log("EOS_LobbyDetails_GetMemberCount called -> 1");
-    return 1;
+    uintptr_t handleVal = (uintptr_t)H;
+    if (handleVal >= 0x1000 && handleVal < 0x1000 + g_steamLobbies.size()) {
+        uint32_t lobbyIdx = (uint32_t)(handleVal - 0x1000);
+        uint64_t steamLobbyId = g_steamLobbies[lobbyIdx].steamLobbyId;
+        void* mm = GetSteamMatchmakingInterface();
+        if (mm && g_pfn_MM_GetNumLobbyMembers && steamLobbyId != 0) {
+            int numMembers = g_pfn_MM_GetNumLobbyMembers(mm, steamLobbyId);
+            if (numMembers > 0) {
+                Log("EOS_LobbyDetails_GetMemberCount handle %p -> Steam Lobby %llu MemberCount=%d", H, steamLobbyId, numMembers);
+                return (uint32_t)numMembers;
+            }
+        }
+    }
+    Log("EOS_LobbyDetails_GetMemberCount called -> 2");
+    return 2;
+}
+
+static uint64_t g_nextNotifId = 1000;
+
+static EOS_NotificationId eos_Lobby_AddNotifyJoinLobbyAccepted(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyJoinLobbyAccepted called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyJoinLobbyAccepted(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyJoinLobbyAccepted called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Lobby_AddNotifyLeaveLobbyRequested(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyLeaveLobbyRequested called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyLeaveLobbyRequested(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyLeaveLobbyRequested called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Lobby_AddNotifyLobbyInviteAccepted(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyLobbyInviteAccepted called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyLobbyInviteAccepted(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyLobbyInviteAccepted called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Lobby_AddNotifyLobbyInviteReceived(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyLobbyInviteReceived called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyLobbyInviteReceived(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyLobbyInviteReceived called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Lobby_AddNotifyLobbyInviteRejected(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyLobbyInviteRejected called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyLobbyInviteRejected(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyLobbyInviteRejected called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Lobby_AddNotifyLobbyMemberStatusReceived(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyLobbyMemberStatusReceived called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyLobbyMemberStatusReceived(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Lobby_AddNotifyLobbyMemberUpdateReceived(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyLobbyMemberUpdateReceived called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyLobbyMemberUpdateReceived(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Lobby_AddNotifyLobbyUpdateReceived(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_AddNotifyLobbyUpdateReceived called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Lobby_RemoveNotifyLobbyUpdateReceived(void* H, EOS_NotificationId InId) {
+    Log("EOS_Lobby_RemoveNotifyLobbyUpdateReceived called (id=%llu)", InId);
+}
+
+struct CB_Lobby_SendInvite {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+    const char* LobbyId;
+};
+
+static void eos_Lobby_SendInvite(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Lobby_SendInvite called");
+    CB_Lobby_SendInvite info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    info.LobbyId = _strdup(g_productUserIdStr);
+    QueueCallback(Cb, info);
 }
 
 static void* eos_LobbyDetails_GetMemberByIndex(void* H, void* O) {
     Log("EOS_LobbyDetails_GetMemberByIndex called -> FAKE_PRODUCT_USER_ID");
     return FAKE_PRODUCT_USER_ID;
+}
+
+static uint32_t eos_LobbyDetails_GetMemberAttributeCount(void* H, void* O) {
+    Log("EOS_LobbyDetails_GetMemberAttributeCount called -> 0");
+    return 0;
+}
+
+static EOS_EResult eos_LobbyDetails_CopyMemberAttributeByIndex(void* H, void* O, EOS_Lobby_Attribute** OutAttribute) {
+    Log("EOS_LobbyDetails_CopyMemberAttributeByIndex called -> EOS_NotFound");
+    return EOS_NotFound;
+}
+
+static EOS_EResult eos_LobbyDetails_CopyMemberAttributeByKey(void* H, void* O, EOS_Lobby_Attribute** OutAttribute) {
+    Log("EOS_LobbyDetails_CopyMemberAttributeByKey called -> EOS_NotFound");
+    return EOS_NotFound;
 }
 
 static void* eos_LobbyDetails_GetLobbyOwner(void* H, void* O) {
@@ -1724,21 +2736,119 @@ static void* eos_LobbyDetails_GetLobbyOwner(void* H, void* O) {
 
 
 
+static HMODULE ResolveSteamApiDll() {
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (hSteam) return hSteam;
+    hSteam = LoadLibraryA("steam_api64.dll");
+    if (hSteam) return hSteam;
+    hSteam = LoadLibraryA("steam_api64_valve.dll");
+    if (hSteam) return hSteam;
+
+    // Search relative to the executable directory (supports nested Unreal Engine structures)
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exePath, MAX_PATH) > 0) {
+        std::string dir(exePath);
+        size_t p = dir.find_last_of("\\/");
+        if (p != std::string::npos) {
+            std::string root = dir.substr(0, p);
+            std::string candidate = root + "\\steam_api64.dll";
+            hSteam = LoadLibraryA(candidate.c_str());
+            if (hSteam) return hSteam;
+            
+            candidate = root + "\\..\\..\\..\\Engine\\Binaries\\ThirdParty\\Steamworks\\Steamv157\\Win64\\steam_api64.dll";
+            hSteam = LoadLibraryA(candidate.c_str());
+            if (hSteam) return hSteam;
+
+            candidate = root + "\\..\\..\\..\\Engine\\Binaries\\ThirdParty\\Steamworks\\Steamv153\\Win64\\steam_api64.dll";
+            hSteam = LoadLibraryA(candidate.c_str());
+            if (hSteam) return hSteam;
+        }
+    }
+    return nullptr;
+}
+
 static void* GetSteamFriendsInterface() {
     static void* friendsInterface = nullptr;
     if (friendsInterface) return friendsInterface;
     
-    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
-    if (!hSteam) hSteam = LoadLibraryA("steam_api64_valve.dll");
+    HMODULE hSteam = ResolveSteamApiDll();
     if (hSteam) {
         g_pfn_SteamFriends = (fn_SteamFriends_t)GetProcAddress(hSteam, "SteamAPI_SteamFriends_v017");
+        if (!g_pfn_SteamFriends) g_pfn_SteamFriends = (fn_SteamFriends_t)GetProcAddress(hSteam, "SteamAPI_SteamFriends_v016");
+        if (!g_pfn_SteamFriends) g_pfn_SteamFriends = (fn_SteamFriends_t)GetProcAddress(hSteam, "SteamFriends");
+        
         g_pfn_GetFriendCount = (fn_GetFriendCount_t)GetProcAddress(hSteam, "SteamAPI_ISteamFriends_GetFriendCount");
         g_pfn_GetFriendByIndex = (fn_GetFriendByIndex_t)GetProcAddress(hSteam, "SteamAPI_ISteamFriends_GetFriendByIndex");
         g_pfn_GetFriendPersonaName = (fn_GetFriendPersonaName_t)GetProcAddress(hSteam, "SteamAPI_ISteamFriends_GetFriendPersonaName");
+        g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress(hSteam, "SteamAPI_ISteamFriends_GetPersonaName");
+        g_pfn_SetRichPresence = (fn_SetRichPresence_t)GetProcAddress(hSteam, "SteamAPI_ISteamFriends_SetRichPresence");
+        g_pfn_GetFriendRichPresence = (fn_GetFriendRichPresence_t)GetProcAddress(hSteam, "SteamAPI_ISteamFriends_GetFriendRichPresence");
         
-        if (g_pfn_SteamFriends) friendsInterface = g_pfn_SteamFriends();
+        if (g_pfn_SteamFriends) {
+            friendsInterface = g_pfn_SteamFriends();
+            if (!friendsInterface) {
+                typedef bool (*fn_Init_t)();
+                auto pfnInit = (fn_Init_t)GetProcAddress(hSteam, "SteamAPI_Init");
+                if (!pfnInit) pfnInit = (fn_Init_t)GetProcAddress(hSteam, "SteamAPI_InitSafe");
+                if (pfnInit) { pfnInit(); friendsInterface = g_pfn_SteamFriends(); }
+            }
+        }
     }
     return friendsInterface;
+}
+
+static void* GetSteamMatchmakingInterface() {
+    if (g_steamMatchmakingInterface) return g_steamMatchmakingInterface;
+    
+    HMODULE hSteam = ResolveSteamApiDll();
+    if (!hSteam) {
+        Log("[ReGoldberg][Unreal][EOS][WARN] GetSteamMatchmakingInterface: Could not find steam_api64.dll or steam_api64_valve.dll");
+        return nullptr;
+    }
+    
+    g_pfn_SteamMatchmaking = (fn_SteamMatchmaking_t)GetProcAddress(hSteam, "SteamAPI_SteamMatchmaking_v009");
+    if (!g_pfn_SteamMatchmaking) g_pfn_SteamMatchmaking = (fn_SteamMatchmaking_t)GetProcAddress(hSteam, "SteamAPI_SteamMatchmaking_v008");
+    if (!g_pfn_SteamMatchmaking) g_pfn_SteamMatchmaking = (fn_SteamMatchmaking_t)GetProcAddress(hSteam, "SteamMatchmaking");
+    if (!g_pfn_SteamMatchmaking) {
+        Log("[ReGoldberg][Unreal][EOS][WARN] GetSteamMatchmakingInterface: SteamMatchmaking getter not found");
+        return nullptr;
+    }
+    
+    g_steamMatchmakingInterface = g_pfn_SteamMatchmaking();
+    if (!g_steamMatchmakingInterface) {
+        typedef bool (*fn_Init_t)();
+        auto pfnInit = (fn_Init_t)GetProcAddress(hSteam, "SteamAPI_Init");
+        if (!pfnInit) pfnInit = (fn_Init_t)GetProcAddress(hSteam, "SteamAPI_InitSafe");
+        if (pfnInit) {
+            pfnInit();
+            g_steamMatchmakingInterface = g_pfn_SteamMatchmaking();
+        }
+    }
+    if (!g_steamMatchmakingInterface) {
+        Log("[ReGoldberg][Unreal][EOS][WARN] GetSteamMatchmakingInterface: Interface returned null (SteamAPI initialization pending)");
+        return nullptr;
+    }
+    
+    // Load all matchmaking function pointers
+    g_pfn_MM_CreateLobby      = (fn_MM_CreateLobby_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_CreateLobby");
+    g_pfn_MM_RequestLobbyList = (fn_MM_RequestLobbyList_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_RequestLobbyList");
+    g_pfn_MM_JoinLobby        = (fn_MM_JoinLobby_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_JoinLobby");
+    g_pfn_MM_LeaveLobby       = (fn_MM_LeaveLobby_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_LeaveLobby");
+    g_pfn_MM_SetLobbyData     = (fn_MM_SetLobbyData_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_SetLobbyData");
+    g_pfn_MM_GetLobbyData     = (fn_MM_GetLobbyData_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_GetLobbyData");
+    g_pfn_MM_GetLobbyByIndex  = (fn_MM_GetLobbyByIndex_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_GetLobbyByIndex");
+    g_pfn_MM_AddStringFilter  = (fn_MM_AddStringFilter_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
+    g_pfn_MM_AddResultCountFilter = (fn_MM_AddResultCountFilter_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter");
+    g_pfn_MM_GetNumLobbyMembers = (fn_MM_GetNumLobbyMembers_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
+    g_pfn_MM_SetLobbyType     = (fn_MM_SetLobbyType_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_SetLobbyType");
+    g_pfn_MM_SetLobbyJoinable = (fn_MM_SetLobbyJoinable_t)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
+    
+    // Also load callback runner
+    g_pfn_SteamRunCallbacks = (fn_SteamAPI_RunCallbacks_t)GetProcAddress(hSteam, "SteamAPI_RunCallbacks");
+    g_pfn_SteamRegisterCallResult = (fn_SteamAPI_RegisterCallResult_t)GetProcAddress(hSteam, "SteamAPI_RegisterCallResult");
+    
+    Log("[ReGoldberg][Unreal][EOS][INFO] GetSteamMatchmakingInterface: Successfully loaded ISteamMatchmaking %p", g_steamMatchmakingInterface);
+    return g_steamMatchmakingInterface;
 }
 
 struct CB_Friends_QueryFriends {
@@ -1793,8 +2903,936 @@ static void* eos_Friends_GetFriendAtIndex(void* H, void* O) {
     return nullptr;
 }
 
-// PROC TABLE SETUP
 // =============================================================================
+// SESSIONS (Unreal Engine RedpointEOS Session Matchmaking)
+// =============================================================================
+static bool g_hasActiveSession = false;
+
+struct CB_Sessions_UpdateSession {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+    const char* SessionName;
+};
+
+static void eos_Sessions_UpdateSession(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_UpdateSession called for SessionName='%s'", g_activeSessionName.c_str());
+    g_hasActiveSession = true;
+    CreateAndTagRealSteamLobbyAsync();
+    
+    CB_Sessions_UpdateSession info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    info.SessionName = g_activeSessionName.c_str();
+    QueueCallback(Cb, info);
+}
+
+struct EOS_Sessions_CreateSessionModificationOptions {
+    int32_t ApiVersion;
+    const char* SessionName;
+};
+
+static EOS_EResult eos_Sessions_CreateSessionModification(void* H, void* O, void** OutSessionModificationHandle) {
+    if (O) {
+        auto* opts = (EOS_Sessions_CreateSessionModificationOptions*)O;
+        if (opts->SessionName && opts->SessionName[0] != '\0') {
+            g_activeSessionName = opts->SessionName;
+            Log("EOS_Sessions_CreateSessionModification for SessionName='%s'", g_activeSessionName.c_str());
+        }
+    } else {
+        Log("EOS_Sessions_CreateSessionModification called");
+    }
+    if (OutSessionModificationHandle) *OutSessionModificationHandle = (void*)0x2000;
+    return EOS_Success;
+}
+
+struct CB_Sessions_DestroySession {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+};
+
+static void eos_Sessions_DestroySession(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_DestroySession called");
+    g_hasActiveSession = false;
+    CB_Sessions_DestroySession info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    QueueCallback(Cb, info);
+}
+
+static EOS_EResult eos_Sessions_CreateSessionSearch(void* H, void* O, void** OutSessionSearchHandle) {
+    Log("EOS_Sessions_CreateSessionSearch called");
+    if (OutSessionSearchHandle) *OutSessionSearchHandle = (void*)0x2001;
+    return EOS_Success;
+}
+
+struct CB_SessionSearch_Find {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+};
+
+static void eos_SessionSearch_Find(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_SessionSearch_Find called");
+    eos_LobbySearch_Find(H, O, C, Cb);
+}
+
+static uint32_t eos_SessionSearch_GetSearchResultCount(void* H, void* O) {
+    uint32_t count = (uint32_t)g_foundLobbies.size();
+    if (count == 0 && g_hasActiveSession) count = 1;
+    Log("EOS_SessionSearch_GetSearchResultCount called -> %u", count);
+    return count;
+}
+
+struct EOS_SessionSearch_CopySearchResultByIndexOptions {
+    int32_t ApiVersion;
+    uint32_t SessionIndex;
+};
+
+static EOS_EResult eos_SessionSearch_CopySearchResultByIndex(void* H, void* O, void** OutSessionDetailsHandle) {
+    Log("EOS_SessionSearch_CopySearchResultByIndex called");
+    if (!O || !OutSessionDetailsHandle) return EOS_NotFound;
+    uint32_t index = ((EOS_SessionSearch_CopySearchResultByIndexOptions*)O)->SessionIndex;
+    
+    if (index < (uint32_t)g_foundLobbies.size()) {
+        // Remote lobby from Steam search — use 0x3000+ range (distinct from 0x2002 = local session)
+        *OutSessionDetailsHandle = (void*)(uintptr_t)(0x3000 + index);
+        Log("  Returning session handle %p for REMOTE search result index %u", *OutSessionDetailsHandle, index);
+    } else if (index == 0 && g_hasActiveSession) {
+        // Fallback: no remote lobbies found but we have our own active session
+        *OutSessionDetailsHandle = (void*)0x2002;
+        Log("  Returning LOCAL active session handle 0x2002 for index 0");
+    } else {
+        Log("  ERROR: search result index %u out of range (foundLobbies=%u)", index, (uint32_t)g_foundLobbies.size());
+        return EOS_NotFound;
+    }
+    return EOS_Success;
+}
+
+// =============================================================================
+// P2P REAL IMPLEMENTATION via ISteamNetworking
+// Routes EOS P2P calls through Valve's Steam relay for NAT traversal
+// =============================================================================
+
+// ISteamNetworking vtable indices (ISteamNetworking006)
+// Verified order: SendP2PPacket=0, IsP2PPacketAvailable=1, ReadP2PPacket=2,
+//                 AcceptP2PSessionWithUser=3, CloseP2PSessionWithUser=4
+#define ISTEAMNETWORKING_SENDP2PPACKET_IDX      0
+#define ISTEAMNETWORKING_ISP2PPACKETAVAIL_IDX   1
+#define ISTEAMNETWORKING_READP2PPACKET_IDX      2
+#define ISTEAMNETWORKING_ACCEPTP2PSESSION_IDX   3
+#define ISTEAMNETWORKING_CLOSEP2PSESSION_IDX    4
+
+typedef bool (*fn_ISN_SendP2PPacket_t)(void* self, uint64_t steamIDRemote, const void* pubData, uint32_t cubData, int eP2PSendType, int nChannel);
+typedef bool (*fn_ISN_IsP2PPacketAvail_t)(void* self, uint32_t* pcubMsgSize, int nChannel);
+typedef bool (*fn_ISN_ReadP2PPacket_t)(void* self, void* pubDest, uint32_t cubDest, uint32_t* pcubMsgSize, uint64_t* psteamIDRemote, int nChannel);
+typedef bool (*fn_ISN_AcceptP2PSession_t)(void* self, uint64_t steamIDRemote);
+typedef bool (*fn_ISN_CloseP2PSession_t)(void* self, uint64_t steamIDRemote);
+
+// ISteamNetworking getter — loaded from steam_api64.dll in-process
+static void* GetSteamNetworkingInterface_EOS() {
+    static void* s_iface = nullptr;
+    if (s_iface) return s_iface;
+
+    HMODULE hSteam = ResolveSteamApiDll();
+    if (!hSteam) return nullptr;
+
+    // Try versioned getter first
+    typedef void* (*fn_t)();
+    const char* names[] = {
+        "SteamAPI_SteamNetworking_v006",
+        "SteamAPI_ISteamNetworking_v006",
+        "SteamNetworking"
+    };
+    for (auto name : names) {
+        auto fn = (fn_t)GetProcAddress(hSteam, name);
+        if (fn) { s_iface = fn(); break; }
+    }
+    if (!s_iface) {
+        typedef bool (*fn_Init_t)();
+        auto pfnInit = (fn_Init_t)GetProcAddress(hSteam, "SteamAPI_Init");
+        if (!pfnInit) pfnInit = (fn_Init_t)GetProcAddress(hSteam, "SteamAPI_InitSafe");
+        if (pfnInit) {
+            pfnInit();
+            for (auto name : names) {
+                auto fn = (fn_t)GetProcAddress(hSteam, name);
+                if (fn) { s_iface = fn(); break; }
+            }
+        }
+    }
+    if (s_iface)
+        Log("[ReGoldberg][Unreal][EOS][INFO] ISteamNetworking resolved: %p", s_iface);
+    else
+        Log("[ReGoldberg][Unreal][EOS][WARN] ISteamNetworking not found in steam_api64.dll");
+    return s_iface;
+}
+
+// Inline vtable call helpers
+static inline fn_ISN_SendP2PPacket_t GetSN_Send() {
+    void* iface = GetSteamNetworkingInterface_EOS();
+    if (!iface) return nullptr;
+    return ((fn_ISN_SendP2PPacket_t**)iface)[0][ISTEAMNETWORKING_SENDP2PPACKET_IDX];
+}
+static inline fn_ISN_IsP2PPacketAvail_t GetSN_IsAvail() {
+    void* iface = GetSteamNetworkingInterface_EOS();
+    if (!iface) return nullptr;
+    return ((fn_ISN_IsP2PPacketAvail_t**)iface)[0][ISTEAMNETWORKING_ISP2PPACKETAVAIL_IDX];
+}
+static inline fn_ISN_ReadP2PPacket_t GetSN_Read() {
+    void* iface = GetSteamNetworkingInterface_EOS();
+    if (!iface) return nullptr;
+    return ((fn_ISN_ReadP2PPacket_t**)iface)[0][ISTEAMNETWORKING_READP2PPACKET_IDX];
+}
+static inline fn_ISN_AcceptP2PSession_t GetSN_Accept() {
+    void* iface = GetSteamNetworkingInterface_EOS();
+    if (!iface) return nullptr;
+    return ((fn_ISN_AcceptP2PSession_t**)iface)[0][ISTEAMNETWORKING_ACCEPTP2PSESSION_IDX];
+}
+
+// EOS_P2P_SendPacketOptions — we only need ApiVersion, RemoteUserId (SteamID64), and packet data.
+// Layout based on EOS SDK 1.x (ApiVersion=1):
+//   [0]  int32_t  ApiVersion
+//   [4]  int32_t  pad
+//   [8]  void*    LocalUserId
+//   [16] void*    RemoteUserId   <-- SteamID64 cast as pointer
+//   [24] struct*  SocketId       <-- ptr to struct { int32 ApiVersion; char Name[33]; }
+//   [32] uint8_t  Channel
+//   [33] uint8_t  bAllowDelayedDelivery
+//   [34] uint8_t  Reliability    (0=UnreliableUnordered,1=Reliable,2=ReliableOrdered)
+//   [36] uint32_t DataLengthBytes
+//   [40] void*    Data
+#pragma pack(push, 1)
+struct EOS_P2P_SendPacketOptions_Layout {
+    int32_t  ApiVersion;
+    int32_t  _pad;
+    void*    LocalUserId;
+    void*    RemoteUserId;
+    void*    SocketId;
+    uint8_t  Channel;
+    uint8_t  bAllowDelayedDelivery;
+    uint8_t  Reliability;
+    uint8_t  _pad2;
+    uint32_t DataLengthBytes;
+    void*    Data;
+};
+struct EOS_P2P_ReceivePacketOptions_Layout {
+    int32_t  ApiVersion;
+    int32_t  _pad;
+    void*    LocalUserId;
+    uint32_t MaxDataSizeBytes;
+    uint8_t  RequestedChannel;  // 255 = any
+};
+struct EOS_P2P_GetNextReceivedPacketSizeOptions_Layout {
+    int32_t ApiVersion;
+    int32_t _pad;
+    void*   LocalUserId;
+    uint8_t RequestedChannel; // 255 = any
+};
+#pragma pack(pop)
+
+static EOS_EResult eos_P2P_SendPacket(void* H, void* O) {
+    if (!O) return EOS_Success;
+    auto* opts = (EOS_P2P_SendPacketOptions_Layout*)O;
+
+    // RemoteUserId is stored as a pointer; the Steam ID is embedded in the pointed-to string
+    // or, in our emulation, it IS the SteamID64 cast to a pointer (set by GetOrCreateProductUserId)
+    uint64_t remoteSteamID = 0;
+    if (opts->RemoteUserId) {
+        // Try to resolve via g_puidMap: look up SteamID string from PUID
+        std::string extId = FindExternalId(opts->RemoteUserId);
+        if (!extId.empty()) {
+            remoteSteamID = _strtoui64(extId.c_str(), nullptr, 10);
+        }
+    }
+
+    if (remoteSteamID == 0 || !opts->Data || opts->DataLengthBytes == 0) {
+        // No valid peer — silently drop (avoids spam log when lobby not joined yet)
+        return EOS_Success;
+    }
+
+    void* iface = GetSteamNetworkingInterface_EOS();
+    auto pfnSend = GetSN_Send();
+    if (!iface || !pfnSend) {
+        Log("[P2P] SendPacket: ISteamNetworking not available, dropping packet");
+        return EOS_Success;
+    }
+
+    // Accept their session first (no-op if already accepted)
+    auto pfnAccept = GetSN_Accept();
+    if (pfnAccept) pfnAccept(iface, remoteSteamID);
+
+    // Reliability: 0=unreliable, 1/2=reliable
+    int eType = (opts->Reliability >= 1) ? 2 /* k_EP2PSendReliable */ : 0 /* k_EP2PSendUnreliable */;
+
+    bool ok = pfnSend(iface, remoteSteamID, opts->Data, opts->DataLengthBytes, eType, (int)opts->Channel);
+    if (!ok) {
+        Log("[P2P] SendP2PPacket to SteamID=%llu FAILED (channel=%d, size=%u)", remoteSteamID, opts->Channel, opts->DataLengthBytes);
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_P2P_GetNextReceivedPacketSize(void* H, void* O, uint32_t* OutPacketSizeBytes) {
+    if (OutPacketSizeBytes) *OutPacketSizeBytes = 0;
+
+    // Don't poll Steam networking if no lobby is active yet — avoids crash on early ticks
+    if (!g_currentSteamLobbyId.load()) return EOS_NotFound;
+
+    void* iface = GetSteamNetworkingInterface_EOS();
+    auto pfnAvail = GetSN_IsAvail();
+    if (!iface || !pfnAvail) return EOS_NotFound;
+
+    uint32_t msgSize = 0;
+    // Check channel 0 (main game channel); UE typically uses channel 0
+    if (!pfnAvail(iface, &msgSize, 0)) return EOS_NotFound;
+
+    if (OutPacketSizeBytes) *OutPacketSizeBytes = msgSize;
+    return EOS_Success;
+}
+
+// EOS_P2P_ReceivePacketOptions/Out layout (EOS SDK 1.x)
+// Out params are separate out-pointers passed by the game
+static EOS_EResult eos_P2P_ReceivePacket(void* H, void* O,
+    void* OutPeerId,        // EOS_ProductUserId* — peer who sent this
+    void* OutSocketId,      // EOS_P2P_SocketId*  — socket name
+    uint8_t* OutChannel,    // uint8_t*
+    void* OutData,          // void*  (pre-allocated by game)
+    uint32_t* OutBytesWritten)
+{
+    if (OutBytesWritten) *OutBytesWritten = 0;
+
+    void* iface = GetSteamNetworkingInterface_EOS();
+    auto pfnRead = GetSN_Read();
+    if (!iface || !pfnRead) return EOS_NotFound;
+
+    uint32_t bytesRead = 0;
+    uint64_t remoteSteamID = 0;
+    uint32_t maxSize = 65536;
+
+    // Query available size first
+    auto pfnAvail = GetSN_IsAvail();
+    if (pfnAvail) {
+        uint32_t avail = 0;
+        if (!pfnAvail(iface, &avail, 0) || avail == 0) return EOS_NotFound;
+        maxSize = avail;
+    }
+
+    // Use a static buffer if game provides nullptr (shouldn't happen but safety net)
+    static uint8_t s_recvBuf[65536];
+    void* dest = OutData ? OutData : s_recvBuf;
+
+    bool ok = pfnRead(iface, dest, maxSize, &bytesRead, &remoteSteamID, 0);
+    if (!ok || bytesRead == 0) return EOS_NotFound;
+
+    if (OutBytesWritten) *OutBytesWritten = bytesRead;
+    if (OutChannel) *OutChannel = 0;
+
+    // Map SteamID back to EOS ProductUserId
+    if (OutPeerId) {
+        char steamIdStr[32];
+        sprintf_s(steamIdStr, "%llu", remoteSteamID);
+        void* puid = GetOrCreateProductUserId(steamIdStr);
+        *(void**)OutPeerId = puid;
+    }
+
+    return EOS_Success;
+}
+
+static uint64_t eos_P2P_AddNotifyPeerConnectionRequest(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_P2P_AddNotifyPeerConnectionRequest called");
+    return 1;
+}
+
+static void eos_P2P_RemoveNotifyPeerConnectionRequest(void* H, uint64_t Id) {}
+
+static uint64_t eos_P2P_AddNotifyPeerConnectionClosed(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_P2P_AddNotifyPeerConnectionClosed called");
+    return 1;
+}
+
+static void eos_P2P_RemoveNotifyPeerConnectionClosed(void* H, uint64_t Id) {}
+
+static EOS_EResult eos_P2P_AcceptConnection(void* H, void* O) {
+    Log("EOS_P2P_AcceptConnection called");
+    // Also accept at the Steam level so ReadP2PPacket works
+    if (O) {
+        // Try to extract RemoteUserId from Options (offset 16, same layout as SendPacket)
+        uint64_t* fields = (uint64_t*)O;
+        if (fields[2]) { // RemoteUserId at offset 16
+            std::string extId = FindExternalId((void*)fields[2]);
+            if (!extId.empty()) {
+                uint64_t steamID = _strtoui64(extId.c_str(), nullptr, 10);
+                void* iface = GetSteamNetworkingInterface_EOS();
+                auto pfnAccept = GetSN_Accept();
+                if (iface && pfnAccept && steamID)
+                    pfnAccept(iface, steamID);
+            }
+        }
+    }
+    return EOS_Success;
+}
+
+static EOS_EResult eos_P2P_CloseConnection(void* H, void* O) {
+    Log("EOS_P2P_CloseConnection called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_P2P_CloseConnections(void* H, void* O) {
+    Log("EOS_P2P_CloseConnections called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_P2P_SetPacketQueueSize(void* H, void* O) {
+    return EOS_Success;
+}
+
+static EOS_EResult eos_P2P_SetPortRange(void* H, void* O) {
+    return EOS_Success;
+}
+
+static EOS_EResult eos_P2P_SetRelayControl(void* H, void* O) {
+    return EOS_Success;
+}
+
+// =============================================================================
+// SESSION HANDLE IP RESOLUTION HELPER
+// =============================================================================
+// Resolves the correct host IP for a session details handle.
+// For search result handles (0x3000+), returns the REMOTE host's IP from g_steamLobbies.
+// For local session handles (0x2002 etc), returns the local player's public/local IP.
+static void ResolveHostIPForSessionHandle(void* H, char* outIP, size_t outIPSize) {
+    outIP[0] = '\0';
+    uintptr_t hVal = (uintptr_t)H;
+    if (hVal >= 0x3000 && (hVal - 0x3000) < (uintptr_t)g_steamLobbies.size()) {
+        uint32_t idx = (uint32_t)(hVal - 0x3000);
+        strncpy_s(outIP, outIPSize, g_steamLobbies[idx].hostIP, _TRUNCATE);
+        if (outIP[0] != '\0') {
+            Log("  ResolveHostIP: handle %p -> REMOTE host IP '%s' (steamLobby idx %u)", H, outIP, idx);
+            return;
+        }
+    }
+    // Fallback: local player's IP
+    GetBestLocalIP(outIP, outIPSize);
+    Log("  ResolveHostIP: handle %p -> LOCAL IP '%s'", H, outIP);
+}
+
+// =============================================================================
+// SESSIONS MODIFICATION & DETAILS IMPLEMENTATIONS
+// =============================================================================
+static EOS_EResult eos_SessionModification_SetBucketId(void* H, void* O) {
+    Log("EOS_SessionModification_SetBucketId called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionModification_SetHostAddress(void* H, void* O) {
+    Log("EOS_SessionModification_SetHostAddress called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionModification_SetPermissionLevel(void* H, void* O) {
+    Log("EOS_SessionModification_SetPermissionLevel called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionModification_SetMaxPlayers(void* H, void* O) {
+    Log("EOS_SessionModification_SetMaxPlayers called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionModification_SetJoinInProgressAllowed(void* H, void* O) {
+    Log("EOS_SessionModification_SetJoinInProgressAllowed called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionModification_SetInvitesAllowed(void* H, void* O) {
+    Log("EOS_SessionModification_SetInvitesAllowed called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionModification_AddAttribute(void* H, void* O) {
+    Log("EOS_SessionModification_AddAttribute called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionModification_RemoveAttribute(void* H, void* O) {
+    Log("EOS_SessionModification_RemoveAttribute called");
+    return EOS_Success;
+}
+
+static void eos_SessionModification_Release(void* H) {
+    Log("EOS_SessionModification_Release called");
+}
+
+struct EOS_SessionDetails_Settings {
+    int32_t ApiVersion;
+    const char* BucketId;
+    uint32_t NumPublicConnections;
+    int32_t PermissionLevel;
+    int32_t bAllowJoinInProgress;
+    int32_t bSanctionsEnabled;
+    int32_t bAllowInvites;
+    int32_t bPresenceEnabled;
+    int32_t bAllowJoinViaPresence;
+    int32_t bAllowJoinViaPresenceFriendsOnly;
+    int32_t bInvitesDisabled;
+    const char* SchemaName;
+    const uint32_t* AllowedPlatformIds;
+    uint32_t AllowedPlatformIdsCount;
+};
+
+struct EOS_SessionDetails_Info {
+    int32_t ApiVersion;
+    const char* SessionId;
+    const char* HostAddress;
+    uint32_t NumOpenPublicConnections;
+    EOS_SessionDetails_Settings* Settings;
+    void* OwnerUserId;
+    const char* OwnerDeviceId;
+};
+
+static EOS_EResult eos_SessionDetails_CopyInfo(void* H, void* O, EOS_SessionDetails_Info** OutSessionDetailsInfo) {
+    Log("EOS_SessionDetails_CopyInfo called for handle %p", H);
+    if (!OutSessionDetailsInfo) return EOS_LimitExceeded;
+    
+    // Resolve host IP: remote lobby IP for search results, local IP for own session
+    char pubIP[64] = "";
+    ResolveHostIPForSessionHandle(H, pubIP, sizeof(pubIP));
+
+    char connectStr[128];
+    sprintf_s(connectStr, sizeof(connectStr), "%s:7777", pubIP);
+
+    void* sessionOwner = FAKE_PRODUCT_USER_ID;
+    uintptr_t val = (uintptr_t)H;
+    if (val >= 0x3000 && val < 0x3000 + g_foundLobbies.size()) {
+        uint32_t idx = (uint32_t)(val - 0x3000);
+        sessionOwner = GetOrCreateProductUserId(g_foundLobbies[idx]);
+    }
+
+    auto* settings = (EOS_SessionDetails_Settings*)malloc(sizeof(EOS_SessionDetails_Settings));
+    if (!settings) return EOS_LimitExceeded;
+    memset(settings, 0, sizeof(EOS_SessionDetails_Settings));
+    settings->ApiVersion = 3;
+    settings->BucketId = _strdup("refix_bucket");
+    settings->NumPublicConnections = 4;
+    settings->PermissionLevel = 0; // Public
+    settings->bAllowJoinInProgress = 1;
+    settings->bSanctionsEnabled = 0;
+    settings->bAllowInvites = 1;
+    settings->bPresenceEnabled = 1;
+    settings->bAllowJoinViaPresence = 1;
+    settings->bAllowJoinViaPresenceFriendsOnly = 0;
+    settings->bInvitesDisabled = 0;
+    settings->SchemaName = nullptr;
+    settings->AllowedPlatformIds = nullptr;
+    settings->AllowedPlatformIdsCount = 0;
+
+    auto* info = (EOS_SessionDetails_Info*)malloc(sizeof(EOS_SessionDetails_Info));
+    if (!info) { free(settings); return EOS_LimitExceeded; }
+    memset(info, 0, sizeof(EOS_SessionDetails_Info));
+    
+    info->ApiVersion = 2;
+    info->SessionId = _strdup("RefixSession_001");
+    info->HostAddress = _strdup(connectStr);
+    info->NumOpenPublicConnections = 4;
+    info->Settings = settings;
+    info->OwnerUserId = sessionOwner;
+    info->OwnerDeviceId = nullptr;
+    
+    *OutSessionDetailsInfo = info;
+    Log("  Returning SessionDetails_Info (HostAddress=%s, Settings=%p, Owner=%p)", connectStr, settings, sessionOwner);
+    return EOS_Success;
+}
+
+static void eos_SessionDetails_Info_Release(EOS_SessionDetails_Info* Info) {
+    Log("EOS_SessionDetails_Info_Release called for %p", Info);
+    if (Info) {
+        if (Info->SessionId) free((void*)Info->SessionId);
+        if (Info->HostAddress) free((void*)Info->HostAddress);
+        if (Info->Settings) {
+            if (Info->Settings->BucketId) free((void*)Info->Settings->BucketId);
+            free(Info->Settings);
+        }
+        free(Info);
+    }
+}
+
+static void eos_SessionDetails_Release(void* H) {
+    Log("EOS_SessionDetails_Release called");
+}
+
+union EOS_SessionDetails_AttributeValue {
+    int64_t AsInt64;
+    double AsDouble;
+    int32_t bAsBool;
+    const char* AsUtf8;
+};
+
+struct EOS_SessionDetails_AttributeData {
+    int32_t ApiVersion;
+    const char* Key;
+    EOS_SessionDetails_AttributeValue Value;
+    int32_t ValueType;
+};
+
+struct EOS_SessionDetails_Attribute {
+    int32_t ApiVersion;
+    EOS_SessionDetails_AttributeData* Data;
+    int32_t AdvertisementType;
+};
+
+static EOS_SessionDetails_AttributeData* CreateSessionAttributeData(const char* key, const char* resolvedIP = nullptr) {
+    auto* data = (EOS_SessionDetails_AttributeData*)malloc(sizeof(EOS_SessionDetails_AttributeData));
+    if (!data) return nullptr;
+    memset(data, 0, sizeof(EOS_SessionDetails_AttributeData));
+    data->ApiVersion = 1;
+    data->Key = _strdup(key ? key : "");
+
+    char pubIP[64] = "127.0.0.1";
+    if (resolvedIP && resolvedIP[0] != '\0') {
+        strncpy_s(pubIP, sizeof(pubIP), resolvedIP, _TRUNCATE);
+    } else {
+        GetBestLocalIP(pubIP, sizeof(pubIP));
+    }
+
+    if (key && (_stricmp(key, "SERVER_PORT") == 0 || _stricmp(key, "HOST_PORT") == 0)) {
+        data->ValueType = 1; // Int64
+        data->Value.AsInt64 = 7777;
+    }
+    else if (key && (_strnicmp(key, "__EOS_b", 7) == 0 || _stricmp(key, "bUsesPresence") == 0)) {
+        data->ValueType = 0; // Boolean
+        data->Value.bAsBool = 1;
+    }
+    else if (key && (_strnicmp(key, "__EOS_num", 9) == 0 || _stricmp(key, "NumPublicConnections") == 0)) {
+        data->ValueType = 1; // Int64
+        data->Value.AsInt64 = 4;
+    }
+    else {
+        data->ValueType = 3; // String
+        data->Value.AsUtf8 = _strdup(pubIP);
+    }
+    return data;
+}
+
+static const char* g_sessionAttrKeys[10] = {
+    "__EOS_bUsesPresence",
+    "__EOS_bIsDedicatedServer",
+    "__EOS_bAllowJoinInProgress",
+    "__EOS_bSanctionsEnabled",
+    "__EOS_numPublicConnections",
+    "__EOS_numPrivateConnections",
+    "SERVER_IP",
+    "SERVER_PORT",
+    "HOST_IP",
+    "HOST_PORT"
+};
+
+static uint32_t eos_SessionDetails_GetAttributeCount(void* H, void* O) {
+    Log("EOS_SessionDetails_GetAttributeCount called -> 10");
+    return 10;
+}
+
+static uint32_t eos_SessionDetails_GetSessionAttributeCount(void* H, void* O) {
+    Log("EOS_SessionDetails_GetSessionAttributeCount called -> 10");
+    return 10;
+}
+
+static EOS_EResult eos_SessionDetails_CopyAttributeByIndex(void* H, void* O, EOS_SessionDetails_Attribute** OutAttribute) {
+    Log("EOS_SessionDetails_CopyAttributeByIndex called");
+    if (!O || !OutAttribute) return EOS_NotFound;
+    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttributeIndex;
+    if (index >= 10) return EOS_NotFound;
+
+    auto* attr = (EOS_SessionDetails_Attribute*)malloc(sizeof(EOS_SessionDetails_Attribute));
+    if (!attr) return EOS_LimitExceeded;
+    memset(attr, 0, sizeof(EOS_SessionDetails_Attribute));
+    
+    // Resolve host IP from session details handle for remote lobbies
+    char resolvedIP[64] = "";
+    ResolveHostIPForSessionHandle(H, resolvedIP, sizeof(resolvedIP));
+    
+    attr->ApiVersion = 1;
+    attr->Data = CreateSessionAttributeData(g_sessionAttrKeys[index], resolvedIP);
+    attr->AdvertisementType = 0;
+    
+    *OutAttribute = attr;
+    Log("  SessionDetails attribute %d: %s", index, g_sessionAttrKeys[index]);
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionDetails_CopyAttributeByKey(void* H, void* O, EOS_SessionDetails_Attribute** OutAttribute) {
+    Log("EOS_SessionDetails_CopyAttributeByKey called");
+    if (!OutAttribute) return EOS_NotFound;
+    *OutAttribute = nullptr;
+    if (!O) return EOS_NotFound;
+
+    const char* key = ((EOS_LobbyDetails_CopyAttributeByKeyOptions*)O)->AttrKey;
+    if (!key) return EOS_NotFound;
+
+    auto* attr = (EOS_SessionDetails_Attribute*)malloc(sizeof(EOS_SessionDetails_Attribute));
+    if (!attr) return EOS_LimitExceeded;
+    memset(attr, 0, sizeof(EOS_SessionDetails_Attribute));
+    
+    // Resolve host IP from session details handle for remote lobbies
+    char resolvedIP[64] = "";
+    ResolveHostIPForSessionHandle(H, resolvedIP, sizeof(resolvedIP));
+    
+    attr->ApiVersion = 1;
+    attr->Data = CreateSessionAttributeData(key, resolvedIP);
+    attr->AdvertisementType = 0;
+    
+    *OutAttribute = attr;
+    Log("  SessionDetails attribute by key '%s' (type %d)", key, attr->Data ? attr->Data->ValueType : -1);
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionDetails_CopySessionAttributeByKey(void* H, void* O, EOS_SessionDetails_Attribute** OutAttribute) {
+    Log("EOS_SessionDetails_CopySessionAttributeByKey called");
+    return eos_SessionDetails_CopyAttributeByKey(H, O, OutAttribute);
+}
+
+
+static EOS_EResult eos_SessionDetails_CopySessionAttributeByIndex(void* H, void* O, EOS_SessionDetails_Attribute** OutAttribute) {
+    Log("EOS_SessionDetails_CopySessionAttributeByIndex called");
+    return eos_SessionDetails_CopyAttributeByIndex(H, O, OutAttribute);
+}
+
+static void eos_SessionDetails_Attribute_Release(EOS_SessionDetails_Attribute* Attribute) {
+    Log("EOS_SessionDetails_Attribute_Release called for attr=%p", Attribute);
+    if (Attribute) {
+        Log("  Attribute->Data=%p", Attribute->Data);
+        if (Attribute->Data) {
+            Log("  Attribute->Data->Key=%p (%s)", Attribute->Data->Key, Attribute->Data->Key ? Attribute->Data->Key : "nullptr");
+            if (Attribute->Data->Key) {
+                free((void*)Attribute->Data->Key);
+                Attribute->Data->Key = nullptr;
+            }
+            if (Attribute->Data->ValueType == 3 && Attribute->Data->Value.AsUtf8) {
+                Log("  Attribute->Data->Value.AsUtf8=%p", Attribute->Data->Value.AsUtf8);
+                free((void*)Attribute->Data->Value.AsUtf8);
+                Attribute->Data->Value.AsUtf8 = nullptr;
+            }
+            free(Attribute->Data);
+            Attribute->Data = nullptr;
+        }
+        free(Attribute);
+    }
+    Log("EOS_SessionDetails_Attribute_Release finished");
+}
+
+static EOS_EResult eos_SessionSearch_SetParameter(void* H, void* O) {
+    Log("EOS_SessionSearch_SetParameter called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionSearch_SetTargetUserId(void* H, void* O) {
+    Log("EOS_SessionSearch_SetTargetUserId called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionSearch_SetSessionId(void* H, void* O) {
+    Log("EOS_SessionSearch_SetSessionId called");
+    return EOS_Success;
+}
+
+static EOS_EResult eos_SessionSearch_SetMaxResults(void* H, void* O) {
+    Log("EOS_SessionSearch_SetMaxResults called");
+    return EOS_Success;
+}
+
+static void eos_SessionSearch_Release(void* H) {
+    Log("EOS_SessionSearch_Release called");
+}
+
+static EOS_EResult eos_Sessions_CopyActiveSessionHandle(void* H, void* O, void** OutSessionHandle) {
+    Log("EOS_Sessions_CopyActiveSessionHandle called");
+    if (OutSessionHandle) *OutSessionHandle = (void*)0x2002;
+    return EOS_Success;
+}
+
+struct CB_Sessions_JoinSession {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+};
+
+struct EOS_Sessions_JoinSessionOptions {
+    int32_t ApiVersion;
+    int32_t _pad0;
+    const char* SessionName;
+    void* SessionHandle;
+    void* LocalUserId;
+    int32_t bPresenceEnabled;
+};
+
+static void eos_Sessions_JoinSession(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_JoinSession called");
+    
+    // If joining a remote session (handle 0x3000+), also join the real Steam lobby
+    if (O) {
+        auto* opts = (EOS_Sessions_JoinSessionOptions*)O;
+        void* sessionHandle = opts->SessionHandle;
+        uintptr_t hVal = (uintptr_t)sessionHandle;
+        
+        if (hVal >= 0x3000 && (hVal - 0x3000) < (uintptr_t)g_steamLobbies.size()) {
+            uint32_t idx = (uint32_t)(hVal - 0x3000);
+            uint64_t steamLobbyId = g_steamLobbies[idx].steamLobbyId;
+            Log("  Joining REAL Steam lobby %llu for remote session (index %u, host=%s)",
+                steamLobbyId, idx, g_steamLobbies[idx].hostIP);
+            
+            std::thread([steamLobbyId]() {
+                void* mm = GetSteamMatchmakingInterface();
+                if (mm && g_pfn_MM_JoinLobby) {
+                    g_pfn_MM_JoinLobby(mm, steamLobbyId);
+                    if (g_pfn_SteamRunCallbacks) {
+                        for (int i = 0; i < 15; i++) {
+                            Sleep(20);
+                            g_pfn_SteamRunCallbacks();
+                        }
+                    }
+                    Log("  Steam JoinLobby completed for lobby %llu", steamLobbyId);
+                    // Notify P2P hook: register host and other members as P2P peers
+                    ReFix_NotifyLobbyID(steamLobbyId);
+                } else {
+                    Log("  ERROR: Cannot join Steam lobby - matchmaking interface or JoinLobby not available");
+                }
+            }).detach();
+        }
+    }
+    
+    CB_Sessions_JoinSession info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    QueueCallback(Cb, info);
+}
+
+static EOS_EResult eos_Sessions_UpdateSessionModification(void* H, void* O, void** OutSessionModificationHandle) {
+    Log("EOS_Sessions_UpdateSessionModification called");
+    if (OutSessionModificationHandle) {
+        *OutSessionModificationHandle = HANDLE_SESSION_MODIFICATION;
+    }
+    return EOS_Success;
+}
+
+static EOS_NotificationId eos_Sessions_AddNotifyJoinSessionAccepted(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_AddNotifyJoinSessionAccepted called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Sessions_RemoveNotifyJoinSessionAccepted(void* H, EOS_NotificationId InId) {
+    Log("EOS_Sessions_RemoveNotifyJoinSessionAccepted called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Sessions_AddNotifySessionInviteAccepted(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_AddNotifySessionInviteAccepted called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Sessions_RemoveNotifySessionInviteAccepted(void* H, EOS_NotificationId InId) {
+    Log("EOS_Sessions_RemoveNotifySessionInviteAccepted called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Sessions_AddNotifySessionInviteReceived(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_AddNotifySessionInviteReceived called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Sessions_RemoveNotifySessionInviteReceived(void* H, EOS_NotificationId InId) {
+    Log("EOS_Sessions_RemoveNotifySessionInviteReceived called (id=%llu)", InId);
+}
+
+static EOS_NotificationId eos_Sessions_AddNotifyLeaveSessionRequested(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_AddNotifyLeaveSessionRequested called");
+    return (EOS_NotificationId)(++g_nextNotifId);
+}
+
+static void eos_Sessions_RemoveNotifyLeaveSessionRequested(void* H, EOS_NotificationId InId) {
+    Log("EOS_Sessions_RemoveNotifyLeaveSessionRequested called (id=%llu)", InId);
+}
+
+struct CB_Sessions_SendInvite {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+};
+
+static void eos_Sessions_SendInvite(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_SendInvite called");
+    CB_Sessions_SendInvite info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    QueueCallback(Cb, info);
+}
+
+struct CB_Sessions_StartSession {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+};
+
+static void eos_Sessions_StartSession(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_StartSession called");
+    CB_Sessions_StartSession info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    QueueCallback(Cb, info);
+}
+
+struct CB_Sessions_EndSession {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+};
+
+static void eos_Sessions_EndSession(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_EndSession called");
+    CB_Sessions_EndSession info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    QueueCallback(Cb, info);
+}
+
+static void* s_dummyPlayerIds[1] = { (void*)FAKE_PRODUCT_USER_ID };
+
+struct CB_Sessions_RegisterPlayers {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+    const void** RegisteredPlayerIds;
+    uint32_t    RegisteredPlayerIdsCount;
+};
+
+static void eos_Sessions_RegisterPlayers(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_RegisterPlayers called");
+    CB_Sessions_RegisterPlayers info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    info.RegisteredPlayerIds = (const void**)s_dummyPlayerIds;
+    info.RegisteredPlayerIdsCount = 1;
+    QueueCallback(Cb, info);
+}
+
+struct CB_Sessions_UnregisterPlayers {
+    EOS_EResult ResultCode;
+    int32_t     _pad0;
+    void*       ClientData;
+    const void** UnregisteredPlayerIds;
+    uint32_t    UnregisteredPlayerIdsCount;
+};
+
+static void eos_Sessions_UnregisterPlayers(void* H, void* O, void* C, void* Cb) {
+    Log("EOS_Sessions_UnregisterPlayers called");
+    CB_Sessions_UnregisterPlayers info = {};
+    info.ResultCode = EOS_Success;
+    info.ClientData = C;
+    info.UnregisteredPlayerIds = (const void**)s_dummyPlayerIds;
+    info.UnregisteredPlayerIdsCount = 1;
+    QueueCallback(Cb, info);
+}
+
+
+
+static void InitExportNames();
+
 static int FindExportIndex(const char* name) {
     for (int i = 0; i < EOS_FORWARD_COUNT; i++) {
         if (g_eosNames[i] && strcmp(g_eosNames[i], name) == 0) return i;
@@ -1804,10 +3842,16 @@ static int FindExportIndex(const char* name) {
 
 static void Override(const char* name, void* proc) {
     int idx = FindExportIndex(name);
-    if (idx >= 0) g_eosProcs[idx] = (FARPROC)proc;
+    if (idx >= 0) {
+        g_eosProcs[idx] = (FARPROC)proc;
+        Log("Override: %s -> idx=%d, ptr=%p", name, idx, proc);
+    } else {
+        Log("Override FAILED: %s not found in g_eosNames", name);
+    }
 }
 
 static void SetupEmulatedFunctions() {
+    InitExportNames();
     SetupTrampolines();
     for (int i = 0; i < EOS_FORWARD_COUNT; i++) {
         if (g_trampolines) {
@@ -1822,6 +3866,25 @@ static void SetupEmulatedFunctions() {
     Override("EOS_Platform_Create",  (void*)eos_Platform_Create);
     Override("EOS_Platform_Tick",    (void*)eos_Platform_Tick);
     Override("EOS_Platform_Release", (void*)eos_Platform_Release);
+    Override("EOS_Platform_CheckForLauncherAndRestart", (void*)eos_Platform_CheckForLauncherAndRestart);
+    Override("EOS_Platform_GetApplicationStatus",       (void*)eos_Platform_GetApplicationStatus);
+    Override("EOS_Platform_SetApplicationStatus",       (void*)eos_Platform_SetApplicationStatus);
+    Override("EOS_Platform_GetNetworkStatus",           (void*)eos_Platform_GetNetworkStatus);
+    Override("EOS_Platform_SetNetworkStatus",           (void*)eos_Platform_SetNetworkStatus);
+    Override("EOS_Platform_GetActiveCountryCode",       (void*)eos_Platform_GetActiveCountryCode);
+    Override("EOS_Platform_GetActiveLocaleCode",        (void*)eos_Platform_GetActiveLocaleCode);
+    Override("EOS_Platform_GetOverrideCountryCode",     (void*)eos_Platform_GetOverrideCountryCode);
+    Override("EOS_Platform_GetOverrideLocaleCode",      (void*)eos_Platform_GetOverrideLocaleCode);
+    Override("EOS_Platform_GetDesktopCrossplayStatus",  (void*)eos_Platform_GetDesktopCrossplayStatus);
+    Override("EOS_Platform_GetIntegratedPlatformInterface", (void*)eos_GetIntegratedPlatformInterface);
+
+    // IntegratedPlatform
+    Override("EOS_IntegratedPlatform_AddNotifyUserLoginStatusChanged", (void*)eos_IntegratedPlatform_AddNotifyUserLoginStatusChanged);
+    Override("EOS_IntegratedPlatform_RemoveNotifyUserLoginStatusChanged", (void*)eos_IntegratedPlatform_RemoveNotifyUserLoginStatusChanged);
+    Override("EOS_IntegratedPlatform_SetUserLoginStatus", (void*)eos_IntegratedPlatform_SetUserLoginStatus);
+    Override("EOS_IntegratedPlatform_CreateIntegratedPlatformOptionsContainer", (void*)eos_IntegratedPlatform_CreateIntegratedPlatformOptionsContainer);
+    Override("EOS_IntegratedPlatformOptionsContainer_Add", (void*)eos_IntegratedPlatformOptionsContainer_Add);
+    Override("EOS_IntegratedPlatformOptionsContainer_Release", (void*)eos_IntegratedPlatformOptionsContainer_Release);
 
     // Platform Get*Interface
     Override("EOS_Platform_GetAuthInterface",               (void*)eos_GetAuthInterface);
@@ -1871,6 +3934,10 @@ static void SetupEmulatedFunctions() {
     Override("EOS_Auth_Token_Release",                (void*)eos_Auth_Token_Release);
     Override("EOS_Auth_VerifyIdToken",                (void*)eos_Auth_VerifyIdToken);
     Override("EOS_Auth_VerifyUserAuth",               (void*)eos_Auth_VerifyUserAuth);
+
+    // Helpers
+    Override("EOS_ByteArray_ToString",                (void*)eos_ByteArray_ToString);
+    Override("EOS_ByteArray_FromString",              (void*)eos_ByteArray_FromString);
 
     // Connect
     Override("EOS_Connect_AddNotifyAuthExpiration",   (void*)eos_Connect_AddNotifyAuthExpiration);
@@ -1941,6 +4008,7 @@ static void SetupEmulatedFunctions() {
 
     // Lobby
     Override("EOS_Lobby_CreateLobby",                         (void*)eos_Lobby_CreateLobby);
+    Override("EOS_Lobby_DestroyLobby",                        (void*)eos_Lobby_DestroyLobby);
     Override("EOS_Lobby_UpdateLobby",                         (void*)eos_Lobby_UpdateLobby);
     Override("EOS_LobbySearch_Find",                          (void*)eos_LobbySearch_Find);
     Override("EOS_LobbySearch_GetSearchResultCount",          (void*)eos_LobbySearch_GetSearchResultCount);
@@ -1949,17 +4017,117 @@ static void SetupEmulatedFunctions() {
     Override("EOS_LobbySearch_Release",                       (void*)eos_LobbySearch_Release);
     Override("EOS_Lobby_JoinLobby",                           (void*)eos_Lobby_JoinLobby);
     Override("EOS_Lobby_CreateLobbySearch",                   (void*)eos_Lobby_CreateLobbySearch);
+    Override("EOS_Lobby_CreateLobbyModification",              (void*)eos_Lobby_CreateLobbyModification);
     Override("EOS_Lobby_UpdateLobbyModification",              (void*)eos_Lobby_UpdateLobbyModification);
+    Override("EOS_LobbyModification_SetPermissionLevel",       (void*)eos_LobbyModification_SetPermissionLevel);
+    Override("EOS_LobbyModification_SetMaxMembers",           (void*)eos_LobbyModification_SetMaxMembers);
+    Override("EOS_LobbyModification_SetBucketId",               (void*)eos_LobbyModification_SetBucketId);
+    Override("EOS_LobbyModification_SetInvitesAllowed",       (void*)eos_LobbyModification_SetInvitesAllowed);
+    Override("EOS_LobbyModification_AddAttribute",            (void*)eos_LobbyModification_AddAttribute);
+    Override("EOS_LobbyModification_AddMemberAttribute",      (void*)eos_LobbyModification_AddMemberAttribute);
+    Override("EOS_LobbyModification_RemoveAttribute",         (void*)eos_LobbyModification_RemoveAttribute);
+    Override("EOS_LobbyModification_RemoveMemberAttribute",   (void*)eos_LobbyModification_RemoveMemberAttribute);
+    Override("EOS_LobbyModification_Release",                 (void*)eos_LobbyModification_Release);
+    Override("EOS_Lobby_CopyLobbyDetailsHandle",              (void*)eos_Lobby_CopyLobbyDetailsHandle);
+    Override("EOS_Lobby_CopyLobbyDetailsHandleByInviteId",    (void*)eos_Lobby_CopyLobbyDetailsHandleByInviteId);
+    Override("EOS_Lobby_CopyLobbyDetailsHandleByUiEventId",   (void*)eos_Lobby_CopyLobbyDetailsHandleByUiEventId);
     Override("EOS_LobbyDetails_CopyInfo",                      (void*)eos_LobbyDetails_CopyInfo);
     Override("EOS_LobbyDetails_GetAttributeCount",             (void*)eos_LobbyDetails_GetAttributeCount);
     Override("EOS_LobbyDetails_CopyAttributeByIndex",          (void*)eos_LobbyDetails_CopyAttributeByIndex);
     Override("EOS_LobbyDetails_CopyAttributeByKey",            (void*)eos_LobbyDetails_CopyAttributeByKey);
     Override("EOS_Lobby_Attribute_Release",                    (void*)eos_Lobby_Attribute_Release);
     Override("EOS_LobbyDetails_GetMemberCount",                (void*)eos_LobbyDetails_GetMemberCount);
+    Override("EOS_LobbyDetails_GetMemberAttributeCount",       (void*)eos_LobbyDetails_GetMemberAttributeCount);
+    Override("EOS_LobbyDetails_CopyMemberAttributeByIndex",    (void*)eos_LobbyDetails_CopyMemberAttributeByIndex);
+    Override("EOS_LobbyDetails_CopyMemberAttributeByKey",      (void*)eos_LobbyDetails_CopyMemberAttributeByKey);
     Override("EOS_LobbyDetails_Info_Release",                  (void*)eos_LobbyDetails_Info_Release);
     Override("EOS_LobbyDetails_Release",                       (void*)eos_LobbyDetails_Release);
     Override("EOS_LobbyDetails_GetMemberByIndex",              (void*)eos_LobbyDetails_GetMemberByIndex);
     Override("EOS_LobbyDetails_GetLobbyOwner",                 (void*)eos_LobbyDetails_GetLobbyOwner);
+    Override("EOS_Lobby_AddNotifyJoinLobbyAccepted",          (void*)eos_Lobby_AddNotifyJoinLobbyAccepted);
+    Override("EOS_Lobby_RemoveNotifyJoinLobbyAccepted",       (void*)eos_Lobby_RemoveNotifyJoinLobbyAccepted);
+    Override("EOS_Lobby_AddNotifyLeaveLobbyRequested",        (void*)eos_Lobby_AddNotifyLeaveLobbyRequested);
+    Override("EOS_Lobby_RemoveNotifyLeaveLobbyRequested",     (void*)eos_Lobby_RemoveNotifyLeaveLobbyRequested);
+    Override("EOS_Lobby_AddNotifyLobbyInviteAccepted",       (void*)eos_Lobby_AddNotifyLobbyInviteAccepted);
+    Override("EOS_Lobby_RemoveNotifyLobbyInviteAccepted",    (void*)eos_Lobby_RemoveNotifyLobbyInviteAccepted);
+    Override("EOS_Lobby_AddNotifyLobbyInviteReceived",       (void*)eos_Lobby_AddNotifyLobbyInviteReceived);
+    Override("EOS_Lobby_RemoveNotifyLobbyInviteReceived",    (void*)eos_Lobby_RemoveNotifyLobbyInviteReceived);
+    Override("EOS_Lobby_AddNotifyLobbyInviteRejected",       (void*)eos_Lobby_AddNotifyLobbyInviteRejected);
+    Override("EOS_Lobby_RemoveNotifyLobbyInviteRejected",    (void*)eos_Lobby_RemoveNotifyLobbyInviteRejected);
+    Override("EOS_Lobby_AddNotifyLobbyMemberStatusReceived", (void*)eos_Lobby_AddNotifyLobbyMemberStatusReceived);
+    Override("EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived",(void*)eos_Lobby_RemoveNotifyLobbyMemberStatusReceived);
+    Override("EOS_Lobby_AddNotifyLobbyMemberUpdateReceived", (void*)eos_Lobby_AddNotifyLobbyMemberUpdateReceived);
+    Override("EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived",(void*)eos_Lobby_RemoveNotifyLobbyMemberUpdateReceived);
+    Override("EOS_Lobby_AddNotifyLobbyUpdateReceived",       (void*)eos_Lobby_AddNotifyLobbyUpdateReceived);
+    Override("EOS_Lobby_RemoveNotifyLobbyUpdateReceived",    (void*)eos_Lobby_RemoveNotifyLobbyUpdateReceived);
+    Override("EOS_Lobby_SendInvite",                          (void*)eos_Lobby_SendInvite);
+
+    // Sessions (RedpointEOS)
+    Override("EOS_Sessions_CreateSessionModification",        (void*)eos_Sessions_CreateSessionModification);
+    Override("EOS_Sessions_UpdateSessionModification",        (void*)eos_Sessions_UpdateSessionModification);
+    Override("EOS_Sessions_UpdateSession",                    (void*)eos_Sessions_UpdateSession);
+    Override("EOS_Sessions_CreateSessionSearch",              (void*)eos_Sessions_CreateSessionSearch);
+    Override("EOS_SessionSearch_Find",                        (void*)eos_SessionSearch_Find);
+    Override("EOS_SessionSearch_GetSearchResultCount",        (void*)eos_SessionSearch_GetSearchResultCount);
+    Override("EOS_SessionSearch_CopySearchResultByIndex",     (void*)eos_SessionSearch_CopySearchResultByIndex);
+    Override("EOS_Sessions_JoinSession",                      (void*)eos_Sessions_JoinSession);
+    Override("EOS_Sessions_DestroySession",                   (void*)eos_Sessions_DestroySession);
+    Override("EOS_Sessions_AddNotifyJoinSessionAccepted",     (void*)eos_Sessions_AddNotifyJoinSessionAccepted);
+    Override("EOS_Sessions_RemoveNotifyJoinSessionAccepted",  (void*)eos_Sessions_RemoveNotifyJoinSessionAccepted);
+    Override("EOS_Sessions_AddNotifySessionInviteAccepted",   (void*)eos_Sessions_AddNotifySessionInviteAccepted);
+    Override("EOS_Sessions_RemoveNotifySessionInviteAccepted",(void*)eos_Sessions_RemoveNotifySessionInviteAccepted);
+    Override("EOS_Sessions_AddNotifySessionInviteReceived",   (void*)eos_Sessions_AddNotifySessionInviteReceived);
+    Override("EOS_Sessions_RemoveNotifySessionInviteReceived",(void*)eos_Sessions_RemoveNotifySessionInviteReceived);
+    Override("EOS_Sessions_AddNotifyLeaveSessionRequested",   (void*)eos_Sessions_AddNotifyLeaveSessionRequested);
+    Override("EOS_Sessions_RemoveNotifyLeaveSessionRequested",(void*)eos_Sessions_RemoveNotifyLeaveSessionRequested);
+    Override("EOS_Sessions_SendInvite",                      (void*)eos_Sessions_SendInvite);
+    Override("EOS_Sessions_StartSession",                     (void*)eos_Sessions_StartSession);
+    Override("EOS_Sessions_EndSession",                       (void*)eos_Sessions_EndSession);
+    Override("EOS_Sessions_RegisterPlayers",                 (void*)eos_Sessions_RegisterPlayers);
+    Override("EOS_Sessions_UnregisterPlayers",               (void*)eos_Sessions_UnregisterPlayers);
+
+    // P2P (Non-blocking Stubs to prevent UE Infinite Loop Freeze)
+    Override("EOS_P2P_GetNextReceivedPacketSize",             (void*)eos_P2P_GetNextReceivedPacketSize);
+    Override("EOS_P2P_ReceivePacket",                        (void*)eos_P2P_ReceivePacket);
+    Override("EOS_P2P_SendPacket",                           (void*)eos_P2P_SendPacket);
+    Override("EOS_P2P_AddNotifyPeerConnectionRequest",        (void*)eos_P2P_AddNotifyPeerConnectionRequest);
+    Override("EOS_P2P_RemoveNotifyPeerConnectionRequest",     (void*)eos_P2P_RemoveNotifyPeerConnectionRequest);
+    Override("EOS_P2P_AddNotifyPeerConnectionClosed",         (void*)eos_P2P_AddNotifyPeerConnectionClosed);
+    Override("EOS_P2P_RemoveNotifyPeerConnectionClosed",      (void*)eos_P2P_RemoveNotifyPeerConnectionClosed);
+    Override("EOS_P2P_AcceptConnection",                     (void*)eos_P2P_AcceptConnection);
+    Override("EOS_P2P_CloseConnection",                      (void*)eos_P2P_CloseConnection);
+    Override("EOS_P2P_CloseConnections",                     (void*)eos_P2P_CloseConnections);
+    Override("EOS_P2P_SetPacketQueueSize",                   (void*)eos_P2P_SetPacketQueueSize);
+    Override("EOS_P2P_SetPortRange",                         (void*)eos_P2P_SetPortRange);
+    Override("EOS_P2P_SetRelayControl",                      (void*)eos_P2P_SetRelayControl);
+    Override("EOS_Sessions_CopyActiveSessionHandle",          (void*)eos_Sessions_CopyActiveSessionHandle);
+
+    Override("EOS_SessionModification_SetBucketId",           (void*)eos_SessionModification_SetBucketId);
+    Override("EOS_SessionModification_SetHostAddress",        (void*)eos_SessionModification_SetHostAddress);
+    Override("EOS_SessionModification_SetPermissionLevel",   (void*)eos_SessionModification_SetPermissionLevel);
+    Override("EOS_SessionModification_SetMaxPlayers",        (void*)eos_SessionModification_SetMaxPlayers);
+    Override("EOS_SessionModification_SetJoinInProgressAllowed",(void*)eos_SessionModification_SetJoinInProgressAllowed);
+    Override("EOS_SessionModification_SetInvitesAllowed",   (void*)eos_SessionModification_SetInvitesAllowed);
+    Override("EOS_SessionModification_AddAttribute",        (void*)eos_SessionModification_AddAttribute);
+    Override("EOS_SessionModification_RemoveAttribute",     (void*)eos_SessionModification_RemoveAttribute);
+    Override("EOS_SessionModification_Release",             (void*)eos_SessionModification_Release);
+
+    Override("EOS_SessionDetails_CopyInfo",                   (void*)eos_SessionDetails_CopyInfo);
+    Override("EOS_SessionDetails_Info_Release",              (void*)eos_SessionDetails_Info_Release);
+    Override("EOS_SessionDetails_Release",                   (void*)eos_SessionDetails_Release);
+    Override("EOS_SessionDetails_GetAttributeCount",         (void*)eos_SessionDetails_GetAttributeCount);
+    Override("EOS_SessionDetails_CopyAttributeByIndex",      (void*)eos_SessionDetails_CopyAttributeByIndex);
+    Override("EOS_SessionDetails_CopyAttributeByKey",        (void*)eos_SessionDetails_CopyAttributeByKey);
+    Override("EOS_SessionDetails_CopySessionAttributeByKey",  (void*)eos_SessionDetails_CopySessionAttributeByKey);
+    Override("EOS_SessionDetails_GetSessionAttributeCount",   (void*)eos_SessionDetails_GetSessionAttributeCount);
+    Override("EOS_SessionDetails_CopySessionAttributeByIndex", (void*)eos_SessionDetails_CopySessionAttributeByIndex);
+    Override("EOS_SessionDetails_Attribute_Release",        (void*)eos_SessionDetails_Attribute_Release);
+
+    Override("EOS_SessionSearch_SetParameter",              (void*)eos_SessionSearch_SetParameter);
+    Override("EOS_SessionSearch_SetTargetUserId",           (void*)eos_SessionSearch_SetTargetUserId);
+    Override("EOS_SessionSearch_SetSessionId",              (void*)eos_SessionSearch_SetSessionId);
+    Override("EOS_SessionSearch_SetMaxResults",             (void*)eos_SessionSearch_SetMaxResults);
+    Override("EOS_SessionSearch_Release",                   (void*)eos_SessionSearch_Release);
 }
 
 // =============================================================================
@@ -1969,8 +4137,7 @@ extern "C" __declspec(dllexport) int ReFix() {
     return 1;
 }
 
-// =============================================================================
-// CONFIGURATION
+// ===============================================================// CONFIGURATION
 // =============================================================================
 static void LoadConfig() {
     char exePath[MAX_PATH];
@@ -1979,41 +4146,35 @@ static void LoadConfig() {
     size_t pos = iniPath.find_last_of("\\/");
     if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
     
-    // Read username from INI first
-    GetPrivateProfileStringA("User", "Name", "",
-        g_userName, sizeof(g_userName), iniPath.c_str());
+    // Priority 1: Check environment variable REFIX_USERNAME
+    char envBuf[128] = {0};
+    if (GetEnvironmentVariableA("REFIX_USERNAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
+        strcpy_s(g_userName, sizeof(g_userName), envBuf);
+    }
     
-    // If INI Name is empty, try environment variable set by winmm loader
-    if (g_userName[0] == '\0') {
-        char envBuf[128] = {0};
-        if (GetEnvironmentVariableA("REFIX_USERNAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
-            strcpy_s(g_userName, sizeof(g_userName), envBuf);
+    // Priority 2: Check ReFix.ini [User] Name
+    if (g_userName[0] == '\0' || strcmp(g_userName, "ReFix User") == 0) {
+        char iniBuf[128] = {0};
+        GetPrivateProfileStringA("User", "Name", "", iniBuf, sizeof(iniBuf), iniPath.c_str());
+        if (iniBuf[0] != '\0') {
+            strcpy_s(g_userName, sizeof(g_userName), iniBuf);
         }
     }
-    
-    // If still empty, try Steam persona name (set by steam_proxy after SteamAPI_Init)
-    // Note: This env var may not be set yet at DllMain time, but we re-check later
-    if (g_userName[0] == '\0') {
-        char envBuf[128] = {0};
-        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
-            strcpy_s(g_userName, sizeof(g_userName), envBuf);
-        }
+
+    // Priority 3: Default fallback "Player" (no Windows OS account name like Valen!)
+    if (g_userName[0] == '\0' || strcmp(g_userName, "ReFix User") == 0) {
+        strcpy_s(g_userName, sizeof(g_userName), "Player");
     }
-    
-    // Final fallback
-    if (g_userName[0] == '\0') {
-        strcpy_s(g_userName, sizeof(g_userName), "ReFix User");
-    }
-    
+
     // Read SteamId from INI
     GetPrivateProfileStringA("User", "SteamId", "",
         g_productUserIdStr, sizeof(g_productUserIdStr), iniPath.c_str());
     
     // If INI SteamId is empty, try env var from steam_proxy
     if (g_productUserIdStr[0] == '\0') {
-        char envBuf[64] = {0};
-        if (GetEnvironmentVariableA("REFIX_STEAM_ID", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
-            strcpy_s(g_productUserIdStr, sizeof(g_productUserIdStr), envBuf);
+        char envId[64] = {0};
+        if (GetEnvironmentVariableA("REFIX_STEAM_ID", envId, sizeof(envId)) > 0 && envId[0] != '\0') {
+            strcpy_s(g_productUserIdStr, sizeof(g_productUserIdStr), envId);
         }
     }
     
@@ -2021,6 +4182,68 @@ static void LoadConfig() {
     if (g_productUserIdStr[0] == '\0') {
         strcpy_s(g_productUserIdStr, sizeof(g_productUserIdStr), "76561197960287930");
     }
+}
+
+// =============================================================================
+// REFIX IN-GAME DEBUG CONSOLE TOGGLE (VK_INSERT / VK_F1)
+// =============================================================================
+static bool g_ConsoleAllocated = false;
+static bool g_ConsoleVisible = false;
+static DWORD g_LastToggleTime = 0;
+
+static void ToggleConsoleWindow() {
+    if (!g_ConsoleAllocated) {
+        if (AllocConsole()) {
+            FILE* fp;
+            freopen_s(&fp, "CONOUT$", "w", stdout);
+            freopen_s(&fp, "CONOUT$", "w", stderr);
+            freopen_s(&fp, "CONIN$", "r", stdin);
+
+            SetConsoleTitleA("ReFix EOS Debug Console");
+            printf("====================================================================\n");
+            printf("           ReFix Universal Multiplatform EOS Emulator (LAN)         \n");
+            printf("====================================================================\n");
+            printf("[INFO] Process ID: %lu\n", GetCurrentProcessId());
+            printf("[INFO] Press INSERT or F1 to Show/Hide this Console Window\n");
+            printf("====================================================================\n\n");
+            fflush(stdout);
+
+            g_ConsoleAllocated = true;
+            g_ConsoleVisible = true;
+        }
+    } else {
+        HWND hConsole = GetConsoleWindow();
+        if (hConsole) {
+            g_ConsoleVisible = !g_ConsoleVisible;
+            ShowWindow(hConsole, g_ConsoleVisible ? SW_SHOW : SW_HIDE);
+            if (g_ConsoleVisible) {
+                SetForegroundWindow(hConsole);
+            }
+        }
+    }
+}
+
+static DWORD WINAPI ConsoleHotkeyThread(LPVOID lpParam) {
+    while (true) {
+        Sleep(50);
+        DWORD now = GetTickCount();
+        if (now - g_LastToggleTime > 300) {
+            bool keyInsertPressed = (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
+            bool keyF1Pressed     = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+            if (keyInsertPressed || keyF1Pressed) {
+                g_LastToggleTime = now;
+                ToggleConsoleWindow();
+            }
+        }
+    }
+    return 0;
+}
+
+static bool g_hotkeyStarted = false;
+static void StartConsoleHotkeyMonitor() {
+    if (g_hotkeyStarted) return;
+    g_hotkeyStarted = true;
+    CreateThread(NULL, 0, ConsoleHotkeyThread, NULL, 0, NULL);
 }
 
 // =============================================================================
@@ -2035,24 +4258,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             InitializeCriticalSection(&g_callbackCS);
             g_csInitialized = true;
             LoadConfig();
-            
-            // Delete old debug log
-            {
-                char exePath[MAX_PATH];
-                GetModuleFileNameA(NULL, exePath, MAX_PATH);
-                std::string logPath(exePath);
-                size_t pos = logPath.find_last_of("\\/");
-                if (pos != std::string::npos) logPath = logPath.substr(0, pos + 1) + "ReFix_eos_debug.log";
-                DeleteFileA(logPath.c_str());
-            }
-            
-            Log("=== ReFix EOS Emulator Debug Log ===");
-            Log("DllMain: DLL_PROCESS_ATTACH (EOSSDK-Win64-Shipping.dll ReFix v3)");
-            Log("DllMain: Config loaded (UserName=%s, SteamID=%s)", g_userName, g_productUserIdStr);
-            
+            LoadGameFilterConfig();
             InitExportNames();
             SetupEmulatedFunctions();
-            Log("DllMain: Emulation ready");
             break;
         case DLL_PROCESS_DETACH:
             if (g_csInitialized && !lpReserved) {
