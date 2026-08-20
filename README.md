@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/badge/version-v1.1.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v1.1)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![Engines](https://img.shields.io/badge/engines-Unity%20%7C%20Unreal%20%7C%20Godot%20%7C%20Native-green.svg)](https://github.com/Coronitaa/ReFix)
-[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://github.com/Coronitaa/ReFix/blob/main/LICENSE)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 [![Keywords](https://img.shields.io/badge/keywords-onlinefix%20%7C%20steam--crack%20%7C%20goldberg-orange.svg)](https://github.com/Coronitaa/ReFix)
 
 **ReFix** is a high-performance, modular C++ DLL proxy, runtime Steamworks emulator, universal DLC unlocker, and multiplayer fix suite for PC games. Built as an open-source alternative to **OnlineFix (online-fix.me)**, **Goldberg Emulator**, **CODEX**, and **SmartSteamEmu**, ReFix enables seamless online co-op / multiplayer via Steam (Spacewar 480) or 100% offline local area network (LAN) play without requiring the Steam client.
@@ -247,4 +247,10 @@ ReFix stands on the shoulders of giants. We express our deepest gratitude to the
 
 ## ⚖️ License
 
-Distributed under the **MIT License**. See `LICENSE` for more information.
+Distributed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)** License.
+
+- **Modify & Collaborate**: You are free to adapt, remix, transform, build upon, and share the code.
+- **Non-Commercial**: You may **not** use the material or software for commercial purposes or sell it.
+- **ShareAlike**: Contributions and derivatives must be distributed under the same license terms.
+
+See `LICENSE` for more information.
