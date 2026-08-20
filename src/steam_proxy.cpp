@@ -1106,6 +1106,8 @@ static std::string g_hostLocalIP = "";
 
 // Function pointer typedefs
 typedef bool(*fn_SteamAPI_Init_t)();
+typedef bool(*fn_SteamAPI_InitSafe_t)();
+typedef int(*fn_SteamAPI_InitFlat_t)(char* pOutErrMsg);
 typedef bool(*fn_SteamAPI_RestartAppIfNecessary_t)(unsigned int);
 typedef bool(*fn_SteamInternal_GameServer_Init_t)(uint32_t, uint16_t, uint16_t, int, const char*);
 typedef bool(*fn_SteamGameServer_InitSafe_t)();
@@ -1139,7 +1141,8 @@ typedef uint64_t(*fn_GetLobbyOwner_t)(void* self, uint64_t steamIDLobby);
 typedef const char* (*fn_GetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey);
 
 static fn_SteamAPI_Init_t g_pfn_Init = nullptr;
-static fn_SteamAPI_Init_t g_pfn_InitSafe = nullptr;
+static fn_SteamAPI_InitSafe_t g_pfn_InitSafe = nullptr;
+static fn_SteamAPI_InitFlat_t g_pfn_InitFlat = nullptr;
 static fn_SteamAPI_Init_t g_pfn_InitAnon = nullptr;
 static fn_SteamAPI_RestartAppIfNecessary_t g_pfn_Restart = nullptr;
 static fn_SteamInternal_GameServer_Init_t g_pfn_GSInit = nullptr;
@@ -2799,6 +2802,40 @@ static bool EnsureOriginal() {
         fullPaths.push_back(exeDir + "..\\..\\..\\Engine\\Binaries\\ThirdParty\\Steamworks\\Steamv153\\Win64\\" + name);
     }
 
+    // Auto-discover Unity *_Data/Plugins and Plugins/ folders
+    std::vector<std::string> searchDirs;
+    searchDirs.push_back(proxyDir);
+    if (proxyDir != exeDir) searchDirs.push_back(exeDir);
+
+    for (const auto& sDir : searchDirs) {
+        WIN32_FIND_DATAA ffd;
+        HANDLE hFind = FindFirstFileA((sDir + "*_Data").c_str(), &ffd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    std::string dataPlugins64 = sDir + ffd.cFileName + "\\Plugins\\x86_64\\";
+                    std::string dataPlugins = sDir + ffd.cFileName + "\\Plugins\\";
+                    for (auto name : candNames) {
+                        fullPaths.push_back(dataPlugins64 + name);
+                        fullPaths.push_back(dataPlugins + name);
+                    }
+                    fullPaths.push_back(dataPlugins64 + "steam_api64.dll");
+                    fullPaths.push_back(dataPlugins + "steam_api64.dll");
+                }
+            } while (FindNextFileA(hFind, &ffd));
+            FindClose(hFind);
+        }
+
+        std::string p64 = sDir + "Plugins\\x86_64\\";
+        std::string p = sDir + "Plugins\\";
+        for (auto name : candNames) {
+            fullPaths.push_back(p64 + name);
+            fullPaths.push_back(p + name);
+        }
+        fullPaths.push_back(p64 + "steam_api64.dll");
+        fullPaths.push_back(p + "steam_api64.dll");
+    }
+
     // Probe exports to identify a genuine Valve DLL. Newer SDK versions
     // (v08.63+) removed the classic SteamAPI_Init export and only ship
     // SteamAPI_InitFlat / SteamAPI_InitSafe, so we try a chain of known
@@ -2813,6 +2850,12 @@ static bool EnsureOriginal() {
     for (const auto& path : fullPaths) {
         HMODULE hMod = LoadLibraryA(path.c_str());
         if (hMod && hMod != g_hSelfModule) {
+            // Ensure this is not another instance of ReFix proxy
+            if (GetProcAddress(hMod, "g_steamProcs") != nullptr) {
+                FreeLibrary(hMod);
+                continue;
+            }
+
             FARPROC pProbe = nullptr;
             for (auto probeName : probeExports) {
                 pProbe = GetProcAddress(hMod, probeName);
@@ -2850,21 +2893,16 @@ static bool EnsureOriginal() {
         return false;
     }
 
-    g_pfn_Init     = (fn_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_Init");
-    // Newer Valve SDKs (v08.63+) only export SteamAPI_InitFlat / SteamAPI_InitSafe.
-    // Fall back through the chain so the proxy can still initialise Steam.
-    if (!g_pfn_Init)
-        g_pfn_Init = (fn_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitFlat");
-    if (!g_pfn_Init)
-        g_pfn_Init = (fn_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitSafe");
-    g_pfn_InitSafe = (fn_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitSafe");
-    g_pfn_InitAnon = (fn_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitAnonymousUser");
-    g_pfn_Restart  = (fn_SteamAPI_RestartAppIfNecessary_t)GetProcAddress(g_hOriginalDll, "SteamAPI_RestartAppIfNecessary");
+    g_pfn_Init                  = (fn_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_Init");
+    g_pfn_InitFlat              = (fn_SteamAPI_InitFlat_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitFlat");
+    g_pfn_InitSafe              = (fn_SteamAPI_InitSafe_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitSafe");
+    g_pfn_InitAnon              = (fn_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitAnonymousUser");
+    g_pfn_Restart               = (fn_SteamAPI_RestartAppIfNecessary_t)GetProcAddress(g_hOriginalDll, "SteamAPI_RestartAppIfNecessary");
 
-    g_pfn_GSInit     = (fn_SteamInternal_GameServer_Init_t)GetProcAddress(g_hOriginalDll, "SteamInternal_GameServer_Init");
+    g_pfn_GSInit                = (fn_SteamInternal_GameServer_Init_t)GetProcAddress(g_hOriginalDll, "SteamInternal_GameServer_Init");
     if (!g_pfn_GSInit)
-        g_pfn_GSInit = (fn_SteamInternal_GameServer_Init_t)GetProcAddress(g_hOriginalDll, "SteamInternal_GameServer_Init_V2");
-    g_pfn_GSInitSafe = (fn_SteamGameServer_InitSafe_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_InitSafe");
+        g_pfn_GSInit            = (fn_SteamInternal_GameServer_Init_t)GetProcAddress(g_hOriginalDll, "SteamInternal_GameServer_Init_V2");
+    g_pfn_GSInitSafe            = (fn_SteamGameServer_InitSafe_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_InitSafe");
     g_pfn_SteamAPIInit_Internal = (fn_SteamInternal_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamInternal_SteamAPI_Init");
 
     g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamFriends_GetPersonaName");
@@ -3090,12 +3128,29 @@ static void CapturePersonaName() {
 extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     ApplySteamEnv();
     ReFixLog("SteamAPI_Init called");
-    if (!EnsureOriginal() || !g_pfn_Init) {
-        ReFixLog("SteamAPI_Init: EnsureOriginal failed or no pfn_Init");
+    if (!EnsureOriginal()) {
+        ReFixLog("SteamAPI_Init: EnsureOriginal failed");
         return false;
     }
-    bool result = g_pfn_Init();
-    ReFixLog("SteamAPI_Init: result=%d", result);
+    bool result = false;
+    if (g_pfn_Init) {
+        result = g_pfn_Init();
+        ReFixLog("SteamAPI_Init: called via SteamAPI_Init -> result=%d", result);
+    } else if (g_pfn_InitFlat) {
+        char errMsg[1024] = { 0 };
+        int flatRes = g_pfn_InitFlat(errMsg);
+        result = (flatRes == 0);
+        ReFixLog("SteamAPI_Init: called via SteamAPI_InitFlat -> result=%d, msg='%s'", flatRes, errMsg);
+    } else if (g_pfn_SteamAPIInit_Internal) {
+        char errMsg[1024] = { 0 };
+        int intRes = g_pfn_SteamAPIInit_Internal("", errMsg);
+        result = (intRes == 0);
+        ReFixLog("SteamAPI_Init: called via SteamInternal_SteamAPI_Init -> result=%d, msg='%s'", intRes, errMsg);
+    } else if (g_pfn_InitSafe) {
+        result = g_pfn_InitSafe();
+        ReFixLog("SteamAPI_Init: called via SteamAPI_InitSafe -> result=%d", result);
+    }
+    ReFixLog("SteamAPI_Init: final result=%d", result);
     if (result) {
         CapturePersonaName();
         // Install Winsock -> Steam P2P redirect hooks (Unity/Unreal only in Valve Online mode)
@@ -3115,28 +3170,49 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
 
 extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
     ApplySteamEnv();
+    ReFixLog("SteamAPI_InitSafe called");
     if (!EnsureOriginal()) return false;
     bool result = false;
-    if (g_pfn_InitSafe) result = g_pfn_InitSafe();
-    else if (g_pfn_Init) result = g_pfn_Init();
+    if (g_pfn_InitSafe) {
+        result = g_pfn_InitSafe();
+    } else if (g_pfn_Init) {
+        result = g_pfn_Init();
+    } else if (g_pfn_InitFlat) {
+        char errMsg[1024] = { 0 };
+        result = (g_pfn_InitFlat(errMsg) == 0);
+    } else if (g_pfn_SteamAPIInit_Internal) {
+        char errMsg[1024] = { 0 };
+        result = (g_pfn_SteamAPIInit_Internal("", errMsg) == 0);
+    }
+    ReFixLog("SteamAPI_InitSafe: result=%d", result);
     if (result) { CapturePersonaName(); InstallVTableHooks(); }
     return result;
 }
 
-extern "C" __declspec(dllexport) bool SteamAPI_InitFlat(char* pOutErrMsg) {
+extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
     ApplySteamEnv();
     ReFixLog("SteamAPI_InitFlat called");
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
-        return false;
+        return 1;
     }
-    bool result = false;
-    typedef bool (*fn_SteamAPI_InitFlat_t)(char*);
-    fn_SteamAPI_InitFlat_t pfnFlat = (fn_SteamAPI_InitFlat_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitFlat");
-    if (pfnFlat) result = pfnFlat(pOutErrMsg);
-    else if (g_pfn_Init) result = g_pfn_Init();
-    else if (g_pfn_InitSafe) result = g_pfn_InitSafe();
-    if (result) {
+    char localErr[1024] = { 0 };
+    char* targetErr = pOutErrMsg ? pOutErrMsg : localErr;
+    int result = 1;
+
+    if (g_pfn_InitFlat) {
+        result = g_pfn_InitFlat(targetErr);
+    } else if (g_pfn_SteamAPIInit_Internal) {
+        result = g_pfn_SteamAPIInit_Internal("", targetErr);
+    } else if (g_pfn_Init) {
+        bool ok = g_pfn_Init();
+        result = ok ? 0 : 1;
+    } else if (g_pfn_InitSafe) {
+        bool ok = g_pfn_InitSafe();
+        result = ok ? 0 : 1;
+    }
+    ReFixLog("SteamAPI_InitFlat: result=%d, msg='%s'", result, targetErr);
+    if (result == 0) {
         CapturePersonaName();
         if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
@@ -3180,29 +3256,27 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
     const char* pszInternalCheckInterfaceVersions, char* pOutErrMsg)
 {
     ApplySteamEnv();
-    ReFixLog("SteamInternal_SteamAPI_Init called");
+    ReFixLog("SteamInternal_SteamAPI_Init called (ver='%s')", pszInternalCheckInterfaceVersions ? pszInternalCheckInterfaceVersions : "");
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
         return 1; // k_ESteamAPIInitResult_NoSteamClient
     }
-    if (!g_pfn_SteamAPIInit_Internal) {
-        // Fallback: underlying DLL lacks this export, try the classic SteamAPI_Init path
-        ReFixLog("SteamInternal_SteamAPI_Init: no pfn, falling back to SteamAPI_Init");
-        bool ok = (g_pfn_Init ? g_pfn_Init() : (g_pfn_InitSafe ? g_pfn_InitSafe() : false));
-        if (!ok && pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: SteamAPI_Init fallback failed", _TRUNCATE);
-        if (ok) {
-            CapturePersonaName();
-            if (!g_godotIsEngine && !g_isGoldbergMode) {
-                SteamP2PHook::Install(g_hOriginalDll);
-                extern void SteamP2PHook_ForceResolve();
-                SteamP2PHook_ForceResolve();
-            }
-            InstallVTableHooks();
-        }
-        return ok ? 0 : 1;
+    char localErr[1024] = { 0 };
+    char* targetErr = pOutErrMsg ? pOutErrMsg : localErr;
+    int result = 1;
+
+    if (g_pfn_SteamAPIInit_Internal) {
+        result = g_pfn_SteamAPIInit_Internal(pszInternalCheckInterfaceVersions, targetErr);
+    } else if (g_pfn_InitFlat) {
+        result = g_pfn_InitFlat(targetErr);
+    } else if (g_pfn_Init) {
+        bool ok = g_pfn_Init();
+        result = ok ? 0 : 1;
+    } else if (g_pfn_InitSafe) {
+        bool ok = g_pfn_InitSafe();
+        result = ok ? 0 : 1;
     }
-    int result = g_pfn_SteamAPIInit_Internal(pszInternalCheckInterfaceVersions, pOutErrMsg);
-    ReFixLog("SteamInternal_SteamAPI_Init: result=%d", result);
+    ReFixLog("SteamInternal_SteamAPI_Init: result=%d, msg='%s'", result, targetErr);
     if (result == 0) {
         CapturePersonaName();
         // Install Winsock -> Steam P2P redirect hooks (Unity/Unreal only in Valve Online mode)

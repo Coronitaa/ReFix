@@ -181,6 +181,16 @@ Write-Host "[2/6] Processing steam_api64.dll instances..." -ForegroundColor Cyan
 # Discover all steam_api64.dll or backup steam_api64_valve.dll locations
 $pluginDirs = @()
 
+# For Unity games, discover dedicated Plugins folders (e.g. *_Data\Plugins\x86_64 or *_Data\Plugins)
+$unityPluginDirs = @()
+$unityDataDirs = Get-ChildItem -Path $TargetDir -Directory -Filter "*_Data" -Recurse -ErrorAction SilentlyContinue
+foreach ($uData in $unityDataDirs) {
+    $p64 = Join-Path $uData.FullName "Plugins\x86_64"
+    $pRoot = Join-Path $uData.FullName "Plugins"
+    if (Test-Path $p64) { $unityPluginDirs += $p64 }
+    elseif (Test-Path $pRoot) { $unityPluginDirs += $pRoot }
+}
+
 $steamDlls = Get-ChildItem -Path $TargetDir -Filter "steam_api64.dll" -Recurse -ErrorAction SilentlyContinue
 foreach ($dll in $steamDlls) {
     if ($pluginDirs -notcontains $dll.DirectoryName) { $pluginDirs += $dll.DirectoryName }
@@ -189,6 +199,21 @@ foreach ($dll in $steamDlls) {
 $valveDlls = Get-ChildItem -Path $TargetDir -Filter "steam_api64_valve.dll" -Recurse -ErrorAction SilentlyContinue
 foreach ($v in $valveDlls) {
     if ($pluginDirs -notcontains $v.DirectoryName) { $pluginDirs += $v.DirectoryName }
+}
+
+# If Unity plugins directory was found, prioritize it and purge any stray proxy in the root folder ($ExeDir)
+if ($unityPluginDirs.Count -gt 0) {
+    foreach ($up in $unityPluginDirs) {
+        if ($pluginDirs -notcontains $up) { $pluginDirs += $up }
+    }
+    if ($pluginDirs.Count -gt 1 -and ($pluginDirs -contains $ExeDir)) {
+        $pluginDirs = @($pluginDirs | Where-Object { $_ -ne $ExeDir })
+        $straySteam = Join-Path $ExeDir "steam_api64.dll"
+        $strayValve = Join-Path $ExeDir "steam_api64_valve.dll"
+        if (Test-Path $straySteam) { Remove-Item -Path $straySteam -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $strayValve) { Remove-Item -Path $strayValve -Force -ErrorAction SilentlyContinue }
+        Write-Host "  [OK] Cleaned stray steam_api64 DLLs from Unity root folder to prevent DLL shadowing" -ForegroundColor Green
+    }
 }
 
 # For Unreal Engine, also ensure ExeDir is in pluginDirs so steam_api64.dll is deployed beside the shipping executable
@@ -213,9 +238,19 @@ switch ($OnlineMode) {
             $valvePath = Join-Path $dir "steam_api64_valve.dll"
             $steamPath = Join-Path $dir "steam_api64.dll"
             if (Test-Path $steamPath) {
+                $isAlreadyProxy = $false
+                if (Test-Path $proxyPath) {
+                    if ((Get-Item $steamPath).Length -eq (Get-Item $proxyPath).Length) {
+                        $isAlreadyProxy = $true
+                    }
+                }
                 if (-not (Test-Path $valvePath)) {
-                    Rename-Item -Path $steamPath -NewName "steam_api64_valve.dll" -Force
-                    Write-Host "  [OK] Backed up original steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
+                    if (-not $isAlreadyProxy) {
+                        Rename-Item -Path $steamPath -NewName "steam_api64_valve.dll" -Force
+                        Write-Host "  [OK] Backed up original steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
+                    } else {
+                        Write-Host "  [NOTICE] Existing steam_api64.dll in $dir is already ReFix proxy (skipping backup to preserve original)" -ForegroundColor Yellow
+                    }
                 }
             }
             Copy-Item -Path $proxyPath -Destination $dir -Force
@@ -233,6 +268,68 @@ switch ($OnlineMode) {
             Copy-Item -Path $winmmPath -Destination $targetWinmm -Force
             Write-Host "  [OK] Deployed ReFix winmm.dll proxy to root folder $ExeDir for early Steam Overlay injection" -ForegroundColor Green
         }
+
+        # Synchronize ReFix.ini in ExeDir
+        $reFixIniPath = Join-Path $ExeDir "ReFix.ini"
+        $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
+        $bypassVal = if ($DLCMode -eq "none") { "false" } else { "true" }
+        $maskVal = if ($MaskAppId) { $MaskAppId } else { "480" }
+        $realVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
+        $reFixIniContent = @"
+; =============================================================================
+; ReFix Universal Configuration File
+; =============================================================================
+
+[Game]
+GameName=$GameName
+EngineType=$EngineType
+
+[Matchmaking]
+EnableLobbyFilter=false
+LobbyFilterKey=game_filter
+LobbyFilterValue=$filterVal
+LobbyDistanceFilter=Worldwide
+MaxLobbyResults=50
+
+[ServerBrowser]
+OverrideServerListAppId=false
+ServerListAppId=480
+Language=english
+
+[Steam]
+MaskAppId=$maskVal
+RealAppId=$realVal
+Language=$Language
+BypassLicenseCheck=$bypassVal
+DLCs=$DLCs
+
+[Overlay]
+EnableOverlay=true
+OverlayAppId=$maskVal
+
+[EOS]
+DeviceIdAuth=true
+
+[User]
+Name=$UserName
+SteamId=
+
+[Online]
+Mode=valve
+
+[Network]
+GameFilter=$filterVal
+PublicIP=
+LocalIP=
+
+[P2P]
+EnableWAN=true
+P2PPort=7777
+AllowRelay=true
+ForcePublicIPInLobby=true
+"@
+        [System.IO.File]::WriteAllText($reFixIniPath, $reFixIniContent)
+        Write-Host "  [OK] Configured ReFix.ini in $ExeDir" -ForegroundColor Green
     }
 
     "photon" {
@@ -248,9 +345,19 @@ switch ($OnlineMode) {
             $valvePath = Join-Path $dir "steam_api64_valve.dll"
             $steamPath = Join-Path $dir "steam_api64.dll"
             if (Test-Path $steamPath) {
+                $isAlreadyProxy = $false
+                if (Test-Path $proxyPath) {
+                    if ((Get-Item $steamPath).Length -eq (Get-Item $proxyPath).Length) {
+                        $isAlreadyProxy = $true
+                    }
+                }
                 if (-not (Test-Path $valvePath)) {
-                    Rename-Item -Path $steamPath -NewName "steam_api64_valve.dll" -Force
-                    Write-Host "  [OK] Backed up original steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
+                    if (-not $isAlreadyProxy) {
+                        Rename-Item -Path $steamPath -NewName "steam_api64_valve.dll" -Force
+                        Write-Host "  [OK] Backed up original steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
+                    } else {
+                        Write-Host "  [NOTICE] Existing steam_api64.dll in $dir is already ReFix proxy (skipping backup to preserve original)" -ForegroundColor Yellow
+                    }
                 }
             }
             Copy-Item -Path $proxyPath -Destination $dir -Force

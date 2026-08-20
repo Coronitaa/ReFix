@@ -51,7 +51,7 @@ if %ERRORLEVEL% neq 0 ( echo [!] Error compiling EOSSDK-Win64-Shipping.dll & exi
 copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
 
 echo [*] Building steam_api64.dll proxy...
-cl /nologo /O2 /Zi /EHsc /LD /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\unreal_detect.cpp src\unreal_steam_emu.cpp src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
+cl /nologo /O2 /Zi /EHsc /LD /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64.dll & exit /b 1 )
 
 echo.
