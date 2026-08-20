@@ -58,6 +58,10 @@ echo [*] Building Re:Photon test harness and validation suite (rephoton_test.exe
 cl /nologo /std:c++17 /O2 /EHsc /Isrc src\rephoton\protocol\photon_serializer.cpp src\rephoton\protocol\photon_message.cpp src\rephoton\diagnostics\photon_diagnostics.cpp src\rephoton\core\photon_config.cpp src\rephoton\profiles\game_profiles.cpp src\rephoton\transport\loopback_transport.cpp src\rephoton\transport\udp_transport.cpp src\rephoton\realtime\room_state.cpp src\rephoton\backend\refix_cloud_backend.cpp src\rephoton\backend\custom_photon_backend.cpp src\rephoton\realtime\realtime_client.cpp src\rephoton\pun\pun_adapter.cpp src\rephoton\fusion\fusion_backend.cpp src\rephoton\voice\voice_backend.cpp src\rephoton\chat\chat_backend.cpp src\rephoton\core\photon_manager.cpp src\rephoton\tests\test_harness.cpp src\rephoton\tests\test_main.cpp /Febuild\rephoton_test.exe user32.lib kernel32.lib ws2_32.lib advapi32.lib
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling rephoton_test.exe & exit /b 1 )
 
+echo [*] Building Re:Photon standalone UDP server (rephoton_server.exe)...
+cl /nologo /std:c++17 /O2 /EHsc /Isrc src\rephoton\protocol\photon_serializer.cpp src\rephoton\protocol\photon_message.cpp src\rephoton\diagnostics\photon_diagnostics.cpp src\rephoton\core\photon_config.cpp src\rephoton\profiles\game_profiles.cpp src\rephoton\realtime\room_state.cpp src\rephoton\server\peer_connection.cpp src\rephoton\server\photon_server.cpp src\rephoton\server\server_main.cpp /Febuild\rephoton_server.exe user32.lib kernel32.lib ws2_32.lib advapi32.lib
+if %ERRORLEVEL% neq 0 ( echo [!] Error compiling rephoton_server.exe & exit /b 1 )
+
 echo.
 echo ====================================================================
 echo [OK] All ReFix DLL proxies & Re:Photon suite successfully built in build\
@@ -66,6 +70,7 @@ echo   - build\EOSSDK-Win64-Shipping.dll
 echo   - build\RedboneEOS.dll
 echo   - build\steam_api64.dll
 echo   - build\rephoton_test.exe
+echo   - build\rephoton_server.exe
 echo ====================================================================
 
 :: Automatically synchronize freshly built binaries to bin/
@@ -75,5 +80,6 @@ if exist bin\ (
     copy /Y build\RedboneEOS.dll bin\RedboneEOS.dll >nul
     copy /Y build\steam_api64.dll bin\steam_api64.dll >nul
     copy /Y build\rephoton_test.exe bin\rephoton_test.exe >nul
+    copy /Y build\rephoton_server.exe bin\rephoton_server.exe >nul
     echo [OK] Synchronized freshly compiled proxies and Re:Photon suite to bin\
 )

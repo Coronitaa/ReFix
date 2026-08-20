@@ -16,7 +16,13 @@ namespace ReFix::Photon::Protocol {
     bool OperationRequest::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset, OperationRequest& outReq) {
         uint8_t msgType = 0;
         if (!PhotonSerializer::ReadByte(buffer, offset, msgType)) return false;
-        if (msgType != static_cast<uint8_t>(MessageType::OperationRequest)) return false;
+        if (msgType != static_cast<uint8_t>(MessageType::OperationRequest) &&
+            msgType != static_cast<uint8_t>(MessageType::InternalOperationRequest)) return false;
+
+        // Skip Protocol16 type marker (0x71 = 'q' = GpType::OperationRequest) if present
+        if (offset < buffer.size() && (buffer[offset] == 0x71 || buffer[offset] == 0x70 || buffer[offset] == 0x65)) {
+            offset++;
+        }
 
         if (!PhotonSerializer::ReadByte(buffer, offset, outReq.opCode)) return false;
         return PhotonSerializer::ReadParameterDictionary(buffer, offset, outReq.parameters);
@@ -27,7 +33,9 @@ namespace ReFix::Photon::Protocol {
     // =========================================================================
     std::vector<uint8_t> OperationResponse::Serialize() const {
         std::vector<uint8_t> buf;
-        PhotonSerializer::WriteByte(buf, static_cast<uint8_t>(MessageType::OperationResponse));
+        uint8_t msgType = (opCode == 0) ? static_cast<uint8_t>(MessageType::InternalOperationResponse)
+                                        : static_cast<uint8_t>(MessageType::OperationResponse);
+        PhotonSerializer::WriteByte(buf, msgType);
         PhotonSerializer::WriteByte(buf, opCode);
         PhotonSerializer::WriteShort(buf, returnCode);
         if (returnCode != ErrorCode::Ok && !debugMessage.empty()) {
@@ -64,7 +72,6 @@ namespace ReFix::Photon::Protocol {
         std::vector<uint8_t> buf;
         PhotonSerializer::WriteByte(buf, static_cast<uint8_t>(MessageType::Event));
         PhotonSerializer::WriteByte(buf, code);
-        PhotonSerializer::WriteInt(buf, senderActorNumber);
         PhotonSerializer::WriteParameterDictionary(buf, parameters);
         return buf;
     }
@@ -75,9 +82,13 @@ namespace ReFix::Photon::Protocol {
         if (msgType != static_cast<uint8_t>(MessageType::Event)) return false;
 
         if (!PhotonSerializer::ReadByte(buffer, offset, outEvent.code)) return false;
-        if (!PhotonSerializer::ReadInt(buffer, offset, outEvent.senderActorNumber)) return false;
 
-        return PhotonSerializer::ReadParameterDictionary(buffer, offset, outEvent.parameters);
+        if (!PhotonSerializer::ReadParameterDictionary(buffer, offset, outEvent.parameters)) return false;
+
+        if (outEvent.parameters.find(ParameterCode::ActorNr) != outEvent.parameters.end()) {
+            outEvent.senderActorNumber = outEvent.parameters[ParameterCode::ActorNr].AsInt();
+        }
+        return true;
     }
 
 } // namespace ReFix::Photon::Protocol

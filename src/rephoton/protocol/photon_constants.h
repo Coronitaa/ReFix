@@ -7,7 +7,7 @@ namespace ReFix::Photon::Protocol {
     // Photon GpType (Serialization Data Types)
     namespace GpType {
         constexpr uint8_t Null               = 0x00; // 0
-        constexpr uint8_t Array              = 0x61; // 'a' (97) - Typed Array
+        constexpr uint8_t StringArray        = 0x61; // 'a' (97) - String Array
         constexpr uint8_t Byte               = 0x62; // 'b' (98) - 8-bit unsigned
         constexpr uint8_t Custom             = 0x63; // 'c' (99) - Custom Type
         constexpr uint8_t Dictionary         = 0x64; // 'd' (100) - Typed Dictionary
@@ -17,11 +17,13 @@ namespace ReFix::Photon::Protocol {
         constexpr uint8_t Integer            = 0x69; // 'i' (105) - 32-bit Signed Integer
         constexpr uint8_t Short              = 0x6B; // 'k' (107) - 16-bit Signed Integer
         constexpr uint8_t Long               = 0x6C; // 'l' (108) - 64-bit Signed Integer
+        constexpr uint8_t IntegerArray       = 0x6E; // 'n' (110) - 32-bit Integer Array
         constexpr uint8_t Boolean            = 0x6F; // 'o' (111) - 1-byte Boolean
         constexpr uint8_t OperationResponse  = 0x70; // 'p' (112) - Response Object
         constexpr uint8_t OperationRequest   = 0x71; // 'q' (113) - Request Object
         constexpr uint8_t String             = 0x73; // 's' (115) - UTF-8 String
         constexpr uint8_t ByteArray          = 0x78; // 'x' (120) - Raw Byte Array
+        constexpr uint8_t Array              = 0x79; // 'y' (121) - Generic Typed Array
         constexpr uint8_t GenericArray       = 0x79; // 'y' (121) - Generic Object Array
         constexpr uint8_t ObjectArray        = 0x7A; // 'z' (122) - Object Array
     }
@@ -51,6 +53,7 @@ namespace ReFix::Photon::Protocol {
         constexpr uint8_t Properties         = 251;
         constexpr uint8_t Broadcast          = 250;
         constexpr uint8_t ActorProperties    = 249;
+        constexpr uint8_t PlayerProperties   = 249;
         constexpr uint8_t GameProperties     = 248;
         constexpr uint8_t Cache              = 247;
         constexpr uint8_t ReceiverGroup      = 246;

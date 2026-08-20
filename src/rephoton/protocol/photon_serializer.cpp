@@ -80,7 +80,8 @@ namespace ReFix::Photon::Protocol {
             case GpType::Long:    return AsLong() < other.AsLong();
             case GpType::Float:   return AsFloat() < other.AsFloat();
             case GpType::String:  return AsString() < other.AsString();
-            default:              return false;
+            case GpType::ByteArray: return AsByteArray() < other.AsByteArray();
+            default:              return this < &other;
         }
     }
 
@@ -180,6 +181,45 @@ namespace ReFix::Photon::Protocol {
                 for (const auto& [k, v] : ht) {
                     WriteValue(buffer, k, true);
                     WriteValue(buffer, v, true);
+                }
+                break;
+            }
+            case GpType::Array: { // 'y' = 0x79
+                auto arr = val.AsArray();
+                WriteShort(buffer, static_cast<int16_t>(arr.size()));
+                uint8_t itemType = arr.empty() ? GpType::String : arr[0].type;
+                WriteByte(buffer, itemType);
+                for (const auto& item : arr) {
+                    WriteValue(buffer, item, false); // without extra type header per item
+                }
+                break;
+            }
+            case GpType::StringArray: { // 'a' = 0x61
+                auto arr = val.AsArray();
+                WriteShort(buffer, static_cast<int16_t>(arr.size()));
+                for (const auto& item : arr) {
+                    WriteString(buffer, item.AsString());
+                }
+                break;
+            }
+            case GpType::IntegerArray: { // 'n' = 0x6E
+                auto arr = val.AsArray();
+                WriteInt(buffer, static_cast<int32_t>(arr.size()));
+                for (const auto& item : arr) {
+                    WriteInt(buffer, item.AsInt());
+                }
+                break;
+            }
+            case GpType::Dictionary: { // 'd' = 0x64 / 'D' = 0x44
+                auto dict = val.AsHashtable();
+                uint8_t keyType = dict.empty() ? GpType::String : dict.begin()->first.type;
+                uint8_t valType = dict.empty() ? GpType::String : dict.begin()->second.type;
+                WriteByte(buffer, keyType);
+                WriteByte(buffer, valType);
+                WriteShort(buffer, static_cast<int16_t>(dict.size()));
+                for (const auto& [k, v] : dict) {
+                    WriteValue(buffer, k, false);
+                    WriteValue(buffer, v, false);
                 }
                 break;
             }
@@ -334,6 +374,73 @@ namespace ReFix::Photon::Protocol {
                     ht[k] = v;
                 }
                 outVal = PhotonValue(ht);
+                return true;
+            }
+            case GpType::Custom:
+            case 0x43: { // 'C' / 'c' CustomType
+                uint8_t customCode = 0;
+                if (!ReadByte(buffer, offset, customCode)) return false;
+                int16_t len = 0;
+                if (!ReadShort(buffer, offset, len) || len < 0) return false;
+                if (offset + len > buffer.size()) return false;
+                std::vector<uint8_t> customBytes(buffer.begin() + offset, buffer.begin() + offset + len);
+                offset += len;
+                outVal = PhotonValue(customBytes);
+                return true;
+            }
+            case GpType::Dictionary: { // 'D' = 0x44
+                uint8_t keyType = 0, valType = 0;
+                if (!ReadByte(buffer, offset, keyType) || !ReadByte(buffer, offset, valType)) return false;
+                int16_t count = 0;
+                if (!ReadShort(buffer, offset, count) || count < 0) return false;
+                PhotonHashtable dict;
+                for (int16_t i = 0; i < count; ++i) {
+                    PhotonValue k, v;
+                    if (!ReadValue(buffer, offset, k, keyType) || !ReadValue(buffer, offset, v, valType)) return false;
+                    dict[k] = v;
+                }
+                outVal = PhotonValue(dict);
+                return true;
+            }
+            case GpType::StringArray: { // 'a' = 0x61
+                int16_t count = 0;
+                if (!ReadShort(buffer, offset, count) || count < 0) return false;
+                PhotonArray arr;
+                for (int16_t i = 0; i < count; ++i) {
+                    std::string s;
+                    if (!ReadString(buffer, offset, s)) return false;
+                    arr.push_back(PhotonValue(s));
+                }
+                outVal = PhotonValue(arr);
+                outVal.type = GpType::StringArray;
+                return true;
+            }
+            case GpType::IntegerArray: { // 'n' = 0x6E
+                int32_t count = 0;
+                if (!ReadInt(buffer, offset, count) || count < 0) return false;
+                PhotonArray arr;
+                for (int32_t i = 0; i < count; ++i) {
+                    int32_t val = 0;
+                    if (!ReadInt(buffer, offset, val)) return false;
+                    arr.push_back(PhotonValue(val));
+                }
+                outVal = PhotonValue(arr);
+                outVal.type = GpType::IntegerArray;
+                return true;
+            }
+            case GpType::Array: { // 'y' = 0x79
+                int16_t count = 0;
+                if (!ReadShort(buffer, offset, count) || count < 0) return false;
+                uint8_t itemType = 0;
+                if (!ReadByte(buffer, offset, itemType)) return false;
+                PhotonArray arr;
+                for (int16_t i = 0; i < count; ++i) {
+                    PhotonValue item;
+                    if (!ReadValue(buffer, offset, item, itemType)) return false;
+                    arr.push_back(item);
+                }
+                outVal = PhotonValue(arr);
+                outVal.type = GpType::Array;
                 return true;
             }
             case GpType::ObjectArray: {
