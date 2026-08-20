@@ -1,15 +1,33 @@
-# ReFix — Universal Game DLL Proxy & Steam/EOS Integration Suite
+# ReFix v1.1 — Universal OnlineFix Alternative, Steam Emulator & LAN Multiplayer Fix
 
-[![Version](https://img.shields.io/badge/version-v3.2.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases)
+[![Version](https://img.shields.io/badge/version-v1.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v1.1)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86-lightgrey.svg)]()
 [![Engines](https://img.shields.io/badge/engines-Unity%20%7C%20Unreal%20%7C%20Godot%20%7C%20Native-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
+[![GitHub Topics](https://img.shields.io/badge/keywords-onlinefix%20%7C%20steam--emu%20%7C%20dlc--unlocker-orange.svg)]()
 
-**ReFix** is a high-performance modular C++ DLL proxy, runtime patcher, and deployment suite for Windows PC games (supporting **Unity**, **Unreal Engine 4/5**, **Godot 3/4**, and **Native C/C++** titles). It bridges networking, authentication, DLC management, and emulator layers to provide seamless online multiplayer via Steam or 100% offline local area network (LAN) play without Steam.
+**ReFix** is a high-performance, modular C++ DLL proxy, runtime Steamworks emulator, universal DLC unlocker, and multiplayer fix suite for PC games. Built as an open-source alternative to **OnlineFix (online-fix.me)**, **Goldberg Emulator**, and **SmartSteamEmu**, ReFix enables seamless online co-op / multiplayer via Steam (Spacewar 480) or 100% offline local area network (LAN) play without requiring the Steam client.
 
 ---
 
-## 🌟 Key Features
+## 🔍 Why ReFix? (Comparison Matrix)
+
+| Feature | ReFix v1.1 | OnlineFix (online-fix.me) | Goldberg Emulator | CreamAPI / SmokeAPI |
+| :--- | :---: | :---: | :---: | :---: |
+| **Open Source (Full C++ Source)** | ✅ **Yes (MIT)** | ❌ Closed / Obfuscated | ✅ Yes (GPL/MIT) | ⚠️ Partial |
+| **Steam Online Matchmaking (Spacewar 480)** | ✅ **Yes** | ✅ Yes | ❌ No (LAN only) | ❌ No |
+| **100% Offline LAN Play (No Steam Required)** | ✅ **Yes (gbe_fork)** | ❌ No | ✅ Yes | ❌ No |
+| **Universal DLC Auto-Unlocker** | ✅ **Yes (BLUESTAR)** | ⚠️ Manual / Partial | ⚠️ Config file only | ✅ Yes |
+| **Interactive GUI File / Executable Picker** | ✅ **Yes (Built-in)** | ❌ No | ❌ No | ❌ No |
+| **Smart Multi-Engine Detection (Unity/Unreal/Godot)**| ✅ **Yes (Native Scoring)** | ❌ No | ❌ No | ❌ No |
+| **Epic Online Services (EOS / Redbone) Proxy** | ✅ **Yes (Built-in)** | ⚠️ Custom patches | ❌ No | ❌ No |
+| **Automatic Windows Firewall Configuration** | ✅ **Yes** | ❌ No | ❌ No | ❌ No |
+| **Steam Non-Steam Shortcut Injector** | ✅ **Yes (shortcuts.vdf)** | ❌ No | ❌ No | ❌ No |
+| **Clean Zero-Trace Uninstaller & Restorer** | ✅ **Yes (1-Click)** | ❌ No | ❌ No | ❌ No |
+
+---
+
+## 🌟 Key Features & Architecture
 
 ### 1. Dual Connectivity Modes
 * **Mode 1 — ReFix Online via Steam (Spacewar 480):**
@@ -33,11 +51,11 @@
 ### 3. Smart Multi-Engine Detection & Executable Selection
 * Automatically inspects target directories for engine signatures:
   * **Unity:** `*_Data/Managed/`, `UnityPlayer.dll`, [BepInEx](https://github.com/BepInEx/BepInEx) loader integration.
-  * **Unreal Engine:** `Binaries/Win64/`, `EOSSDK-Win64-Shipping.dll`, `RedboneEOS.dll`.
-  * **Godot:** `*.pck` project packages, GodotSteam / SteamMultiplayerPeer.
-  * **Native:** C/C++ and custom engines (e.g. Don't Starve Together, Source engine titles).
+  * **Unreal Engine 4/5:** `Binaries/Win64/`, `EOSSDK-Win64-Shipping.dll`, `RedboneEOS.dll`.
+  * **Godot 3/4:** `*.pck` project packages, GodotSteam / SteamMultiplayerPeer.
+  * **Native C/C++:** Custom engines (e.g. Don't Starve Together, Source engine titles).
 * **Smart Binary Scoring:** Automatically filters out dedicated servers, crash handlers, nullrenderers, and helper tools (`*dedicated*`, `*nullrenderer*`, `*server*`), prioritizing main client 64-bit binaries.
-* **Interactive Executable Picker:** Allows confirming the detected executable, choosing via native Windows File Explorer GUI dialog, or entering custom paths.
+* **Interactive Executable Picker:** Allows confirming the detected executable, choosing via native Windows File Explorer GUI dialog (`select_exe.ps1`), or entering custom paths.
 
 ### 4. Automatic Network & Firewall Configuration
 * Embedded PowerShell and UAC helpers automatically configure Windows Defender Firewall rules for TCP/UDP game traffic and UDP LAN discovery ports.
@@ -62,12 +80,13 @@ ReFix/
 ├── build.bat                           # MSVC build script for C++ proxies
 ├── deploy.bat                          # Automated packaging & deployment script
 ├── ReFix.ini                           # Unified configuration template
-├── README.md                           # Comprehensive documentation
+├── README.md                           # Comprehensive documentation & SEO guide
 ├── bin/                                # Deployment binaries & helper modules
 │   ├── steam_api64.dll                 # ReFix Steam proxy DLL (x64)
 │   ├── winmm.dll                       # ReFix winmm startup proxy loader
 │   ├── EOSSDK-Win64-Shipping.dll       # EOS authentication proxy
 │   ├── RedboneEOS.dll                  # Redpoint EOS bridge proxy
+│   ├── ReFixSync.dll                   # Synchronization helper
 │   ├── detect_game.ps1                 # Engine & executable analyzer
 │   ├── deploy_helper.ps1               # Deployment engine & config synchronizer
 │   ├── select_dlcs.ps1                 # Steam Store API DLC catalog scraper
@@ -78,12 +97,8 @@ ReFix/
 │   ├── add_steam_shortcut.ps1          # Steam shortcuts.vdf binary injector
 │   ├── Install_ReFix_Steam_Shortcut.bat # Steam shortcut batch helper
 │   ├── goldberg/                       # Goldberg emulator binaries & tools
-│   │   ├── steam_api64.dll             # Goldberg LAN backend x64
-│   │   ├── steam_api.dll               # Goldberg LAN backend x86
-│   │   └── tools/                      # Interface generation utilities
-│   └── tools/                          # SmokeAPI & unpacking utilities
-│       ├── SmokeAPI/                   # SmokeAPI 32/64-bit binaries
-│       └── Steamless_CLI/              # SteamStub DRM unpacker
+│   ├── bepinex/                        # BepInEx runtime loader
+│   └── tools/                          # SmokeAPI & Steamless unpacking utilities
 └── src/                                # C++ Proxy source code
     ├── winmm_proxy.cpp                 # winmm.dll loader & hooking entry point
     ├── steam_proxy.cpp                 # steam_api64.dll export proxy & wrapper
@@ -93,8 +108,7 @@ ReFix/
     ├── upnp_firewall.cpp               # UPnP & firewall automation routines
     ├── server_browser_gui.cpp          # In-game ImGui server browser
     ├── include/                        # Steamworks SDK headers
-    ├── minhook/                        # MinHook hooking library
-    └── imgui/                          # Dear ImGui library
+    └── minhook/                        # MinHook hooking library
 ```
 
 ---
@@ -103,15 +117,15 @@ ReFix/
 
 ### For Players (Deployment Package)
 
-1. Download the latest `ReFix_Release_v3.2.0.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases).
-2. Extract the folder to any directory (or keep it on a USB flash drive).
+1. Download the latest `ReFix_Release_v1.1.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/tag/v1.1).
+2. Extract the archive to any folder (or directly to a USB flash drive).
 3. Run **`AutoDeploy.bat`**:
-   - Choose your game directory using the GUI picker or enter the path.
-   - Confirm or select the game executable.
-   - Select your mode:
+   - Choose your target game directory using the GUI dialog or enter the path.
+   - Confirm or choose the executable (`.exe`).
+   - Select your connectivity mode:
      - `[1] ReFix Online via Steam`: Online multiplayer with friends via Steam.
      - `[2] Re:Goldberg LAN without Steam`: Local LAN multiplayer without Steam running.
-   - Choose your DLC preference (`All`, `None`, or `Custom`).
+   - Choose your DLC preference (`[1] All`, `[2] None`, `[3] Custom`).
    - Launch your game and play!
 
 ### For DLC Unlocking Only
@@ -119,13 +133,13 @@ ReFix/
 1. Run **`DLC_Unlocker.bat`**.
 2. Select your game folder.
 3. Choose `[1] Unlock ALL DLCs`, `[2] Choose specific DLCs`, or `[3] Unlock NO DLCs`.
-4. The tool configures SmokeAPI/CreamAPI and backs up the original DLLs.
+4. The tool automatically configures SmokeAPI/CreamAPI and creates non-destructive backups.
 
-### Restoring to Original State
+### Restoring to Original Clean State
 
 1. Run **`Uninstall_ReFix.bat`**.
 2. Select your game folder.
-3. All original files (`.orig`, `_valve.dll`, `_o.dll`, `.steamstub.exe`) are restored and all emulators/proxies are removed.
+3. All original files (`.orig`, `_valve.dll`, `_o.dll`, `.steamstub.exe`) are restored and all proxies/emulators are removed.
 
 ---
 
@@ -133,13 +147,23 @@ ReFix/
 
 ```ini
 [Game]
-GameName=MyGame                 ; Descriptive game title
-EngineType=Native               ; Unity | Unreal | Godot | Native
+GameName=GenericGame            ; Descriptive game title
+EngineType=Auto                 ; Auto | Unity | Unreal | Godot | Native
+
+[Online]
+Mode=goldberg                   ; valve (Steam Online 480) | goldberg (LAN Offline)
+
+[Steam]
+MaskAppId=480                   ; Steam AppID used for masking (Spacewar 480)
+RealAppId=480                   ; Real Steam AppID for DLCs and metadata
+Language=english                ; Game language
+BypassLicenseCheck=true         ; Allow running without Steam license ownership
+DLCs=all                        ; all | none | comma-separated AppIDs
 
 [Matchmaking]
 EnableLobbyFilter=false         ; Filter lobbies by custom key
 LobbyFilterKey=game_filter      ; Metadata key for game filtering
-LobbyFilterValue=322330         ; Filter value (usually RealAppId)
+LobbyFilterValue=               ; Filter value (auto uses RealAppId if empty)
 LobbyDistanceFilter=Worldwide   ; Close | Default | Far | Worldwide
 MaxLobbyResults=50              ; Max lobbies returned
 
@@ -147,13 +171,6 @@ MaxLobbyResults=50              ; Max lobbies returned
 OverrideServerListAppId=false
 ServerListAppId=480
 Language=english
-
-[Steam]
-MaskAppId=480                   ; Steam AppID used for masking (Spacewar 480)
-RealAppId=322330                ; Real Steam AppID for DLCs and metadata
-Language=english                ; Game language
-BypassLicenseCheck=true         ; Allow running without Steam license
-DLCs=all                        ; all | none | comma-separated AppIDs
 
 [Overlay]
 EnableOverlay=true              ; Enable Steam Overlay hook
@@ -163,14 +180,12 @@ OverlayAppId=480
 DeviceIdAuth=true               ; Emulate Epic Online Services DeviceID login
 
 [User]
-Name=Player                     ; Custom player name (or empty for Steam name)
+Name=Player                     ; Custom player name (or empty for auto-generated)
 SteamId=                        ; Custom SteamID64 (or empty for auto-generated)
 
-[Online]
-Mode=goldberg                   ; valve | goldberg
-
 [Network]
-GameFilter=322330
+ListenPort=47584                ; UDP port for LAN discovery
+CustomBroadcasts=               ; Additional broadcast IPs (comma-separated)
 PublicIP=                       ; Custom public IP for WAN relay
 LocalIP=
 
@@ -205,23 +220,6 @@ deploy.bat
 
 ---
 
-## ❓ Troubleshooting & FAQ
-
-### 1. Game crashes on startup or DLL load error
-* Verify that Microsoft Visual C++ 2015–2022 Redistributable (x64 and x86) is installed.
-* If the game has SteamStub DRM, the deployer will automatically unpack it; ensure antivirus software is not blocking the unpacked executable.
-
-### 2. Cannot find other players on LAN
-* Make sure both players are in the same local subnet or connected via VPN (e.g. Radmin VPN / ZeroTier).
-* Ensure both players have run `Configure_LAN_Firewall.bat` to allow UDP port `47584` through Windows Firewall.
-* Ensure both players have different `SteamID` values (ReFix generates machine-unique IDs automatically).
-
-### 3. Steam Overlay does not show up
-* Launch the game through Steam using the shortcut installed by `Install_ReFix_Steam_Shortcut.bat`.
-* Ensure Steam Overlay is enabled in your Steam Settings (`Settings -> In-Game -> Enable the Steam Overlay while in-game`).
-
----
-
 ## 📄 References, Credits & Related Projects
 
 ReFix stands on the shoulders of giants. We express our deepest gratitude to the creators and maintainers of the following open-source projects and emulation tools:
@@ -235,6 +233,12 @@ ReFix stands on the shoulders of giants. We express our deepest gratitude to the
 * **[MinHook](https://github.com/TsudaKageyu/minhook)** by Tsuda Kageyu — The Minimalistic x86/x64 API Hooking Library for Windows.
 * **[Dear ImGui](https://github.com/ocornut/imgui)** by Omar Cornut — Bloat-free graphical user interface library for C++.
 * **[Steamless](https://github.com/atom0s/Steamless)** by atom0s — DRM unpacker for SteamStub variants.
+
+---
+
+## 🏷️ Search Keywords & Tags (SEO)
+
+`online-fix` `onlinefix` `online-fix-me` `steam-emulator` `steam-emu` `steam-crack` `goldberg-emulator` `goldberg-lan` `creamapi` `smokeapi` `dlc-unlocker` `steam-multiplayer-fix` `pirated-games-multiplayer` `spacewar-crack` `spacewar-480` `lan-multiplayer-fix` `coop-game-crack` `steam-api64-proxy` `unreal-engine-multiplayer-fix` `unity-multiplayer-fix` `godotsteam-fix` `steam-overlay-fix` `steam-keygen-bypass` `free-steam-multiplayer` `onlinefix-alternative` `smartsteamemu`
 
 ---
 

@@ -1,27 +1,38 @@
-# Build and deployment directories
+# Build output and temp directories
 build/
 deploy/
-ReFix_deploy/
-ReFix_src/
-ReFix_Release.zip
-
-# Submodule/vendor clone repos (source headers/libs are in imgui/ and minhook/)
-src/imgui_repo/
-src/minhook_repo/
-
-# Executables, libraries, and symbol files
-*.exe
-*.dll
-*.lib
-*.exp
 *.obj
 *.pdb
 *.map
+*.exp
+*.lib
+*.log
+*.tmp
+*.bak
 
-# IDE and system temporary files
+# Disassembly, reverse engineering dumps and test scratches
+disasm.txt
+*exports_raw.txt
+*system_exports.txt
+tests/
+scratch/
+
+# Vendor clone directories
+src/minhook_repo/
+src/imgui_repo/
+
+# IDE & OS temporary files
 .vs/
 *.user
 *.suo
 *.sln.docstates
 Thumbs.db
 Desktop.ini
+
+# Sensitive files / keys
+*.pfx
+*.p12
+*.key
+*.cer
+*.crt
+sign_dlls.ps1

@@ -1,6 +1,0 @@
-Microsoft (R) COFF/PE Dumper Version 14.44.35228.0
-Copyright (C) Microsoft Corporation.  All rights reserved.
-
-
-Dump of file build\unreal_steam_emu.obj
-LINK : fatal error LNK1181: no se puede abrir el archivo de entrada 'build\unreal_steam_emu.obj'
