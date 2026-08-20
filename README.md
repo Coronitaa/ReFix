@@ -1,29 +1,29 @@
-# ReFix v1.1 — Universal OnlineFix Alternative, Steam Emulator & LAN Multiplayer Fix
+# ReFix v1.1.0 — Universal OnlineFix Alternative, Steam Emulator & LAN Multiplayer Fix
 
-[![Version](https://img.shields.io/badge/version-v1.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v1.1)
-[![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86-lightgrey.svg)]()
-[![Engines](https://img.shields.io/badge/engines-Unity%20%7C%20Unreal%20%7C%20Godot%20%7C%20Native-green.svg)]()
-[![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
-[![GitHub Topics](https://img.shields.io/badge/keywords-onlinefix%20%7C%20steam--emu%20%7C%20dlc--unlocker-orange.svg)]()
+[![Release](https://img.shields.io/badge/version-v1.1.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v1.1)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
+[![Engines](https://img.shields.io/badge/engines-Unity%20%7C%20Unreal%20%7C%20Godot%20%7C%20Native-green.svg)](https://github.com/Coronitaa/ReFix)
+[![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://github.com/Coronitaa/ReFix/blob/main/LICENSE)
+[![Keywords](https://img.shields.io/badge/keywords-onlinefix%20%7C%20steam--crack%20%7C%20goldberg-orange.svg)](https://github.com/Coronitaa/ReFix)
 
-**ReFix** is a high-performance, modular C++ DLL proxy, runtime Steamworks emulator, universal DLC unlocker, and multiplayer fix suite for PC games. Built as an open-source alternative to **OnlineFix (online-fix.me)**, **Goldberg Emulator**, and **SmartSteamEmu**, ReFix enables seamless online co-op / multiplayer via Steam (Spacewar 480) or 100% offline local area network (LAN) play without requiring the Steam client.
+**ReFix** is a high-performance, modular C++ DLL proxy, runtime Steamworks emulator, universal DLC unlocker, and multiplayer fix suite for PC games. Built as an open-source alternative to **OnlineFix (online-fix.me)**, **Goldberg Emulator**, **CODEX**, and **SmartSteamEmu**, ReFix enables seamless online co-op / multiplayer via Steam (Spacewar 480) or 100% offline local area network (LAN) play without requiring the Steam client.
 
 ---
 
-## 🔍 Why ReFix? (Comparison Matrix)
+## 🔍 Steam Emulators & Multiplayer Fixes Comparison Matrix
 
-| Feature | ReFix v1.1 | OnlineFix (online-fix.me) | Goldberg Emulator | CreamAPI / SmokeAPI |
-| :--- | :---: | :---: | :---: | :---: |
-| **Open Source (Full C++ Source)** | ✅ **Yes (MIT)** | ❌ Closed / Obfuscated | ✅ Yes (GPL/MIT) | ⚠️ Partial |
-| **Steam Online Matchmaking (Spacewar 480)** | ✅ **Yes** | ✅ Yes | ❌ No (LAN only) | ❌ No |
-| **100% Offline LAN Play (No Steam Required)** | ✅ **Yes (gbe_fork)** | ❌ No | ✅ Yes | ❌ No |
-| **Universal DLC Auto-Unlocker** | ✅ **Yes (BLUESTAR)** | ⚠️ Manual / Partial | ⚠️ Config file only | ✅ Yes |
-| **Interactive GUI File / Executable Picker** | ✅ **Yes (Built-in)** | ❌ No | ❌ No | ❌ No |
-| **Smart Multi-Engine Detection (Unity/Unreal/Godot)**| ✅ **Yes (Native Scoring)** | ❌ No | ❌ No | ❌ No |
-| **Epic Online Services (EOS / Redbone) Proxy** | ✅ **Yes (Built-in)** | ⚠️ Custom patches | ❌ No | ❌ No |
-| **Automatic Windows Firewall Configuration** | ✅ **Yes** | ❌ No | ❌ No | ❌ No |
-| **Steam Non-Steam Shortcut Injector** | ✅ **Yes (shortcuts.vdf)** | ❌ No | ❌ No | ❌ No |
-| **Clean Zero-Trace Uninstaller & Restorer** | ✅ **Yes (1-Click)** | ❌ No | ❌ No | ❌ No |
+| Feature | ReFix v1.1.0 | OnlineFix (online-fix.me) | Goldberg Emulator (gbe_fork) | CODEX Steam Emu | SmartSteamEmu (SSE) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Open Source (Full C++ Source)** | ✅ **Yes (MIT)** | ❌ Closed / Obfuscated | ✅ Yes (GPL/MIT) | ❌ Closed Source | ❌ Closed / Discontinued |
+| **Steam Online Matchmaking (Spacewar 480)** | ✅ **Yes** | ✅ Yes | ❌ No (LAN only) | ❌ No (Offline only) | ❌ No (LAN only) |
+| **100% Offline LAN Play (No Steam Required)** | ✅ **Yes (gbe_fork)** | ❌ No | ✅ Yes | ⚠️ Offline solo | ✅ Yes (Legacy LAN) |
+| **Universal DLC Auto-Unlocker (BLUESTAR)** | ✅ **Yes (SmokeAPI/CreamAPI)** | ⚠️ Manual / Partial | ⚠️ Config file only | ⚠️ INI list only | ⚠️ INI list only |
+| **Interactive GUI Executable Picker** | ✅ **Yes (`select_exe.ps1`)** | ❌ No | ❌ No | ❌ No | ❌ No |
+| **Smart Multi-Engine Detection (Unity/Unreal/Godot/Native)** | ✅ **Yes (Automated)** | ❌ No | ❌ No | ❌ No | ❌ No |
+| **Epic Online Services (EOS / Redbone) Proxy** | ✅ **Yes (Built-in)** | ⚠️ Custom patches | ❌ No | ❌ No | ❌ No |
+| **Automatic Windows Defender Firewall Config** | ✅ **Yes** | ❌ No | ❌ No | ❌ No | ❌ No |
+| **Steam Non-Steam Shortcut Injector** | ✅ **Yes (`shortcuts.vdf`)** | ❌ No | ❌ No | ❌ No | ❌ No |
+| **Clean Zero-Trace Uninstaller & Game Restorer** | ✅ **Yes (1-Click)** | ❌ No | ❌ No | ❌ No | ❌ No |
 
 ---
 
@@ -53,7 +53,7 @@
   * **Unity:** `*_Data/Managed/`, `UnityPlayer.dll`, [BepInEx](https://github.com/BepInEx/BepInEx) loader integration.
   * **Unreal Engine 4/5:** `Binaries/Win64/`, `EOSSDK-Win64-Shipping.dll`, `RedboneEOS.dll`.
   * **Godot 3/4:** `*.pck` project packages, GodotSteam / SteamMultiplayerPeer.
-  * **Native C/C++:** Custom engines (e.g. Don't Starve Together, Source engine titles).
+  * **Native C/C++:** Custom engines (e.g. *Don't Starve Together*, Source engine titles).
 * **Smart Binary Scoring:** Automatically filters out dedicated servers, crash handlers, nullrenderers, and helper tools (`*dedicated*`, `*nullrenderer*`, `*server*`), prioritizing main client 64-bit binaries.
 * **Interactive Executable Picker:** Allows confirming the detected executable, choosing via native Windows File Explorer GUI dialog (`select_exe.ps1`), or entering custom paths.
 
@@ -74,8 +74,8 @@
 
 ```
 ReFix/
-├── AutoDeploy.bat                      # Main Universal AutoDeploy batch tool
-├── DLC_Unlocker.bat                    # Universal DLC Unlocker tool (BLUESTAR)
+├── AutoDeploy.bat                      # Main Universal AutoDeploy batch tool (v1.1.0)
+├── DLC_Unlocker.bat                    # Universal DLC Unlocker tool (v1.1.0)
 ├── Uninstall_ReFix.bat                 # Zero-trace uninstaller & game restorer
 ├── build.bat                           # MSVC build script for C++ proxies
 ├── deploy.bat                          # Automated packaging & deployment script
@@ -117,7 +117,7 @@ ReFix/
 
 ### For Players (Deployment Package)
 
-1. Download the latest `ReFix_Release_v1.1.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/tag/v1.1).
+1. Download the latest **`ReFix_Release_v1.1.zip`** from [Releases](https://github.com/Coronitaa/ReFix/releases/tag/v1.1).
 2. Extract the archive to any folder (or directly to a USB flash drive).
 3. Run **`AutoDeploy.bat`**:
    - Choose your target game directory using the GUI dialog or enter the path.
@@ -201,19 +201,23 @@ ForcePublicIPInLobby=true
 ## 🛠️ Building from Source
 
 ### Prerequisites
-* **Windows 10 / 11 x64**
-* **Microsoft Visual Studio 2022** (MSVC v143 toolset) with C++ Desktop Development workload.
-* **MASM (Microsoft Macro Assembler)** (included with VS2022).
+* **Windows 10 / 11 (64-bit)**
+* **Visual Studio 2022** (Community, Professional, Enterprise, or Build Tools) with the **Desktop development with C++** workload enabled (includes MSVC v143 toolset + MASM `ml64.exe`).
 
-### Compilation
-Open **Developer Command Prompt for VS 2022** (x64) and execute:
+### 1-Click Build
+Open **Developer Command Prompt for VS 2022** (x64) or standard Windows Command Prompt / PowerShell and execute:
 ```cmd
 cd ReFix
 build.bat
 ```
-The compiled proxy binaries (`winmm.dll`, `steam_api64.dll`, `EOSSDK-Win64-Shipping.dll`, `RedboneEOS.dll`) will be output to `build/`.
+`build.bat` automatically:
+1. Locates the MSVC environment using `vswhere.exe` or standard Visual Studio installation directories.
+2. Assembles x64 forwarding assembly tables (`winmm_fwd.asm`, `eos_fwd.asm`, `steam_fwd.asm`) via `ml64.exe`.
+3. Compiles `winmm.dll`, `EOSSDK-Win64-Shipping.dll`, `RedboneEOS.dll`, and `steam_api64.dll` with high optimizations (`/O2 /EHsc /LD`).
+4. Outputs the compiled proxies to `build/` and automatically synchronizes them to `bin/`.
 
-To package a standalone deployable release:
+### Packaging the Standalone Release
+To package a clean deployment distribution:
 ```cmd
 deploy.bat
 ```
@@ -238,7 +242,7 @@ ReFix stands on the shoulders of giants. We express our deepest gratitude to the
 
 ## 🏷️ Search Keywords & Tags (SEO)
 
-`online-fix` `onlinefix` `online-fix-me` `steam-emulator` `steam-emu` `steam-crack` `goldberg-emulator` `goldberg-lan` `creamapi` `smokeapi` `dlc-unlocker` `steam-multiplayer-fix` `pirated-games-multiplayer` `spacewar-crack` `spacewar-480` `lan-multiplayer-fix` `coop-game-crack` `steam-api64-proxy` `unreal-engine-multiplayer-fix` `unity-multiplayer-fix` `godotsteam-fix` `steam-overlay-fix` `steam-keygen-bypass` `free-steam-multiplayer` `onlinefix-alternative` `smartsteamemu`
+`online-fix` `onlinefix` `online-fix-me` `steam-emulator` `steam-emu` `steam-crack` `goldberg-emulator` `goldberg-lan` `codex-steam-emulator` `smartsteamemu` `creamapi` `smokeapi` `dlc-unlocker` `steam-multiplayer-fix` `pirated-games-multiplayer` `spacewar-crack` `spacewar-480` `lan-multiplayer-fix` `coop-game-crack` `steam-api64-proxy` `unreal-engine-multiplayer-fix` `unity-multiplayer-fix` `godotsteam-fix` `steam-overlay-fix` `steam-keygen-bypass` `free-steam-multiplayer` `onlinefix-alternative` `game-crack-multiplayer`
 
 ---
 

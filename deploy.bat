@@ -1,6 +1,6 @@
 @echo off
 REM =============================================================================
-REM ReFix Deploy Script v2.0
+REM ReFix Deploy Script v1.1.0
 REM =============================================================================
 REM Automated deployment of open-source binaries to game executable directory.
 REM Creates safe backups (*_o.dll) of existing game DLLs and initializes ReFix.log.
@@ -28,7 +28,7 @@ set "BUILD_DIR=%~dp0build"
 
 echo.
 echo  ====================================
-echo   ReFix Deployment Script v2.0
+echo   ReFix Deployment Script v1.1.0
 echo  ====================================
 echo   Target: %DEPOT%
 echo  ====================================
