@@ -17,7 +17,7 @@
 | **Open Source (Full C++ Source)** | ✅ **Yes (MIT)** | ❌ Closed / Obfuscated | ✅ Yes (GPL/MIT) | ❌ Closed Source | ❌ Closed / Discontinued |
 | **Steam Online Matchmaking (Spacewar 480)** | ✅ **Yes** | ✅ Yes | ❌ No (LAN only) | ❌ No (Offline only) | ❌ No (LAN only) |
 | **100% Offline LAN Play (No Steam Required)** | ✅ **Yes (gbe_fork)** | ❌ No | ✅ Yes | ⚠️ Offline solo | ✅ Yes (Legacy LAN) |
-| **Universal DLC Auto-Unlocker (BLUESTAR)** | ✅ **Yes (SmokeAPI/CreamAPI)** | ⚠️ Manual / Partial | ⚠️ Config file only | ⚠️ INI list only | ⚠️ INI list only |
+| **Universal DLC Auto-Unlocker** | ✅ **Yes (SmokeAPI/CreamAPI)** | ⚠️ Manual / Partial | ⚠️ Config file only | ⚠️ INI list only | ⚠️ INI list only |
 | **Interactive GUI Executable Picker** | ✅ **Yes (`select_exe.ps1`)** | ❌ No | ❌ No | ❌ No | ❌ No |
 | **Smart Multi-Engine Detection (Unity/Unreal/Godot/Native)** | ✅ **Yes (Automated)** | ❌ No | ❌ No | ❌ No | ❌ No |
 | **Epic Online Services (EOS / Redbone) Proxy** | ✅ **Yes (Built-in)** | ⚠️ Custom patches | ❌ No | ❌ No | ❌ No |
@@ -155,7 +155,7 @@ Mode=goldberg                   ; valve (Steam Online 480) | goldberg (LAN Offli
 
 [Steam]
 MaskAppId=480                   ; Steam AppID used for masking (Spacewar 480)
-RealAppId=480                   ; Real Steam AppID for DLCs and metadata
+RealAppId=550                   ; Real Steam AppID for DLCs and metadata
 Language=english                ; Game language
 BypassLicenseCheck=true         ; Allow running without Steam license ownership
 DLCs=all                        ; all | none | comma-separated AppIDs
@@ -232,7 +232,6 @@ ReFix stands on the shoulders of giants. We express our deepest gratitude to the
 * **[gbe_fork (Goldberg Emulator Community Fork)](https://github.com/Detanup01/gbe_fork)** by Detanup01 & contributors — Modern Goldberg fork providing enhanced lobby broadcast, interface generation, and extended API support.
 * **[SmokeAPI](https://github.com/acidicoala/SmokeAPI)** by acidicoala — Fast and modern universal Steam DLC unlocker backend.
 * **[CreamAPI](https://github.com/acidicoala/CreamAPI)** by acidicoala — Legendary Steam DLC unlocker architecture and INI configuration standard.
-* **[BepInEx](https://github.com/BepInEx/BepInEx)** by BepInEx Team — Unity / .NET modding and assembly injection framework.
 * **[Mono.Cecil](https://github.com/jbevain/cecil)** by Jb Evain — Assembly inspection and IL patching library.
 * **[MinHook](https://github.com/TsudaKageyu/minhook)** by Tsuda Kageyu — The Minimalistic x86/x64 API Hooking Library for Windows.
 * **[Dear ImGui](https://github.com/ocornut/imgui)** by Omar Cornut — Bloat-free graphical user interface library for C++.
