@@ -54,13 +54,18 @@ echo [*] Building steam_api64.dll proxy...
 cl /nologo /O2 /Zi /EHsc /LD /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64.dll & exit /b 1 )
 
+echo [*] Building Re:Photon test harness and validation suite (rephoton_test.exe)...
+cl /nologo /std:c++17 /O2 /EHsc /Isrc src\rephoton\protocol\photon_serializer.cpp src\rephoton\protocol\photon_message.cpp src\rephoton\diagnostics\photon_diagnostics.cpp src\rephoton\core\photon_config.cpp src\rephoton\profiles\game_profiles.cpp src\rephoton\transport\loopback_transport.cpp src\rephoton\transport\udp_transport.cpp src\rephoton\realtime\room_state.cpp src\rephoton\backend\refix_cloud_backend.cpp src\rephoton\backend\custom_photon_backend.cpp src\rephoton\realtime\realtime_client.cpp src\rephoton\pun\pun_adapter.cpp src\rephoton\fusion\fusion_backend.cpp src\rephoton\voice\voice_backend.cpp src\rephoton\chat\chat_backend.cpp src\rephoton\core\photon_manager.cpp src\rephoton\tests\test_harness.cpp src\rephoton\tests\test_main.cpp /Febuild\rephoton_test.exe user32.lib kernel32.lib ws2_32.lib advapi32.lib
+if %ERRORLEVEL% neq 0 ( echo [!] Error compiling rephoton_test.exe & exit /b 1 )
+
 echo.
 echo ====================================================================
-echo [OK] All ReFix DLL proxies successfully built in build\
+echo [OK] All ReFix DLL proxies & Re:Photon suite successfully built in build\
 echo   - build\winmm.dll
 echo   - build\EOSSDK-Win64-Shipping.dll
 echo   - build\RedboneEOS.dll
 echo   - build\steam_api64.dll
+echo   - build\rephoton_test.exe
 echo ====================================================================
 
 :: Automatically synchronize freshly built binaries to bin/
@@ -69,5 +74,6 @@ if exist bin\ (
     copy /Y build\EOSSDK-Win64-Shipping.dll bin\EOSSDK-Win64-Shipping.dll >nul
     copy /Y build\RedboneEOS.dll bin\RedboneEOS.dll >nul
     copy /Y build\steam_api64.dll bin\steam_api64.dll >nul
-    echo [OK] Synchronized freshly compiled proxies to bin\
+    copy /Y build\rephoton_test.exe bin\rephoton_test.exe >nul
+    echo [OK] Synchronized freshly compiled proxies and Re:Photon suite to bin\
 )
