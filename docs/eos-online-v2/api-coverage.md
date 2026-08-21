@@ -1,3 +1,11 @@
+
+> [!IMPORTANT]
+> **ABI Architectural Principle: EOS IDs are Opaque Handles**
+> EOS_ProductUserId and EOS_EpicAccountId are strictly opaque memory handles (oid*) in the official EOS C ABI. 
+> While ReFix internally formats its canonical string identifier as 32 lowercase hexadecimal characters (derived from the persistent 128-bit AccountUUID), the caller must never rely on string length or layout assumptions. All serialization and deserialization must occur through the official ABI converters:
+> - EOS_ProductUserId_ToString & EOS_ProductUserId_FromString
+> - EOS_EpicAccountId_ToString & EOS_EpicAccountId_FromString
+
 # ReFix EOS API Coverage & Status Matrix
 
 ## 1. Classification Methodology

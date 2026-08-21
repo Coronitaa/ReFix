@@ -1,5 +1,5 @@
 // =============================================================================
-// ReFix EOS Online v2 - Logical & Persistent Identity Manager
+// ReFix EOS Online v2 - Logical & Persistent Identity Manager (Opaque Handles)
 // =============================================================================
 #pragma once
 
@@ -10,6 +10,22 @@
 #include <vector>
 
 namespace ReFixEOS {
+
+// Magic constants for opaque handle validation
+constexpr uint32_t PUID_HANDLE_MAGIC = 0x50554944; // 'PUID'
+constexpr uint32_t EAID_HANDLE_MAGIC = 0x45414944; // 'EAID'
+
+#pragma pack(push, 8)
+struct OpaqueProductUserIdHandle {
+    uint32_t magic;
+    char hexString[33];
+};
+
+struct OpaqueEpicAccountIdHandle {
+    uint32_t magic;
+    char hexString[33];
+};
+#pragma pack(pop)
 
 struct ExternalAccountData {
     int32_t accountType;
@@ -24,8 +40,8 @@ struct UserIdentityRecord {
     std::string displayName;
     uint64_t steamId64;
     std::vector<ExternalAccountData> externalAccounts;
-    void* handlePUID;
-    void* handleEAID;
+    OpaqueProductUserIdHandle* handlePUID;
+    OpaqueEpicAccountIdHandle* handleEAID;
 };
 
 class IdentityManager {
@@ -47,7 +63,7 @@ public:
     void SetLocalDisplayName(const std::string& name);
     void SetLocalSteamId(uint64_t steamId);
 
-    // PUID <-> Handle & String conversions
+    // PUID <-> Handle & String conversions (Opaque Handle Model)
     bool IsValidProductUserId(EOS_ProductUserId puid);
     bool IsValidEpicAccountId(EOS_EpicAccountId eaid);
     std::string ProductUserIdToString(EOS_ProductUserId puid);
@@ -59,6 +75,7 @@ public:
     EOS_ProductUserId GetOrCreateProductUserIdFromSteamId(uint64_t steamId, const std::string& personaName = "");
     EOS_ProductUserId GetOrCreateProductUserIdFromExternal(int32_t accountType, const std::string& externalId, const std::string& displayName = "");
     EOS_ProductUserId GetOrCreateProductUserId(const std::string& puidStr);
+    EOS_EpicAccountId GetOrCreateEpicAccountId(const std::string& eaidStr);
 
     // Record lookups
     const UserIdentityRecord* GetRecordByPUID(EOS_ProductUserId puid);
@@ -75,6 +92,7 @@ private:
     std::string LoadOrCreatePersistentAccountUuid();
     std::string DerivePuidFromUuid(const std::string& uuid);
     std::string DeriveEaidFromUuid(const std::string& uuid);
+    bool IsValidHex32String(const char* str);
 
     std::recursive_mutex m_mutex;
     bool m_initialized = false;
@@ -84,6 +102,7 @@ private:
     std::unordered_map<void*, std::string> m_puidToPuidStr;
     std::unordered_map<void*, std::string> m_eaidToPuidStr;
     std::unordered_map<uint64_t, std::string> m_steamIdToPuidStr;
+    std::vector<void*> m_allocatedHandles;
 };
 
 } // namespace ReFixEOS

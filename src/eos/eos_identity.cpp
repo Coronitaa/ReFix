@@ -11,6 +11,7 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
+#include <cctype>
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -18,7 +19,6 @@
 
 namespace ReFixEOS {
 
-// SHA-256 helper using Windows CryptoAPI
 static std::string ComputeSHA256Hex(const std::string& input) {
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
@@ -43,7 +43,6 @@ static std::string ComputeSHA256Hex(const std::string& input) {
     }
 
     if (result.empty()) {
-        // Deterministic fallback if CryptoAPI is unavailable
         uint64_t h1 = 14695981039346656037ULL;
         uint64_t h2 = 1099511628211ULL;
         for (char c : input) {
@@ -58,7 +57,6 @@ static std::string ComputeSHA256Hex(const std::string& input) {
     return result;
 }
 
-// Generates a cryptographically random UUIDv4 string
 static std::string GenerateRandomUUID() {
     GUID guid;
     if (CoCreateGuid(&guid) == S_OK) {
@@ -70,7 +68,6 @@ static std::string GenerateRandomUUID() {
         return guidStr;
     }
 
-    // Fallback: CryptoAPI random bytes
     HCRYPTPROV hProv = 0;
     BYTE bytes[16];
     if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
@@ -95,8 +92,20 @@ IdentityManager::IdentityManager() {
     Initialize();
 }
 
+bool IdentityManager::IsValidHex32String(const char* str) {
+    if (!str) return false;
+    size_t len = strlen(str);
+    if (len != 32) return false;
+    for (size_t i = 0; i < 32; ++i) {
+        char c = str[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string IdentityManager::LoadOrCreatePersistentAccountUuid() {
-    // 1. Determine profile path in AppData or local directory
     char appDataPath[MAX_PATH] = { 0 };
     std::string profileFilePath;
 
@@ -108,7 +117,6 @@ std::string IdentityManager::LoadOrCreatePersistentAccountUuid() {
         profileFilePath = "refix_user_profile.json";
     }
 
-    // 2. Try to read existing UUID
     std::ifstream inFile(profileFilePath);
     if (inFile.is_open()) {
         std::string line;
@@ -130,7 +138,6 @@ std::string IdentityManager::LoadOrCreatePersistentAccountUuid() {
         inFile.close();
     }
 
-    // 3. Create new persistent random UUID
     std::string newUuid = GenerateRandomUUID();
 
     std::ofstream outFile(profileFilePath);
@@ -166,7 +173,6 @@ void IdentityManager::Initialize() {
     m_localUser.eaidString = DeriveEaidFromUuid(m_localUser.accountUuid);
     m_localUser.displayName = "ReFix Player";
 
-    // Stable SteamID derived from UUID
     uint64_t hashVal = 0;
     for (size_t i = 0; i < 16 && i < m_localUser.puidString.length(); ++i) {
         hashVal = (hashVal << 4) | (m_localUser.puidString[i] >= 'a' ? (m_localUser.puidString[i] - 'a' + 10) : (m_localUser.puidString[i] - '0'));
@@ -175,11 +181,18 @@ void IdentityManager::Initialize() {
     if (accountId == 0) accountId = 100001;
     m_localUser.steamId64 = 76561197960265728ULL + accountId;
 
-    // Allocate persistent heap memory handles for local user
-    m_localUser.handlePUID = _strdup(m_localUser.puidString.c_str());
-    m_localUser.handleEAID = _strdup(m_localUser.eaidString.c_str());
+    auto* puidHandle = new OpaqueProductUserIdHandle();
+    puidHandle->magic = PUID_HANDLE_MAGIC;
+    strcpy_s(puidHandle->hexString, sizeof(puidHandle->hexString), m_localUser.puidString.c_str());
+    m_localUser.handlePUID = puidHandle;
+    m_allocatedHandles.push_back(puidHandle);
 
-    // Register external accounts
+    auto* eaidHandle = new OpaqueEpicAccountIdHandle();
+    eaidHandle->magic = EAID_HANDLE_MAGIC;
+    strcpy_s(eaidHandle->hexString, sizeof(eaidHandle->hexString), m_localUser.eaidString.c_str());
+    m_localUser.handleEAID = eaidHandle;
+    m_allocatedHandles.push_back(eaidHandle);
+
     ExternalAccountData epicData;
     epicData.accountType = EOS_EAT_EPIC;
     epicData.accountId = m_localUser.eaidString;
@@ -192,7 +205,6 @@ void IdentityManager::Initialize() {
     steamData.displayName = m_localUser.displayName;
     m_localUser.externalAccounts.push_back(steamData);
 
-    // Populate lookup maps
     m_recordsByPuidStr[m_localUser.puidString] = m_localUser;
     m_puidToPuidStr[m_localUser.handlePUID] = m_localUser.puidString;
     m_eaidToPuidStr[m_localUser.handleEAID] = m_localUser.puidString;
@@ -283,13 +295,19 @@ void IdentityManager::SetLocalSteamId(uint64_t steamId) {
 bool IdentityManager::IsValidProductUserId(EOS_ProductUserId puid) {
     if (!puid) return false;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    return m_puidToPuidStr.find(puid) != m_puidToPuidStr.end();
+    auto it = m_puidToPuidStr.find(puid);
+    if (it == m_puidToPuidStr.end()) return false;
+    auto* handle = (const OpaqueProductUserIdHandle*)puid;
+    return (handle->magic == PUID_HANDLE_MAGIC);
 }
 
 bool IdentityManager::IsValidEpicAccountId(EOS_EpicAccountId eaid) {
     if (!eaid) return false;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    return m_eaidToPuidStr.find(eaid) != m_eaidToPuidStr.end();
+    auto it = m_eaidToPuidStr.find(eaid);
+    if (it == m_eaidToPuidStr.end()) return false;
+    auto* handle = (const OpaqueEpicAccountIdHandle*)eaid;
+    return (handle->magic == EAID_HANDLE_MAGIC);
 }
 
 std::string IdentityManager::ProductUserIdToString(EOS_ProductUserId puid) {
@@ -313,11 +331,13 @@ std::string IdentityManager::EpicAccountIdToString(EOS_EpicAccountId eaid) {
 
 EOS_ProductUserId IdentityManager::ProductUserIdFromString(const char* puidStr) {
     if (!puidStr || puidStr[0] == '\0') return nullptr;
+    if (!IsValidHex32String(puidStr)) return nullptr;
     return GetOrCreateProductUserId(puidStr);
 }
 
 EOS_EpicAccountId IdentityManager::EpicAccountIdFromString(const char* eaidStr) {
     if (!eaidStr || eaidStr[0] == '\0') return nullptr;
+    if (!IsValidHex32String(eaidStr)) return nullptr;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     for (const auto& pair : m_recordsByPuidStr) {
         if (pair.second.eaidString == eaidStr) {
@@ -349,8 +369,18 @@ EOS_ProductUserId IdentityManager::GetOrCreateProductUserId(const std::string& p
     rec.eaidString = DeriveEaidFromUuid("PEER_EAID:" + puidStr);
     rec.displayName = "Player_" + (puidStr.length() >= 4 ? puidStr.substr(puidStr.length() - 4) : puidStr);
     rec.steamId64 = 0;
-    rec.handlePUID = _strdup(rec.puidString.c_str());
-    rec.handleEAID = _strdup(rec.eaidString.c_str());
+
+    auto* puidHandle = new OpaqueProductUserIdHandle();
+    puidHandle->magic = PUID_HANDLE_MAGIC;
+    strcpy_s(puidHandle->hexString, sizeof(puidHandle->hexString), rec.puidString.c_str());
+    rec.handlePUID = puidHandle;
+    m_allocatedHandles.push_back(puidHandle);
+
+    auto* eaidHandle = new OpaqueEpicAccountIdHandle();
+    eaidHandle->magic = EAID_HANDLE_MAGIC;
+    strcpy_s(eaidHandle->hexString, sizeof(eaidHandle->hexString), rec.eaidString.c_str());
+    rec.handleEAID = eaidHandle;
+    m_allocatedHandles.push_back(eaidHandle);
 
     ExternalAccountData epicData;
     epicData.accountType = EOS_EAT_EPIC;
@@ -438,7 +468,6 @@ const UserIdentityRecord* IdentityManager::GetRecordByEAID(EOS_EpicAccountId eai
     return nullptr;
 }
 
-// C-ABI External Account Info layout (matches EOS SDK EOS_Connect_ExternalAccountInfo)
 struct EOS_Connect_ExternalAccountInfo_Layout {
     int32_t ApiVersion;
     EOS_ProductUserId ProductUserId;
@@ -494,10 +523,6 @@ void IdentityManager::FreeExternalAccountInfo(void* info) {
 
 } // namespace ReFixEOS
 
-// =============================================================================
-// C API Function Implementations
-// =============================================================================
-
 extern "C" {
 
 EOS_EResult EOS_ProductUserId_IsValid(EOS_ProductUserId Id) {
@@ -510,6 +535,7 @@ EOS_EResult EOS_EpicAccountId_IsValid(EOS_EpicAccountId Id) {
 
 EOS_EResult EOS_ProductUserId_ToString(EOS_ProductUserId Id, char* OutBuffer, int32_t* InOutBufferLength) {
     if (!InOutBufferLength) return EOS_InvalidParameters;
+    if (!ReFixEOS::IdentityManager::Get().IsValidProductUserId(Id)) return EOS_InvalidUser;
     std::string str = ReFixEOS::IdentityManager::Get().ProductUserIdToString(Id);
     if (str.empty()) return EOS_InvalidUser;
     int32_t needed = (int32_t)str.length() + 1;
@@ -524,6 +550,7 @@ EOS_EResult EOS_ProductUserId_ToString(EOS_ProductUserId Id, char* OutBuffer, in
 
 EOS_EResult EOS_EpicAccountId_ToString(EOS_EpicAccountId Id, char* OutBuffer, int32_t* InOutBufferLength) {
     if (!InOutBufferLength) return EOS_InvalidParameters;
+    if (!ReFixEOS::IdentityManager::Get().IsValidEpicAccountId(Id)) return EOS_InvalidUser;
     std::string str = ReFixEOS::IdentityManager::Get().EpicAccountIdToString(Id);
     if (str.empty()) return EOS_InvalidUser;
     int32_t needed = (int32_t)str.length() + 1;
