@@ -62,9 +62,18 @@ namespace ReFix::Photon::Protocol {
 
         EventData() = default;
         EventData(uint8_t eventCode, int32_t sender = 0)
-            : code(eventCode), senderActorNumber(sender) {}
+            : code(eventCode), senderActorNumber(sender) {
+            if (sender != 0) {
+                parameters[ParameterCode::ActorNr] = PhotonValue(sender);
+            }
+        }
 
-        void SetParam(uint8_t paramCode, const PhotonValue& val) { parameters[paramCode] = val; }
+        void SetParam(uint8_t paramCode, const PhotonValue& val) {
+            parameters[paramCode] = val;
+            if (paramCode == ParameterCode::ActorNr) {
+                senderActorNumber = val.AsInt(senderActorNumber);
+            }
+        }
         bool HasParam(uint8_t paramCode) const { return parameters.find(paramCode) != parameters.end(); }
         PhotonValue GetParam(uint8_t paramCode, const PhotonValue& def = PhotonValue()) const {
             auto it = parameters.find(paramCode);

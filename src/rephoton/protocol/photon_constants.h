@@ -37,6 +37,8 @@ namespace ReFix::Photon::Protocol {
         constexpr uint8_t CreateGame         = 227; // 0xE3
         constexpr uint8_t JoinGame           = 226; // 0xE2
         constexpr uint8_t JoinRandomGame     = 225; // 0xE1
+        constexpr uint8_t GetRegions         = 220; // 0xDC - Query available Photon Cloud regions from Name Server
+        constexpr uint8_t GetGameList        = 217; // 0xD9
         constexpr uint8_t Leave              = 254; // 0xFE
         constexpr uint8_t RaiseEvent         = 253; // 0xFD
         constexpr uint8_t SetProperties      = 252; // 0xFC
@@ -59,6 +61,7 @@ namespace ReFix::Photon::Protocol {
         constexpr uint8_t ReceiverGroup      = 246;
         constexpr uint8_t Data               = 245;
         constexpr uint8_t Code               = 244;
+        constexpr uint8_t GameList           = 222; // Hashtable of room names -> room properties hashtable
         constexpr uint8_t MasterClientId     = 203;
         constexpr uint8_t CustomInitData     = 229;
         constexpr uint8_t EncryptionMode     = 228;
@@ -70,12 +73,30 @@ namespace ReFix::Photon::Protocol {
         constexpr uint8_t ClientAuthenticationType = 217;
         constexpr uint8_t ClientAuthenticationParams = 216;
         constexpr uint8_t ClientAuthenticationData = 214;
+        constexpr uint8_t CustomAuthenticationData = 221; // 0xDD
+        constexpr uint8_t Region             = 210; // 0xD2 - Region identifier/list (e.g. "sa", "us", "eu", "asia")
+        constexpr uint8_t Cluster            = 196; // 0xC4 - Cluster identifier (e.g. "sa")
         constexpr uint8_t RoomName           = 255;
         constexpr uint8_t MaxPlayers         = 255;
         constexpr uint8_t IsOpen             = 253;
         constexpr uint8_t IsVisible          = 254;
         constexpr uint8_t EmptyRoomTtl       = 245;
         constexpr uint8_t PlayerTtl          = 246;
+    }
+
+    // Well-Known Game / Room Property Keys (within room properties Hashtable)
+    namespace GamePropertyKey {
+        constexpr uint8_t MaxPlayers         = 255; // byte
+        constexpr uint8_t IsVisible          = 254; // bool
+        constexpr uint8_t IsOpen             = 253; // bool
+        constexpr uint8_t PlayerCount        = 252; // byte
+        constexpr uint8_t Removed            = 251; // bool (true if room deleted from lobby)
+        constexpr uint8_t PropsListedInLobby = 250; // string[]
+        constexpr uint8_t CleanupCacheOnLeave= 249; // bool
+        constexpr uint8_t MasterClientId     = 248; // int32
+        constexpr uint8_t ExpectedUsers      = 247; // string[]
+        constexpr uint8_t PlayerTtl          = 246; // int32
+        constexpr uint8_t EmptyRoomTtl       = 245; // int32
     }
 
     // Photon Event Codes (EventCode)
@@ -85,6 +106,8 @@ namespace ReFix::Photon::Protocol {
         constexpr uint8_t PropertiesChanged  = 253; // Custom properties updated
         constexpr uint8_t SetProperties      = 252;
         constexpr uint8_t AppInfo            = 251;
+        constexpr uint8_t GameList           = 230; // Initial room list for lobby
+        constexpr uint8_t GameListUpdate     = 229; // Room list delta / update for lobby
         constexpr uint8_t CacheSliceChanged  = 230;
         constexpr uint8_t ErrorInfo          = 224;
         constexpr uint8_t AuthEvent          = 223;

@@ -150,6 +150,17 @@ namespace ReFix::Photon::Realtime {
         return {};
     }
 
+    Protocol::PhotonHashtable RoomState::GetLobbyProperties() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        Protocol::PhotonHashtable props = m_customProperties;
+        props[Protocol::PhotonValue(static_cast<uint8_t>(Protocol::GamePropertyKey::MaxPlayers))] = Protocol::PhotonValue(static_cast<uint8_t>(m_maxPlayers));
+        props[Protocol::PhotonValue(static_cast<uint8_t>(Protocol::GamePropertyKey::IsOpen))] = Protocol::PhotonValue(m_isOpen);
+        props[Protocol::PhotonValue(static_cast<uint8_t>(Protocol::GamePropertyKey::IsVisible))] = Protocol::PhotonValue(m_isVisible);
+        props[Protocol::PhotonValue(static_cast<uint8_t>(Protocol::GamePropertyKey::PlayerCount))] = Protocol::PhotonValue(static_cast<uint8_t>(m_actors.size()));
+        props[Protocol::PhotonValue(static_cast<uint8_t>(Protocol::GamePropertyKey::MasterClientId))] = Protocol::PhotonValue(static_cast<int32_t>(m_masterClientId));
+        return props;
+    }
+
     RoomStateInfo RoomState::GetInfo(int32_t localActorNr) const {
         std::lock_guard<std::mutex> lock(m_mutex);
         RoomStateInfo info;

@@ -61,6 +61,9 @@ namespace ReFix::Photon::Server {
         std::string GetAppVersion() const { return m_appVersion; }
         void SetAppVersion(const std::string& v) { m_appVersion = v; }
 
+        std::string GetRegion() const { return m_region; }
+        void SetRegion(const std::string& r) { m_region = r; }
+
         std::string GetCurrentRoomName() const { return m_currentRoomName; }
         void SetCurrentRoomName(const std::string& r) { m_currentRoomName = r; }
 
@@ -82,6 +85,9 @@ namespace ReFix::Photon::Server {
         DWORD GetLastActivityTime() const { return m_lastActivity; }
         void UpdateActivity() { m_lastActivity = GetTickCount(); }
 
+        uint16_t GetLocalPort() const { return m_localPort; }
+        void SetLocalPort(uint16_t p) { m_localPort = p; }
+
     private:
         uint16_t m_peerId;
         sockaddr_in m_address;
@@ -90,9 +96,11 @@ namespace ReFix::Photon::Server {
         std::string m_userId;
         std::string m_appId;
         std::string m_appVersion;
+        std::string m_region = "sa";
         std::string m_currentRoomName;
         int32_t m_actorNr = 0;
         uint32_t m_challenge = 0;
+        uint16_t m_localPort = 5055;
 
         std::map<uint8_t, uint32_t> m_outgoingSeq;
         std::map<uint8_t, uint32_t> m_incomingSeq;

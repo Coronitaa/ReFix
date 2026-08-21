@@ -37,6 +37,8 @@ namespace ReFix::Photon::Realtime {
         bool UpdateActorProperties(int32_t actorNr, const Protocol::PhotonHashtable& props);
         Protocol::PhotonHashtable GetActorProperties(int32_t actorNr) const;
 
+        Protocol::PhotonHashtable GetLobbyProperties() const;
+
         RoomStateInfo GetInfo(int32_t localActorNr = 0) const;
 
     private:

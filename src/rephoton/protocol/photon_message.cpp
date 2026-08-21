@@ -72,7 +72,13 @@ namespace ReFix::Photon::Protocol {
         std::vector<uint8_t> buf;
         PhotonSerializer::WriteByte(buf, static_cast<uint8_t>(MessageType::Event));
         PhotonSerializer::WriteByte(buf, code);
-        PhotonSerializer::WriteParameterDictionary(buf, parameters);
+
+        std::map<uint8_t, PhotonValue> paramsToSend = parameters;
+        if (senderActorNumber != 0 && paramsToSend.find(ParameterCode::ActorNr) == paramsToSend.end()) {
+            paramsToSend[ParameterCode::ActorNr] = PhotonValue(senderActorNumber);
+        }
+
+        PhotonSerializer::WriteParameterDictionary(buf, paramsToSend);
         return buf;
     }
 
