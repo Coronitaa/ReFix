@@ -1,6 +1,47 @@
-# ReFix EOS Online v2 — Verification & Test Plan
+# ReFix EOS Online v2 — Test Plan & Golden Test Specification
 
-## 1. Test Matrix Overview
+## 1. The Golden Test (End-to-End Success Benchmark)
+
+The ultimate verification standard for ReFix EOS Online v2:
+
+```mermaid
+sequenceDiagram
+    participant PC_A as Host (PC A)
+    participant Backend as ReFix Online Backend
+    participant PC_B as Client (PC B)
+
+    PC_A->>Backend: Login (PUID_A, DisplayName="HostPlayer")
+    PC_B->>Backend: Login (PUID_B, DisplayName="ClientPlayer")
+    
+    Note over PC_A: PC A creates Room / Session
+    PC_A->>Backend: CreateRoom (Name="Chameleon_Match", MaxMembers=4)
+    Backend-->>PC_A: Room Created (RoomId="room_9876")
+    
+    Note over PC_B: PC B searches for rooms
+    PC_B->>Backend: SearchRooms (Filter: Game=MECCHA_CHAMELEON)
+    Backend-->>PC_B: Return Rooms (room_9876, Host=PC_A, Slots=3/4)
+    
+    Note over PC_B: PC B joins room
+    PC_B->>Backend: JoinRoom (room_9876, PUID_B)
+    Backend-->>PC_A: NotifyMemberJoined (PUID_B)
+    Backend-->>PC_B: JoinAccepted (RoomState, HostConnectionInfo)
+    
+    Note over PC_A,PC_B: Membership Synchronized on Both Ends
+    
+    Note over PC_A: PC A sends In-Game Invite to PC B
+    PC_A->>Backend: SendInvite (From=PUID_A, To=PUID_B, Room=room_9876)
+    Backend->>PC_B: NotifyInviteReceived (From=PUID_A, Room=room_9876)
+    
+    Note over PC_A,PC_B: P2P Connection Established (Direct UDP / Relay)
+    PC_A->>PC_B: EOS_P2P_SendPacket (Channel 0)
+    PC_B->>PC_A: EOS_P2P_SendPacket (Channel 0)
+    
+    Note over PC_A,PC_B: Unreal NetDriver connects & gameplay starts!
+```
+
+---
+
+## 2. Test Matrix Overview
 
 | Test ID | Test Title | Scope | Expected Outcome |
 | :--- | :--- | :--- | :--- |
@@ -13,46 +54,3 @@
 | **Test G** | Metadata & Attribute Fidelity | Host & Client | Custom keys, map name, game mode, and server ports match exactly on search results without fake defaults. |
 | **Test H** | Direct P2P & Relay Fallback | 2 PCs under Strict NAT | Direct UDP fails -> Seamlessly transitions to ReFix Relay -> Packets delivered with <100ms latency. |
 | **Test I** | Non-EOS Subsystems Non-Regression | All game engine modes | Verify Re:Goldberg, Steamworks proxy, Godot proxy, and Re:Photon remain 100% operational. |
-
----
-
-## 2. Detailed Test Specifications
-
-### Test A — LAN Discovery & Matchmaking
-1. **Setup**:
-   - PC 1 (IP: `192.168.1.10`) running target game (*MECCHA CHAMELEON*).
-   - PC 2 (IP: `192.168.1.20`) running target game.
-2. **Execution**:
-   - PC 1 navigates to Multiplayer -> Host Game -> Sets Room Name `"Chameleon_Battle"`, Max Players = `6`.
-   - PC 2 navigates to Multiplayer -> Find Game.
-3. **Verification Criteria**:
-   - PC 2 search results show exactly 1 session:
-     - Name: `"Chameleon_Battle"`
-     - Max Players: `6`, Open Slots: `5`
-     - Host Address: `192.168.1.10:7777`
-   - PC 2 clicks Join -> Both PCs successfully load into game lobby.
-   - Logs show `EOS_Sessions_JoinSession` callback returning `EOS_Success`.
-
----
-
-### Test C — Invitation Flow
-1. **Setup**: PC 1 (Host) and PC 2 (Client) both logged in.
-2. **Execution**:
-   - PC 1 creates private lobby.
-   - PC 1 opens Friends menu -> Clicks "Invite" on PC 2.
-3. **Verification Criteria**:
-   - PC 2 immediately receives `EOS_Sessions_AddNotifySessionInviteReceived` event callback.
-   - In-game notification banner / prompt appears on PC 2.
-   - PC 2 clicks "Accept" -> `EOS_Sessions_JoinSession` executes -> PC 2 enters PC 1's lobby.
-
----
-
-### Test D — Duplicate & Session Recreation Lifecycle
-1. **Execution**:
-   - Host creates Session `"GameSession"`.
-   - Host leaves match back to Main Menu (triggers `EOS_Sessions_DestroySession`).
-   - Host immediately creates Session `"GameSession"` again.
-2. **Verification Criteria**:
-   - Callback returns `EOS_Success`.
-   - No `"A session with this name already exists"` error.
-   - Session search returns only the new active instance.
