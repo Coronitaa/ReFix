@@ -9,6 +9,10 @@
 #pragma pack(push, 8)
 
 // Return Results
+typedef int32_t EOS_Bool;
+typedef int32_t EOS_Boolean;
+constexpr EOS_Bool EOS_TRUE = 1;
+constexpr EOS_Bool EOS_FALSE = 0;
 typedef int32_t EOS_EResult;
 #define EOS_Success                               0
 #define EOS_NoConnection                          1

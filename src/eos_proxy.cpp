@@ -10,6 +10,7 @@
 
 #include "upnp_firewall.h"
 #include "eos/eos_connect.h"
+#include "eos/eos_lobby.h"
 #include <windows.h>
 #include <cstring>
 #include <cstdint>
@@ -1757,20 +1758,7 @@ struct CB_Lobby_CreateLobby {
     const char* LobbyId;
 };
 
-// Search Parameter Capturing & Dynamic Lying for Matchmaking
-union EOS_Lobby_AttributeValue {
-    int64_t AsInt64;
-    double AsDouble;
-    int32_t bAsBool;
-    const char* AsUtf8;
-};
-
-struct EOS_Lobby_AttributeData {
-    int32_t ApiVersion;
-    const char* Key;
-    EOS_Lobby_AttributeValue Value;
-    int32_t ValueType; // 0=Bool, 1=Int64, 2=Double, 3=String (EOS_AT_STRING)
-};
+// (EOS_Lobby_AttributeData defined in eos_lobby.h)
 
 static std::vector<EOS_Lobby_AttributeData> g_capturedSearchParameters;
 
@@ -2424,11 +2412,7 @@ struct EOS_LobbyDetails_CopyAttributeByIndexOptions {
     uint32_t AttributeIndex;
 };
 
-struct EOS_Lobby_Attribute {
-    int32_t ApiVersion;
-    EOS_Lobby_AttributeData* Data;
-    int32_t Visibility;
-};
+// (EOS_Lobby_Attribute defined in eos_lobby.h)
 
 static EOS_EResult eos_LobbyDetails_CopyAttributeByIndex(void* H, void* O, EOS_Lobby_Attribute** OutAttribute) {
     Log("EOS_LobbyDetails_CopyAttributeByIndex called");
@@ -3911,43 +3895,6 @@ static void SetupEmulatedFunctions() {
     Override("EOS_ByteArray_ToString",                (void*)eos_ByteArray_ToString);
     Override("EOS_ByteArray_FromString",              (void*)eos_ByteArray_FromString);
 
-    char backendMode[32] = { 0 };
-    GetPrivateProfileStringA("EOS", "Backend", "online-v2", backendMode, sizeof(backendMode), ".\\ReFix.ini");
-    bool isOnlineV2 = (_stricmp(backendMode, "legacy") != 0);
-
-    if (isOnlineV2) {
-        Log("[EOS] Backend configured as online-v2: Routing Connect and Identity to modular ReFix EOS v2");
-        Override("EOS_Connect_Login",                     (void*)EOS_Connect_Login);
-        Override("EOS_Connect_CreateUser",                (void*)EOS_Connect_CreateUser);
-        Override("EOS_Connect_LinkAccount",               (void*)EOS_Connect_LinkAccount);
-        Override("EOS_Connect_CreateDeviceId",            (void*)EOS_Connect_CreateDeviceId);
-        Override("EOS_Connect_DeleteDeviceId",            (void*)EOS_Connect_DeleteDeviceId);
-        Override("EOS_Connect_Logout",                    (void*)EOS_Connect_Logout);
-        Override("EOS_Connect_QueryExternalAccountMappings", (void*)EOS_Connect_QueryExternalAccountMappings);
-        Override("EOS_Connect_GetExternalAccountMapping",  (void*)EOS_Connect_GetExternalAccountMapping);
-        Override("EOS_Connect_QueryProductUserIdMappings", (void*)EOS_Connect_QueryProductUserIdMappings);
-        Override("EOS_Connect_GetProductUserIdMapping",   (void*)EOS_Connect_GetProductUserIdMapping);
-        Override("EOS_Connect_GetProductUserExternalAccountCount", (void*)EOS_Connect_GetProductUserExternalAccountCount);
-        Override("EOS_Connect_CopyProductUserInfo",       (void*)EOS_Connect_CopyProductUserInfo);
-        Override("EOS_Connect_CopyProductUserExternalAccountByIndex", (void*)EOS_Connect_CopyProductUserExternalAccountByIndex);
-        Override("EOS_Connect_CopyProductUserExternalAccountByAccountType", (void*)EOS_Connect_CopyProductUserExternalAccountByAccountType);
-        Override("EOS_Connect_CopyProductUserExternalAccountByAccountId", (void*)EOS_Connect_CopyProductUserExternalAccountByAccountId);
-        Override("EOS_Connect_ExternalAccountInfo_Release", (void*)EOS_Connect_ExternalAccountInfo_Release);
-        Override("EOS_Connect_GetLoggedInUserByIndex",    (void*)EOS_Connect_GetLoggedInUserByIndex);
-        Override("EOS_Connect_GetLoggedInUsersCount",     (void*)EOS_Connect_GetLoggedInUsersCount);
-        Override("EOS_Connect_GetLoginStatus",            (void*)EOS_Connect_GetLoginStatus);
-        Override("EOS_Connect_AddNotifyLoginStatusChanged", (void*)EOS_Connect_AddNotifyLoginStatusChanged);
-        Override("EOS_Connect_RemoveNotifyLoginStatusChanged", (void*)EOS_Connect_RemoveNotifyLoginStatusChanged);
-        Override("EOS_Connect_AddNotifyAuthExpiration",    (void*)EOS_Connect_AddNotifyAuthExpiration);
-        Override("EOS_Connect_RemoveNotifyAuthExpiration", (void*)EOS_Connect_RemoveNotifyAuthExpiration);
-
-        Override("EOS_ProductUserId_IsValid",   (void*)EOS_ProductUserId_IsValid);
-        Override("EOS_EpicAccountId_IsValid",   (void*)EOS_EpicAccountId_IsValid);
-        Override("EOS_ProductUserId_ToString",  (void*)EOS_ProductUserId_ToString);
-        Override("EOS_EpicAccountId_ToString",  (void*)EOS_EpicAccountId_ToString);
-        Override("EOS_ProductUserId_FromString", (void*)EOS_ProductUserId_FromString);
-        Override("EOS_EpicAccountId_FromString", (void*)EOS_EpicAccountId_FromString);
-    }
 
     // Connect
     Override("EOS_Connect_AddNotifyAuthExpiration",   (void*)eos_Connect_AddNotifyAuthExpiration);
@@ -4138,6 +4085,59 @@ static void SetupEmulatedFunctions() {
     Override("EOS_SessionSearch_SetSessionId",              (void*)eos_SessionSearch_SetSessionId);
     Override("EOS_SessionSearch_SetMaxResults",             (void*)eos_SessionSearch_SetMaxResults);
     Override("EOS_SessionSearch_Release",                   (void*)eos_SessionSearch_Release);
+
+    // =========================================================================
+    // Modular Online v2 Dynamic Overrides
+    // =========================================================================
+    char backendMode[32] = { 0 };
+    GetPrivateProfileStringA("EOS", "Backend", "online-v2", backendMode, sizeof(backendMode), ".\\ReFix.ini");
+    bool isOnlineV2 = (_stricmp(backendMode, "legacy") != 0);
+
+    if (isOnlineV2) {
+        Log("[EOS] Backend configured as online-v2: Routing Connect, Identity, and Lobby to modular ReFix EOS v2");
+        Override("EOS_Connect_Login",                     (void*)EOS_Connect_Login);
+        Override("EOS_Connect_CreateUser",                (void*)EOS_Connect_CreateUser);
+        Override("EOS_Connect_LinkAccount",               (void*)EOS_Connect_LinkAccount);
+        Override("EOS_Connect_CreateDeviceId",            (void*)EOS_Connect_CreateDeviceId);
+        Override("EOS_Connect_DeleteDeviceId",            (void*)EOS_Connect_DeleteDeviceId);
+        Override("EOS_Connect_Logout",                    (void*)EOS_Connect_Logout);
+        Override("EOS_Connect_QueryExternalAccountMappings", (void*)EOS_Connect_QueryExternalAccountMappings);
+        Override("EOS_Connect_GetExternalAccountMapping",  (void*)EOS_Connect_GetExternalAccountMapping);
+        Override("EOS_Connect_QueryProductUserIdMappings", (void*)EOS_Connect_QueryProductUserIdMappings);
+        Override("EOS_Connect_GetProductUserIdMapping",   (void*)EOS_Connect_GetProductUserIdMapping);
+        Override("EOS_Connect_GetProductUserExternalAccountCount", (void*)EOS_Connect_GetProductUserExternalAccountCount);
+        Override("EOS_Connect_CopyProductUserInfo",       (void*)EOS_Connect_CopyProductUserInfo);
+        Override("EOS_Connect_CopyProductUserExternalAccountByIndex", (void*)EOS_Connect_CopyProductUserExternalAccountByIndex);
+        Override("EOS_Connect_CopyProductUserExternalAccountByAccountType", (void*)EOS_Connect_CopyProductUserExternalAccountByAccountType);
+        Override("EOS_Connect_CopyProductUserExternalAccountByAccountId", (void*)EOS_Connect_CopyProductUserExternalAccountByAccountId);
+        Override("EOS_Connect_ExternalAccountInfo_Release", (void*)EOS_Connect_ExternalAccountInfo_Release);
+        Override("EOS_Connect_GetLoggedInUserByIndex",    (void*)EOS_Connect_GetLoggedInUserByIndex);
+        Override("EOS_Connect_GetLoggedInUsersCount",     (void*)EOS_Connect_GetLoggedInUsersCount);
+        Override("EOS_Connect_GetLoginStatus",            (void*)EOS_Connect_GetLoginStatus);
+        Override("EOS_Connect_AddNotifyLoginStatusChanged", (void*)EOS_Connect_AddNotifyLoginStatusChanged);
+        Override("EOS_Connect_RemoveNotifyLoginStatusChanged", (void*)EOS_Connect_RemoveNotifyLoginStatusChanged);
+        Override("EOS_Connect_AddNotifyAuthExpiration",    (void*)EOS_Connect_AddNotifyAuthExpiration);
+        Override("EOS_Connect_RemoveNotifyAuthExpiration", (void*)EOS_Connect_RemoveNotifyAuthExpiration);
+
+        Override("EOS_ProductUserId_IsValid",   (void*)EOS_ProductUserId_IsValid);
+        Override("EOS_EpicAccountId_IsValid",   (void*)EOS_EpicAccountId_IsValid);
+        Override("EOS_ProductUserId_ToString",  (void*)EOS_ProductUserId_ToString);
+        Override("EOS_EpicAccountId_ToString",  (void*)EOS_EpicAccountId_ToString);
+        Override("EOS_ProductUserId_FromString", (void*)EOS_ProductUserId_FromString);
+        Override("EOS_EpicAccountId_FromString", (void*)EOS_EpicAccountId_FromString);
+
+        // Lobby Create & Modification
+        Override("EOS_Lobby_CreateLobby",                         (void*)EOS_Lobby_CreateLobby);
+        Override("EOS_Lobby_CreateLobbyModification",              (void*)EOS_Lobby_CreateLobbyModification);
+        Override("EOS_Lobby_UpdateLobbyModification",              (void*)EOS_Lobby_UpdateLobbyModification);
+        Override("EOS_LobbyModification_SetPermissionLevel",       (void*)EOS_LobbyModification_SetPermissionLevel);
+        Override("EOS_LobbyModification_SetMaxMembers",           (void*)EOS_LobbyModification_SetMaxMembers);
+        Override("EOS_LobbyModification_SetBucketId",               (void*)EOS_LobbyModification_SetBucketId);
+        Override("EOS_LobbyModification_SetInvitesAllowed",       (void*)EOS_LobbyModification_SetInvitesAllowed);
+        Override("EOS_LobbyModification_AddAttribute",            (void*)EOS_LobbyModification_AddAttribute);
+        Override("EOS_LobbyModification_Release",                 (void*)EOS_LobbyModification_Release);
+        Override("EOS_Lobby_Attribute_Release",                    (void*)EOS_Lobby_Attribute_Release);
+    }
 }
 
 // =============================================================================
