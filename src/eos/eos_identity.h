@@ -50,6 +50,7 @@ public:
 
     void Initialize();
     void RefreshFromEnvironment();
+    void LoadFromProfilePath(const std::string& customProfilePath);
 
     // Local user identity
     EOS_ProductUserId GetLocalProductUserId();

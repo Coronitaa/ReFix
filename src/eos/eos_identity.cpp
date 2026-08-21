@@ -521,6 +521,61 @@ void IdentityManager::FreeExternalAccountInfo(void* info) {
     free(layout);
 }
 
+
+void IdentityManager::LoadFromProfilePath(const std::string& customProfilePath) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::string uuid;
+    std::string dispName = "ReFix Player";
+    uint64_t steamId = 76561198000000001ULL;
+
+    std::ifstream inFile(customProfilePath);
+    if (inFile.is_open()) {
+        std::string line;
+        while (std::getline(inFile, line)) {
+            size_t pos = line.find("account_uuid");
+            if (pos != std::string::npos) {
+                size_t q1 = line.find('"', pos + 15);
+                if (q1 != std::string::npos) {
+                    size_t q2 = line.find('"', q1 + 1);
+                    if (q2 != std::string::npos) {
+                        uuid = line.substr(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+            }
+            size_t npos = line.find("display_name");
+            if (npos != std::string::npos) {
+                size_t q1 = line.find('"', npos + 15);
+                if (q1 != std::string::npos) {
+                    size_t q2 = line.find('"', q1 + 1);
+                    if (q2 != std::string::npos) {
+                        dispName = line.substr(q1 + 1, q2 - q1 - 1);
+                    }
+                }
+            }
+        }
+        inFile.close();
+    }
+
+    if (uuid.empty()) {
+        uuid = GenerateRandomUUID();
+    }
+
+    m_localUser.accountUuid = uuid;
+    m_localUser.displayName = dispName;
+    m_localUser.steamId64 = steamId;
+    m_localUser.puidString = DerivePuidFromUuid(uuid);
+    m_localUser.eaidString = DeriveEaidFromUuid(uuid);
+
+    m_localUser.handlePUID = (OpaqueProductUserIdHandle*)GetOrCreateProductUserId(m_localUser.puidString);
+    m_localUser.handleEAID = m_recordsByPuidStr[m_localUser.puidString].handleEAID;
+
+    m_localUser.externalAccounts.clear();
+    m_localUser.externalAccounts.push_back({ EOS_EAT_EPIC, m_localUser.eaidString, m_localUser.displayName });
+    m_localUser.externalAccounts.push_back({ EOS_EAT_STEAM, std::to_string(steamId), m_localUser.displayName });
+
+    m_recordsByPuidStr[m_localUser.puidString] = m_localUser;
+}
+
 } // namespace ReFixEOS
 
 extern "C" {

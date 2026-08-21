@@ -34,11 +34,28 @@ void LogDiagnostic(const char* format, ...) {
     SYSTEMTIME st;
     GetLocalTime(&st);
     char finalMsg[1200];
-    sprintf_s(finalMsg, "[%02d:%02d:%02d.%03d] [TID:0x%04X] [EOS:CONNECT] %s\n",
-        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, GetCurrentThreadId(), buffer);
+    sprintf_s(finalMsg, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [TID:0x%04X] [EOS:CONNECT] %s\n",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, GetCurrentThreadId(), buffer);
 
     OutputDebugStringA(finalMsg);
     printf("%s", finalMsg);
+
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string logPath(exePath);
+    size_t pos = logPath.find_last_of("\\/");
+    if (pos != std::string::npos) {
+        logPath = logPath.substr(0, pos + 1) + "ReFix.log";
+    } else {
+        logPath = "ReFix.log";
+    }
+
+    FILE* f = nullptr;
+    fopen_s(&f, logPath.c_str(), "a");
+    if (f) {
+        fprintf(f, "%s", finalMsg);
+        fclose(f);
+    }
 }
 
 static std::string RedactToken(const char* token) {
