@@ -2395,7 +2395,16 @@ static void InstallVTableHooks() {
         }
     }
 
-    // 3. ISteamUser - No VTable hooks needed; exported wrappers handle user auth cleanly.
+    // 3. ISteamUser
+    fn_GetInterface_t pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUser_v021");
+    if (!pfnUser) pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUser_v020");
+    if (!pfnUser) pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUser");
+    if (pfnUser) {
+        void* pUser = pfnUser();
+        if (pUser) {
+            HookVTableMethod(pUser, 14, (void*)Hooked_VTable_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi);
+        }
+    }
 
     // 4. ISteamApps
     fn_GetInterface_t pfnApps = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamApps_v008");
@@ -2470,24 +2479,25 @@ static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 1) {
         void** vtable = *(void***)pCallback;
         if (!vtable) return false;
 
-        typedef void (*fn_Run0_t)(void* self, void* pvParam);
-        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
-        if (pRun0) {
-            pRun0(pCallback, pData);
-        }
-
         typedef void (*fn_Run1_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hAPICall);
         fn_Run1_t pRun1 = (fn_Run1_t)vtable[1];
         if (pRun1) {
             pRun1(pCallback, pData, false, hAPICall);
+            return true;
         }
-        return true;
+
+        typedef void (*fn_Run0_t)(void* self, void* pvParam);
+        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
+        if (pRun0) {
+            pRun0(pCallback, pData);
+            return true;
+        }
+        return false;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         DWORD code = GetExceptionCode();
         ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
         return false;
     }
-    return false;
 }
 
 static void DispatchAuthCallbacksImmediately(int targetCallback) {
@@ -2617,7 +2627,11 @@ static std::once_flag g_authDispatchOnce;
 static void AuthDispatchWorker() {
     while (g_authDispatchRunning) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        DispatchPendingAuthCallbacks();
+        try {
+            DispatchPendingAuthCallbacks();
+        } catch (...) {
+            ReFixLog("AuthDispatchWorker: caught unhandled exception");
+        }
     }
 }
 
@@ -2664,37 +2678,11 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
     if (g_pfn_RegisterCallback) g_pfn_RegisterCallback(pCallback, iCallback);
 
     if (g_isGoldbergMode) {
-        if (iCallback == 101 || iCallback == 154 || iCallback == 163) {
+        if (iCallback == 101 || iCallback == 154 || iCallback == 163 || iCallback == 168) {
             std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
             g_pendingAuthCallbacks.push_back({ pCallback, iCallback, 0, 0 });
             ReFixLog("  -> Queued auth callback %d for %p", iCallback, pCallback);
-        } else if (iCallback == 168) {
-            if (s_runCallbacksLogged > 0) {
-                // Runtime auth ticket request (e.g. RedpointEOS FSteamCredentialObtainer)
-                uint32_t handle = g_lastAuthTicketHandle ? g_lastAuthTicketHandle : 1;
-                if (g_lastAuthTicketData.empty()) {
-                    g_lastAuthTicketData = GenerateDummyAuthTicket();
-                }
-                struct {
-                    uint32_t m_hAuthTicket;
-                    int32_t  m_eResult;
-                    int32_t  m_cubTicket;
-                    uint8_t  m_rgubTicket[1024];
-                } data = {};
-                data.m_hAuthTicket = handle;
-                data.m_eResult = 1; // k_EResultOK
-                data.m_cubTicket = (int32_t)g_lastAuthTicketData.size();
-                if (data.m_cubTicket > 0 && data.m_cubTicket <= sizeof(data.m_rgubTicket)) {
-                    memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
-                }
-                if (SafeCallRun(pCallback, &data, handle)) {
-                    ReFixLog("  -> Runtime: Immediately dispatched GetTicketForWebApiResponse_t (168, handle=%u) to %p", handle, pCallback);
-                }
-            } else {
-                std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
-                g_pendingAuthCallbacks.push_back({ pCallback, iCallback, 0, 0 });
-                ReFixLog("  -> Startup: Queued auth callback 168 for %p", pCallback);
-            }
+            StartAuthDispatchWorker();
         }
     }
 }
@@ -3385,6 +3373,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             }
             EnsureOriginal();
             StartConsoleHotkeyMonitor();
+            StartAuthDispatchWorker();
             break;
         case DLL_PROCESS_DETACH:
             SteamP2PHook::Uninstall();

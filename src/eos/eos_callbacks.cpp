@@ -1,3 +1,4 @@
+#include "eos_connect.h"
 // =============================================================================
 // ReFix EOS Online v2 - Callback & Notification Dispatcher Implementation
 // =============================================================================
@@ -32,6 +33,8 @@ size_t CallbackManager::FlushCallbacks() {
         if (m_queue.empty()) return 0;
         localQueue.swap(m_queue);
     }
+
+    ReFixEOS::LogDiagnostic("CallbackManager::FlushCallbacks: Disagree/Dispatching %u callbacks", (uint32_t)localQueue.size());
 
     size_t executedCount = 0;
     for (const auto& item : localQueue) {

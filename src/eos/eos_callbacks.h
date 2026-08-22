@@ -57,7 +57,9 @@ public:
         std::lock_guard<std::mutex> lock(m_notifyMutex);
         for (const auto& sub : m_subscriptions) {
             if (sub.eventType == eventType && sub.callbackFn) {
-                QueueCallback((void*)sub.callbackFn, data);
+                T copyData = data;
+                copyData.ClientData = sub.clientData;
+                QueueCallback((void*)sub.callbackFn, copyData);
             }
         }
     }

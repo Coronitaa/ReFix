@@ -16,8 +16,15 @@ constexpr uint32_t CTOK_HANDLE_MAGIC = 0x43544F4B; // 'CTOK'
 bool IsDebugLoggingEnabled() {
     static int s_cached = -1;
     if (s_cached == -1) {
+        char exePath[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string iniPath(exePath);
+        size_t pos = iniPath.find_last_of("\\/");
+        if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
+        else iniPath = "ReFix.ini";
+
         char buf[32] = { 0 };
-        GetPrivateProfileStringA("EOS", "DebugLogging", "false", buf, sizeof(buf), ".\\ReFix.ini");
+        GetPrivateProfileStringA("EOS", "DebugLogging", "true", buf, sizeof(buf), iniPath.c_str());
         s_cached = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0) ? 1 : 0;
     }
     return (s_cached == 1);
@@ -107,8 +114,8 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
         creds->Type, ReFixEOS::RedactToken(creds->Token).c_str());
 
     // 2. Explicit State Machine by Credential Type
-    if (creds->Type == EOS_ECT_STEAM_SESSION_TICKET || creds->Type == EOS_ECT_STEAM_APP_TICKET) {
-        // Steam session ticket authentication
+    if (creds->Type == EOS_ECT_STEAM_SESSION_TICKET || creds->Type == EOS_ECT_STEAM_APP_TICKET || creds->Type == 18 /* EOS_ECT_EXTERNAL_ACCOUNT */) {
+        // Steam session ticket / external auth authentication
         if (strlen(creds->Token) < 4) {
             ReFixEOS::LogDiagnostic("EOS_Connect_Login: Steam ticket token too short -> EOS_InvalidAuth");
             EOS_Connect_LoginCallbackInfo cbInfo = {};
@@ -173,6 +180,14 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
         cbInfo.LocalUserId = localPuid;
         cbInfo.ContinuanceToken = nullptr;
         ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+
+        // Dispatch Login Status Notification to registered listeners (e.g. RedpointEOS)
+        EOS_Connect_LoginStatusChangedCallbackInfo notif = {};
+        notif.ClientData = nullptr;
+        notif.LocalUserId = localPuid;
+        notif.PreviousStatus = EOS_LS_NotLoggedIn;
+        notif.CurrentStatus = EOS_LS_LoggedIn;
+        ReFixEOS::CallbackManager::Get().DispatchNotification(1, notif);
         return;
     }
     else {

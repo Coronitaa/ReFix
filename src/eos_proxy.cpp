@@ -198,7 +198,10 @@ static void LoadEOSLogConfig() {
     if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
 
     char buf[64];
-    GetPrivateProfileStringA("Debug", "EnableLog", "false", buf, sizeof(buf), iniPath.c_str());
+    GetPrivateProfileStringA("EOS", "DebugLogging", "", buf, sizeof(buf), iniPath.c_str());
+    if (buf[0] == '\0') {
+        GetPrivateProfileStringA("Debug", "EnableLog", "true", buf, sizeof(buf), iniPath.c_str());
+    }
     g_enableEosLog = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
 }
 
@@ -2238,7 +2241,7 @@ static void eos_Lobby_JoinLobby(void* H, void* O, void* C, void* Cb) {
 }
 
 static EOS_EResult eos_Lobby_CreateLobbySearch(void* H, void* O, void** OutLobbySearchHandle) {
-    Log("EOS_Lobby_CreateLobbySearch called");
+    Log("[EOS_RUNTIME] EOS_Lobby_CreateLobbySearch called");
     if (OutLobbySearchHandle) {
         *OutLobbySearchHandle = HANDLE_LOBBY_SEARCH;
     }
@@ -2872,7 +2875,7 @@ struct CB_Sessions_UpdateSession {
 };
 
 static void eos_Sessions_UpdateSession(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Sessions_UpdateSession called for SessionName='%s'", g_activeSessionName.c_str());
+    Log("[EOS_RUNTIME] EOS_Sessions_UpdateSession called for SessionName='%s'", g_activeSessionName.c_str());
     g_hasActiveSession = true;
     CreateAndTagRealSteamLobbyAsync();
     
@@ -2893,7 +2896,7 @@ static EOS_EResult eos_Sessions_CreateSessionModification(void* H, void* O, void
         auto* opts = (EOS_Sessions_CreateSessionModificationOptions*)O;
         if (opts->SessionName && opts->SessionName[0] != '\0') {
             g_activeSessionName = opts->SessionName;
-            Log("EOS_Sessions_CreateSessionModification for SessionName='%s'", g_activeSessionName.c_str());
+            Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification for SessionName='%s'", g_activeSessionName.c_str());
         }
     } else {
         Log("EOS_Sessions_CreateSessionModification called");
@@ -2918,7 +2921,7 @@ static void eos_Sessions_DestroySession(void* H, void* O, void* C, void* Cb) {
 }
 
 static EOS_EResult eos_Sessions_CreateSessionSearch(void* H, void* O, void** OutSessionSearchHandle) {
-    Log("EOS_Sessions_CreateSessionSearch called");
+    Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionSearch called");
     if (OutSessionSearchHandle) *OutSessionSearchHandle = (void*)0x2001;
     return EOS_Success;
 }
@@ -2930,7 +2933,7 @@ struct CB_SessionSearch_Find {
 };
 
 static void eos_SessionSearch_Find(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_SessionSearch_Find called");
+    Log("[EOS_RUNTIME] EOS_SessionSearch_Find called");
     eos_LobbySearch_Find(H, O, C, Cb);
 }
 
@@ -3726,7 +3729,7 @@ struct CB_Sessions_StartSession {
 };
 
 static void eos_Sessions_StartSession(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Sessions_StartSession called");
+    Log("[EOS_RUNTIME] EOS_Sessions_StartSession called");
     CB_Sessions_StartSession info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = C;
@@ -4089,8 +4092,15 @@ static void SetupEmulatedFunctions() {
     // =========================================================================
     // Modular Online v2 Dynamic Overrides
     // =========================================================================
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string iniPath(exePath);
+    size_t pos = iniPath.find_last_of("\\/");
+    if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
+    else iniPath = "ReFix.ini";
+
     char backendMode[32] = { 0 };
-    GetPrivateProfileStringA("EOS", "Backend", "online-v2", backendMode, sizeof(backendMode), ".\\ReFix.ini");
+    GetPrivateProfileStringA("EOS", "Backend", "online-v2", backendMode, sizeof(backendMode), iniPath.c_str());
     bool isOnlineV2 = (_stricmp(backendMode, "legacy") != 0);
 
     if (isOnlineV2) {

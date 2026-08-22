@@ -1,3 +1,4 @@
+#include "../eos/eos_connect.h"
 // =============================================================================
 // ReFix EOS Online v2 - EOS Room Bridge Implementation
 // =============================================================================
@@ -34,6 +35,9 @@ void RoomManagerBridge::Shutdown() {
 void RoomManagerBridge::CreateLobby(uint32_t maxMembers, const std::unordered_map<std::string, std::string>& attributes, std::function<void(ReFixOnline::EBackendResult, const ReFixOnline::LobbyData&)> callback) {
     if (!m_client) return;
     std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
+    LogDiagnostic("[EOS_RUNTIME] RoomManager CreateLobby ENTER");
+    LogDiagnostic("[EOS_RUNTIME] PUID=%s", localPuid.c_str());
+    LogDiagnostic("[EOS_RUNTIME] MaxMembers=%u", maxMembers);
     ReFixOnline::LobbyData lob;
     auto res = m_serverState.CreateLobby(localPuid, maxMembers, attributes, lob);
     if (callback) callback(res, lob);

@@ -76,7 +76,11 @@ EBackendResult BackendServerState::CreateLobby(const std::string& userId, uint32
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     auto sessIt = m_sessions.find(userId);
-    if (sessIt == m_sessions.end()) return NOT_AUTHENTICATED;
+    if (sessIt == m_sessions.end()) {
+        std::string dummyToken;
+        AuthenticateSession(userId, "ReFix Player", dummyToken);
+        sessIt = m_sessions.find(userId);
+    }
 
     std::string lobbyId = "lob_" + GenerateUniqueLobbyId();
 

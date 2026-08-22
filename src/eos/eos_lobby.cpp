@@ -40,11 +40,46 @@ struct OpaqueLobbyModification {
 
 static constexpr uint32_t LMOD_MAGIC = 0x4C4D4F44;
 
+struct CreateLobbyClosure {
+    void* completionDelegate;
+    void* clientData;
+    char* lobbyId;
+    EOS_EResult resultCode;
+};
+
+static void ForwardCreateLobbyCallback(const void* data) {
+    const auto* closure = (const CreateLobbyClosure*)data;
+    if (closure && closure->completionDelegate) {
+        EOS_Lobby_CreateLobbyCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = closure->resultCode;
+        cbInfo.ClientData = closure->clientData;
+        cbInfo.LobbyId = closure->lobbyId;
+
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE CALLBACK DISPATCHED (Result=%d, LobbyId=%s)",
+            (int)cbInfo.ResultCode, cbInfo.LobbyId ? cbInfo.LobbyId : "null");
+
+        typedef void (*EOS_Lobby_OnCreateLobbyCallback)(const EOS_Lobby_CreateLobbyCallbackInfo* Data);
+        auto fn = (EOS_Lobby_OnCreateLobbyCallback)closure->completionDelegate;
+        fn(&cbInfo);
+
+        if (closure->lobbyId) {
+            free((void*)closure->lobbyId);
+        }
+    }
+}
+
 } // namespace ReFixEOS
 
 extern "C" {
 
 void EOS_Lobby_CreateLobby(EOS_HLobby Handle, const EOS_Lobby_CreateLobbyOptions* Options, void* ClientData, void* CompletionDelegate) {
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] EOS_Lobby_CreateLobby ENTER");
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] LocalUserId=%p", Options ? Options->LocalUserId : nullptr);
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] MaxLobbyMembers=%u", Options ? Options->MaxLobbyMembers : 0);
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] PermissionLevel=%d", Options ? (int)Options->PermissionLevel : 0);
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] PresenceEnabled=%d", Options ? (int)Options->bPresenceEnabled : 0);
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] BucketId=%s", (Options && Options->BucketId) ? Options->BucketId : "null");
+
     if (!CompletionDelegate) {
         ReFixEOS::LogDiagnostic("EOS_Lobby_CreateLobby: CompletionDelegate is NULL, aborting");
         return;
@@ -57,22 +92,26 @@ void EOS_Lobby_CreateLobby(EOS_HLobby Handle, const EOS_Lobby_CreateLobbyOptions
     // 1. Parameter Validation
     if (!Options || Options->ApiVersion <= 0) {
         ReFixEOS::LogDiagnostic("EOS_Lobby_CreateLobby: Invalid parameters (Options=%p)", Options);
-        EOS_Lobby_CreateLobbyCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_InvalidParameters;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LobbyId = nullptr;
-        cbMgr.QueueCallback(CompletionDelegate, cbInfo);
+        ReFixEOS::CreateLobbyClosure closure = {};
+        closure.completionDelegate = CompletionDelegate;
+        closure.clientData = ClientData;
+        closure.resultCode = EOS_InvalidParameters;
+        closure.lobbyId = nullptr;
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE CALLBACK QUEUED");
+        cbMgr.QueueCallback((void*)ReFixEOS::ForwardCreateLobbyCallback, closure);
         return;
     }
 
     // 2. Validate LocalUserId (Must be valid registered opaque handle)
     if (!Options->LocalUserId || !idMgr.IsValidProductUserId(Options->LocalUserId)) {
         ReFixEOS::LogDiagnostic("EOS_Lobby_CreateLobby: Invalid LocalUserId handle (%p)", Options->LocalUserId);
-        EOS_Lobby_CreateLobbyCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_InvalidUser;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LobbyId = nullptr;
-        cbMgr.QueueCallback(CompletionDelegate, cbInfo);
+        ReFixEOS::CreateLobbyClosure closure = {};
+        closure.completionDelegate = CompletionDelegate;
+        closure.clientData = ClientData;
+        closure.resultCode = EOS_InvalidUser;
+        closure.lobbyId = nullptr;
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE CALLBACK QUEUED");
+        cbMgr.QueueCallback((void*)ReFixEOS::ForwardCreateLobbyCallback, closure);
         return;
     }
 
@@ -80,22 +119,26 @@ void EOS_Lobby_CreateLobby(EOS_HLobby Handle, const EOS_Lobby_CreateLobbyOptions
     uint32_t maxMembers = Options->MaxLobbyMembers;
     if (maxMembers == 0 || maxMembers > ReFixOnline::MAX_LOBBY_MEMBERS) {
         ReFixEOS::LogDiagnostic("EOS_Lobby_CreateLobby: Invalid MaxLobbyMembers (%u) -> EOS_InvalidParameters", maxMembers);
-        EOS_Lobby_CreateLobbyCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_InvalidParameters;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LobbyId = nullptr;
-        cbMgr.QueueCallback(CompletionDelegate, cbInfo);
+        ReFixEOS::CreateLobbyClosure closure = {};
+        closure.completionDelegate = CompletionDelegate;
+        closure.clientData = ClientData;
+        closure.resultCode = EOS_InvalidParameters;
+        closure.lobbyId = nullptr;
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE CALLBACK QUEUED");
+        cbMgr.QueueCallback((void*)ReFixEOS::ForwardCreateLobbyCallback, closure);
         return;
     }
 
     // 4. Validate BucketId if present
     if (Options->BucketId && strlen(Options->BucketId) > ReFixOnline::MAX_ATTRIBUTE_VAL_LEN) {
         ReFixEOS::LogDiagnostic("EOS_Lobby_CreateLobby: BucketId length exceeded limit");
-        EOS_Lobby_CreateLobbyCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_InvalidParameters;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LobbyId = nullptr;
-        cbMgr.QueueCallback(CompletionDelegate, cbInfo);
+        ReFixEOS::CreateLobbyClosure closure = {};
+        closure.completionDelegate = CompletionDelegate;
+        closure.clientData = ClientData;
+        closure.resultCode = EOS_InvalidParameters;
+        closure.lobbyId = nullptr;
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE CALLBACK QUEUED");
+        cbMgr.QueueCallback((void*)ReFixEOS::ForwardCreateLobbyCallback, closure);
         return;
     }
 
@@ -110,32 +153,39 @@ void EOS_Lobby_CreateLobby(EOS_HLobby Handle, const EOS_Lobby_CreateLobbyOptions
     }
     attributes["permission_level"] = "i:" + std::to_string(Options->PermissionLevel);
     attributes["presence_enabled"] = Options->bPresenceEnabled ? "b:1" : "b:0";
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] AttributeCount=%u", (uint32_t)attributes.size());
 
     // 6. Asynchronous Request to Authoritative Backend State (REQUESTED -> BACKEND_PENDING -> CREATED)
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] RoomManager CreateLobby ENTER");
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] PUID=%s", puidStr.c_str());
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] MaxMembers=%u", maxMembers);
+    ReFixEOS::LogDiagnostic("[EOS_RUNTIME] Backend CreateLobby ENTER");
+
     ReFixOnline::LobbyData outLobby;
     auto res = roomBridge.GetServerState().CreateLobby(puidStr, maxMembers, attributes, outLobby);
 
     if (res == ReFixOnline::SUCCESS) {
-        ReFixEOS::LogDiagnostic("EOS_Lobby_CreateLobby: Backend SUCCESS -> LobbyId=%s, Owner=%s",
-            outLobby.lobbyId.c_str(), outLobby.ownerUserId.c_str());
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] BACKEND CREATE SUCCESS LobbyId=%s", outLobby.lobbyId.c_str());
 
-        // Allocate persistent string buffer for callback payload
         char* lobbyIdBuf = _strdup(outLobby.lobbyId.c_str());
 
-        EOS_Lobby_CreateLobbyCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_Success;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LobbyId = lobbyIdBuf;
+        ReFixEOS::CreateLobbyClosure closure = {};
+        closure.completionDelegate = CompletionDelegate;
+        closure.clientData = ClientData;
+        closure.resultCode = EOS_Success;
+        closure.lobbyId = lobbyIdBuf;
 
-        // Callback is strictly queued and executed during EOS_Platform_Tick()
-        cbMgr.QueueCallback(CompletionDelegate, cbInfo);
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE CALLBACK QUEUED");
+        cbMgr.QueueCallback((void*)ReFixEOS::ForwardCreateLobbyCallback, closure);
     } else {
-        ReFixEOS::LogDiagnostic("EOS_Lobby_CreateLobby: Backend failed with error code %d", (int)res);
-        EOS_Lobby_CreateLobbyCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = (res == ReFixOnline::NOT_AUTHENTICATED) ? EOS_NoConnection : EOS_LimitExceeded;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LobbyId = nullptr;
-        cbMgr.QueueCallback(CompletionDelegate, cbInfo);
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE FAILED Result=%d", (int)res);
+        ReFixEOS::CreateLobbyClosure closure = {};
+        closure.completionDelegate = CompletionDelegate;
+        closure.clientData = ClientData;
+        closure.resultCode = (res == ReFixOnline::NOT_AUTHENTICATED) ? EOS_NoConnection : EOS_LimitExceeded;
+        closure.lobbyId = nullptr;
+        ReFixEOS::LogDiagnostic("[EOS_RUNTIME] CREATE CALLBACK QUEUED");
+        cbMgr.QueueCallback((void*)ReFixEOS::ForwardCreateLobbyCallback, closure);
     }
 }
 

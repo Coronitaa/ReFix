@@ -20,7 +20,6 @@ static void OnCreateLobbyCallback(const void* data) {
     s_receivedClientData = info->ClientData;
     if (info->LobbyId) {
         s_createdLobbyId = info->LobbyId;
-        free((void*)info->LobbyId);
     }
     s_lobbyCreated = true;
 }
