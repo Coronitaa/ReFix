@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
 // =============================================================================
 // Forwards 1055 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
@@ -2110,13 +2110,48 @@ static uint64_t Hooked_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType,
 }
 
 static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDLobby) {
-    ReFixLog("ISteamMatchmaking::JoinLobby Hook called (LobbyID=%llu)", steamIDLobby);
+    LoadConfig();
+    uint32_t realApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    uint32_t maskApp = g_config.maskAppIdNum;
+
+    ReFixLog("ISteamMatchmaking::JoinLobby Hook called:");
+    ReFixLog("  LobbyID: %llu", steamIDLobby);
+    ReFixLog("  RealAppId: %u | MaskAppId: %u", realApp, maskApp);
+    ReFixLog("  Interface (self): %p", self);
+    ReFixLog("  g_orig_VTable_JoinLobby: %p", g_orig_VTable_JoinLobby);
+    ReFixLog("  g_pfn_JoinLobby: %p", g_pfn_JoinLobby);
+
     ReFix_NotifyLobbyID(steamIDLobby);
+
+    const char* targetName = "None";
+    void* targetAddr = nullptr;
     uint64_t hCall = 0;
+
     if (g_orig_VTable_JoinLobby) {
+        targetName = "VTable";
+        targetAddr = (void*)g_orig_VTable_JoinLobby;
         hCall = g_orig_VTable_JoinLobby(self, steamIDLobby);
+    } else if (g_pfn_JoinLobby) {
+        targetName = "Flat Export";
+        targetAddr = (void*)g_pfn_JoinLobby;
+        hCall = g_pfn_JoinLobby(self, steamIDLobby);
+    } else {
+        targetName = "None (No valid JoinLobby target resolved)";
+        targetAddr = nullptr;
+        hCall = 0;
     }
+
+    ReFixLog("  Target Selected: %s (%p)", targetName, targetAddr);
     ReFixLog("  -> JoinLobby APICall handle: %llu", hCall);
+
+    if (hCall == 0) {
+        if (!targetAddr) {
+            ReFixLog("  [ERROR] JoinLobby failed: No backend function pointer available (VTable=null, Export=null)");
+        } else {
+            ReFixLog("  [WARNING] JoinLobby backend target %s (%p) returned 0 (k_uAPICallInvalid) for LobbyID=%llu",
+                     targetName, targetAddr, steamIDLobby);
+        }
+    }
 
     // Godot-specific: steam-multiplayer-peer.dll waits for LobbyEnter_t (iCallback=504)
     // before calling ISteamNetworkingSockets::ConnectP2P(). If the lobby ID is synthetic
@@ -2457,9 +2492,7 @@ static void InstallVTableHooks() {
     if (pfnMM) {
         void* pMM = pfnMM();
         if (pMM) {
-            if (g_godotIsEngine) {
-                HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
-            }
+            HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
             HookVTableMethod(pMM, 20, (void*)Hooked_ISteamMatchmaking_SetLobbyData, (void**)&g_orig_VTable_SetLobbyData);
         }
     }
