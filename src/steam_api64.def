@@ -2,6 +2,7 @@ LIBRARY steam_api64
 EXPORTS
     ReFix_NotifyLobbyID
     ReFix_NotifyLobbyMemberChange
+    ReFix_Steam_GetCapturedTicketData
     GetHSteamPipe=GetHSteamPipe_proxy
     GetHSteamUser=GetHSteamUser_proxy
     SteamAPI_GetHSteamPipe=SteamAPI_GetHSteamPipe_proxy

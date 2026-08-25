@@ -1,4 +1,5 @@
 #include "../src/eos/eos_connect.h"
+#include "../src/identity/online_identity_provider.h"
 #include <iostream>
 #include <cassert>
 #include <atomic>
@@ -22,17 +23,24 @@ int main() {
     std::cout << "ReFix EOS Online v2 - Connect Login Unit Test" << std::endl;
     std::cout << "==========================================================" << std::endl;
 
+    auto provider = ReFixIdentity::GetActiveIdentityProvider();
     auto& idMgr = ReFixEOS::IdentityManager::Get();
     idMgr.Initialize();
     auto& cbMgr = ReFixEOS::CallbackManager::Get();
     cbMgr.Reset();
 
-    // TEST 1: Valid Steam Session Ticket Login
-    std::cout << "\n[TEST 1] Valid Steam Session Ticket Login..." << std::endl;
+    // Setup fixture: capture a 64-byte ticket for testing
+    std::vector<uint8_t> fixtureTicket(64, 0xAB);
+    fixtureTicket[0] = 0x14; // gc_len
+    provider->SetCapturedSteamTicket(fixtureTicket.data(), fixtureTicket.size(), 1001);
+    std::string validTicketHex = provider->GetCapturedTicketHex();
+
+    // TEST 1: Valid Steam Session Ticket Login (Exact Captured Ticket)
+    std::cout << "\n[TEST 1] Valid Steam Session Ticket Login (Exact Match)..." << std::endl;
     EOS_Connect_Credentials creds = {};
     creds.ApiVersion = 1;
     creds.Type = EOS_ECT_STEAM_SESSION_TICKET;
-    creds.Token = "14000000AABBCCDDEEFF001122334455";
+    creds.Token = validTicketHex.c_str();
 
     EOS_Connect_LoginOptions loginOpts = {};
     loginOpts.ApiVersion = 2;
@@ -61,10 +69,19 @@ int main() {
     assert(s_receivedUserId == idMgr.GetLocalProductUserId()); // Must match
     std::cout << "  Repeated login returned identical ProductUserId handle!" << std::endl;
 
-    // TEST 3: Invalid Credentials (Null options / Null credentials / Short token)
-    std::cout << "\n[TEST 3] Invalid Credentials Validation..." << std::endl;
+    // TEST 3: Arbitrary / Random / Fake Token REJECTION
+    std::cout << "\n[TEST 3] Arbitrary / Random Token Rejection..." << std::endl;
+    creds.Token = "DEADBEEF0123456789ABCDEF"; // Random 24-char hex not matching captured ticket
     s_loginCalled = false;
-    EOS_Connect_Login(nullptr, nullptr, (void*)0x3333, (void*)OnLoginCallback);
+    EOS_Connect_Login(nullptr, &loginOpts, (void*)0x3333, (void*)OnLoginCallback);
+    cbMgr.FlushCallbacks();
+    assert(s_loginCalled && s_loginResult == EOS_InvalidAuth);
+    std::cout << "  [PASS] Arbitrary random token strictly rejected with EOS_InvalidAuth!" << std::endl;
+
+    // TEST 4: Invalid Parameters (Null options / Null credentials / Short token)
+    std::cout << "\n[TEST 4] Invalid Parameters Validation..." << std::endl;
+    s_loginCalled = false;
+    EOS_Connect_Login(nullptr, nullptr, (void*)0x4444, (void*)OnLoginCallback);
     cbMgr.FlushCallbacks();
     assert(s_loginCalled && s_loginResult == EOS_InvalidParameters);
 
@@ -72,20 +89,20 @@ int main() {
     badOpts.ApiVersion = 0; // Bad version
     badOpts.Credentials = nullptr;
     s_loginCalled = false;
-    EOS_Connect_Login(nullptr, &badOpts, (void*)0x4444, (void*)OnLoginCallback);
+    EOS_Connect_Login(nullptr, &badOpts, (void*)0x5555, (void*)OnLoginCallback);
     cbMgr.FlushCallbacks();
     assert(s_loginCalled && s_loginResult == EOS_InvalidParameters);
 
-    creds.Token = "ab"; // Too short
+    creds.Token = "ab"; // Invalid length
     s_loginCalled = false;
-    EOS_Connect_Login(nullptr, &loginOpts, (void*)0x5555, (void*)OnLoginCallback);
+    EOS_Connect_Login(nullptr, &loginOpts, (void*)0x6666, (void*)OnLoginCallback);
     cbMgr.FlushCallbacks();
     assert(s_loginCalled && s_loginResult == EOS_InvalidAuth);
-    std::cout << "  Bad credentials safely rejected with EOS_InvalidParameters / EOS_InvalidAuth!" << std::endl;
+    std::cout << "  Bad parameters safely rejected with EOS_InvalidParameters / EOS_InvalidAuth!" << std::endl;
 
-    // TEST 4: Concurrent Thread Safety Login
-    std::cout << "\n[TEST 4] Concurrent Multi-Threaded Login Queuing..." << std::endl;
-    creds.Token = "14000000AABBCCDDEEFF001122334455";
+    // TEST 5: Concurrent Multi-Threaded Login Queuing with Valid Ticket
+    std::cout << "\n[TEST 5] Concurrent Multi-Threaded Login Queuing..." << std::endl;
+    creds.Token = validTicketHex.c_str();
     constexpr int NUM_THREADS = 4;
     std::vector<std::thread> threads;
     std::atomic<int> completedLogins = 0;

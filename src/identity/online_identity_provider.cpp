@@ -11,12 +11,37 @@
 
 namespace ReFixIdentity {
 
-static std::string BytesToHex(const uint8_t* data, size_t len) {
+std::string BytesToHex(const uint8_t* data, size_t len) {
     std::ostringstream oss;
     for (size_t i = 0; i < len; ++i) {
         oss << std::hex << std::setw(2) << std::setfill('0') << (int)data[i];
     }
     return oss.str();
+}
+
+bool HexToBytes(const char* hexStr, std::vector<uint8_t>& outBytes) {
+    outBytes.clear();
+    if (!hexStr) return false;
+    size_t len = strlen(hexStr);
+    if (len == 0 || (len % 2) != 0) return false;
+    outBytes.reserve(len / 2);
+    for (size_t i = 0; i < len; i += 2) {
+        char c1 = hexStr[i];
+        char c2 = hexStr[i + 1];
+        int v1 = -1, v2 = -1;
+        if (c1 >= '0' && c1 <= '9') v1 = c1 - '0';
+        else if (c1 >= 'a' && c1 <= 'f') v1 = c1 - 'a' + 10;
+        else if (c1 >= 'A' && c1 <= 'F') v1 = c1 - 'A' + 10;
+        else return false;
+
+        if (c2 >= '0' && c2 <= '9') v2 = c2 - '0';
+        else if (c2 >= 'a' && c2 <= 'f') v2 = c2 - 'a' + 10;
+        else if (c2 >= 'A' && c2 <= 'F') v2 = c2 - 'A' + 10;
+        else return false;
+
+        outBytes.push_back((uint8_t)((v1 << 4) | v2));
+    }
+    return true;
 }
 
 static uint64_t ComputeMachineHash() {
@@ -91,18 +116,49 @@ public:
     bool ValidateCredential(int32_t credentialType, const char* token) override {
         if (!token) return false;
         size_t len = strlen(token);
-        if (len < 4) return false;
+        if (len == 0) return false;
 
-        // In Valve mode, external auth / steam tickets / device ID fallback are supported
-        if (credentialType == 3 /* STEAM_SESSION_TICKET */ ||
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        // In Valve mode, we expect a real Steam auth session ticket or external account credential
+        if (credentialType == 1 /* EOS_ECT_STEAM_APP_TICKET / STEAM_SESSION_TICKET */ ||
+            credentialType == 3 /* STEAM_SESSION_TICKET */ ||
             credentialType == 4 /* STEAM_APP_TICKET */ ||
-            credentialType == 18 /* EXTERNAL_ACCOUNT */) {
-            // Must have valid non-trivial token
-            return len >= 8;
-        } else if (credentialType == 5 /* DEVICEID_ACCESS_TOKEN */) {
+            credentialType == 18 /* EXTERNAL_ACCOUNT / EPIC_ID_TOKEN */) {
+
+            // If no Steam ticket was captured yet, try to refresh from environment/steam_api64.dll
+            if (m_ticketBytes.empty()) {
+                RefreshFromEnvironment();
+            }
+
+            // If still no Steam ticket was captured from Steam client, reject!
+            if (m_ticketBytes.empty()) {
+                return false;
+            }
+
+            // 1. Try hex decoding the incoming token
+            std::vector<uint8_t> candidateBytes;
+            if (HexToBytes(token, candidateBytes)) {
+                // Exact byte match against captured ticket
+                if (candidateBytes == m_ticketBytes) {
+                    return true;
+                }
+            }
+
+            // 2. Direct binary memory match
+            if (len == m_ticketBytes.size()) {
+                if (memcmp(token, m_ticketBytes.data(), len) == 0) {
+                    return true;
+                }
+            }
+
+            // If token does not match the real Steam ticket from Steam client, reject!
+            return false;
+        } else if (credentialType == 5 || credentialType == 11 /* DEVICEID_ACCESS_TOKEN */) {
             return len >= 4;
         }
-        return len >= 4;
+
+        return false;
     }
 
     std::string GetProductUserIdString() override {
@@ -141,15 +197,62 @@ public:
         }
     }
 
+    std::string GetCapturedTicketHex() override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_ticketBytes.empty()) return "";
+        return BytesToHex(m_ticketBytes.data(), m_ticketBytes.size());
+    }
+
+    uint32_t GetCapturedTicketHandle() override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_ticketHandle;
+    }
+
+    bool HasCapturedTicket() override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return !m_ticketBytes.empty();
+    }
+
 private:
     void RefreshFromEnvironment() {
-        char envBuf[128] = { 0 };
+        char envBuf[512] = { 0 };
         if (GetEnvironmentVariableA("REFIX_STEAM_ID", envBuf, sizeof(envBuf)) > 0) {
             uint64_t sid = _strtoui64(envBuf, nullptr, 10);
             if (sid != 0) m_steamId = sid;
         }
         if (GetEnvironmentVariableA("REFIX_USERNAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
             m_displayName = envBuf;
+        }
+
+        if (m_ticketBytes.empty()) {
+            char ticketHex[4096] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", ticketHex, sizeof(ticketHex)) > 0 && ticketHex[0] != '\0') {
+                std::vector<uint8_t> tb;
+                if (HexToBytes(ticketHex, tb) && !tb.empty()) {
+                    m_ticketBytes = std::move(tb);
+                }
+            }
+            char handleBuf[32] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", handleBuf, sizeof(handleBuf)) > 0) {
+                m_ticketHandle = (uint32_t)strtoul(handleBuf, nullptr, 10);
+            }
+        }
+
+        if (m_ticketBytes.empty()) {
+            HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+            if (hSteam) {
+                typedef bool (*fn_GetTicketData_t)(uint8_t* outBuf, size_t maxLen, size_t* outLen, uint32_t* outHandle);
+                auto pfn = (fn_GetTicketData_t)GetProcAddress(hSteam, "ReFix_Steam_GetCapturedTicketData");
+                if (pfn) {
+                    uint8_t buf[2048] = { 0 };
+                    size_t len = 0;
+                    uint32_t handle = 0;
+                    if (pfn(buf, sizeof(buf), &len, &handle) && len > 0) {
+                        m_ticketBytes.assign(buf, buf + len);
+                        m_ticketHandle = handle;
+                    }
+                }
+            }
         }
     }
 
@@ -199,7 +302,29 @@ public:
 
     bool ValidateCredential(int32_t credentialType, const char* token) override {
         if (!token) return false;
-        return strlen(token) >= 4;
+        size_t len = strlen(token);
+        if (len < 4) return false;
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        uint64_t sid = m_steamId;
+        if (sid == 0) {
+            uint64_t mHash = ComputeMachineHash();
+            uint32_t accountId = (uint32_t)(mHash & 0x0FFFFFFF);
+            if (accountId == 0) accountId = 100001;
+            sid = 76561197960265728ULL + accountId;
+        }
+
+        std::string expectedToken = "goldberg_token_" + std::to_string(sid);
+        if (_stricmp(token, expectedToken.c_str()) == 0) return true;
+
+        if (strncmp(token, "goldberg_", 9) == 0) return true;
+
+        std::vector<uint8_t> candidateBytes;
+        if (HexToBytes(token, candidateBytes)) {
+            if (!m_ticketBytes.empty() && candidateBytes == m_ticketBytes) return true;
+        }
+
+        return false;
     }
 
     std::string GetProductUserIdString() override {
@@ -234,6 +359,24 @@ public:
     void SetCapturedDisplayName(const std::string& name) override {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!name.empty()) m_displayName = name;
+    }
+
+    std::string GetCapturedTicketHex() override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_ticketBytes.empty()) {
+            std::string t = "goldberg_ticket_" + std::to_string(m_steamId);
+            return BytesToHex((const uint8_t*)t.data(), t.size());
+        }
+        return BytesToHex(m_ticketBytes.data(), m_ticketBytes.size());
+    }
+
+    uint32_t GetCapturedTicketHandle() override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_ticketHandle;
+    }
+
+    bool HasCapturedTicket() override {
+        return true;
     }
 
 private:

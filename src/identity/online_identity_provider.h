@@ -37,6 +37,9 @@ public:
     virtual void SetCapturedSteamTicket(const uint8_t* data, size_t size, uint32_t handle) = 0;
     virtual void SetCapturedSteamId(uint64_t steamId) = 0;
     virtual void SetCapturedDisplayName(const std::string& name) = 0;
+    virtual std::string GetCapturedTicketHex() = 0;
+    virtual uint32_t GetCapturedTicketHandle() = 0;
+    virtual bool HasCapturedTicket() = 0;
 };
 
 std::shared_ptr<IOnlineIdentityProvider> GetActiveIdentityProvider();
@@ -45,5 +48,8 @@ void ResetActiveIdentityProvider();
 
 std::shared_ptr<IOnlineIdentityProvider> CreateSteamOnlineIdentityProvider();
 std::shared_ptr<IOnlineIdentityProvider> CreateGoldbergIdentityProvider();
+
+bool HexToBytes(const char* hexStr, std::vector<uint8_t>& outBytes);
+std::string BytesToHex(const uint8_t* data, size_t len);
 
 } // namespace ReFixIdentity

@@ -266,8 +266,42 @@ int main(int argc, char** argv) {
     printf("  -> EOS_Platform_GetConnectInterface Handle=%p\n", hConnect);
     fflush(stdout);
 
-    // 7. Perform EOS_Connect_Login with Steam Ticket
-    printf("\n[STEP 7] Performing EOS_Connect_Login using Steam credential token...\n");
+    // 7. Perform Negative Test: Invalid Token Rejection
+    printf("\n[STEP 7] Performing Negative Test: Invalid Token Rejection...\n");
+    fflush(stdout);
+    EOS_Connect_Credentials badCreds = {};
+    badCreds.ApiVersion = 1;
+    badCreds.Type = 3; // EOS_ECT_STEAM_SESSION_TICKET
+    badCreds.Token = "DEADBEEF0123456789ABCDEF00112233"; // Random invalid token
+
+    EOS_Connect_LoginOptions badLoginOpts = {};
+    badLoginOpts.ApiVersion = 2;
+    badLoginOpts.Credentials = &badCreds;
+
+    g_loginCompleted = false;
+    g_loginResult = -1;
+    pfnEOSConnectLogin(hConnect, &badLoginOpts, (void*)0xDEAD, OnLoginComplete);
+
+    auto startBad = std::chrono::steady_clock::now();
+    while (!g_loginCompleted) {
+        pfnEOSTick(hPlatform);
+        pfnRunCallbacks();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startBad).count();
+        if (elapsed > 2000) break;
+    }
+
+    if (g_loginCompleted && g_loginResult != EOS_Success) {
+        printf("[PASS] Invalid arbitrary token correctly rejected (ResultCode=%d)!\n", g_loginResult);
+    } else {
+        printf("[FAIL] Invalid arbitrary token was NOT rejected (ResultCode=%d)!\n", g_loginResult);
+        fflush(stdout);
+        return 1;
+    }
+    fflush(stdout);
+
+    // 8. Perform Positive Test: Real Steam Ticket Login
+    printf("\n[STEP 8] Performing EOS_Connect_Login using real captured Steam credential token...\n");
     fflush(stdout);
     std::string tokenStr = (ticketSize > 0) ? BytesToHex(ticketBuf, ticketSize) : "dummy_steam_ticket_hex_1234567890abcdef";
 
@@ -281,10 +315,11 @@ int main(int argc, char** argv) {
     loginOpts.Credentials = &creds;
 
     g_loginCompleted = false;
+    g_loginResult = -1;
     pfnEOSConnectLogin(hConnect, &loginOpts, (void*)0x1337, OnLoginComplete);
 
-    // 8. Tick Platform until callback completes
-    printf("[STEP 8] Ticking EOS Platform to process asynchronous callbacks...\n");
+    // 9. Tick Platform until callback completes
+    printf("[STEP 9] Ticking EOS Platform to process asynchronous callbacks...\n");
     fflush(stdout);
     auto start = std::chrono::steady_clock::now();
     while (!g_loginCompleted) {
@@ -301,12 +336,13 @@ int main(int argc, char** argv) {
 
     if (g_loginCompleted && g_loginResult == EOS_Success) {
         printf("\n====================================================================\n");
-        printf("[CHECKPOINT 0 SUCCESS] Full Steam -> EOS Authentication Succeeded!\n");
+        printf("[HARNESS SUCCESS] Steam Client -> ReFix EOS Proxy Contract Verified!\n");
         printf("  - SteamAPI_Init: OK\n");
         printf("  - AppID: %u\n", appId);
         printf("  - SteamID: %llu\n", steamId);
         printf("  - Steam Auth Ticket: %u bytes\n", ticketSize);
-        printf("  - EOS_Connect_Login: EOS_Success (0)\n");
+        printf("  - Invalid Token Rejection: PASS\n");
+        printf("  - Real Ticket Authentication: EOS_Success (0)\n");
         printf("====================================================================\n");
         fflush(stdout);
         return 0;
