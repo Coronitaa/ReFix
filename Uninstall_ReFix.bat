@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal enabledelayedexpansion
 title ReFix - Universal Uninstall ^& Restore Tool
 

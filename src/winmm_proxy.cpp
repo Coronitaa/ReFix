@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 // ReFix - Forwarded winmm.dll Proxy (100% Crash-Proof Dynamic MASM Forwarding)
 // =============================================================================
 #define WIN32_LEAN_AND_MEAN
@@ -639,4 +639,3 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     }
     return TRUE;
 }
-
