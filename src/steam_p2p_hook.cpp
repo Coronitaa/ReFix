@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 // ReFix - Steam P2P Winsock Redirect Layer (Implementation)
 // =============================================================================
 // Hooks ws2_32.dll sendto/recvfrom/connect/select using MinHook (inline hooks).
@@ -284,57 +284,64 @@ static void* ResolveSteamNetworking() {
 // =============================================================================
 // Background pump thread — drains incoming P2P packets into g_recvQueue
 // =============================================================================
-static DWORD WINAPI P2PPumpThread(LPVOID) {
-    SteamP2PHook::Log("P2P pump thread started");
-
+static bool P2PPumpStep() {
     static uint8_t pktBuf[k_maxPacketSize];
 
-    while (g_pumpRunning.load(std::memory_order_relaxed)) {
-        // Lazily resolve networking if not yet done
-        if (!g_pSteamNetworking) {
-            g_pSteamNetworking = ResolveSteamNetworking();
-        }
+    // Lazily resolve networking if not yet done
+    if (!g_pSteamNetworking) {
+        g_pSteamNetworking = ResolveSteamNetworking();
+    }
 
-        if (g_pSteamNetworking) {
-            uint32_t pktSize = 0;
-            while (ISteamNetworking_IsP2PPacketAvailable(g_pSteamNetworking, &pktSize, k_nChannel)
-                   && pktSize > 0)
-            {
-                if (pktSize > k_maxPacketSize) pktSize = k_maxPacketSize;
+    if (g_pSteamNetworking && g_pumpRunning.load(std::memory_order_relaxed)) {
+        uint32_t pktSize = 0;
+        while (g_pumpRunning.load(std::memory_order_relaxed) &&
+               ISteamNetworking_IsP2PPacketAvailable(g_pSteamNetworking, &pktSize, k_nChannel) &&
+               pktSize > 0)
+        {
+            if (pktSize > k_maxPacketSize) pktSize = k_maxPacketSize;
 
-                uint64_t fromID = 0;
-                uint32_t bytesRead = 0;
-                bool ok = ISteamNetworking_ReadP2PPacket(g_pSteamNetworking,
-                    pktBuf, pktSize, &bytesRead, &fromID, k_nChannel);
+            uint64_t fromID = 0;
+            uint32_t bytesRead = 0;
+            bool ok = ISteamNetworking_ReadP2PPacket(g_pSteamNetworking,
+                pktBuf, pktSize, &bytesRead, &fromID, k_nChannel);
 
-                if (ok && bytesRead > 0 && fromID != 0) {
-                    // Accept P2P session automatically (required first time)
-                    ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, fromID);
+            if (ok && bytesRead > 0 && fromID != 0) {
+                // Accept P2P session automatically (required first time)
+                ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, fromID);
 
-                    // Ensure this peer is in our map (remote-initiated join)
-                    {
-                        std::lock_guard<std::mutex> lg(g_peerMutex);
-                        if (g_steamIDToIP.find(fromID) == g_steamIDToIP.end()) {
-                            SteamP2PHook::Log("Auto-registered inbound peer SteamID=%llu (no IP yet)", fromID);
-                            // Use a synthetic loopback-range IP so the game still gets a valid source
-                            // 127.x.x.x range: use last 3 bytes of SteamID
-                            uint32_t syntheticIP = 0x7F000001u | (uint32_t)(fromID & 0x00FFFFFFu);
-                            g_steamIDToIP[fromID]   = syntheticIP;
-                            g_ipToSteamID[syntheticIP] = fromID;
-                        }
+                // Ensure this peer is in our map (remote-initiated join)
+                {
+                    std::lock_guard<std::mutex> lg(g_peerMutex);
+                    if (g_steamIDToIP.find(fromID) == g_steamIDToIP.end()) {
+                        uint32_t syntheticIP = 0x7F000001u | (uint32_t)(fromID & 0x00FFFFFFu);
+                        g_steamIDToIP[fromID]   = syntheticIP;
+                        g_ipToSteamID[syntheticIP] = fromID;
                     }
+                }
 
-                    {
-                        std::lock_guard<std::mutex> lg(g_recvMutex);
-                        if (g_recvQueue.size() < k_maxRecvQueue) {
-                            RecvPacket pkt;
-                            pkt.data.assign(pktBuf, pktBuf + bytesRead);
-                            pkt.fromSteamID = fromID;
-                            g_recvQueue.push_back(std::move(pkt));
-                        }
+                {
+                    std::lock_guard<std::mutex> lg(g_recvMutex);
+                    if (g_recvQueue.size() < k_maxRecvQueue) {
+                        RecvPacket pkt;
+                        pkt.data.assign(pktBuf, pktBuf + bytesRead);
+                        pkt.fromSteamID = fromID;
+                        g_recvQueue.push_back(std::move(pkt));
                     }
                 }
             }
+        }
+    }
+    return true;
+}
+
+static DWORD WINAPI P2PPumpThread(LPVOID) {
+    SteamP2PHook::Log("P2P pump thread started");
+
+    while (g_pumpRunning.load(std::memory_order_relaxed)) {
+        __try {
+            P2PPumpStep();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
         }
 
         Sleep(1); // 1ms polling — very low CPU overhead
@@ -543,16 +550,14 @@ void Uninstall() {
     // Signal pump thread to stop
     g_pumpRunning.store(false, std::memory_order_relaxed);
 
-    // During process shutdown (DLL_PROCESS_DETACH), Windows has already killed background threads.
-    // Waiting on g_pumpThread or uninitializing MinHook causes access violations in CRT.
-    // We close the handle and let Windows clean up process memory safely.
     if (g_pumpThread) {
+        WaitForSingleObject(g_pumpThread, 100);
         CloseHandle(g_pumpThread);
         g_pumpThread = nullptr;
     }
 
+    g_pSteamNetworking = nullptr;
     g_hooksInstalled = false;
-    Log("Winsock P2P hooks shutdown safely");
 }
 
 void RegisterPeer(uint64_t steamID, uint32_t ipv4_host) {
@@ -613,4 +618,3 @@ extern "C" void SteamP2PHook_ForceResolve() {
         SteamP2PHook::Log("[ForceResolve] WARNING: ISteamNetworking still not resolved post-Init");
     }
 }
-

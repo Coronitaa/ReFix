@@ -1172,6 +1172,11 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_RequestSpectatorServerList(void* self, uint32_t iApp, void** ppchFilters, uint32_t nFilters, void* pResponse);
 extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_RequestLANServerList(void* self, uint32_t iApp, void* pResponse);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self);
+
+typedef void (*fn_SteamAPI_Shutdown_t)();
+static fn_SteamAPI_Shutdown_t g_pfn_Shutdown = nullptr;
+extern "C" __declspec(dllexport) void SteamAPI_Shutdown();
+
 extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks();
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t hSteamPipe);
 extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(uint32_t hSteamPipe, void* pCallbackMsg);
@@ -1799,17 +1804,6 @@ static void ApplySteamEnv() {
     if (g_config.enableOverlay && !g_isGoldbergMode) {
         InjectSteamOverlay();
     }
-
-    // Auto-configure Network: Firewall Rules (7777-7779, 27015) + UPnP Mappings + Public IP Lookup
-    ReFixNet::AutoOpenPorts();
-    g_hostLocalIP = ReFixNet::GetLocalIP();
-    g_hostPublicIP = ReFixNet::GetPublicIP();
-
-    SetEnvironmentVariableA("REFIX_LOCAL_IP", g_hostLocalIP.c_str());
-    SetEnvironmentVariableA("REFIX_PUBLIC_IP", g_hostPublicIP.c_str());
-
-    ReFixLog("Network P2P setup: LocalIP=%s, PublicIP=%s, UPnP/Firewall Port=7777",
-             g_hostLocalIP.c_str(), g_hostPublicIP.c_str());
 }
 
 // =============================================================================
@@ -1856,6 +1850,70 @@ static fn_VTable_GetItemInstallInfo_t g_orig_VTable_GetItemInstallInfo = nullptr
 static fn_VTable_ActivateGameOverlayInviteDialog_t g_orig_VTable_ActivateGameOverlayInviteDialog = nullptr;
 static fn_VTable_SetRichPresence_t g_orig_VTable_SetRichPresence = nullptr;
 
+struct ReFix_FriendGameInfo_t {
+    uint64_t m_gameID;
+    uint32_t m_unGameIP;
+    uint16_t m_usGamePort;
+    uint16_t m_usQueryPort;
+    uint64_t m_steamIDLobby;
+};
+
+typedef bool (*fn_VTable_GetFriendGamePlayed_t)(void* self, uint64_t steamIDFriend, void* pFriendGameInfo);
+static fn_VTable_GetFriendGamePlayed_t g_orig_VTable_GetFriendGamePlayed = nullptr;
+
+typedef bool (*fn_Flat_GetFriendGamePlayed_t)(void* self, uint64_t steamIDFriend, void* pFriendGameInfo);
+static fn_Flat_GetFriendGamePlayed_t g_pfn_Flat_GetFriendGamePlayed = nullptr;
+
+// === ISteamNetworkingUtils relay hook (fix: 'Checking Steam Relay...' hang) ===
+// k_ESteamNetworkingAvailability_Current = 100 (in official Steam SDK & Steamworks.NET)
+// ISteamNetworkingUtils vtable (v003+): [0]=AllocateMessage, [1]=GetRelayNetworkStatus
+typedef int(__thiscall* fn_VTable_GetRelayNetworkStatus_t)(void* self, void* pDetails);
+static fn_VTable_GetRelayNetworkStatus_t g_orig_VTable_GetRelayNetworkStatus = nullptr;
+
+// =============================================================================
+// ISteamNetworkingUtils::GetRelayNetworkStatus Hook
+// =============================================================================
+// Fixes the "Checking Steam Relay..." infinite hang for games using
+// ISteamNetworkingSockets (spacewar / AppID 480 and similar).
+//
+// Root cause: the real Steam SDR network takes 1-5s to initialize after
+// SteamAPI_Init(). Games polling GetRelayNetworkStatus() immediately, or
+// waiting for SteamRelayNetworkStatus_t with m_eAvail==Current(100), hang.
+//
+// Fix: always return k_ESteamNetworkingAvailability_Current(100). The real
+// SDR init continues in background; the game proceeds immediately.
+// GENERAL: applies to ALL games using ISteamNetworkingUtils.
+// =============================================================================
+struct ReFix_SteamRelayNetworkStatus_t {
+    int  m_eAvail;
+    int  m_bPingMeasurementInProgress;
+    int  m_eAvailNetworkConfig;
+    int  m_eAvailAnyRelay;
+    char m_debugMsg[256];
+};
+static const int k_eRelayAvail_Current = 100;
+static DWORD g_steamInitTick = 0;
+
+static int __fastcall Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus(
+    void* self, void* /*edx*/, void* pDetails)
+{
+    if (g_orig_VTable_GetRelayNetworkStatus)
+        g_orig_VTable_GetRelayNetworkStatus(self, pDetails);
+    
+    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
+    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
+
+    if (pDetails) {
+        auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
+        d->m_eAvail = avail;
+        d->m_bPingMeasurementInProgress = (avail == 3) ? 1 : 0;
+        d->m_eAvailNetworkConfig = avail;
+        d->m_eAvailAnyRelay = avail;
+        if (d->m_debugMsg[0] == '\0')
+            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == 100) ? "OK (ReFix)" : "Connecting (ReFix)", _TRUNCATE);
+    }
+    return avail;
+}
 static bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, void** ppOriginalFn) {
     if (!pInterface) return false;
     void** vtable = *(void***)pInterface;
@@ -1957,6 +2015,37 @@ static bool Hooked_ISteamFriends_SetRichPresence(void* self, const char* pchKey,
     return true;
 }
 
+static void NormalizeFriendGameInfo(void* pFriendGameInfo, uint64_t steamIDFriend) {
+    if (!pFriendGameInfo) return;
+    auto* info = (ReFix_FriendGameInfo_t*)pFriendGameInfo;
+    uint32_t fid = (uint32_t)(info->m_gameID & 0x00FFFFFF);
+    if (fid != 0) {
+        if (fid == 480 || fid == g_config.maskAppIdNum || fid == g_config.realAppIdNum) {
+            uint32_t myAppId = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+            info->m_gameID = (info->m_gameID & 0xFFFFFFFFFF000000ULL) | (uint64_t)myAppId;
+            ReFixLog("GetFriendGamePlayed: Normalized friend %llu AppID (%u -> %u, Lobby=%llu)", steamIDFriend, fid, myAppId, info->m_steamIDLobby);
+        }
+    }
+}
+
+static bool Hooked_ISteamFriends_GetFriendGamePlayed(void* self, uint64_t steamIDFriend, void* pFriendGameInfo) {
+    bool res = false;
+    if (g_orig_VTable_GetFriendGamePlayed) {
+        res = g_orig_VTable_GetFriendGamePlayed(self, steamIDFriend, pFriendGameInfo);
+    }
+    if (res) NormalizeFriendGameInfo(pFriendGameInfo, steamIDFriend);
+    return res;
+}
+
+static bool Intercepted_SteamAPI_ISteamFriends_GetFriendGamePlayed(void* self, uint64_t steamIDFriend, void* pFriendGameInfo) {
+    bool res = false;
+    if (g_pfn_Flat_GetFriendGamePlayed) {
+        res = g_pfn_Flat_GetFriendGamePlayed(self, steamIDFriend, pFriendGameInfo);
+    }
+    if (res) NormalizeFriendGameInfo(pFriendGameInfo, steamIDFriend);
+    return res;
+}
+
 static uint64_t Hooked_ISteamMatchmaking_RequestLobbyList(void* self) {
     ReFixLog("ISteamMatchmaking::RequestLobbyList Hook called (self=%p)", self);
     if (self) {
@@ -2021,13 +2110,48 @@ static uint64_t Hooked_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType,
 }
 
 static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDLobby) {
-    ReFixLog("ISteamMatchmaking::JoinLobby Hook called (LobbyID=%llu)", steamIDLobby);
+    LoadConfig();
+    uint32_t realApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    uint32_t maskApp = g_config.maskAppIdNum;
+
+    ReFixLog("ISteamMatchmaking::JoinLobby Hook called:");
+    ReFixLog("  LobbyID: %llu", steamIDLobby);
+    ReFixLog("  RealAppId: %u | MaskAppId: %u", realApp, maskApp);
+    ReFixLog("  Interface (self): %p", self);
+    ReFixLog("  g_orig_VTable_JoinLobby: %p", g_orig_VTable_JoinLobby);
+    ReFixLog("  g_pfn_JoinLobby: %p", g_pfn_JoinLobby);
+
     ReFix_NotifyLobbyID(steamIDLobby);
+
+    const char* targetName = "None";
+    void* targetAddr = nullptr;
     uint64_t hCall = 0;
+
     if (g_orig_VTable_JoinLobby) {
+        targetName = "VTable";
+        targetAddr = (void*)g_orig_VTable_JoinLobby;
         hCall = g_orig_VTable_JoinLobby(self, steamIDLobby);
+    } else if (g_pfn_JoinLobby) {
+        targetName = "Flat Export";
+        targetAddr = (void*)g_pfn_JoinLobby;
+        hCall = g_pfn_JoinLobby(self, steamIDLobby);
+    } else {
+        targetName = "None (No valid JoinLobby target resolved)";
+        targetAddr = nullptr;
+        hCall = 0;
     }
+
+    ReFixLog("  Target Selected: %s (%p)", targetName, targetAddr);
     ReFixLog("  -> JoinLobby APICall handle: %llu", hCall);
+
+    if (hCall == 0) {
+        if (!targetAddr) {
+            ReFixLog("  [ERROR] JoinLobby failed: No backend function pointer available (VTable=null, Export=null)");
+        } else {
+            ReFixLog("  [WARNING] JoinLobby backend target %s (%p) returned 0 (k_uAPICallInvalid) for LobbyID=%llu",
+                     targetName, targetAddr, steamIDLobby);
+        }
+    }
 
     // Godot-specific: steam-multiplayer-peer.dll waits for LobbyEnter_t (iCallback=504)
     // before calling ISteamNetworkingSockets::ConnectP2P(). If the lobby ID is synthetic
@@ -2131,15 +2255,9 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
     LoadConfig();
-    if (g_unrealIsEngine) {
-        uint32_t targetApp = (g_isGoldbergMode && g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-        ReFixLog("SteamAPI_ISteamUtils_GetAppID (Unreal) returning AppId=%u", targetApp);
-        return targetApp;
-    }
-    uint32_t realId = (g_config.workshopAppIdNum != 0) ? g_config.workshopAppIdNum :
-                      ((g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum);
-    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning %u", realId);
-    return realId;
+    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u", targetApp);
+    return targetApp;
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_ISteamUser_BLoggedOn(void* self) {
@@ -2179,8 +2297,9 @@ static void ToggleConsoleWindow() {
     ShowWindow(hCons, g_ConsoleVisible ? SW_SHOW : SW_HIDE);
 }
 
+static std::atomic<bool> g_hotkeyRunning{ true };
 static DWORD WINAPI ConsoleHotkeyThread(LPVOID) {
-    while (true) {
+    while (g_hotkeyRunning) {
         Sleep(50);
         if (!g_config.enableConsole) continue;
         if ((GetAsyncKeyState(VK_INSERT) & 0x8000) || (GetAsyncKeyState(VK_F1) & 0x8000)) {
@@ -2208,14 +2327,9 @@ static void* Hooked_ISteamMatchmakingServers_RequestInternetServerList(
 }
 
 static uint32_t Hooked_ISteamUtils_GetAppID(void* self) {
-    if (g_unrealIsEngine) {
-        uint32_t targetApp = (g_isGoldbergMode && g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-        ReFixLog("ISteamUtils::GetAppID (Unreal) returning AppId=%u", targetApp);
-        return targetApp;
-    }
-    uint32_t targetApp = (g_config.workshopAppIdNum != 0) ? g_config.workshopAppIdNum :
-                          ((g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum);
-    ReFixLog("ISteamUtils::GetAppID Hook returning %u", targetApp);
+    LoadConfig();
+    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u", targetApp);
     return targetApp;
 }
 
@@ -2378,9 +2492,7 @@ static void InstallVTableHooks() {
     if (pfnMM) {
         void* pMM = pfnMM();
         if (pMM) {
-            if (g_godotIsEngine) {
-                HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
-            }
+            HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
             HookVTableMethod(pMM, 20, (void*)Hooked_ISteamMatchmaking_SetLobbyData, (void**)&g_orig_VTable_SetLobbyData);
         }
     }
@@ -2423,6 +2535,7 @@ static void InstallVTableHooks() {
     if (pfnFriends) {
         void* pFriends = pfnFriends();
         if (pFriends) {
+            HookVTableMethod(pFriends, 8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed);
             HookVTableMethod(pFriends, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
             HookVTableMethod(pFriends, 43, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
         }
@@ -2443,6 +2556,33 @@ static void InstallVTableHooks() {
         }
     }
 
+    // 7. ISteamNetworkingUtils -- GetRelayNetworkStatus hook
+    // Fixes "Checking Steam Relay..." hang for all ISteamNetworkingSockets games.
+    // vtable[0]=AllocateMessage, vtable[1]=GetRelayNetworkStatus (hooked).
+    {
+        fn_GetInterface_t pfnNetUtils = nullptr;
+        pfnNetUtils = (fn_GetInterface_t)GetProcAddress(
+            (HMODULE)g_hOriginalDll, "SteamAPI_SteamNetworkingUtils_v003");
+        if (!pfnNetUtils)
+            pfnNetUtils = (fn_GetInterface_t)GetProcAddress(
+                (HMODULE)g_hOriginalDll, "SteamNetworkingUtils_v003");
+        if (!pfnNetUtils)
+            pfnNetUtils = (fn_GetInterface_t)GetProcAddress(
+                (HMODULE)g_hOriginalDll, "SteamNetworkingUtils");
+        if (pfnNetUtils) {
+            void* pNetUtils = pfnNetUtils();
+            if (pNetUtils) {
+                HookVTableMethod(pNetUtils, 1,
+                    (void*)Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus,
+                    (void**)&g_orig_VTable_GetRelayNetworkStatus);
+                ReFixLog("InstallVTableHooks: ISteamNetworkingUtils relay hook OK (vtable[1])");
+            } else {
+                ReFixLog("InstallVTableHooks: ISteamNetworkingUtils->pfn returned null");
+            }
+        } else {
+            ReFixLog("InstallVTableHooks: SteamNetworkingUtils accessor not in valve DLL");
+        }
+    }
     g_vtableHooksInstalled = true;
     ReFixLog("InstallVTableHooks: All VTable hooks initialized successfully.");
 }
@@ -2499,6 +2639,106 @@ static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 1) {
         return false;
     }
 }
+
+// =============================================================================
+// ISteamNetworkingUtils Flat Export Interception & Relay Callback Dispatcher
+// =============================================================================
+struct ReFix_CallbackMsg_t {
+    int32_t  m_hSteamUser;
+    int32_t  m_iCallback;
+    uint8_t* m_pubParam;
+    int32_t  m_cubParam;
+};
+
+static std::atomic<bool> g_syntheticRelayPending{ false };
+static ReFix_SteamRelayNetworkStatus_t g_syntheticRelayData = {};
+
+static void TriggerSyntheticRelayCallback() {
+    g_syntheticRelayPending.store(true, std::memory_order_relaxed);
+}
+
+struct RelayCallbackEntry {
+    void* pCallback;
+    int iCallback;
+};
+static std::vector<RelayCallbackEntry> g_registeredRelayCallbacks;
+static std::mutex g_relayCallbackMutex;
+
+static void TrackRelayCallback(void* pCallback, int iCallback) {
+    std::lock_guard<std::mutex> lg(g_relayCallbackMutex);
+    for (auto& e : g_registeredRelayCallbacks) {
+        if (e.pCallback == pCallback) { e.iCallback = iCallback; return; }
+    }
+    g_registeredRelayCallbacks.push_back({ pCallback, iCallback });
+}
+
+static void UntrackRelayCallback(void* pCallback) {
+    std::lock_guard<std::mutex> lg(g_relayCallbackMutex);
+    for (auto it = g_registeredRelayCallbacks.begin(); it != g_registeredRelayCallbacks.end(); ) {
+        if (it->pCallback == pCallback) {
+            it = g_registeredRelayCallbacks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void DispatchRelayCallbacks() {
+    std::vector<RelayCallbackEntry> snapshot;
+    {
+        std::lock_guard<std::mutex> lg(g_relayCallbackMutex);
+        snapshot = g_registeredRelayCallbacks;
+    }
+    if (snapshot.empty()) return;
+
+    ReFix_SteamRelayNetworkStatus_t data = {};
+    data.m_eAvail = k_eRelayAvail_Current; // 100
+    data.m_bPingMeasurementInProgress = 0;
+    data.m_eAvailNetworkConfig = k_eRelayAvail_Current;
+    data.m_eAvailAnyRelay = k_eRelayAvail_Current;
+    strncpy_s(data.m_debugMsg, sizeof(data.m_debugMsg), "OK (ReFix)", _TRUNCATE);
+
+    for (auto& entry : snapshot) {
+        if (entry.pCallback) {
+            SafeCallRun(entry.pCallback, &data);
+        }
+    }
+}
+
+typedef int (*fn_Flat_GetRelayNetworkStatus_t)(void* self, void* pDetails);
+static fn_Flat_GetRelayNetworkStatus_t g_pfn_Flat_GetRelayNetworkStatus = nullptr;
+
+static int Intercepted_SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus(void* self, void* pDetails) {
+    if (g_pfn_Flat_GetRelayNetworkStatus) {
+        g_pfn_Flat_GetRelayNetworkStatus(self, pDetails);
+    }
+    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
+    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
+
+    if (pDetails) {
+        auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
+        d->m_eAvail = avail;
+        d->m_bPingMeasurementInProgress = (avail == 3) ? 1 : 0;
+        d->m_eAvailNetworkConfig = avail;
+        d->m_eAvailAnyRelay = avail;
+        if (d->m_debugMsg[0] == '\0')
+            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == 100) ? "OK (ReFix)" : "Connecting (ReFix)", _TRUNCATE);
+    }
+    return avail;
+}
+
+typedef void (*fn_Flat_InitRelayNetworkAccess_t)(void* self);
+static fn_Flat_InitRelayNetworkAccess_t g_pfn_Flat_InitRelayNetworkAccess = nullptr;
+
+static void Intercepted_SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(void* self) {
+    if (g_pfn_Flat_InitRelayNetworkAccess) {
+        g_pfn_Flat_InitRelayNetworkAccess(self);
+    }
+    g_syntheticRelayPending.store(true, std::memory_order_relaxed);
+    DispatchRelayCallbacks();
+}
+
+
 
 static void DispatchAuthCallbacksImmediately(int targetCallback) {
     if (g_lastAuthTicketData.empty()) {
@@ -2646,6 +2886,7 @@ typedef void (*fn_SteamAPI_UnregisterCallback_t)(void* pCallback);
 static fn_SteamAPI_UnregisterCallback_t g_pfn_UnregisterCallback = nullptr;
 
 static void Intercepted_SteamAPI_UnregisterCallback(void* pCallback) {
+    UntrackRelayCallback(pCallback);
     if (g_godotIsEngine) {
         UntrackCallback(pCallback);
     }
@@ -2667,6 +2908,19 @@ static void Intercepted_SteamAPI_UnregisterCallback(void* pCallback) {
 // C++ Interception handlers
 static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback) {
     ReFixLog("SteamAPI_RegisterCallback: pCallback=%p, iCallback=%d", pCallback, iCallback);
+    
+    if (iCallback == 1281) {
+        ReFixLog("  -> Intercepted SteamRelayNetworkStatus_t (1281) callback registration for %p", pCallback);
+        TrackRelayCallback(pCallback, iCallback);
+        ReFix_SteamRelayNetworkStatus_t data = {};
+        data.m_eAvail = k_eRelayAvail_Current;
+        data.m_bPingMeasurementInProgress = 0;
+        data.m_eAvailNetworkConfig = k_eRelayAvail_Current;
+        data.m_eAvailAnyRelay = k_eRelayAvail_Current;
+        strncpy_s(data.m_debugMsg, sizeof(data.m_debugMsg), "OK (ReFix)", _TRUNCATE);
+        SafeCallRun(pCallback, &data);
+    }
+
     if (iCallback == 333) ReFixLog("  -> Intercepted GameLobbyJoinRequested_t (333)");
     else if (iCallback == 337) ReFixLog("  -> Intercepted GameRichPresenceJoinRequested_t (337)");
 
@@ -2985,6 +3239,13 @@ static bool EnsureOriginal() {
         g_steamProcs[idxSetRichPresence] = (FARPROC)Intercepted_SetRichPresence;
     }
 
+    int idxGetFriendGamePlayed = FindSteamExportIndex("SteamAPI_ISteamFriends_GetFriendGamePlayed");
+    if (idxGetFriendGamePlayed >= 0) {
+        g_pfn_Flat_GetFriendGamePlayed = (fn_Flat_GetFriendGamePlayed_t)g_steamProcs[idxGetFriendGamePlayed];
+        g_steamProcs[idxGetFriendGamePlayed] = (FARPROC)Intercepted_SteamAPI_ISteamFriends_GetFriendGamePlayed;
+        ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamFriends_GetFriendGamePlayed");
+    }
+
     int idxAddStringFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
     if (idxAddStringFilter >= 0) g_pfn_AddRequestLobbyListStringFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t)g_steamProcs[idxAddStringFilter];
 
@@ -3049,6 +3310,29 @@ static bool EnsureOriginal() {
         g_steamProcs[idxGetAuthTicketForWebApi] = (FARPROC)SteamAPI_ISteamUser_GetAuthTicketForWebApi;
     }
 
+    
+    int idxGetRelayStatus = FindSteamExportIndex("SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus");
+    if (idxGetRelayStatus >= 0) {
+        g_pfn_Flat_GetRelayNetworkStatus = (fn_Flat_GetRelayNetworkStatus_t)g_steamProcs[idxGetRelayStatus];
+        g_steamProcs[idxGetRelayStatus] = (FARPROC)Intercepted_SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus;
+        ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus");
+    }
+
+    int idxInitRelay = FindSteamExportIndex("SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
+    if (idxInitRelay >= 0) {
+        g_pfn_Flat_InitRelayNetworkAccess = (fn_Flat_InitRelayNetworkAccess_t)g_steamProcs[idxInitRelay];
+        g_steamProcs[idxInitRelay] = (FARPROC)Intercepted_SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess;
+        ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
+    }
+
+    
+    int idxShutdown = FindSteamExportIndex("SteamAPI_Shutdown");
+    if (idxShutdown >= 0) {
+        g_pfn_Shutdown = (fn_SteamAPI_Shutdown_t)g_steamProcs[idxShutdown];
+        g_steamProcs[idxShutdown] = (FARPROC)SteamAPI_Shutdown;
+        ReFixLog("EnsureOriginal: Intercepted SteamAPI_Shutdown");
+    }
+
     int idxRunCallbacks = FindSteamExportIndex("SteamAPI_RunCallbacks");
     if (idxRunCallbacks >= 0) {
         g_pfn_RunCallbacks = (fn_SteamAPI_RunCallbacks_t)g_steamProcs[idxRunCallbacks];
@@ -3075,13 +3359,6 @@ static bool EnsureOriginal() {
     g_godotIsEngine = (_stricmp(g_config.engineType.c_str(), "Godot") == 0);
     if (g_godotIsEngine) {
         ReFixLog("EngineType=Godot detected: Winsock P2P hook disabled, LobbyEnter_t synthesis enabled");
-    }
-
-    // Install Winsock P2P redirection hooks (Unity/Unreal only in Valve Online mode)
-    if (!g_godotIsEngine && !g_isGoldbergMode) {
-        SteamP2PHook::Install(g_hOriginalDll);
-    } else {
-        ReFixLog("EnsureOriginal: Winsock P2P hook skipped (godot=%d, goldberg=%d)", g_godotIsEngine, g_isGoldbergMode);
     }
 
     ReFixLog("steam_api64.dll proxy initialized successfully");
@@ -3140,16 +3417,18 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     }
     ReFixLog("SteamAPI_Init: final result=%d", result);
     if (result) {
+        g_steamInitTick = GetTickCount();
         CapturePersonaName();
-        // Install Winsock -> Steam P2P redirect hooks (Unity/Unreal only in Valve Online mode)
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
+        TriggerSyntheticRelayCallback();
+        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
+        if (g_unrealIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
             ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
             // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         } else {
-            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, goldberg=%d)", g_godotIsEngine, g_isGoldbergMode);
+            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
         }
         InstallVTableHooks();
     }
@@ -3266,14 +3545,16 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
     }
     ReFixLog("SteamInternal_SteamAPI_Init: result=%d, msg='%s'", result, targetErr);
     if (result == 0) {
+        g_steamInitTick = GetTickCount();
         CapturePersonaName();
-        // Install Winsock -> Steam P2P redirect hooks (Unity/Unreal only in Valve Online mode)
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
+        TriggerSyntheticRelayCallback();
+        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
+        if (g_unrealIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         } else {
-            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, goldberg=%d)", g_godotIsEngine, g_isGoldbergMode);
+            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
         }
         InstallVTableHooks();
     }
@@ -3313,6 +3594,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
     if (g_pfn_RunCallbacks) g_pfn_RunCallbacks();
+    DispatchRelayCallbacks();
     DispatchPendingAuthCallbacks();
 }
 
@@ -3327,7 +3609,39 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
 
 extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(uint32_t hSteamPipe, void* pCallbackMsg) {
     if (g_pfn_ManualDispatch_GetNextCallback) {
-        return g_pfn_ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
+        bool res = g_pfn_ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
+        if (res) {
+            if (pCallbackMsg) {
+                auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+                if (msg->m_iCallback == 1281) { // k_iSteamRelayNetworkStatusChanged
+                    if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamRelayNetworkStatus_t)) {
+                        auto* d = (ReFix_SteamRelayNetworkStatus_t*)msg->m_pubParam;
+                        d->m_eAvail = k_eRelayAvail_Current; // 100
+                        d->m_bPingMeasurementInProgress = 0;
+                        d->m_eAvailNetworkConfig = k_eRelayAvail_Current; // 100
+                        d->m_eAvailAnyRelay = k_eRelayAvail_Current; // 100
+                        strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), "OK (ReFix)", _TRUNCATE);
+                        ReFixLog("ManualDispatch_GetNextCallback: Overrode Callback 1281 to Current (100)");
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    if (g_syntheticRelayPending.exchange(false) && pCallbackMsg) {
+        g_syntheticRelayData.m_eAvail = k_eRelayAvail_Current; // 100
+        g_syntheticRelayData.m_bPingMeasurementInProgress = 0;
+        g_syntheticRelayData.m_eAvailNetworkConfig = k_eRelayAvail_Current; // 100
+        g_syntheticRelayData.m_eAvailAnyRelay = k_eRelayAvail_Current; // 100
+        strncpy_s(g_syntheticRelayData.m_debugMsg, sizeof(g_syntheticRelayData.m_debugMsg), "OK (ReFix)", _TRUNCATE);
+
+        auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+        msg->m_hSteamUser = 0;
+        msg->m_iCallback = 1281; // k_iSteamRelayNetworkStatusChanged
+        msg->m_pubParam = (uint8_t*)&g_syntheticRelayData;
+        msg->m_cubParam = (int32_t)sizeof(ReFix_SteamRelayNetworkStatus_t);
+        ReFixLog("ManualDispatch_GetNextCallback: Delivered synthetic Callback 1281 (Current 100)");
+        return true;
     }
     return false;
 }
@@ -3357,31 +3671,47 @@ extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWe
     return handle;
 }
 
+
+static void SafeBackendShutdown() {
+    if (g_pfn_Shutdown) {
+        __try {
+            g_pfn_Shutdown();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
+    ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+    g_authDispatchRunning.store(false, std::memory_order_relaxed);
+    g_hotkeyRunning.store(false, std::memory_order_relaxed);
+    SteamP2PHook::Uninstall();
+    {
+        std::lock_guard<std::mutex> lg(g_relayCallbackMutex);
+        g_registeredRelayCallbacks.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lg(g_callbackMutex);
+        g_registeredCallbacks.clear();
+    }
+    SafeBackendShutdown();
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
             g_hSelfModule = hModule;
             DisableThreadLibraryCalls(hModule);
-            LoadConfig();
-            if (!g_isGoldbergMode) {
-                EnsureSteamAppIdFile(g_maskAppId);
-                InjectSteamOverlay();
-            } else {
-                std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
-                if (targetApp.empty() || targetApp == "0") targetApp = "480";
-                EnsureSteamAppIdFile(targetApp.c_str());
-            }
+            ApplySteamEnv();
             EnsureOriginal();
-            StartConsoleHotkeyMonitor();
-            StartAuthDispatchWorker();
             break;
         case DLL_PROCESS_DETACH:
+            g_authDispatchRunning.store(false, std::memory_order_relaxed);
+            g_hotkeyRunning.store(false, std::memory_order_relaxed);
             SteamP2PHook::Uninstall();
-            ReFixNet::UnmapUPnPPort(7777);
-            if (g_hOriginalDll && !lpReserved) {
-                FreeLibrary(g_hOriginalDll);
-                g_hOriginalDll = nullptr;
-            }
+            // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary
+            // during DLL_PROCESS_DETACH. Calling COM/FreeLibrary in DllMain violates loader lock
+            // and causes crashes on process exit. OS cleans up process memory safely.
             break;
     }
     return TRUE;
