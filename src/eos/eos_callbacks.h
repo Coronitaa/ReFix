@@ -9,7 +9,22 @@
 #include <functional>
 #include <cstdint>
 #include <cstring>
-#include <cstdlib>
+#include <type_traits>
+
+namespace Detail {
+    template<typename T, typename = void>
+    struct HasClientData : std::false_type {};
+
+    template<typename T>
+    struct HasClientData<T, std::void_t<decltype(std::declval<T&>().ClientData)>> : std::true_type {};
+
+    template<typename T>
+    void AssignClientDataIfPresent(T& data, void* clientData) {
+        if constexpr (HasClientData<T>::value) {
+            data.ClientData = clientData;
+        }
+    }
+}
 
 namespace ReFixEOS {
 
@@ -58,7 +73,7 @@ public:
         for (const auto& sub : m_subscriptions) {
             if (sub.eventType == eventType && sub.callbackFn) {
                 T copyData = data;
-                copyData.ClientData = sub.clientData;
+                Detail::AssignClientDataIfPresent(copyData, sub.clientData);
                 QueueCallback((void*)sub.callbackFn, copyData);
             }
         }

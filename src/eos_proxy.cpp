@@ -854,6 +854,7 @@ static void* eos_Platform_Create(void* Options) {
 
 static void eos_Platform_Tick(void* Handle) {
     FlushCallbacks();
+    ReFixEOS::RoomManagerBridge::Get().Tick();
     ReFixEOS::CallbackManager::Get().FlushCallbacks();
 }
 
@@ -1798,12 +1799,6 @@ static void CaptureSearchParameter(const EOS_Lobby_AttributeData* data) {
     g_capturedSearchParameters.push_back(clone);
 }
 
-struct EOS_LobbySearch_SetParameterOptions {
-    int32_t ApiVersion;
-    const EOS_Lobby_AttributeData* Parameter;
-    int32_t ComparisonOp;
-};
-
 static EOS_EResult eos_LobbySearch_SetParameter(void* H, void* O) {
     Log("EOS_LobbySearch_SetParameter called");
     if (O) {
@@ -2024,7 +2019,8 @@ struct CB_Lobby_UpdateLobby {
 };
 
 static void eos_Lobby_UpdateLobby(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Lobby_UpdateLobby called");
+    DWORD tid = GetCurrentThreadId();
+    Log("[EOS_RUNTIME] EOS_Lobby_UpdateLobby called (TID=0x%lx, Handle=%p, Options=%p, Delegate=%p)", tid, H, O, Cb);
     CB_Lobby_UpdateLobby info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = C;
@@ -2173,11 +2169,6 @@ static uint32_t eos_LobbySearch_GetSearchResultCount(void* H, void* O) {
     Log("EOS_LobbySearch_GetSearchResultCount called -> %d", (int)g_foundLobbies.size());
     return (uint32_t)g_foundLobbies.size();
 }
-
-struct EOS_LobbySearch_CopySearchResultByIndexOptions {
-    int32_t ApiVersion;
-    uint32_t LobbyIndex;
-};
 
 static EOS_EResult eos_LobbySearch_CopySearchResultByIndex(void* H, void* O, void** OutLobbyDetailsHandle) {
     Log("EOS_LobbySearch_CopySearchResultByIndex called");
@@ -2331,24 +2322,6 @@ static EOS_EResult eos_Lobby_CopyLobbyDetailsHandleByUiEventId(void* H, void* O,
     }
     return EOS_Success;
 }
-struct EOS_LobbyDetails_Info {
-    int32_t ApiVersion;
-    const char* LobbyId;
-    void* LobbyOwnerUserId;
-    int32_t PermissionLevel;
-    uint32_t AvailableSlots;
-    uint32_t MaxMembers;
-    int32_t bAllowInvites;
-    const char* BucketId;
-    int32_t bAllowHostMigration;
-    int32_t bRTCRoomEnabled;
-    int32_t bAllowJoinById;
-    int32_t bRejoinAfterKickRequiresInvite;
-    int32_t bPresenceEnabled;
-    const uint32_t* AllowedPlatformIds;
-    uint32_t AllowedPlatformIdsCount;
-};
-
 static EOS_EResult eos_LobbyDetails_CopyInfo(void* H, void* O, EOS_LobbyDetails_Info** OutLobbyDetailsInfo) {
     Log("EOS_LobbyDetails_CopyInfo called for handle %p", H);
     if (!OutLobbyDetailsInfo) return EOS_LimitExceeded;
@@ -2374,13 +2347,12 @@ static EOS_EResult eos_LobbyDetails_CopyInfo(void* H, void* O, EOS_LobbyDetails_
     info->ApiVersion = 1;
     info->LobbyId = _strdup(lobbyId.c_str());
     info->LobbyOwnerUserId = lobbyOwner;
-    info->PermissionLevel = 0; // Public
+    info->PermissionLevel = EOS_LPL_PUBLICADVERTISED;
     info->AvailableSlots = 3;
     info->MaxMembers = 4;
     info->bAllowInvites = 1;
     info->BucketId = "refix_bucket";
     info->bAllowHostMigration = 0;
-    info->bRTCRoomEnabled = 0;
     info->bAllowJoinById = 1;
     info->bRejoinAfterKickRequiresInvite = 0;
     info->bPresenceEnabled = 1;
@@ -2410,17 +2382,10 @@ static uint32_t eos_LobbyDetails_GetAttributeCount(void* H, void* O) {
     return count;
 }
 
-struct EOS_LobbyDetails_CopyAttributeByIndexOptions {
-    int32_t ApiVersion;
-    uint32_t AttributeIndex;
-};
-
-// (EOS_Lobby_Attribute defined in eos_lobby.h)
-
 static EOS_EResult eos_LobbyDetails_CopyAttributeByIndex(void* H, void* O, EOS_Lobby_Attribute** OutAttribute) {
     Log("EOS_LobbyDetails_CopyAttributeByIndex called");
     if (!O || !OutAttribute) return EOS_NotFound;
-    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttributeIndex;
+    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttrIndex;
 
     // Determine the IP/Port to return based on whether this is a real Steam lobby
     char lobbyIP[64] = "127.0.0.1";
@@ -2481,11 +2446,6 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByIndex(void* H, void* O, EOS_L
     return EOS_Success;
 }
 
-struct EOS_LobbyDetails_CopyAttributeByKeyOptions {
-    int32_t ApiVersion;
-    const char* AttrKey;
-};
-
 static EOS_EResult eos_LobbyDetails_CopyAttributeByKey(void* H, void* O, EOS_Lobby_Attribute** OutAttribute) {
     Log("EOS_LobbyDetails_CopyAttributeByKey called");
     if (!O || !OutAttribute || !((EOS_LobbyDetails_CopyAttributeByKeyOptions*)O)->AttrKey) return EOS_NotFound;
@@ -2516,7 +2476,7 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByKey(void* H, void* O, EOS_Lob
     if (index >= 0) {
         EOS_LobbyDetails_CopyAttributeByIndexOptions idxOpts = {};
         idxOpts.ApiVersion = 1;
-        idxOpts.AttributeIndex = (uint32_t)index;
+        idxOpts.AttrIndex = (uint32_t)index;
         return eos_LobbyDetails_CopyAttributeByIndex(H, &idxOpts, OutAttribute);
     }
 
@@ -2875,7 +2835,9 @@ struct CB_Sessions_UpdateSession {
 };
 
 static void eos_Sessions_UpdateSession(void* H, void* O, void* C, void* Cb) {
-    Log("[EOS_RUNTIME] EOS_Sessions_UpdateSession called for SessionName='%s'", g_activeSessionName.c_str());
+    DWORD tid = GetCurrentThreadId();
+    Log("[EOS_RUNTIME] EOS_Sessions_UpdateSession called (TID=0x%lx, Handle=%p, Options=%p, SessionName='%s', Delegate=%p)",
+        tid, H, O, g_activeSessionName.c_str(), Cb);
     g_hasActiveSession = true;
     CreateAndTagRealSteamLobbyAsync();
     
@@ -2892,14 +2854,17 @@ struct EOS_Sessions_CreateSessionModificationOptions {
 };
 
 static EOS_EResult eos_Sessions_CreateSessionModification(void* H, void* O, void** OutSessionModificationHandle) {
+    DWORD tid = GetCurrentThreadId();
     if (O) {
         auto* opts = (EOS_Sessions_CreateSessionModificationOptions*)O;
         if (opts->SessionName && opts->SessionName[0] != '\0') {
             g_activeSessionName = opts->SessionName;
-            Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification for SessionName='%s'", g_activeSessionName.c_str());
+            Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification called (TID=0x%lx, Handle=%p, SessionName='%s')", tid, H, g_activeSessionName.c_str());
+        } else {
+            Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification called (TID=0x%lx, Handle=%p, SessionName=null)", tid, H);
         }
     } else {
-        Log("EOS_Sessions_CreateSessionModification called");
+        Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification called (TID=0x%lx, Handle=%p, Options=null)", tid, H);
     }
     if (OutSessionModificationHandle) *OutSessionModificationHandle = (void*)0x2000;
     return EOS_Success;
@@ -2912,7 +2877,8 @@ struct CB_Sessions_DestroySession {
 };
 
 static void eos_Sessions_DestroySession(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Sessions_DestroySession called");
+    DWORD tid = GetCurrentThreadId();
+    Log("[EOS_RUNTIME] EOS_Sessions_DestroySession called (TID=0x%lx, Handle=%p, Options=%p)", tid, H, O);
     g_hasActiveSession = false;
     CB_Sessions_DestroySession info = {};
     info.ResultCode = EOS_Success;
@@ -3498,7 +3464,7 @@ static uint32_t eos_SessionDetails_GetSessionAttributeCount(void* H, void* O) {
 static EOS_EResult eos_SessionDetails_CopyAttributeByIndex(void* H, void* O, EOS_SessionDetails_Attribute** OutAttribute) {
     Log("EOS_SessionDetails_CopyAttributeByIndex called");
     if (!O || !OutAttribute) return EOS_NotFound;
-    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttributeIndex;
+    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttrIndex;
     if (index >= 10) return EOS_NotFound;
 
     auto* attr = (EOS_SessionDetails_Attribute*)malloc(sizeof(EOS_SessionDetails_Attribute));
@@ -4136,8 +4102,13 @@ static void SetupEmulatedFunctions() {
         Override("EOS_ProductUserId_FromString", (void*)EOS_ProductUserId_FromString);
         Override("EOS_EpicAccountId_FromString", (void*)EOS_EpicAccountId_FromString);
 
-        // Lobby Create & Modification
+        // Lobby Lifecycle & Modification
         Override("EOS_Lobby_CreateLobby",                         (void*)EOS_Lobby_CreateLobby);
+        Override("EOS_Lobby_UpdateLobby",                         (void*)EOS_Lobby_UpdateLobby);
+        Override("EOS_Lobby_DestroyLobby",                        (void*)EOS_Lobby_DestroyLobby);
+        Override("EOS_Lobby_JoinLobby",                           (void*)EOS_Lobby_JoinLobby);
+        Override("EOS_Lobby_LeaveLobby",                          (void*)EOS_Lobby_LeaveLobby);
+
         Override("EOS_Lobby_CreateLobbyModification",              (void*)EOS_Lobby_CreateLobbyModification);
         Override("EOS_Lobby_UpdateLobbyModification",              (void*)EOS_Lobby_UpdateLobbyModification);
         Override("EOS_LobbyModification_SetPermissionLevel",       (void*)EOS_LobbyModification_SetPermissionLevel);
@@ -4147,6 +4118,46 @@ static void SetupEmulatedFunctions() {
         Override("EOS_LobbyModification_AddAttribute",            (void*)EOS_LobbyModification_AddAttribute);
         Override("EOS_LobbyModification_Release",                 (void*)EOS_LobbyModification_Release);
         Override("EOS_Lobby_Attribute_Release",                    (void*)EOS_Lobby_Attribute_Release);
+
+        // Lobby Details
+        Override("EOS_Lobby_CopyLobbyDetailsHandle",              (void*)EOS_Lobby_CopyLobbyDetailsHandle);
+        Override("EOS_Lobby_CopyLobbyDetailsHandleByInviteId",    (void*)EOS_Lobby_CopyLobbyDetailsHandleByInviteId);
+        Override("EOS_Lobby_CopyLobbyDetailsHandleByUiEventId",   (void*)EOS_Lobby_CopyLobbyDetailsHandleByUiEventId);
+        Override("EOS_LobbyDetails_CopyInfo",                      (void*)EOS_LobbyDetails_CopyInfo);
+        Override("EOS_LobbyDetails_Info_Release",                  (void*)EOS_LobbyDetails_Info_Release);
+        Override("EOS_LobbyDetails_Release",                       (void*)EOS_LobbyDetails_Release);
+        Override("EOS_LobbyDetails_GetAttributeCount",             (void*)EOS_LobbyDetails_GetAttributeCount);
+        Override("EOS_LobbyDetails_CopyAttributeByIndex",          (void*)EOS_LobbyDetails_CopyAttributeByIndex);
+        Override("EOS_LobbyDetails_CopyAttributeByKey",            (void*)EOS_LobbyDetails_CopyAttributeByKey);
+        Override("EOS_LobbyDetails_GetMemberCount",                (void*)EOS_LobbyDetails_GetMemberCount);
+        Override("EOS_LobbyDetails_GetMemberByIndex",              (void*)EOS_LobbyDetails_GetMemberByIndex);
+        Override("EOS_LobbyDetails_GetLobbyOwner",                 (void*)EOS_LobbyDetails_GetLobbyOwner);
+
+        // Lobby Search
+        Override("EOS_Lobby_CreateLobbySearch",                   (void*)EOS_Lobby_CreateLobbySearch);
+        Override("EOS_LobbySearch_SetParameter",                  (void*)EOS_LobbySearch_SetParameter);
+        Override("EOS_LobbySearch_Find",                          (void*)EOS_LobbySearch_Find);
+        Override("EOS_LobbySearch_GetSearchResultCount",          (void*)EOS_LobbySearch_GetSearchResultCount);
+        Override("EOS_LobbySearch_CopySearchResultByIndex",       (void*)EOS_LobbySearch_CopySearchResultByIndex);
+        Override("EOS_LobbySearch_Release",                       (void*)EOS_LobbySearch_Release);
+
+        // Lobby Notifications
+        Override("EOS_Lobby_AddNotifyLobbyUpdateReceived",        (void*)EOS_Lobby_AddNotifyLobbyUpdateReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyUpdateReceived",     (void*)EOS_Lobby_RemoveNotifyLobbyUpdateReceived);
+        Override("EOS_Lobby_AddNotifyLobbyMemberUpdateReceived",  (void*)EOS_Lobby_AddNotifyLobbyMemberUpdateReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived",(void*)EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived);
+        Override("EOS_Lobby_AddNotifyLobbyMemberStatusReceived",  (void*)EOS_Lobby_AddNotifyLobbyMemberStatusReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived",(void*)EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived);
+        Override("EOS_Lobby_AddNotifyJoinLobbyAccepted",          (void*)EOS_Lobby_AddNotifyJoinLobbyAccepted);
+        Override("EOS_Lobby_RemoveNotifyJoinLobbyAccepted",       (void*)EOS_Lobby_RemoveNotifyJoinLobbyAccepted);
+        Override("EOS_Lobby_AddNotifyLeaveLobbyRequested",        (void*)EOS_Lobby_AddNotifyLeaveLobbyRequested);
+        Override("EOS_Lobby_RemoveNotifyLeaveLobbyRequested",     (void*)EOS_Lobby_RemoveNotifyLeaveLobbyRequested);
+        Override("EOS_Lobby_AddNotifyLobbyInviteReceived",        (void*)EOS_Lobby_AddNotifyLobbyInviteReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyInviteReceived",     (void*)EOS_Lobby_RemoveNotifyLobbyInviteReceived);
+        Override("EOS_Lobby_AddNotifyLobbyInviteAccepted",        (void*)EOS_Lobby_AddNotifyLobbyInviteAccepted);
+        Override("EOS_Lobby_RemoveNotifyLobbyInviteAccepted",     (void*)EOS_Lobby_RemoveNotifyLobbyInviteAccepted);
+        Override("EOS_Lobby_AddNotifyLobbyInviteRejected",        (void*)EOS_Lobby_AddNotifyLobbyInviteRejected);
+        Override("EOS_Lobby_RemoveNotifyLobbyInviteRejected",     (void*)EOS_Lobby_RemoveNotifyLobbyInviteRejected);
     }
 }
 

@@ -23,7 +23,15 @@ void RoomManagerBridge::Initialize() {
 
     std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
     std::string dispName = IdentityManager::Get().GetLocalDisplayName();
-    m_client->Authenticate(localPuid, dispName, nullptr);
+    if (!localPuid.empty()) {
+        m_client->Authenticate(localPuid, dispName, nullptr);
+        m_client->Tick();
+    }
+}
+
+void RoomManagerBridge::Reset() {
+    m_serverState.Reset();
+    Initialize();
 }
 
 void RoomManagerBridge::Shutdown() {
@@ -32,48 +40,93 @@ void RoomManagerBridge::Shutdown() {
     }
 }
 
-void RoomManagerBridge::CreateLobby(uint32_t maxMembers, const std::unordered_map<std::string, std::string>& attributes, std::function<void(ReFixOnline::EBackendResult, const ReFixOnline::LobbyData&)> callback) {
+void RoomManagerBridge::Tick() {
+    if (m_client) {
+        m_client->Tick();
+    }
+}
+
+void RoomManagerBridge::Authenticate(const std::string& userId, const std::string& displayName, std::function<void(ReFixOnline::EBackendResult, const std::string&)> callback) {
     if (!m_client) return;
-    std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
-    LogDiagnostic("[EOS_RUNTIME] RoomManager CreateLobby ENTER");
-    LogDiagnostic("[EOS_RUNTIME] PUID=%s", localPuid.c_str());
-    LogDiagnostic("[EOS_RUNTIME] MaxMembers=%u", maxMembers);
-    ReFixOnline::LobbyData lob;
-    auto res = m_serverState.CreateLobby(localPuid, maxMembers, attributes, lob);
-    if (callback) callback(res, lob);
+    m_client->Authenticate(userId, displayName, callback);
+    m_client->Tick();
+}
+
+void RoomManagerBridge::EnsureAuthenticated() {
+    if (!m_client) return;
+    if (m_client->GetConnectionState() != ReFixOnline::EClientConnectionState::AUTHENTICATED) {
+        std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
+        std::string dispName = IdentityManager::Get().GetLocalDisplayName();
+        if (!localPuid.empty()) {
+            m_client->Authenticate(localPuid, dispName, nullptr);
+            m_client->Tick();
+        }
+    }
+}
+
+void RoomManagerBridge::CreateLobby(uint32_t maxMembers, const std::unordered_map<std::string, std::string>& attributes, std::function<void(ReFixOnline::EBackendResult, const ReFixOnline::LobbyData&)> callback) {
+    if (!m_client) {
+        if (callback) callback(ReFixOnline::SERVER_ERROR, {});
+        return;
+    }
+    EnsureAuthenticated();
+    if (m_client->GetConnectionState() != ReFixOnline::EClientConnectionState::AUTHENTICATED) {
+        LogDiagnostic("[RFIX_BACKEND] CreateLobby rejected: BackendClient not authenticated (state=%d)", (int)m_client->GetConnectionState());
+        if (callback) callback(ReFixOnline::NOT_AUTHENTICATED, {});
+        return;
+    }
+    m_client->CreateLobby(maxMembers, attributes, callback);
 }
 
 void RoomManagerBridge::FindLobbies(uint32_t maxResults, const std::unordered_map<std::string, std::string>& filters, std::function<void(ReFixOnline::EBackendResult, const std::vector<ReFixOnline::LobbyData>&)> callback) {
-    if (!m_client) return;
-    std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
-    std::vector<ReFixOnline::LobbyData> lobs;
-    auto res = m_serverState.FindLobbies(localPuid, maxResults, filters, lobs);
-    if (callback) callback(res, lobs);
+    if (!m_client) {
+        if (callback) callback(ReFixOnline::SERVER_ERROR, {});
+        return;
+    }
+    EnsureAuthenticated();
+    m_client->FindLobbies(maxResults, filters, callback);
 }
 
 void RoomManagerBridge::JoinLobby(const std::string& lobbyId, std::function<void(ReFixOnline::EBackendResult, const ReFixOnline::LobbyData&)> callback) {
-    if (!m_client) return;
-    std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
-    std::string dispName = IdentityManager::Get().GetLocalDisplayName();
-    ReFixOnline::LobbyData lob;
-    auto res = m_serverState.JoinLobby(localPuid, dispName, lobbyId, lob);
-    if (callback) callback(res, lob);
+    if (!m_client) {
+        if (callback) callback(ReFixOnline::SERVER_ERROR, {});
+        return;
+    }
+    EnsureAuthenticated();
+    m_client->JoinLobby(lobbyId, callback);
 }
 
 void RoomManagerBridge::LeaveLobby(const std::string& lobbyId, std::function<void(ReFixOnline::EBackendResult, const std::string&)> callback) {
-    if (!m_client) return;
-    std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
-    std::string newOwner;
-    auto res = m_serverState.LeaveLobby(localPuid, lobbyId, newOwner);
+    if (!m_client) {
+        if (callback) callback(ReFixOnline::SERVER_ERROR, "");
+        return;
+    }
+    EnsureAuthenticated();
+    m_client->LeaveLobby(lobbyId, callback);
+}
+
+void RoomManagerBridge::DestroyLobby(const std::string& lobbyId, std::function<void(ReFixOnline::EBackendResult, const std::string&)> callback) {
+    if (!m_client) {
+        if (callback) callback(ReFixOnline::SERVER_ERROR, "");
+        return;
+    }
+    EnsureAuthenticated();
+    std::string puid = IdentityManager::Get().GetLocalProductUserIdString();
+    ReFixOnline::EBackendResult res = m_serverState.DestroyLobby(puid, lobbyId);
     if (callback) callback(res, lobbyId);
 }
 
 void RoomManagerBridge::ResyncLobby(const std::string& lobbyId, std::function<void(ReFixOnline::EBackendResult, const ReFixOnline::LobbyData&)> callback) {
-    if (!m_client) return;
-    std::string localPuid = IdentityManager::Get().GetLocalProductUserIdString();
-    ReFixOnline::LobbyData lob;
-    auto res = m_serverState.ResyncLobby(localPuid, lobbyId, lob);
-    if (callback) callback(res, lob);
+    if (!m_client) {
+        if (callback) callback(ReFixOnline::SERVER_ERROR, {});
+        return;
+    }
+    EnsureAuthenticated();
+    m_client->ResyncLobby(lobbyId, callback);
+}
+
+bool RoomManagerBridge::GetLobby(const std::string& lobbyId, ReFixOnline::LobbyData& outLobby) {
+    return (m_serverState.GetLobby(lobbyId, outLobby) == ReFixOnline::SUCCESS);
 }
 
 } // namespace ReFixEOS

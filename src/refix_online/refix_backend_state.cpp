@@ -70,17 +70,13 @@ bool BackendServerState::ValidateSession(const std::string& userId, const std::s
 }
 
 EBackendResult BackendServerState::CreateLobby(const std::string& userId, uint32_t maxMembers, const std::unordered_map<std::string, std::string>& attributes, LobbyData& outLobby) {
-    if (userId.empty()) return INVALID_USER;
+    if (userId.empty()) return NOT_AUTHENTICATED;
     if (maxMembers == 0 || maxMembers > MAX_LOBBY_MEMBERS) maxMembers = 4;
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     auto sessIt = m_sessions.find(userId);
-    if (sessIt == m_sessions.end()) {
-        std::string dummyToken;
-        AuthenticateSession(userId, "ReFix Player", dummyToken);
-        sessIt = m_sessions.find(userId);
-    }
+    if (sessIt == m_sessions.end()) return NOT_AUTHENTICATED;
 
     std::string lobbyId = "lob_" + GenerateUniqueLobbyId();
 
@@ -106,6 +102,45 @@ EBackendResult BackendServerState::CreateLobby(const std::string& userId, uint32
     sessIt->second.activeLobbyId = lobbyId;
 
     outLobby = lob;
+    return SUCCESS;
+}
+
+EBackendResult BackendServerState::UpdateLobby(const std::string& userId, const std::string& lobbyId, const std::unordered_map<std::string, std::string>& attributes, uint32_t maxMembers, const std::string& bucketId, int32_t permissionLevel, bool invitesAllowed, LobbyData& outLobby) {
+    if (userId.empty() || lobbyId.empty()) return LOBBY_NOT_FOUND;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    auto lobIt = m_lobbies.find(lobbyId);
+    if (lobIt == m_lobbies.end() || lobIt->second.state != (int32_t)ELobbyState::ACTIVE) {
+        return LOBBY_NOT_FOUND;
+    }
+    auto& lob = lobIt->second;
+    if (lob.ownerUserId != userId) {
+        return NOT_OWNER;
+    }
+    for (const auto& kv : attributes) {
+        lob.attributes[kv.first] = kv.second;
+    }
+    if (maxMembers > 0 && maxMembers <= MAX_LOBBY_MEMBERS) {
+        lob.maxMembers = maxMembers;
+    }
+    if (!bucketId.empty()) {
+        lob.attributes["bucket_id"] = "s:" + bucketId;
+    }
+    lob.attributes["permission_level"] = "i:" + std::to_string(permissionLevel);
+    lob.attributes["invites_allowed"] = invitesAllowed ? "b:1" : "b:0";
+    lob.lastHeartbeat = GetCurrentTimeMs();
+    outLobby = lob;
+    return SUCCESS;
+}
+
+EBackendResult BackendServerState::GetLobby(const std::string& lobbyId, LobbyData& outLobby) {
+    if (lobbyId.empty()) return LOBBY_NOT_FOUND;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    auto lobIt = m_lobbies.find(lobbyId);
+    if (lobIt == m_lobbies.end() || lobIt->second.state != (int32_t)ELobbyState::ACTIVE) {
+        return LOBBY_NOT_FOUND;
+    }
+    outLobby = lobIt->second;
     return SUCCESS;
 }
 

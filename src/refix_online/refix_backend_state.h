@@ -41,8 +41,9 @@ public:
     EBackendResult AuthenticateSession(const std::string& userId, const std::string& displayName, std::string& outSessionToken);
     bool ValidateSession(const std::string& userId, const std::string& sessionToken);
 
-    // Authoritative Lobby Lifecycle
     EBackendResult CreateLobby(const std::string& userId, uint32_t maxMembers, const std::unordered_map<std::string, std::string>& attributes, LobbyData& outLobby);
+    EBackendResult UpdateLobby(const std::string& userId, const std::string& lobbyId, const std::unordered_map<std::string, std::string>& attributes, uint32_t maxMembers, const std::string& bucketId, int32_t permissionLevel, bool invitesAllowed, LobbyData& outLobby);
+    EBackendResult GetLobby(const std::string& lobbyId, LobbyData& outLobby);
     EBackendResult FindLobbies(const std::string& userId, uint32_t maxResults, const std::unordered_map<std::string, std::string>& filters, std::vector<LobbyData>& outLobbies);
     EBackendResult JoinLobby(const std::string& userId, const std::string& displayName, const std::string& lobbyId, LobbyData& outLobby);
     EBackendResult LeaveLobby(const std::string& userId, const std::string& lobbyId, std::string& outNewOwnerUserId);

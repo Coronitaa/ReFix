@@ -259,6 +259,27 @@ bool ReadLeaveLobbyResult(ByteReader& reader, EBackendResult& result, std::strin
     return reader.ReadString(lobbyId, MAX_LOBBY_ID_LEN);
 }
 
+// Destroy Lobby
+void WriteDestroyLobbyRequest(ByteWriter& writer, const std::string& lobbyId) {
+    writer.WriteString(lobbyId);
+}
+
+bool ReadDestroyLobbyRequest(ByteReader& reader, std::string& lobbyId) {
+    return reader.ReadString(lobbyId, MAX_LOBBY_ID_LEN);
+}
+
+void WriteDestroyLobbyResult(ByteWriter& writer, EBackendResult result, const std::string& lobbyId) {
+    writer.WriteInt32((int32_t)result);
+    writer.WriteString(lobbyId);
+}
+
+bool ReadDestroyLobbyResult(ByteReader& reader, EBackendResult& result, std::string& lobbyId) {
+    int32_t resInt = 0;
+    if (!reader.ReadInt32(resInt)) return false;
+    result = (EBackendResult)resInt;
+    return reader.ReadString(lobbyId, MAX_LOBBY_ID_LEN);
+}
+
 // Notifications
 void WriteMemberJoinedNotification(ByteWriter& writer, const std::string& lobbyId, const LobbyMemberInfo& member) {
     writer.WriteString(lobbyId);

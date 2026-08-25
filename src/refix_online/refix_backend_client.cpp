@@ -3,6 +3,7 @@
 // ReFix Online v2 - Backend Client Implementation
 // =============================================================================
 #include "refix_backend_client.h"
+#include "../eos/eos_connect.h"
 
 namespace ReFixOnline {
 
@@ -169,6 +170,9 @@ void BackendClient::Tick() {
         RefixPacketHeader header = {};
         if (!DeserializeHeader(reader, header)) continue;
 
+        ReFixEOS::LogDiagnostic("[RFIX_BACKEND] BackendClient::Tick");
+        ReFixEOS::LogDiagnostic("[RFIX_BACKEND] RequestId=%llu", (unsigned long long)header.RequestId);
+
         std::function<void(ByteReader&)> cb = nullptr;
         {
             std::lock_guard<std::mutex> lock(m_clientMutex);
@@ -228,6 +232,10 @@ uint64_t BackendClient::Authenticate(const std::string& userId, const std::strin
 uint64_t BackendClient::CreateLobby(uint32_t maxMembers, const std::unordered_map<std::string, std::string>& attributes, std::function<void(EBackendResult, const LobbyData&)> onComplete) {
     uint64_t reqId = GetNextRequestId();
 
+    ReFixEOS::LogDiagnostic("[RFIX_BACKEND] BackendClient::CreateLobby");
+    ReFixEOS::LogDiagnostic("[RFIX_BACKEND] MSG_CREATE_LOBBY");
+    ReFixEOS::LogDiagnostic("[RFIX_BACKEND] RequestId=%llu", (unsigned long long)reqId);
+
     RefixPacketHeader header = {};
     header.Magic = REFIX_PROTOCOL_MAGIC;
     header.Version = REFIX_PROTOCOL_VERSION;
@@ -248,6 +256,7 @@ uint64_t BackendClient::CreateLobby(uint32_t maxMembers, const std::unordered_ma
             EBackendResult res = SERVER_ERROR;
             LobbyData lob;
             if (ReadCreateLobbyResult(r, res, lob)) {
+                ReFixEOS::LogDiagnostic("[RFIX_BACKEND] MSG_CREATE_LOBBY_RESULT");
                 if (res == SUCCESS) {
                     m_activeLobbyId = lob.lobbyId;
                 }

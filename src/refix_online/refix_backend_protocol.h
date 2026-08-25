@@ -134,6 +134,12 @@ bool ReadLeaveLobbyRequest(ByteReader& reader, std::string& lobbyId);
 void WriteLeaveLobbyResult(ByteWriter& writer, EBackendResult result, const std::string& lobbyId);
 bool ReadLeaveLobbyResult(ByteReader& reader, EBackendResult& result, std::string& lobbyId);
 
+void WriteDestroyLobbyRequest(ByteWriter& writer, const std::string& lobbyId);
+bool ReadDestroyLobbyRequest(ByteReader& reader, std::string& lobbyId);
+
+void WriteDestroyLobbyResult(ByteWriter& writer, EBackendResult result, const std::string& lobbyId);
+bool ReadDestroyLobbyResult(ByteReader& reader, EBackendResult& result, std::string& lobbyId);
+
 // Notifications & Updates
 void WriteMemberJoinedNotification(ByteWriter& writer, const std::string& lobbyId, const LobbyMemberInfo& member);
 bool ReadMemberJoinedNotification(ByteReader& reader, std::string& lobbyId, LobbyMemberInfo& member);
