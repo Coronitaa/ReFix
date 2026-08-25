@@ -2023,6 +2023,48 @@ static void NormalizeFriendGameInfo(void* pFriendGameInfo, uint64_t steamIDFrien
         if (fid == 480 || fid == g_config.maskAppIdNum || fid == g_config.realAppIdNum) {
             uint32_t myAppId = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
             info->m_gameID = (info->m_gameID & 0xFFFFFFFFFF000000ULL) | (uint64_t)myAppId;
+
+            // Check if m_steamIDLobby is invalid or 0.
+            // A valid Steam lobby ID must have Universe == 1 (Public) and AccountType == 7 (Chat/Lobby) or 1 (Individual)
+            // Invalid values like 0x8000000042C70FD3 (9223372037975117779) or 0 must be recovered from Rich Presence
+            bool isLobbyValid = false;
+            if (info->m_steamIDLobby != 0) {
+                uint8_t universe = (uint8_t)((info->m_steamIDLobby >> 56) & 0xFF);
+                uint8_t accType = (uint8_t)((info->m_steamIDLobby >> 52) & 0x0F);
+                if (universe == 1 && (accType == 7 || accType == 1)) {
+                    isLobbyValid = true;
+                }
+            }
+
+            if (!isLobbyValid) {
+                typedef const char* (*fn_GetFriendRP_t)(void* self, uint64_t steamIDFriend, const char* pchKey);
+                static fn_GetFriendRP_t s_pfnGetFriendRP = nullptr;
+                if (!s_pfnGetFriendRP) {
+                    s_pfnGetFriendRP = (fn_GetFriendRP_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamFriends_GetFriendRichPresence");
+                }
+                typedef void* (*fn_SteamFriends_t)();
+                static fn_SteamFriends_t s_pfnFriends = nullptr;
+                if (!s_pfnFriends) {
+                    s_pfnFriends = (fn_SteamFriends_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamFriends_v017");
+                    if (!s_pfnFriends) s_pfnFriends = (fn_SteamFriends_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamFriends");
+                }
+                void* pFriends = s_pfnFriends ? s_pfnFriends() : nullptr;
+                if (pFriends && s_pfnGetFriendRP) {
+                    const char* connectStr = s_pfnGetFriendRP(pFriends, steamIDFriend, "connect");
+                    if (connectStr && connectStr[0] != '\0') {
+                        const char* pLobby = strstr(connectStr, "+connect_lobby ");
+                        if (pLobby) {
+                            uint64_t rpLobbyId = _strtoui64(pLobby + 15, nullptr, 10);
+                            if (rpLobbyId != 0) {
+                                info->m_steamIDLobby = rpLobbyId;
+                                ReFixLog("GetFriendGamePlayed: Recovered valid LobbyID %llu from Rich Presence connect string for friend %llu",
+                                         rpLobbyId, steamIDFriend);
+                            }
+                        }
+                    }
+                }
+            }
+
             ReFixLog("GetFriendGamePlayed: Normalized friend %llu AppID (%u -> %u, Lobby=%llu)", steamIDFriend, fid, myAppId, info->m_steamIDLobby);
         }
     }
@@ -2120,6 +2162,15 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
     ReFixLog("  Interface (self): %p", self);
     ReFixLog("  g_orig_VTable_JoinLobby: %p", g_orig_VTable_JoinLobby);
     ReFixLog("  g_pfn_JoinLobby: %p", g_pfn_JoinLobby);
+
+    // Sanitize invalid lobby IDs (e.g. 0x80000000... / shortcut / negative int64 / universe != 1)
+    uint8_t universe = (uint8_t)((steamIDLobby >> 56) & 0xFF);
+    uint8_t accType = (uint8_t)((steamIDLobby >> 52) & 0x0F);
+    if (universe != 1 || (accType != 7 && accType != 1)) {
+        ReFixLog("  [WARNING] Invalid Steam LobbyID=%llu (universe=%u, accType=%u, highBit=%d) - aborting invalid backend join",
+                 steamIDLobby, universe, accType, (int)(steamIDLobby >> 63));
+        return 0;
+    }
 
     ReFix_NotifyLobbyID(steamIDLobby);
 
