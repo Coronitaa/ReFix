@@ -120,6 +120,17 @@ int main() {
     assert(flushed == 200);
     std::cout << "  200 concurrent logins enqueued and drained safely!" << std::endl;
 
+    // TEST 6: Ticket Invalidation (CancelAuthTicket) strictly causes EOS_InvalidAuth
+    std::cout << "\n[TEST 6] Ticket Invalidation (CancelAuthTicket)..." << std::endl;
+    provider->InvalidateCapturedTicket(1001);
+    assert(!provider->HasCapturedTicket());
+    s_loginCalled = false;
+    EOS_Connect_Login(nullptr, &loginOpts, (void*)0x7777, (void*)OnLoginCallback);
+    cbMgr.FlushCallbacks();
+    assert(s_loginCalled);
+    assert(s_loginResult == EOS_InvalidAuth);
+    std::cout << "  [PASS] Invalidated/canceled ticket rejected with EOS_InvalidAuth!" << std::endl;
+
     std::cout << "\n==========================================================" << std::endl;
     std::cout << "[SUCCESS] 100% of Connect Login Unit Tests Passed!" << std::endl;
     std::cout << "==========================================================" << std::endl;

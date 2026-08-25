@@ -35,6 +35,7 @@ public:
     virtual bool IsAuthenticated() = 0;
 
     virtual void SetCapturedSteamTicket(const uint8_t* data, size_t size, uint32_t handle) = 0;
+    virtual void InvalidateCapturedTicket(uint32_t handle = 0) = 0;
     virtual void SetCapturedSteamId(uint64_t steamId) = 0;
     virtual void SetCapturedDisplayName(const std::string& name) = 0;
     virtual std::string GetCapturedTicketHex() = 0;

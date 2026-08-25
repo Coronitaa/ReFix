@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstdint>
+#include <cassert>
 #include <vector>
 #include <string>
 #include <sstream>
@@ -99,6 +100,56 @@ typedef void (*fn_EOS_Platform_Tick_t)(EOS_HPlatform Handle);
 typedef EOS_HConnect (*fn_EOS_Platform_GetConnectInterface_t)(EOS_HPlatform Handle);
 typedef void (*fn_EOS_Connect_Login_t)(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Options, void* ClientData, EOS_Connect_OnLoginCallback CompletionDelegate);
 typedef EOS_EResult (*fn_EOS_ProductUserId_ToString_t)(EOS_ProductUserId ProductUserId, char* OutBuffer, int32_t* InOutBufferLength);
+typedef void (*fn_SteamAPI_RegisterCallback_t)(void* pCallback, int iCallback);
+typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
+
+#pragma pack(push, 8)
+struct Steam_GetTicketForWebApiResponse_t {
+    enum { k_iCallback = 168 };
+    uint32_t m_hAuthTicket;
+    int32_t  m_eResult;
+    int32_t  m_cubTicket;
+    uint8_t  m_rgubTicket[1024];
+};
+#pragma pack(pop)
+
+class HarnessCallback168Receiver {
+public:
+    HarnessCallback168Receiver() : m_fired(false), m_handle(0), m_result(-1), m_size(0) {
+        memset(m_ticket, 0, sizeof(m_ticket));
+    }
+
+    virtual void Run(void* pvParam) {
+        if (!pvParam) return;
+        auto* resp = (Steam_GetTicketForWebApiResponse_t*)pvParam;
+        m_handle = resp->m_hAuthTicket;
+        m_result = resp->m_eResult;
+        m_size = resp->m_cubTicket;
+        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) {
+            memcpy(m_ticket, resp->m_rgubTicket, resp->m_cubTicket);
+        }
+        m_fired = true;
+        printf("  -> [HarnessCallback168Receiver::Run] Received Callback 168: Handle=%u, Result=%d, Size=%d bytes\n",
+               m_handle, m_result, m_size);
+        fflush(stdout);
+    }
+
+    virtual void Run(void* pvParam, bool bIOFailure, uint64_t hSteamAPICall) {
+        (void)bIOFailure;
+        (void)hSteamAPICall;
+        Run(pvParam);
+    }
+
+    virtual int GetCallbackSizeBytes() {
+        return sizeof(Steam_GetTicketForWebApiResponse_t);
+    }
+
+    bool m_fired;
+    uint32_t m_handle;
+    int32_t m_result;
+    int32_t m_size;
+    uint8_t m_ticket[1024];
+};
 
 static bool g_loginCompleted = false;
 static EOS_EResult g_loginResult = -1;
@@ -191,26 +242,46 @@ int main(int argc, char** argv) {
            steamId, (bLoggedOn ? "TRUE" : "FALSE"));
     fflush(stdout);
 
-    // 4. Obtain Auth Session Ticket
-    printf("[STEP 4] Requesting Steam Auth Session Ticket...\n");
+    auto pfnRegisterCallback = (fn_SteamAPI_RegisterCallback_t)GetProcAddress(hSteam, "SteamAPI_RegisterCallback");
+    auto pfnGetAuthTicketForWebApi = (fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t)GetProcAddress(hSteam, "SteamAPI_ISteamUser_GetAuthTicketForWebApi");
+
+    // 4. Obtain Auth Session Ticket & Test WebApi Ticket Fallback to Callback 168
+    printf("[STEP 4] Requesting Steam Auth Ticket (GetAuthTicketForWebApi 'epiconlineservices')...\n");
     fflush(stdout);
+
+    HarnessCallback168Receiver cb168Receiver;
+    if (pfnRegisterCallback) {
+        pfnRegisterCallback(&cb168Receiver, 168);
+        printf("  -> Registered Callback 168 receiver at %p\n", &cb168Receiver);
+    }
+
     uint8_t ticketBuf[1024] = { 0 };
     uint32_t ticketSize = 0;
     uint32_t ticketHandle = 0;
-    if (pfnGetAuthSessionTicket && pUser) {
-        ticketHandle = pfnGetAuthSessionTicket(pUser, ticketBuf, sizeof(ticketBuf), &ticketSize);
+
+    if (pfnGetAuthTicketForWebApi && pUser) {
+        ticketHandle = pfnGetAuthTicketForWebApi(pUser, "epiconlineservices");
     }
 
-    printf("  -> TicketHandle=%u, TicketSize=%u bytes\n", ticketHandle, ticketSize);
-    if (ticketHandle != 0 && ticketSize > 0) {
-        printf("[PASS] Real Steam Auth Session Ticket successfully obtained! (Size: %u bytes)\n", ticketSize);
+    printf("  -> GetAuthTicketForWebApi returned Handle=%u\n", ticketHandle);
+    assert(ticketHandle != 0);
+
+    // Run callbacks to deliver the synthetic Callback 168
+    pfnRunCallbacks();
+
+    if (cb168Receiver.m_fired && cb168Receiver.m_size > 0) {
+        ticketSize = cb168Receiver.m_size;
+        memcpy(ticketBuf, cb168Receiver.m_ticket, ticketSize);
+        printf("[PASS] Synthetic Callback 168 backed by genuine Steam Session Ticket fired successfully! (Handle: %u, Size: %u bytes)\n",
+               cb168Receiver.m_handle, ticketSize);
     } else {
-        printf("[WARN] Ticket generation returned handle=%u, size=%u\n", ticketHandle, ticketSize);
+        printf("[WARN] Callback 168 did not fire synchronously, querying GetAuthSessionTicket fallback...\n");
+        if (pfnGetAuthSessionTicket && pUser) {
+            ticketHandle = pfnGetAuthSessionTicket(pUser, ticketBuf, sizeof(ticketBuf), &ticketSize);
+        }
+        pfnRunCallbacks();
     }
     fflush(stdout);
-
-    // Run callbacks
-    pfnRunCallbacks();
 
     // 5. Load EOS SDK Proxy DLL
     printf("\n[STEP 5] Loading EOS SDK Proxy DLL (EOSSDK-Win64-Shipping.dll)...\n");

@@ -131,16 +131,16 @@ public:
                 RefreshFromEnvironment();
             }
 
-            // If still no Steam ticket was captured from Steam client, reject!
-            if (m_ticketBytes.empty()) {
+            // If still no Steam ticket was captured from Steam client or handle is invalid, reject!
+            if (m_ticketBytes.empty() || m_ticketHandle == 0) {
                 return false;
             }
 
             // 1. Try hex decoding the incoming token
             std::vector<uint8_t> candidateBytes;
             if (HexToBytes(token, candidateBytes)) {
-                // Exact byte match against captured ticket
-                if (candidateBytes == m_ticketBytes) {
+                // Exact length and byte match against captured ticket
+                if (candidateBytes.size() == m_ticketBytes.size() && candidateBytes == m_ticketBytes) {
                     return true;
                 }
             }
@@ -181,6 +181,16 @@ public:
             m_ticketBytes.assign(data, data + size);
         }
         m_ticketHandle = handle;
+    }
+
+    void InvalidateCapturedTicket(uint32_t handle = 0) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (handle == 0 || handle == m_ticketHandle) {
+            m_ticketBytes.clear();
+            m_ticketHandle = 0;
+            SetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", "");
+            SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", "0");
+        }
     }
 
     void SetCapturedSteamId(uint64_t steamId) override {
@@ -349,6 +359,16 @@ public:
             m_ticketBytes.assign(data, data + size);
         }
         m_ticketHandle = handle;
+    }
+
+    void InvalidateCapturedTicket(uint32_t handle = 0) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (handle == 0 || handle == m_ticketHandle) {
+            m_ticketBytes.clear();
+            m_ticketHandle = 0;
+            SetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", "");
+            SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", "0");
+        }
     }
 
     void SetCapturedSteamId(uint64_t steamId) override {

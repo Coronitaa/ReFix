@@ -81,6 +81,10 @@ echo [*] Compiling test_runtime_auth_harness...
 cl %CFLAGS% tests\test_runtime_auth_harness.cpp /Febuild\tests\test_runtime_auth_harness.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_runtime_auth_harness & exit /b 1 )
 
+echo [*] Compiling test_synthetic_cb168...
+cl %CFLAGS% tests\test_synthetic_cb168.cpp src\identity\online_identity_provider.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_synthetic_cb168.exe %LIBS%
+if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_synthetic_cb168 & exit /b 1 )
+
 echo.
 echo ====================================================================
 echo [*] Executing EOS Online V2 Unit Tests...
@@ -127,6 +131,9 @@ if %ERRORLEVEL% neq 0 ( echo [!] test_lobby_search FAILED & exit /b 1 )
 
 build\tests\test_lobby_join_leave.exe
 if %ERRORLEVEL% neq 0 ( echo [!] test_lobby_join_leave FAILED & exit /b 1 )
+
+build\tests\test_synthetic_cb168.exe
+if %ERRORLEVEL% neq 0 ( echo [!] test_synthetic_cb168 FAILED & exit /b 1 )
 
 echo.
 echo ====================================================================

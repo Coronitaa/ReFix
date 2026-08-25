@@ -1182,8 +1182,10 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown();
 extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks();
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t hSteamPipe);
 extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(uint32_t hSteamPipe, void* pCallbackMsg);
+extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(uint32_t hSteamPipe);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamUser_CancelAuthTicket(void* self, uint32_t hAuthTicket);
 typedef uint64_t(*fn_SteamAPI_ISteamMatchmaking_JoinLobby_t)(void* self, uint64_t steamIDLobby);
 static fn_SteamAPI_ISteamMatchmaking_JoinLobby_t g_pfn_JoinLobby = nullptr;
 static fn_SteamAPI_ISteamMatchmaking_SetLobbyData_t g_pfn_SetLobbyData = nullptr;
@@ -2435,6 +2437,18 @@ static fn_VTable_GetAuthSessionTicket_t g_orig_VTable_GetAuthSessionTicket = nul
 typedef uint32_t (*fn_VTable_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
 static fn_VTable_GetAuthTicketForWebApi_t g_orig_VTable_GetAuthTicketForWebApi = nullptr;
 
+typedef void (*fn_VTable_CancelAuthTicket_t)(void* self, uint32_t hAuthTicket);
+static fn_VTable_CancelAuthTicket_t g_orig_VTable_CancelAuthTicket = nullptr;
+
+typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
+static fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t g_pfn_GetAuthSessionTicket = nullptr;
+
+typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
+static fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t g_pfn_GetAuthTicketForWebApi = nullptr;
+
+typedef void (*fn_SteamAPI_ISteamUser_CancelAuthTicket_t)(void* self, uint32_t hAuthTicket);
+static fn_SteamAPI_ISteamUser_CancelAuthTicket_t g_pfn_CancelAuthTicket = nullptr;
+
 static void EnsureAuthCallbackRegistered();
 
 static void SyncTicketToEnvironment(const uint8_t* data, size_t size, uint32_t handle) {
@@ -2442,43 +2456,6 @@ static void SyncTicketToEnvironment(const uint8_t* data, size_t size, uint32_t h
     std::string hexStr = ReFixIdentity::BytesToHex(data, size);
     SetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", hexStr.c_str());
     SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", std::to_string(handle).c_str());
-}
-
-static uint32_t Hooked_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
-    EnsureAuthCallbackRegistered();
-    uint32_t handle = 0;
-    if (g_orig_VTable_GetAuthSessionTicket) {
-        handle = g_orig_VTable_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
-    }
-    uint32_t ticketSize = (pcbTicket ? *pcbTicket : 0);
-    ReFixLog("Hooked_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u, mode=%s",
-             handle, ticketSize, (g_isGoldbergMode ? "goldberg" : "valve"));
-
-    if (handle != 0 && pTicket && ticketSize > 0) {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
-        g_lastAuthTicketHandle = handle;
-        g_lastAuthTicketData.assign((const uint8_t*)pTicket, (const uint8_t*)pTicket + ticketSize);
-        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-            (const uint8_t*)pTicket, ticketSize, handle);
-        SyncTicketToEnvironment((const uint8_t*)pTicket, ticketSize, handle);
-    }
-    return handle;
-}
-
-static uint32_t Hooked_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
-    EnsureAuthCallbackRegistered();
-    uint32_t handle = 0;
-    if (g_orig_VTable_GetAuthTicketForWebApi) {
-        handle = g_orig_VTable_GetAuthTicketForWebApi(self, pchIdentity);
-    }
-    ReFixLog("Hooked_ISteamUser_GetAuthTicketForWebApi (identity='%s'): handle=%u, mode=%s",
-             pchIdentity ? pchIdentity : "", handle, (g_isGoldbergMode ? "goldberg" : "valve"));
-    if (handle != 0) {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
-        g_lastAuthTicketHandle = handle;
-        SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", std::to_string(handle).c_str());
-    }
-    return handle;
 }
 
 #pragma pack(push, 8)
@@ -2496,6 +2473,49 @@ struct Steam_GetTicketForWebApiResponse_t {
     uint8_t  m_rgubTicket[1024];
 };
 #pragma pack(pop)
+
+// Pending Synthetic Callback 168 data structure
+struct PendingSyntheticWebApiCallback {
+    uint32_t hAuthTicket;
+    int32_t  eResult;
+    int32_t  cubTicket;
+    uint8_t  rgubTicket[1024];
+    int      framesRemaining;
+};
+
+static std::vector<PendingSyntheticWebApiCallback> g_pendingSynthetic168;
+static std::mutex g_synthetic168Mutex;
+
+static std::atomic<bool> g_manualDispatch168Pending{ false };
+static Steam_GetTicketForWebApiResponse_t g_manualDispatch168Data = {};
+
+static void QueueSyntheticWebApiCallback168(uint32_t handle, const uint8_t* pTicket, uint32_t ticketSize) {
+    if (!pTicket || ticketSize == 0 || ticketSize > 1024) return;
+
+    PendingSyntheticWebApiCallback cb = {};
+    cb.hAuthTicket = handle;
+    cb.eResult = 1; // k_EResultOK
+    cb.cubTicket = (int32_t)ticketSize;
+    memset(cb.rgubTicket, 0, sizeof(cb.rgubTicket));
+    memcpy(cb.rgubTicket, pTicket, ticketSize);
+    cb.framesRemaining = 0; // Ready immediately on next RunCallbacks
+
+    {
+        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
+        g_pendingSynthetic168.push_back(cb);
+    }
+
+    // ManualDispatch data cache
+    g_manualDispatch168Data.m_hAuthTicket = handle;
+    g_manualDispatch168Data.m_eResult = 1; // k_EResultOK
+    g_manualDispatch168Data.m_cubTicket = (int32_t)ticketSize;
+    memset(g_manualDispatch168Data.m_rgubTicket, 0, sizeof(g_manualDispatch168Data.m_rgubTicket));
+    memcpy(g_manualDispatch168Data.m_rgubTicket, pTicket, ticketSize);
+    g_manualDispatch168Pending.store(true, std::memory_order_relaxed);
+
+    ReFixLog("[STEAM] QueueSyntheticWebApiCallback168: Queued Synthetic Callback 168 backed by genuine Steam Session Ticket (handle=%u, cubTicket=%u)",
+             handle, ticketSize);
+}
 
 typedef void (*fn_CallbackRun_t)(void* self, void* pvParam);
 typedef void (*fn_CallbackRun2_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hSteamAPICall);
@@ -2552,6 +2572,134 @@ static void Hooked_Callback_Run2_168(void* self, void* pvParam, bool bIOFailure,
     if (orig) {
         orig(self, pvParam, bIOFailure, hSteamAPICall);
     }
+}
+
+static uint32_t Hooked_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
+    EnsureAuthCallbackRegistered();
+    uint32_t handle = 0;
+    if (g_orig_VTable_GetAuthSessionTicket) {
+        handle = g_orig_VTable_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
+    } else if (g_pfn_GetAuthSessionTicket) {
+        handle = g_pfn_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
+    }
+    uint32_t ticketSize = (pcbTicket ? *pcbTicket : 0);
+    ReFixLog("Hooked_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u, mode=%s",
+             handle, ticketSize, (g_isGoldbergMode ? "goldberg" : "valve"));
+
+    if (handle != 0 && pTicket && ticketSize > 0) {
+        std::lock_guard<std::mutex> lg(g_callbackMutex);
+        g_lastAuthTicketHandle = handle;
+        g_lastAuthTicketData.assign((const uint8_t*)pTicket, (const uint8_t*)pTicket + ticketSize);
+        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
+            (const uint8_t*)pTicket, ticketSize, handle);
+        SyncTicketToEnvironment((const uint8_t*)pTicket, ticketSize, handle);
+    }
+    return handle;
+}
+
+static void Hooked_ISteamUser_CancelAuthTicket(void* self, uint32_t hAuthTicket) {
+    ReFixLog("Hooked_ISteamUser_CancelAuthTicket: Canceling handle=%u", hAuthTicket);
+    {
+        std::lock_guard<std::mutex> lg(g_callbackMutex);
+        if (hAuthTicket == g_lastAuthTicketHandle || hAuthTicket == 0) {
+            g_lastAuthTicketHandle = 0;
+            g_lastAuthTicketData.clear();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
+        for (auto it = g_pendingSynthetic168.begin(); it != g_pendingSynthetic168.end(); ) {
+            if (it->hAuthTicket == hAuthTicket || hAuthTicket == 0) {
+                it = g_pendingSynthetic168.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    ReFixIdentity::GetActiveIdentityProvider()->InvalidateCapturedTicket(hAuthTicket);
+    if (g_orig_VTable_CancelAuthTicket) {
+        g_orig_VTable_CancelAuthTicket(self, hAuthTicket);
+    } else if (g_pfn_CancelAuthTicket) {
+        g_pfn_CancelAuthTicket(self, hAuthTicket);
+    }
+}
+
+static uint32_t Internal_GetAuthTicketForWebApi(void* self, const char* pchIdentity, bool fromVTable) {
+    EnsureAuthCallbackRegistered();
+    uint32_t handle = 0;
+    if (fromVTable && g_orig_VTable_GetAuthTicketForWebApi) {
+        handle = g_orig_VTable_GetAuthTicketForWebApi(self, pchIdentity);
+    } else if (g_pfn_GetAuthTicketForWebApi) {
+        handle = g_pfn_GetAuthTicketForWebApi(self, pchIdentity);
+    }
+
+    ReFixLog("GetAuthTicketForWebApi (identity='%s'): Native Valve handle=%u, mode=%s",
+             pchIdentity ? pchIdentity : "", handle, (g_isGoldbergMode ? "goldberg" : "valve"));
+
+    // Case 1: Native Valve handle is valid -> pass through untouched!
+    if (handle != 0) {
+        std::lock_guard<std::mutex> lg(g_callbackMutex);
+        g_lastAuthTicketHandle = handle;
+        SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", std::to_string(handle).c_str());
+        return handle;
+    }
+
+    // Case 2: Native Valve handle is 0 -> Trigger fallback: Synthetic Callback 168 backed by a genuine Steam Session Ticket
+    ReFixLog("GetAuthTicketForWebApi: Native Valve returned 0. Triggering Synthetic Callback 168 backed by a genuine Steam Session Ticket fallback...");
+
+    uint8_t sessionTicket[1024] = { 0 };
+    uint32_t sessionTicketSize = 0;
+    uint32_t sessionTicketHandle = 0;
+
+    void* pUser = self;
+    if (!pUser) {
+        typedef void* (*fn_GetInterface_t)();
+        fn_GetInterface_t pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUser_v021");
+        if (!pfnUser) pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUser");
+        if (pfnUser) pUser = pfnUser();
+    }
+
+    if (fromVTable && g_orig_VTable_GetAuthSessionTicket && pUser) {
+        sessionTicketHandle = g_orig_VTable_GetAuthSessionTicket(pUser, sessionTicket, (int)sizeof(sessionTicket), &sessionTicketSize);
+    } else if (g_pfn_GetAuthSessionTicket && pUser) {
+        sessionTicketHandle = g_pfn_GetAuthSessionTicket(pUser, sessionTicket, (int)sizeof(sessionTicket), &sessionTicketSize);
+    }
+
+    if (g_isGoldbergMode && (sessionTicketHandle == 0 || sessionTicketSize == 0)) {
+        std::vector<uint8_t> dummyTicket = GenerateDummyAuthTicket();
+        sessionTicketHandle = 1;
+        sessionTicketSize = (uint32_t)dummyTicket.size();
+        if (sessionTicketSize > sizeof(sessionTicket)) sessionTicketSize = sizeof(sessionTicket);
+        memcpy(sessionTicket, dummyTicket.data(), sessionTicketSize);
+    }
+
+    ReFixLog("GetAuthTicketForWebApi Fallback: Obtained genuine Session Ticket handle=%u, size=%u bytes",
+             sessionTicketHandle, sessionTicketSize);
+
+    if (sessionTicketHandle != 0 && sessionTicketSize > 0 && sessionTicketSize <= sizeof(sessionTicket)) {
+        {
+            std::lock_guard<std::mutex> lg(g_callbackMutex);
+            g_lastAuthTicketHandle = sessionTicketHandle;
+            g_lastAuthTicketData.assign(sessionTicket, sessionTicket + sessionTicketSize);
+            ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
+                sessionTicket, (size_t)sessionTicketSize, sessionTicketHandle);
+            SyncTicketToEnvironment(sessionTicket, (size_t)sessionTicketSize, sessionTicketHandle);
+        }
+
+        QueueSyntheticWebApiCallback168(sessionTicketHandle, sessionTicket, sessionTicketSize);
+        return sessionTicketHandle;
+    }
+
+    ReFixLog("GetAuthTicketForWebApi Fallback FAILED: Could not obtain genuine Session Ticket from Steam client");
+    return 0;
+}
+
+static uint32_t Hooked_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
+    return Internal_GetAuthTicketForWebApi(self, pchIdentity, true);
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_ISteamUser_CancelAuthTicket(void* self, uint32_t hAuthTicket) {
+    Hooked_ISteamUser_CancelAuthTicket(self, hAuthTicket);
 }
 
 static bool g_vtableHooksInstalled = false;
@@ -2658,8 +2806,9 @@ static void InstallVTableHooks() {
             void* pUser = pfnUser();
             if (pUser) {
                 HookVTableMethod(pUser, 13, (void*)Hooked_ISteamUser_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
+                HookVTableMethod(pUser, 16, (void*)Hooked_ISteamUser_CancelAuthTicket, (void**)&g_orig_VTable_CancelAuthTicket);
                 HookVTableMethod(pUser, 24, (void*)Hooked_ISteamUser_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi);
-                ReFixLog("InstallVTableHooks: ISteamUser hooks installed (vtable[13], vtable[24])");
+                ReFixLog("InstallVTableHooks: ISteamUser hooks installed (vtable[13], vtable[16], vtable[24])");
             }
         }
     }
@@ -2676,11 +2825,8 @@ static fn_SteamAPI_ManualDispatch_RunFrame_t g_pfn_ManualDispatch_RunFrame = nul
 typedef bool (*fn_SteamAPI_ManualDispatch_GetNextCallback_t)(uint32_t hSteamPipe, void* pCallbackMsg);
 static fn_SteamAPI_ManualDispatch_GetNextCallback_t g_pfn_ManualDispatch_GetNextCallback = nullptr;
 
-typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
-static fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t g_pfn_GetAuthSessionTicket = nullptr;
-
-typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
-static fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t g_pfn_GetAuthTicketForWebApi = nullptr;
+typedef void (*fn_SteamAPI_ManualDispatch_FreeLastCallback_t)(uint32_t hSteamPipe);
+static fn_SteamAPI_ManualDispatch_FreeLastCallback_t g_pfn_ManualDispatch_FreeLastCallback = nullptr;
 
 static int s_runCallbacksLogged = 0;
 
@@ -2710,6 +2856,52 @@ static bool SafeCallRun(void* pCallback, void* pData) {
         DWORD code = GetExceptionCode();
         ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
         return false;
+    }
+}
+
+static void DispatchSyntheticWebApiCallbacks() {
+    std::vector<PendingSyntheticWebApiCallback> toFire;
+    {
+        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
+        for (auto it = g_pendingSynthetic168.begin(); it != g_pendingSynthetic168.end(); ) {
+            if (--it->framesRemaining <= 0) {
+                toFire.push_back(*it);
+                it = g_pendingSynthetic168.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    if (toFire.empty()) return;
+
+    // Snapshot registered Callback 168 receivers under g_callbackMutex,
+    // then release lock before invoking user callbacks to prevent deadlocks on reentrancy.
+    std::vector<GodotCallbackEntry> listeners;
+    {
+        std::lock_guard<std::mutex> lg(g_callbackMutex);
+        for (const auto& entry : g_registeredCallbacks) {
+            if (entry.iCallback == 168 && entry.pCallback != nullptr) {
+                listeners.push_back(entry);
+            }
+        }
+    }
+
+    for (const auto& item : toFire) {
+        Steam_GetTicketForWebApiResponse_t resp = {};
+        resp.m_hAuthTicket = item.hAuthTicket;
+        resp.m_eResult = item.eResult;
+        resp.m_cubTicket = item.cubTicket;
+        memcpy(resp.m_rgubTicket, item.rgubTicket, sizeof(resp.m_rgubTicket));
+
+        ReFixLog("[STEAM] DispatchSyntheticWebApiCallbacks: Delivering Synthetic Callback 168 (handle=%u, size=%d) to %zu registered listener(s)",
+                 resp.m_hAuthTicket, resp.m_cubTicket, listeners.size());
+
+        for (const auto& listener : listeners) {
+            if (SafeCallRun(listener.pCallback, &resp)) {
+                ReFixLog("[STEAM]   -> Successfully dispatched Synthetic Callback 168 to receiver %p", listener.pCallback);
+            }
+        }
     }
 }
 
@@ -2926,9 +3118,7 @@ static fn_SteamAPI_UnregisterCallback_t g_pfn_UnregisterCallback = nullptr;
 
 static void Intercepted_SteamAPI_UnregisterCallback(void* pCallback) {
     UntrackRelayCallback(pCallback);
-    if (g_godotIsEngine) {
-        UntrackCallback(pCallback);
-    }
+    UntrackCallback(pCallback);
     {
         std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
         for (auto it = g_pendingAuthCallbacks.begin(); it != g_pendingAuthCallbacks.end(); ) {
@@ -2963,8 +3153,8 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
     if (iCallback == 333) ReFixLog("  -> Intercepted GameLobbyJoinRequested_t (333)");
     else if (iCallback == 337) ReFixLog("  -> Intercepted GameRichPresenceJoinRequested_t (337)");
 
-    // Track callbacks for Godot LobbyEnter_t synthesis
-    if (g_godotIsEngine && (iCallback == LobbyEnter_t::k_iCallback || iCallback == 333 || iCallback == 337)) {
+    // Track callbacks for Godot LobbyEnter_t synthesis & Synthetic Callback 168 delivery
+    if (iCallback == 168 || iCallback == LobbyEnter_t::k_iCallback || iCallback == 333 || iCallback == 337) {
         TrackCallback(pCallback, iCallback);
     }
 
@@ -3366,6 +3556,11 @@ static bool EnsureOriginal() {
         g_steamProcs[idxGetAuthTicketForWebApi] = (FARPROC)SteamAPI_ISteamUser_GetAuthTicketForWebApi;
     }
 
+    g_pfn_CancelAuthTicket = (fn_SteamAPI_ISteamUser_CancelAuthTicket_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamUser_CancelAuthTicket");
+    int idxCancelAuthTicket = FindSteamExportIndex("SteamAPI_ISteamUser_CancelAuthTicket");
+    if (idxCancelAuthTicket >= 0) {
+        g_steamProcs[idxCancelAuthTicket] = (FARPROC)SteamAPI_ISteamUser_CancelAuthTicket;
+    }
     
     int idxGetRelayStatus = FindSteamExportIndex("SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus");
     if (idxGetRelayStatus >= 0) {
@@ -3381,7 +3576,6 @@ static bool EnsureOriginal() {
         ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
     }
 
-    
     int idxShutdown = FindSteamExportIndex("SteamAPI_Shutdown");
     if (idxShutdown >= 0) {
         g_pfn_Shutdown = (fn_SteamAPI_Shutdown_t)g_steamProcs[idxShutdown];
@@ -3405,6 +3599,12 @@ static bool EnsureOriginal() {
     if (idxManualGetNext >= 0) {
         g_pfn_ManualDispatch_GetNextCallback = (fn_SteamAPI_ManualDispatch_GetNextCallback_t)g_steamProcs[idxManualGetNext];
         g_steamProcs[idxManualGetNext] = (FARPROC)SteamAPI_ManualDispatch_GetNextCallback;
+    }
+
+    g_pfn_ManualDispatch_FreeLastCallback = (fn_SteamAPI_ManualDispatch_FreeLastCallback_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ManualDispatch_FreeLastCallback");
+    int idxManualFree = FindSteamExportIndex("SteamAPI_ManualDispatch_FreeLastCallback");
+    if (idxManualFree >= 0) {
+        g_steamProcs[idxManualFree] = (FARPROC)SteamAPI_ManualDispatch_FreeLastCallback;
     }
 
     // SteamInternal_SteamAPI_Init is handled via C++ __declspec(dllexport) below
@@ -3653,6 +3853,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
     if (g_pfn_RunCallbacks) g_pfn_RunCallbacks();
+    DispatchSyntheticWebApiCallbacks();
     DispatchRelayCallbacks();
     DispatchPendingAuthCallbacks();
 }
@@ -3664,6 +3865,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
         ReFixLog("SteamAPI_ManualDispatch_RunFrame called (pipe=%u, frame=%d)", hSteamPipe, s_manualRunFrameLogged);
     }
     if (g_pfn_ManualDispatch_RunFrame) g_pfn_ManualDispatch_RunFrame(hSteamPipe);
+    DispatchSyntheticWebApiCallbacks();
     DispatchPendingAuthCallbacks();
 }
 
@@ -3678,10 +3880,12 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                     ReFixLog("[STEAM] ManualDispatch captured Callback 168 (WebApi Ticket): handle=%u, result=%d, cubTicket=%d",
                              resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket);
                     if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) {
+                        std::lock_guard<std::mutex> lg(g_callbackMutex);
                         g_lastAuthTicketHandle = resp->m_hAuthTicket;
                         g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
                         ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
                             resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
+                        SyncTicketToEnvironment(resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
                     }
                 }
             } else if (msg->m_iCallback == 163) {
@@ -3704,6 +3908,18 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
             return true;
         }
     }
+
+    if (g_manualDispatch168Pending.exchange(false) && pCallbackMsg) {
+        auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+        msg->m_hSteamUser = 0;
+        msg->m_iCallback = 168; // Steam_GetTicketForWebApiResponse_t
+        msg->m_pubParam = (uint8_t*)&g_manualDispatch168Data;
+        msg->m_cubParam = (int32_t)sizeof(Steam_GetTicketForWebApiResponse_t);
+        ReFixLog("ManualDispatch_GetNextCallback: Delivered Synthetic Callback 168 (handle=%u, size=%d)",
+                 g_manualDispatch168Data.m_hAuthTicket, g_manualDispatch168Data.m_cubTicket);
+        return true;
+    }
+
     if (g_syntheticRelayPending.exchange(false) && pCallbackMsg) {
         g_syntheticRelayData.m_eAvail = k_eRelayAvail_Current; // 100
         g_syntheticRelayData.m_bPingMeasurementInProgress = 0;
@@ -3722,6 +3938,12 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
     return false;
 }
 
+extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(uint32_t hSteamPipe) {
+    if (g_pfn_ManualDispatch_FreeLastCallback) {
+        g_pfn_ManualDispatch_FreeLastCallback(hSteamPipe);
+    }
+}
+
 extern "C" __declspec(dllexport) bool ReFix_Steam_GetCapturedTicketData(uint8_t* outBuf, size_t maxLen, size_t* outLen, uint32_t* outHandle) {
     std::lock_guard<std::mutex> lg(g_callbackMutex);
     if (g_lastAuthTicketData.empty()) return false;
@@ -3737,42 +3959,12 @@ extern "C" __declspec(dllexport) bool ReFix_Steam_GetCapturedTicketData(uint8_t*
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
-    EnsureAuthCallbackRegistered();
-    uint32_t handle = 0;
-    if (g_pfn_GetAuthSessionTicket) {
-        handle = g_pfn_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
-    }
-    uint32_t ticketSize = (pcbTicket ? *pcbTicket : 0);
-    ReFixLog("SteamAPI_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u, mode=%s",
-             handle, ticketSize, (g_isGoldbergMode ? "goldberg" : "valve"));
-
-    if (handle != 0 && pTicket && ticketSize > 0) {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
-        g_lastAuthTicketHandle = handle;
-        g_lastAuthTicketData.assign((const uint8_t*)pTicket, (const uint8_t*)pTicket + ticketSize);
-        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-            (const uint8_t*)pTicket, ticketSize, handle);
-        SyncTicketToEnvironment((const uint8_t*)pTicket, ticketSize, handle);
-    }
-    return handle;
+    return Hooked_ISteamUser_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
-    EnsureAuthCallbackRegistered();
-    uint32_t handle = 0;
-    if (g_pfn_GetAuthTicketForWebApi) {
-        handle = g_pfn_GetAuthTicketForWebApi(self, pchIdentity);
-    }
-    ReFixLog("SteamAPI_ISteamUser_GetAuthTicketForWebApi (identity='%s'): handle=%u, mode=%s",
-             pchIdentity ? pchIdentity : "", handle, (g_isGoldbergMode ? "goldberg" : "valve"));
-    if (handle != 0) {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
-        g_lastAuthTicketHandle = handle;
-        SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", std::to_string(handle).c_str());
-    }
-    return handle;
+    return Internal_GetAuthTicketForWebApi(self, pchIdentity, false);
 }
-
 
 static void SafeBackendShutdown() {
     if (g_pfn_Shutdown) {
@@ -3794,7 +3986,18 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     {
         std::lock_guard<std::mutex> lg(g_callbackMutex);
         g_registeredCallbacks.clear();
+        g_lastAuthTicketHandle = 0;
+        g_lastAuthTicketData.clear();
     }
+    {
+        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
+        g_pendingSynthetic168.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
+        g_pendingAuthCallbacks.clear();
+    }
+    ReFixIdentity::GetActiveIdentityProvider()->InvalidateCapturedTicket(0);
     SafeBackendShutdown();
 }
 
