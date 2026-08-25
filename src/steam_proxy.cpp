@@ -24,6 +24,7 @@
 #include "upnp_firewall.h"
 #include "steam_p2p_hook.h"
 #include "minhook/MinHook.h"
+#include "identity/online_identity_provider.h"
 
 #define STEAM_FORWARD_COUNT 1057
 
@@ -2427,56 +2428,6 @@ static std::vector<uint8_t> GenerateDummyAuthTicket() {
     return ticket;
 }
 
-typedef bool (*fn_BLoggedOn_t)(void* self);
-static fn_BLoggedOn_t g_orig_VTable_BLoggedOn = nullptr;
-
-static bool Hooked_ISteamUser_BLoggedOn(void* self) {
-    ReFixLog("ISteamUser::BLoggedOn Hook -> returning true");
-    return true;
-}
-
-typedef uint32_t (*fn_VTable_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
-static fn_VTable_GetAuthSessionTicket_t g_orig_VTable_GetAuthSessionTicket = nullptr;
-
-static void DispatchAuthCallbacksImmediately(int targetCallback);
-
-static uint32_t Hooked_VTable_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
-    uint32_t handle = 1;
-    if (g_orig_VTable_GetAuthSessionTicket) {
-        handle = g_orig_VTable_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
-    }
-    ReFixLog("ISteamUser::GetAuthSessionTicket (VTable index 13) -> handle=%u, cbTicket=%u", handle, (pcbTicket ? *pcbTicket : 0));
-    if (handle != 0) {
-        g_lastAuthTicketHandle = handle;
-    }
-    if (pTicket && pcbTicket && *pcbTicket > 0) {
-        g_lastAuthTicketData.assign((uint8_t*)pTicket, (uint8_t*)pTicket + *pcbTicket);
-    }
-    DispatchAuthCallbacksImmediately(163);
-    DispatchAuthCallbacksImmediately(168);
-    return handle;
-}
-
-typedef uint32_t (*fn_VTable_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
-static fn_VTable_GetAuthTicketForWebApi_t g_orig_VTable_GetAuthTicketForWebApi = nullptr;
-
-static uint32_t Hooked_VTable_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
-    uint32_t handle = 1;
-    if (g_orig_VTable_GetAuthTicketForWebApi) {
-        handle = g_orig_VTable_GetAuthTicketForWebApi(self, pchIdentity);
-    }
-    ReFixLog("ISteamUser::GetAuthTicketForWebApi (VTable index 14) -> handle=%u, pchIdentity='%s'", handle, pchIdentity ? pchIdentity : "");
-    if (handle != 0) {
-        g_lastAuthTicketHandle = handle;
-    }
-    if (g_lastAuthTicketData.empty()) {
-        g_lastAuthTicketData = GenerateDummyAuthTicket();
-    }
-    DispatchAuthCallbacksImmediately(168);
-    DispatchAuthCallbacksImmediately(163);
-    return handle;
-}
-
 static bool g_vtableHooksInstalled = false;
 
 static void InstallVTableHooks() {
@@ -2507,18 +2458,7 @@ static void InstallVTableHooks() {
         }
     }
 
-    // 3. ISteamUser
-    fn_GetInterface_t pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUser_v021");
-    if (!pfnUser) pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUser_v020");
-    if (!pfnUser) pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUser");
-    if (pfnUser) {
-        void* pUser = pfnUser();
-        if (pUser) {
-            HookVTableMethod(pUser, 14, (void*)Hooked_VTable_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi);
-        }
-    }
-
-    // 4. ISteamApps
+    // 3. ISteamApps
     fn_GetInterface_t pfnApps = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamApps_v008");
     if (!pfnApps) pfnApps = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamApps");
     if (pfnApps) {
@@ -2613,18 +2553,11 @@ struct PendingAuthCallback {
 static std::vector<PendingAuthCallback> g_pendingAuthCallbacks;
 static std::mutex g_pendingAuthMutex;
 
-static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 1) {
+static bool SafeCallRun(void* pCallback, void* pData) {
     if (!pCallback) return false;
     __try {
         void** vtable = *(void***)pCallback;
         if (!vtable) return false;
-
-        typedef void (*fn_Run1_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hAPICall);
-        fn_Run1_t pRun1 = (fn_Run1_t)vtable[1];
-        if (pRun1) {
-            pRun1(pCallback, pData, false, hAPICall);
-            return true;
-        }
 
         typedef void (*fn_Run0_t)(void* self, void* pvParam);
         fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
@@ -2738,55 +2671,25 @@ static void Intercepted_SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(vo
     DispatchRelayCallbacks();
 }
 
+#pragma pack(push, 8)
+struct Steam_GetAuthSessionTicketResponse_t {
+    enum { k_iCallback = 163 };
+    uint32_t m_hAuthTicket;
+    int32_t  m_eResult;
+};
 
-
-static void DispatchAuthCallbacksImmediately(int targetCallback) {
-    if (g_lastAuthTicketData.empty()) {
-        g_lastAuthTicketData = GenerateDummyAuthTicket();
-    }
-    uint32_t handle = g_lastAuthTicketHandle ? g_lastAuthTicketHandle : 1;
-    
-    std::vector<void*> targets;
-    {
-        std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
-        for (const auto& item : g_pendingAuthCallbacks) {
-            if (item.iCallback == targetCallback && item.pCallback) {
-                targets.push_back(item.pCallback);
-            }
-        }
-    }
-    for (void* pCb : targets) {
-        if (targetCallback == 168) {
-            struct {
-                uint32_t m_hAuthTicket;
-                int32_t  m_eResult;
-                int32_t  m_cubTicket;
-                uint8_t  m_rgubTicket[1024];
-            } data = {};
-            data.m_hAuthTicket = handle;
-            data.m_eResult = 1; // k_EResultOK
-            data.m_cubTicket = (int32_t)g_lastAuthTicketData.size();
-            if (data.m_cubTicket > 0 && data.m_cubTicket <= sizeof(data.m_rgubTicket)) {
-                memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
-            }
-            if (SafeCallRun(pCb, &data)) {
-                ReFixLog("DispatchAuthCallbacksImmediately: Dispatched 168 (handle=%u) to %p", handle, pCb);
-            }
-        } else if (targetCallback == 163) {
-            struct {
-                uint32_t m_hAuthTicket;
-                int32_t  m_eResult;
-            } data = {};
-            data.m_hAuthTicket = handle;
-            data.m_eResult = 1; // k_EResultOK
-            if (SafeCallRun(pCb, &data)) {
-                ReFixLog("DispatchAuthCallbacksImmediately: Dispatched 163 (handle=%u) to %p", handle, pCb);
-            }
-        }
-    }
-}
+struct Steam_GetTicketForWebApiResponse_t {
+    enum { k_iCallback = 168 };
+    uint32_t m_hAuthTicket;
+    int32_t  m_eResult;
+    int32_t  m_cubTicket;
+    uint8_t  m_rgubTicket[1024];
+};
+#pragma pack(pop)
 
 static void DispatchPendingAuthCallbacks() {
+    if (!g_isGoldbergMode) return;
+
     std::vector<PendingAuthCallback> toFire;
     {
         std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
@@ -2813,7 +2716,7 @@ static void DispatchPendingAuthCallbacks() {
                 enum { k_iCallback = 101 };
             } data = {};
             if (SafeCallRun(item.pCallback, &data)) {
-                ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched SteamServersConnected_t (101) to %p (count=%d)", item.pCallback, item.dispatchCount);
+                ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched SteamServersConnected_t (101) to %p", item.pCallback);
             }
         } else if (item.iCallback == 154) {
             struct {
@@ -2828,58 +2731,28 @@ static void DispatchPendingAuthCallbacks() {
             if (g_lastAuthTicketData.empty()) {
                 g_lastAuthTicketData = GenerateDummyAuthTicket();
             }
-            struct {
-                uint32_t m_hAuthTicket;
-                int32_t  m_eResult;
-                int32_t  m_cubTicket;
-                uint8_t  m_rgubTicket[1024];
-            } data = {};
+            Steam_GetTicketForWebApiResponse_t data = {};
             data.m_hAuthTicket = handle;
             data.m_eResult = 1; // k_EResultOK
             data.m_cubTicket = (int32_t)g_lastAuthTicketData.size();
-            if (data.m_cubTicket > 0 && data.m_cubTicket <= sizeof(data.m_rgubTicket)) {
+            if (data.m_cubTicket > 0 && data.m_cubTicket <= (int32_t)sizeof(data.m_rgubTicket)) {
                 memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
             }
 
-            if (SafeCallRun(item.pCallback, &data, handle)) {
+            if (SafeCallRun(item.pCallback, &data)) {
                 ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched GetTicketForWebApiResponse_t (168, handle=%u) to %p", handle, item.pCallback);
             }
         } else if (item.iCallback == 163) {
             uint32_t handle = g_lastAuthTicketHandle ? g_lastAuthTicketHandle : 1;
-            struct {
-                uint32_t m_hAuthTicket;
-                int32_t  m_eResult;
-            } data = {};
+            Steam_GetAuthSessionTicketResponse_t data = {};
             data.m_hAuthTicket = handle;
             data.m_eResult = 1; // k_EResultOK
 
-            if (SafeCallRun(item.pCallback, &data, handle)) {
+            if (SafeCallRun(item.pCallback, &data)) {
                 ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched GetAuthSessionTicketResponse_t (163, handle=%u) to %p", handle, item.pCallback);
             }
         }
     }
-}
-
-static std::thread g_authDispatchThread;
-static std::atomic<bool> g_authDispatchRunning{ true };
-static std::once_flag g_authDispatchOnce;
-
-static void AuthDispatchWorker() {
-    while (g_authDispatchRunning) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        try {
-            DispatchPendingAuthCallbacks();
-        } catch (...) {
-            ReFixLog("AuthDispatchWorker: caught unhandled exception");
-        }
-    }
-}
-
-static void StartAuthDispatchWorker() {
-    std::call_once(g_authDispatchOnce, []() {
-        g_authDispatchThread = std::thread(AuthDispatchWorker);
-        g_authDispatchThread.detach();
-    });
 }
 
 typedef void (*fn_SteamAPI_UnregisterCallback_t)(void* pCallback);
@@ -2935,8 +2808,7 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
         if (iCallback == 101 || iCallback == 154 || iCallback == 163 || iCallback == 168) {
             std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
             g_pendingAuthCallbacks.push_back({ pCallback, iCallback, 0, 0 });
-            ReFixLog("  -> Queued auth callback %d for %p", iCallback, pCallback);
-            StartAuthDispatchWorker();
+            ReFixLog("  -> Queued auth callback %d for %p (Goldberg Mode)", iCallback, pCallback);
         }
     }
 }
@@ -3373,6 +3245,7 @@ static void CapturePersonaName() {
     if (name && name[0] != '\0') {
         SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", name);
         ReFixLog("CapturePersonaName: %s", name);
+        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedDisplayName(name);
     }
     if (g_pfn_GetSteamID && g_pfn_SteamUser) {
         void* user = g_pfn_SteamUser();
@@ -3384,6 +3257,7 @@ static void CapturePersonaName() {
                 sprintf_s(idStr, sizeof(idStr), "%llu", steamId);
                 SetEnvironmentVariableA("REFIX_STEAM_ID", idStr);
                 ReFixLog("CaptureSteamID: %s", idStr);
+                ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamId(steamId);
             }
         }
     }
@@ -3647,24 +3521,30 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
-    uint32_t handle = 1;
+    uint32_t handle = 0;
     if (g_pfn_GetAuthSessionTicket) {
         handle = g_pfn_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
     }
-    ReFixLog("SteamAPI_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u", handle, (pcbTicket ? *pcbTicket : 0));
-    g_lastAuthTicketHandle = handle;
-    if (pTicket && pcbTicket && *pcbTicket > 0) {
-        g_lastAuthTicketData.assign((uint8_t*)pTicket, (uint8_t*)pTicket + *pcbTicket);
+    uint32_t ticketSize = (pcbTicket ? *pcbTicket : 0);
+    ReFixLog("SteamAPI_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u, mode=%s",
+             handle, ticketSize, (g_isGoldbergMode ? "goldberg" : "valve"));
+
+    if (handle != 0 && pTicket && ticketSize > 0) {
+        g_lastAuthTicketHandle = handle;
+        g_lastAuthTicketData.assign((const uint8_t*)pTicket, (const uint8_t*)pTicket + ticketSize);
+        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
+            (const uint8_t*)pTicket, ticketSize, handle);
     }
     return handle;
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
-    uint32_t handle = 1;
+    uint32_t handle = 0;
     if (g_pfn_GetAuthTicketForWebApi) {
         handle = g_pfn_GetAuthTicketForWebApi(self, pchIdentity);
     }
-    ReFixLog("SteamAPI_ISteamUser_GetAuthTicketForWebApi ('%s'): handle=%u", pchIdentity ? pchIdentity : "", handle);
+    ReFixLog("SteamAPI_ISteamUser_GetAuthTicketForWebApi (identity='%s'): handle=%u, mode=%s",
+             pchIdentity ? pchIdentity : "", handle, (g_isGoldbergMode ? "goldberg" : "valve"));
     if (handle != 0) {
         g_lastAuthTicketHandle = handle;
     }
@@ -3683,7 +3563,6 @@ static void SafeBackendShutdown() {
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
-    g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);
     SteamP2PHook::Uninstall();
     {
@@ -3706,7 +3585,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             EnsureOriginal();
             break;
         case DLL_PROCESS_DETACH:
-            g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
             SteamP2PHook::Uninstall();
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary

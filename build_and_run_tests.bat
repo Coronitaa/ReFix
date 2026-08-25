@@ -26,31 +26,31 @@ cl %CFLAGS% tests\test_abi_asserts.cpp /Febuild\tests\test_abi_asserts.exe %LIBS
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_abi_asserts & exit /b 1 )
 
 echo [*] Compiling test_identity...
-cl %CFLAGS% tests\test_identity.cpp src\eos\eos_identity.cpp /Febuild\tests\test_identity.exe %LIBS%
+cl %CFLAGS% tests\test_identity.cpp src\identity\online_identity_provider.cpp src\eos\eos_identity.cpp /Febuild\tests\test_identity.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_identity & exit /b 1 )
 
 echo [*] Compiling test_callbacks...
-cl %CFLAGS% tests\test_callbacks.cpp src\eos\eos_callbacks.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp /Febuild\tests\test_callbacks.exe %LIBS%
+cl %CFLAGS% tests\test_callbacks.cpp src\identity\online_identity_provider.cpp src\eos\eos_callbacks.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp /Febuild\tests\test_callbacks.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_callbacks & exit /b 1 )
 
 echo [*] Compiling test_connect_contract...
-cl %CFLAGS% tests\test_connect_contract.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_contract.exe %LIBS%
+cl %CFLAGS% tests\test_connect_contract.cpp src\identity\online_identity_provider.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_contract.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_connect_contract & exit /b 1 )
 
 echo [*] Compiling test_connect_login...
-cl %CFLAGS% tests\test_connect_login.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_login.exe %LIBS%
+cl %CFLAGS% tests\test_connect_login.cpp src\identity\online_identity_provider.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_login.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_connect_login & exit /b 1 )
 
 echo [*] Compiling test_connect_deviceid...
-cl %CFLAGS% tests\test_connect_deviceid.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_deviceid.exe %LIBS%
+cl %CFLAGS% tests\test_connect_deviceid.cpp src\identity\online_identity_provider.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_deviceid.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_connect_deviceid & exit /b 1 )
 
 echo [*] Compiling test_connect_external_account...
-cl %CFLAGS% tests\test_connect_external_account.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_external_account.exe %LIBS%
+cl %CFLAGS% tests\test_connect_external_account.cpp src\identity\online_identity_provider.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_connect_external_account.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_connect_external_account & exit /b 1 )
 
 echo [*] Compiling test_two_machine_identity...
-cl %CFLAGS% tests\test_two_machine_identity.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_two_machine_identity.exe %LIBS%
+cl %CFLAGS% tests\test_two_machine_identity.cpp src\identity\online_identity_provider.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_two_machine_identity.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_two_machine_identity & exit /b 1 )
 
 echo [*] Compiling test_backend_protocol...
@@ -62,20 +62,24 @@ cl %CFLAGS% tests\test_backend_state.cpp src\refix_online\refix_wire.cpp src\ref
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_backend_state & exit /b 1 )
 
 echo [*] Compiling test_backend_reconnect...
-cl %CFLAGS% tests\test_backend_reconnect.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_backend_reconnect.exe %LIBS%
+cl %CFLAGS% tests\test_backend_reconnect.cpp src\identity\online_identity_provider.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp /Febuild\tests\test_backend_reconnect.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_backend_reconnect & exit /b 1 )
 
 echo [*] Compiling test_lobby_create...
-cl %CFLAGS% tests\test_lobby_create.cpp src\eos\eos_lobby.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos_core\eos_room_manager.cpp /Febuild\tests\test_lobby_create.exe %LIBS%
+cl %CFLAGS% tests\test_lobby_create.cpp src\identity\online_identity_provider.cpp src\eos\eos_lobby.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos_core\eos_room_manager.cpp /Febuild\tests\test_lobby_create.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_lobby_create & exit /b 1 )
 
 echo [*] Compiling test_lobby_search...
-cl %CFLAGS% tests\test_lobby_search.cpp src\eos\eos_lobby.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos_core\eos_room_manager.cpp /Febuild\tests\test_lobby_search.exe %LIBS%
+cl %CFLAGS% tests\test_lobby_search.cpp src\identity\online_identity_provider.cpp src\eos\eos_lobby.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos_core\eos_room_manager.cpp /Febuild\tests\test_lobby_search.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_lobby_search & exit /b 1 )
 
 echo [*] Compiling test_lobby_join_leave...
-cl %CFLAGS% tests\test_lobby_join_leave.cpp src\eos\eos_lobby.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos_core\eos_room_manager.cpp /Febuild\tests\test_lobby_join_leave.exe %LIBS%
+cl %CFLAGS% tests\test_lobby_join_leave.cpp src\identity\online_identity_provider.cpp src\eos\eos_lobby.cpp src\eos\eos_connect.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos_core\eos_room_manager.cpp /Febuild\tests\test_lobby_join_leave.exe %LIBS%
 if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_lobby_join_leave & exit /b 1 )
+
+echo [*] Compiling test_runtime_auth_harness...
+cl %CFLAGS% tests\test_runtime_auth_harness.cpp /Febuild\tests\test_runtime_auth_harness.exe %LIBS%
+if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_runtime_auth_harness & exit /b 1 )
 
 echo.
 echo ====================================================================

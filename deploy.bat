@@ -11,12 +11,15 @@ setlocal enabledelayedexpansion
 
 set "TARGET_DIR=%~1"
 if "%TARGET_DIR%"=="" (
-    if exist "D:\Games\MECCHA CHAMELEON" (
+    if exist "D:\EOS_REFIX\MECCHA CHAMELEON" (
+        set "TARGET_DIR=D:\EOS_REFIX\MECCHA CHAMELEON"
+    ) else if exist "D:\Games\MECCHA CHAMELEON" (
         set "TARGET_DIR=D:\Games\MECCHA CHAMELEON"
     ) else (
         set "TARGET_DIR=C:\Users\Valen\Desktop\STEAM_CRACKING\DepotDownloader\depots\4704691\24176442"
     )
 )
+if "%TARGET_DIR:~-1%"=="\" set "TARGET_DIR=%TARGET_DIR:~0,-1%"
 
 set "DEPOT=%TARGET_DIR%"
 set "GAME_BIN=%DEPOT%\Chameleon\Binaries\Win64"

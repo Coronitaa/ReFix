@@ -88,7 +88,31 @@ static_assert(offsetof(EOS_Lobby_LeaveLobbyCallbackInfo, ResultCode) == 0, "Leav
 static_assert(offsetof(EOS_Lobby_LeaveLobbyCallbackInfo, ClientData) == 8, "LeaveLobbyCallbackInfo ClientData offset mismatch");
 static_assert(offsetof(EOS_Lobby_LeaveLobbyCallbackInfo, LobbyId) == 16, "LeaveLobbyCallbackInfo LobbyId offset mismatch");
 
+#pragma pack(push, 8)
+struct Steam_GetAuthSessionTicketResponse_t {
+    enum { k_iCallback = 163 };
+    uint32_t m_hAuthTicket;
+    int32_t  m_eResult;
+};
+static_assert(sizeof(Steam_GetAuthSessionTicketResponse_t) == 8, "GetAuthSessionTicketResponse_t size mismatch");
+static_assert(offsetof(Steam_GetAuthSessionTicketResponse_t, m_hAuthTicket) == 0, "m_hAuthTicket offset mismatch");
+static_assert(offsetof(Steam_GetAuthSessionTicketResponse_t, m_eResult) == 4, "m_eResult offset mismatch");
+
+struct Steam_GetTicketForWebApiResponse_t {
+    enum { k_iCallback = 168 };
+    uint32_t m_hAuthTicket;
+    int32_t  m_eResult;
+    int32_t  m_cubTicket;
+    uint8_t  m_rgubTicket[1024];
+};
+static_assert(sizeof(Steam_GetTicketForWebApiResponse_t) == 1036, "GetTicketForWebApiResponse_t size mismatch");
+static_assert(offsetof(Steam_GetTicketForWebApiResponse_t, m_hAuthTicket) == 0, "m_hAuthTicket offset mismatch");
+static_assert(offsetof(Steam_GetTicketForWebApiResponse_t, m_eResult) == 4, "m_eResult offset mismatch");
+static_assert(offsetof(Steam_GetTicketForWebApiResponse_t, m_cubTicket) == 8, "m_cubTicket offset mismatch");
+static_assert(offsetof(Steam_GetTicketForWebApiResponse_t, m_rgubTicket) == 12, "m_rgubTicket offset mismatch");
+#pragma pack(pop)
+
 int main() {
-    std::cout << "[PASS] All EOS Lobby ABI static_asserts verified successfully!" << std::endl;
+    std::cout << "[PASS] All EOS and Steam ABI static_asserts verified successfully!" << std::endl;
     return 0;
 }

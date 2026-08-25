@@ -1018,12 +1018,12 @@ static void eos_IntegratedPlatformOptionsContainer_Release(void* H) { }
 
 // --- Auth Interface ---
 static EOS_NotificationId eos_Auth_AddNotifyLoginStatusChanged(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_AddNotifyLoginStatusChanged registered (id=%llu)", s_nextNotifId);
+    Log("EOS_Auth_AddNotifyLoginStatusChanged registered (id=%llu, Callback=%p)", s_nextNotifId, Callback);
     return s_nextNotifId++;
 }
 
 static EOS_EResult eos_Auth_CopyIdToken(void* Handle, void* Options, FakeIdToken** OutToken) {
-    Log("EOS_Auth_CopyIdToken called");
+    Log("EOS_Auth_CopyIdToken called (Handle=%p)", Handle);
     if (OutToken) {
         s_fakeIdToken.AccountId = FAKE_EPIC_ACCOUNT_ID;
         *OutToken = &s_fakeIdToken;
@@ -1032,7 +1032,7 @@ static EOS_EResult eos_Auth_CopyIdToken(void* Handle, void* Options, FakeIdToken
 }
 
 static EOS_EResult eos_Auth_CopyUserAuthToken(void* Handle, void* Options, void* AccountId, FakeAuthToken** OutToken) {
-    Log("EOS_Auth_CopyUserAuthToken called");
+    Log("EOS_Auth_CopyUserAuthToken called (Handle=%p, AccountId=%p)", Handle, AccountId);
     if (OutToken) {
         s_fakeAuthToken.AccountId = FAKE_EPIC_ACCOUNT_ID;
         *OutToken = &s_fakeAuthToken;
@@ -1041,7 +1041,7 @@ static EOS_EResult eos_Auth_CopyUserAuthToken(void* Handle, void* Options, void*
 }
 
 static void eos_Auth_DeletePersistentAuth(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_DeletePersistentAuth called");
+    Log("EOS_Auth_DeletePersistentAuth called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_DeletePersistentAuth info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1057,7 +1057,7 @@ static int32_t eos_Auth_GetLoggedInAccountsCount(void* Handle) {
 }
 
 static int32_t eos_Auth_GetLoginStatus(void* Handle, void* LocalUserId) {
-    Log("EOS_Auth_GetLoginStatus (LocalUserId=%p) -> EOS_LS_LoggedIn", LocalUserId);
+    Log("EOS_Auth_GetLoginStatus (Handle=%p, LocalUserId=%p) -> EOS_LS_LoggedIn", Handle, LocalUserId);
     return EOS_LS_LoggedIn;
 }
 
@@ -1072,7 +1072,7 @@ static EOS_EResult eos_Auth_GetSelectedAccountId(void* Handle, void* LocalUserId
 static void eos_Auth_IdToken_Release(void* Token) { }
 
 static void eos_Auth_LinkAccount(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_LinkAccount called");
+    Log("EOS_Auth_LinkAccount called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_LinkAccount info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1083,7 +1083,17 @@ static void eos_Auth_LinkAccount(void* Handle, void* Options, void* ClientData, 
 }
 
 static void eos_Auth_Login(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_Login called");
+    struct AuthCreds { int32_t ApiVer; const char* Id; const char* Token; int32_t Type; };
+    struct AuthOpts { int32_t ApiVer; const AuthCreds* Credentials; };
+    auto* opts = (AuthOpts*)Options;
+    const auto* creds = opts ? opts->Credentials : nullptr;
+    const char* token = creds ? creds->Token : nullptr;
+    size_t tokenLen = token ? strlen(token) : 0;
+    int credType = creds ? creds->Type : -1;
+
+    Log("EOS_Auth_Login called: Handle=%p, CredentialType=%d, TokenPresent=%s, TokenLength=%zu, Callback=%p",
+        Handle, credType, (token != nullptr ? "TRUE" : "FALSE"), tokenLen, Callback);
+
     CB_Auth_Login info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1095,7 +1105,7 @@ static void eos_Auth_Login(void* Handle, void* Options, void* ClientData, void* 
 }
 
 static void eos_Auth_Logout(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_Logout called");
+    Log("EOS_Auth_Logout called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_Logout info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1104,7 +1114,7 @@ static void eos_Auth_Logout(void* Handle, void* Options, void* ClientData, void*
 }
 
 static void eos_Auth_QueryIdToken(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_QueryIdToken called");
+    Log("EOS_Auth_QueryIdToken called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_QueryIdToken info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1116,7 +1126,7 @@ static void eos_Auth_RemoveNotifyLoginStatusChanged(void* Handle, EOS_Notificati
 static void eos_Auth_Token_Release(void* Token) { }
 
 static void eos_Auth_VerifyIdToken(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_VerifyIdToken called");
+    Log("EOS_Auth_VerifyIdToken called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_VerifyIdToken info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1124,7 +1134,7 @@ static void eos_Auth_VerifyIdToken(void* Handle, void* Options, void* ClientData
 }
 
 static void eos_Auth_VerifyUserAuth(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_VerifyUserAuth called");
+    Log("EOS_Auth_VerifyUserAuth called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_VerifyUserAuth info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;

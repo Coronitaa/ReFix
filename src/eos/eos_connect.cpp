@@ -2,6 +2,7 @@
 // ReFix EOS Online v2 - EOS Connect & Authentication Implementation
 // =============================================================================
 #include "eos_connect.h"
+#include "../identity/online_identity_provider.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
@@ -83,6 +84,7 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
         return;
     }
 
+    auto provider = ReFixIdentity::GetActiveIdentityProvider();
     auto& idMgr = ReFixEOS::IdentityManager::Get();
     idMgr.RefreshFromEnvironment();
 
@@ -99,8 +101,15 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
     }
 
     const auto* creds = Options->Credentials;
-    if (creds->ApiVersion <= 0 || !creds->Token) {
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Invalid credentials struct (Token=NULL)");
+    const char* token = creds ? creds->Token : nullptr;
+    size_t tokenLen = token ? strlen(token) : 0;
+    int credType = creds ? (int)creds->Type : -1;
+
+    ReFixEOS::LogDiagnostic("EOS_Connect_Login ENTER: Handle=%p, CredentialType=%d, TokenPresent=%s, TokenLength=%zu, Delegate=%p",
+        Handle, credType, (token != nullptr ? "TRUE" : "FALSE"), tokenLen, CompletionDelegate);
+
+    if (creds->ApiVersion <= 0 || !token) {
+        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Invalid credentials struct (Token=NULL) -> ResultCode=EOS_InvalidParameters");
         EOS_Connect_LoginCallbackInfo cbInfo = {};
         cbInfo.ResultCode = EOS_InvalidParameters;
         cbInfo.ClientData = ClientData;
@@ -110,89 +119,11 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
         return;
     }
 
-    ReFixEOS::LogDiagnostic("EOS_Connect_Login: CredentialType=%d, Token=%s",
-        creds->Type, ReFixEOS::RedactToken(creds->Token).c_str());
-
-    // 2. Explicit State Machine by Credential Type
-    if (creds->Type == EOS_ECT_STEAM_SESSION_TICKET || creds->Type == EOS_ECT_STEAM_APP_TICKET || creds->Type == 18 /* EOS_ECT_EXTERNAL_ACCOUNT */) {
-        // Steam session ticket / external auth authentication
-        if (strlen(creds->Token) < 4) {
-            ReFixEOS::LogDiagnostic("EOS_Connect_Login: Steam ticket token too short -> EOS_InvalidAuth");
-            EOS_Connect_LoginCallbackInfo cbInfo = {};
-            cbInfo.ResultCode = EOS_InvalidAuth;
-            cbInfo.ClientData = ClientData;
-            cbInfo.LocalUserId = nullptr;
-            cbInfo.ContinuanceToken = nullptr;
-            ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
-            return;
-        }
-
-        EOS_ProductUserId localPuid = idMgr.GetLocalProductUserId();
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Steam login success -> PUID=%s",
-            idMgr.GetLocalProductUserIdString().c_str());
-
-        EOS_Connect_LoginCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_Success;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LocalUserId = localPuid;
-        cbInfo.ContinuanceToken = nullptr;
-        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
-
-        // Dispatch Login Status Notification
-        EOS_Connect_LoginStatusChangedCallbackInfo notif = {};
-        notif.ClientData = nullptr;
-        notif.LocalUserId = localPuid;
-        notif.PreviousStatus = EOS_LS_NotLoggedIn;
-        notif.CurrentStatus = EOS_LS_LoggedIn;
-        ReFixEOS::CallbackManager::Get().DispatchNotification(1, notif);
-        return;
-    }
-    else if (creds->Type == EOS_ECT_DEVICEID_ACCESS_TOKEN) {
-        // Device ID login (standalone / fallback)
-        EOS_ProductUserId localPuid = idMgr.GetLocalProductUserId();
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: DeviceId login success -> PUID=%s",
-            idMgr.GetLocalProductUserIdString().c_str());
-
-        EOS_Connect_LoginCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_Success;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LocalUserId = localPuid;
-        cbInfo.ContinuanceToken = nullptr;
-        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
-
-        EOS_Connect_LoginStatusChangedCallbackInfo notif = {};
-        notif.ClientData = nullptr;
-        notif.LocalUserId = localPuid;
-        notif.PreviousStatus = EOS_LS_NotLoggedIn;
-        notif.CurrentStatus = EOS_LS_LoggedIn;
-        ReFixEOS::CallbackManager::Get().DispatchNotification(1, notif);
-        return;
-    }
-    else if (creds->Type == EOS_ECT_EPIC_ID_TOKEN) {
-        // Epic ID token login
-        EOS_ProductUserId localPuid = idMgr.GetLocalProductUserId();
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Epic ID token login success -> PUID=%s",
-            idMgr.GetLocalProductUserIdString().c_str());
-
-        EOS_Connect_LoginCallbackInfo cbInfo = {};
-        cbInfo.ResultCode = EOS_Success;
-        cbInfo.ClientData = ClientData;
-        cbInfo.LocalUserId = localPuid;
-        cbInfo.ContinuanceToken = nullptr;
-        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
-
-        // Dispatch Login Status Notification to registered listeners (e.g. RedpointEOS)
-        EOS_Connect_LoginStatusChangedCallbackInfo notif = {};
-        notif.ClientData = nullptr;
-        notif.LocalUserId = localPuid;
-        notif.PreviousStatus = EOS_LS_NotLoggedIn;
-        notif.CurrentStatus = EOS_LS_LoggedIn;
-        ReFixEOS::CallbackManager::Get().DispatchNotification(1, notif);
-        return;
-    }
-    else {
-        // Unsupported credential type
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Unsupported CredentialType=%d -> EOS_InvalidAuth", creds->Type);
+    // 2. Validate Credential via Unified Identity Provider
+    bool isValid = provider->ValidateCredential(credType, token);
+    if (!isValid) {
+        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Credential validation failed for CredentialType=%d, TokenLength=%zu -> ResultCode=EOS_InvalidAuth",
+            credType, tokenLen);
         EOS_Connect_LoginCallbackInfo cbInfo = {};
         cbInfo.ResultCode = EOS_InvalidAuth;
         cbInfo.ClientData = ClientData;
@@ -201,6 +132,28 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
         ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
         return;
     }
+
+    // 3. Resolve Stable ProductUserId
+    EOS_ProductUserId localPuid = idMgr.GetLocalProductUserId();
+    std::string puidStr = idMgr.GetLocalProductUserIdString();
+
+    ReFixEOS::LogDiagnostic("EOS_Connect_Login: Authentication SUCCESS (ResultCode=EOS_Success) -> PUID=%s, Mode=%s, Delegate=%p",
+        puidStr.c_str(), (provider->GetMode() == ReFixIdentity::IdentityMode::Valve ? "valve" : "goldberg"), CompletionDelegate);
+
+    EOS_Connect_LoginCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    cbInfo.LocalUserId = localPuid;
+    cbInfo.ContinuanceToken = nullptr;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+
+    // 4. Dispatch Login Status Notification
+    EOS_Connect_LoginStatusChangedCallbackInfo notif = {};
+    notif.ClientData = nullptr;
+    notif.LocalUserId = localPuid;
+    notif.PreviousStatus = EOS_LS_NotLoggedIn;
+    notif.CurrentStatus = EOS_LS_LoggedIn;
+    ReFixEOS::CallbackManager::Get().DispatchNotification(1, notif);
 }
 
 void EOS_Connect_CreateUser(EOS_HConnect Handle, const EOS_Connect_CreateUserOptions* Options, void* ClientData, void* CompletionDelegate) {
