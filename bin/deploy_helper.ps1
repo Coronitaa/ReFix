@@ -784,12 +784,16 @@ if ($EngineType -eq "Unity") {
 
     foreach ($mFolder in $managedFolders) {
         $candidateDlls = Get-ChildItem -Path $mFolder.FullName -Filter "*.dll" -ErrorAction SilentlyContinue | 
-            Where-Object { $_.Name -match "(?i)(steamworks|assembly-csharp|com\.rlabrecque)" }
+            Where-Object { $_.Name -match "(?i)(steamworks|assembly-csharp|com\.rlabrecque|utilities)" }
+
+        $resolver = New-Object Mono.Cecil.DefaultAssemblyResolver
+        $resolver.AddSearchDirectory($mFolder.FullName)
 
         foreach ($dllItem in $candidateDlls) {
             try {
                 $readerParams = New-Object Mono.Cecil.ReaderParameters
                 $readerParams.ReadWrite = $true
+                $readerParams.AssemblyResolver = $resolver
                 $asmDef = [Mono.Cecil.AssemblyDefinition]::ReadAssembly($dllItem.FullName, $readerParams)
                 $modified = $false
 
@@ -890,7 +894,7 @@ if ($EngineType -eq "Unity") {
                     }
                 }
 
-                # 3. Patch Assembly-CSharp.dll SteamManager
+                # 3. Patch Assembly-CSharp.dll SteamManager + SteamP2PManager
                 $smType = $asmDef.MainModule.Types | Where-Object { $_.Name -eq "SteamManager" }
                 if ($smType) {
                     # Disable RestartAppIfNecessary application quitting
@@ -945,6 +949,122 @@ if ($EngineType -eq "Unity") {
                                 }
                             } else {
                                 Write-Host "  [INFO] Photon CustomAuth appid=480 already patched in $($dllItem.Name)" -ForegroundColor Yellow
+                            }
+                        }
+                    }
+                }
+
+                # Patch SteamP2PManager in Assembly-CSharp.dll (Neutralize premature InCurrentLobby rejections)
+                $p2pType = $asmDef.MainModule.Types | Where-Object { $_.Name -eq "SteamP2PManager" }
+                if ($p2pType) {
+                    $osrMethod = $p2pType.Methods | Where-Object { $_.Name -eq "OnSessionRequest" }
+                    if ($osrMethod -and $osrMethod.HasBody) {
+                        for ($i = 0; $i -lt $osrMethod.Body.Instructions.Count; $i++) {
+                            $instr = $osrMethod.Body.Instructions[$i]
+                            if ($instr.OpCode.Name -eq "callvirt" -and $instr.Operand -and $instr.Operand.ToString() -like "*InCurrentLobby*") {
+                                $osrMethod.Body.Instructions[$i - 2].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $osrMethod.Body.Instructions[$i - 2].Operand = $null
+                                $osrMethod.Body.Instructions[$i - 1].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $osrMethod.Body.Instructions[$i - 1].Operand = $null
+                                $osrMethod.Body.Instructions[$i].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $osrMethod.Body.Instructions[$i].Operand = $null
+                                $osrMethod.Body.Instructions[$i + 1].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $osrMethod.Body.Instructions[$i + 1].Operand = $null
+                                $modified = $true
+                                Write-Host "  [OK] Patched SteamP2PManager::OnSessionRequest (Neutralized InCurrentLobby race condition)" -ForegroundColor Green
+                                break
+                            }
+                        }
+                    }
+
+                    $prmMethod = $p2pType.Methods | Where-Object { $_.Name -eq "ProcessReceivedMessage" }
+                    if ($prmMethod -and $prmMethod.HasBody) {
+                        for ($i = 0; $i -lt $prmMethod.Body.Instructions.Count; $i++) {
+                            $instr = $prmMethod.Body.Instructions[$i]
+                            if ($instr.OpCode.Name -eq "callvirt" -and $instr.Operand -and $instr.Operand.ToString() -like "*InCurrentLobby*") {
+                                $prmMethod.Body.Instructions[$i - 2].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $prmMethod.Body.Instructions[$i - 2].Operand = $null
+                                $prmMethod.Body.Instructions[$i - 1].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $prmMethod.Body.Instructions[$i - 1].Operand = $null
+                                $prmMethod.Body.Instructions[$i].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $prmMethod.Body.Instructions[$i].Operand = $null
+                                $prmMethod.Body.Instructions[$i + 1].OpCode = [Mono.Cecil.Cil.OpCodes]::Nop
+                                $prmMethod.Body.Instructions[$i + 1].Operand = $null
+                                $modified = $true
+                                Write-Host "  [OK] Patched SteamP2PManager::ProcessReceivedMessage (Prevented premature player kick)" -ForegroundColor Green
+                                break
+                            }
+                        }
+                    }
+                }
+
+                # 4. Patch Utilities.dll (Map<T1, T2>.Remove safe TryGetValue)
+                $mapType = $asmDef.MainModule.Types | Where-Object { $_.Name -eq 'Map`2' }
+                if ($mapType) {
+                    $fwdField = $mapType.Fields | Where-Object { $_.Name -eq '_forward' }
+                    $revField = $mapType.Fields | Where-Object { $_.Name -eq '_reverse' }
+                    if ($fwdField -and $revField) {
+                        foreach ($m in $mapType.Methods) {
+                            if ($m.Name -eq 'Remove' -and $m.Parameters.Count -eq 1) {
+                                $paramType = $m.Parameters[0].ParameterType
+                                $isT1 = ($paramType.Name -eq 'T1')
+                                $dictSourceField = if ($isT1) { $fwdField } else { $revField }
+                                $dictTargetField = if ($isT1) { $revField } else { $fwdField }
+                                $targetType = if ($isT1) { $mapType.GenericParameters[1] } else { $mapType.GenericParameters[0] }
+
+                                $m.Body.Instructions.Clear()
+                                $m.Body.Variables.Clear()
+
+                                $var0 = New-Object Mono.Cecil.Cil.VariableDefinition($targetType)
+                                $m.Body.Variables.Add($var0)
+
+                                $il = $m.Body.GetILProcessor()
+                                $pDef1 = New-Object Mono.Cecil.ParameterDefinition($paramType)
+                                $byRefTarget = New-Object Mono.Cecil.ByReferenceType($targetType)
+                                $pDef2 = New-Object Mono.Cecil.ParameterDefinition($byRefTarget)
+
+                                $tryGetRef = New-Object Mono.Cecil.MethodReference('TryGetValue', $asmDef.MainModule.TypeSystem.Boolean, $dictSourceField.FieldType)
+                                $tryGetRef.HasThis = $true
+                                $tryGetRef.Parameters.Add($pDef1)
+                                $tryGetRef.Parameters.Add($pDef2)
+
+                                $pDefTarget = New-Object Mono.Cecil.ParameterDefinition($targetType)
+                                $remTargetRef = New-Object Mono.Cecil.MethodReference('Remove', $asmDef.MainModule.TypeSystem.Boolean, $dictTargetField.FieldType)
+                                $remTargetRef.HasThis = $true
+                                $remTargetRef.Parameters.Add($pDefTarget)
+
+                                $pDefSource = New-Object Mono.Cecil.ParameterDefinition($paramType)
+                                $remSourceRef = New-Object Mono.Cecil.MethodReference('Remove', $asmDef.MainModule.TypeSystem.Boolean, $dictSourceField.FieldType)
+                                $remSourceRef.HasThis = $true
+                                $remSourceRef.Parameters.Add($pDefSource)
+
+                                $lblFail = $il.Create([Mono.Cecil.Cil.OpCodes]::Ldc_I4_0)
+                                $lblRet = $il.Create([Mono.Cecil.Cil.OpCodes]::Ret)
+
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $dictSourceField))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldloca_S, $var0))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $tryGetRef))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Brfalse_S, $lblFail))
+
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $dictTargetField))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldloc_0))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $remTargetRef))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Pop))
+
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_0))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldfld, $dictSourceField))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ldarg_1))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Callvirt, $remSourceRef))
+                                $il.Append($il.Create([Mono.Cecil.Cil.OpCodes]::Ret))
+
+                                $il.Append($lblFail)
+                                $il.Append($lblRet)
+
+                                $modified = $true
+                                Write-Host "  [OK] Patched Map::Remove($($paramType.Name)) in $($dllItem.Name) with safe TryGetValue" -ForegroundColor Green
                             }
                         }
                     }
