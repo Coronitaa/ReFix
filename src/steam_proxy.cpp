@@ -1914,14 +1914,24 @@ static int __fastcall Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus(
     }
     return avail;
 }
+
 static bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, void** ppOriginalFn) {
     if (!pInterface) return false;
     void** vtable = *(void***)pInterface;
     if (!vtable || !vtable[vtableIndex]) return false;
+
     void* pTarget = vtable[vtableIndex];
-    if (MH_CreateHook(pTarget, pHookFn, ppOriginalFn) == MH_OK) {
-        MH_EnableHook(pTarget);
-        ReFixLog("VTable Hook Installed: Interface %p index %d (Target %p -> Hook %p)",
+    if (pTarget == pHookFn) return true; // Already hooked
+
+    if (ppOriginalFn && *ppOriginalFn == nullptr) {
+        *ppOriginalFn = pTarget;
+    }
+
+    DWORD oldProtect = 0;
+    if (VirtualProtect(&vtable[vtableIndex], sizeof(void*), PAGE_READWRITE, &oldProtect)) {
+        vtable[vtableIndex] = pHookFn;
+        VirtualProtect(&vtable[vtableIndex], sizeof(void*), oldProtect, &oldProtect);
+        ReFixLog("VTable Hook Installed: Interface %p index %d (Original %p -> Hook %p)",
                  pInterface, vtableIndex, pTarget, pHookFn);
         return true;
     }
@@ -2025,13 +2035,12 @@ static void NormalizeFriendGameInfo(void* pFriendGameInfo, uint64_t steamIDFrien
             info->m_gameID = (info->m_gameID & 0xFFFFFFFFFF000000ULL) | (uint64_t)myAppId;
 
             // Check if m_steamIDLobby is invalid or 0.
-            // A valid Steam lobby ID must have Universe == 1 (Public) and AccountType == 7 (Chat/Lobby) or 1 (Individual)
+            // A valid Steam lobby ID has bit 63 clear (positive int64) and universe == 1 (e.g. 0x0186... / 0x0110...).
             // Invalid values like 0x8000000042C70FD3 (9223372037975117779) or 0 must be recovered from Rich Presence
             bool isLobbyValid = false;
-            if (info->m_steamIDLobby != 0) {
+            if (info->m_steamIDLobby != 0 && (info->m_steamIDLobby & 0x8000000000000000ULL) == 0) {
                 uint8_t universe = (uint8_t)((info->m_steamIDLobby >> 56) & 0xFF);
-                uint8_t accType = (uint8_t)((info->m_steamIDLobby >> 52) & 0x0F);
-                if (universe == 1 && (accType == 7 || accType == 1)) {
+                if (universe == 1) {
                     isLobbyValid = true;
                 }
             }
@@ -2057,6 +2066,7 @@ static void NormalizeFriendGameInfo(void* pFriendGameInfo, uint64_t steamIDFrien
                             uint64_t rpLobbyId = _strtoui64(pLobby + 15, nullptr, 10);
                             if (rpLobbyId != 0) {
                                 info->m_steamIDLobby = rpLobbyId;
+                                info->m_unGameIP = 0; // Clear raw IP so Unreal/Unity joins via Steam Lobby
                                 ReFixLog("GetFriendGamePlayed: Recovered valid LobbyID %llu from Rich Presence connect string for friend %llu",
                                          rpLobbyId, steamIDFriend);
                             }
@@ -2156,77 +2166,44 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
     uint32_t realApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
     uint32_t maskApp = g_config.maskAppIdNum;
 
-    ReFixLog("ISteamMatchmaking::JoinLobby Hook called:");
-    ReFixLog("  LobbyID: %llu", steamIDLobby);
-    ReFixLog("  RealAppId: %u | MaskAppId: %u", realApp, maskApp);
-    ReFixLog("  Interface (self): %p", self);
-    ReFixLog("  g_orig_VTable_JoinLobby: %p", g_orig_VTable_JoinLobby);
-    ReFixLog("  g_pfn_JoinLobby: %p", g_pfn_JoinLobby);
+    static std::atomic<uint64_t> s_lastJoinLobbyID{0};
+    static std::atomic<DWORD> s_lastJoinLogTick{0};
+    DWORD now = GetTickCount();
+    bool shouldLog = (s_lastJoinLobbyID.exchange(steamIDLobby) != steamIDLobby) || ((now - s_lastJoinLogTick.load()) > 2000);
 
-    // Sanitize invalid lobby IDs (e.g. 0x80000000... / shortcut / negative int64 / universe != 1)
-    uint8_t universe = (uint8_t)((steamIDLobby >> 56) & 0xFF);
-    uint8_t accType = (uint8_t)((steamIDLobby >> 52) & 0x0F);
-    if (universe != 1 || (accType != 7 && accType != 1)) {
-        ReFixLog("  [WARNING] Invalid Steam LobbyID=%llu (universe=%u, accType=%u, highBit=%d) - aborting invalid backend join",
-                 steamIDLobby, universe, accType, (int)(steamIDLobby >> 63));
-        return 0;
+    bool isRealLobby = ((steamIDLobby >> 56) == 1);
+
+    if (shouldLog && isRealLobby) {
+        s_lastJoinLogTick.store(now);
+        ReFixLog("ISteamMatchmaking::JoinLobby Hook called: Input LobbyID=%llu (RealAppId=%u, MaskAppId=%u, self=%p)",
+                 steamIDLobby, realApp, maskApp, self);
     }
 
-    ReFix_NotifyLobbyID(steamIDLobby);
-
-    const char* targetName = "None";
-    void* targetAddr = nullptr;
     uint64_t hCall = 0;
-
     if (g_orig_VTable_JoinLobby) {
-        targetName = "VTable";
-        targetAddr = (void*)g_orig_VTable_JoinLobby;
         hCall = g_orig_VTable_JoinLobby(self, steamIDLobby);
     } else if (g_pfn_JoinLobby) {
-        targetName = "Flat Export";
-        targetAddr = (void*)g_pfn_JoinLobby;
         hCall = g_pfn_JoinLobby(self, steamIDLobby);
-    } else {
-        targetName = "None (No valid JoinLobby target resolved)";
-        targetAddr = nullptr;
-        hCall = 0;
     }
 
-    ReFixLog("  Target Selected: %s (%p)", targetName, targetAddr);
-    ReFixLog("  -> JoinLobby APICall handle: %llu", hCall);
-
-    if (hCall == 0) {
-        if (!targetAddr) {
-            ReFixLog("  [ERROR] JoinLobby failed: No backend function pointer available (VTable=null, Export=null)");
-        } else {
-            ReFixLog("  [WARNING] JoinLobby backend target %s (%p) returned 0 (k_uAPICallInvalid) for LobbyID=%llu",
-                     targetName, targetAddr, steamIDLobby);
-        }
+    if (hCall != 0 && isRealLobby) {
+        ReFix_NotifyLobbyID(steamIDLobby);
     }
 
-    // Godot-specific: steam-multiplayer-peer.dll waits for LobbyEnter_t (iCallback=504)
-    // before calling ISteamNetworkingSockets::ConnectP2P(). If the lobby ID is synthetic
-    // (not a real Steam lobby) the real Steam backend won't fire LobbyEnter_t, causing
-    // the "Failed to join. The connection timed out." error.
-    // We synthesize LobbyEnter_t so Godot can proceed with the P2P connection.
-    if (g_godotIsEngine) {
-        // Detect synthetic lobby IDs: format is 0x0110000100000000 | lowBits
-        bool isSyntheticOrUnknown = ((steamIDLobby >> 52) == 0x011) || (hCall == 0);
-        if (isSyntheticOrUnknown) {
-            ReFixLog("[Godot] JoinLobby: lobby appears synthetic or join handle=0, scheduling LobbyEnter_t synthesis");
+    if (shouldLog && isRealLobby) {
+        ReFixLog("  Target Selected: VTable (%p), APICall handle: %llu", (void*)g_orig_VTable_JoinLobby, hCall);
+    }
+
+    // ONLY for Godot: steam-multiplayer-peer requires a synthetic LobbyEnter_t if the backend returned 0
+    if (g_godotIsEngine && isRealLobby && (hCall == 0 || (steamIDLobby >> 52) == 0x011)) {
+        static std::atomic<uint64_t> s_lastSyntheticLobby{0};
+        static std::atomic<DWORD> s_lastSyntheticTick{0};
+        if (s_lastSyntheticLobby.exchange(steamIDLobby) != steamIDLobby || (now - s_lastSyntheticTick.load()) > 2000) {
+            s_lastSyntheticTick.store(now);
+            ReFixLog("[Godot] JoinLobby: Scheduling synthetic LobbyEnter_t for LobbyID=%llu", steamIDLobby);
             std::thread([steamIDLobby]() {
-                Sleep(300); // brief delay to let real callbacks fire first if any
+                Sleep(200);
                 SynthesizeLobbyEnterCallback(steamIDLobby);
-            }).detach();
-        } else {
-            // Real lobby — also synthesize as fallback in case real callback is lost
-            std::thread([steamIDLobby]() {
-                Sleep(1500); // wait for real LobbyEnter_t; if not fired, inject ours
-                // Only inject if still tracking this lobby (active lobby = this lobby)
-                if (g_activeLobbyID == steamIDLobby) {
-                    ReFixLog("[Godot] JoinLobby: fallback LobbyEnter_t synthesis after 1500ms for real lobby %llu", steamIDLobby);
-                    SynthesizeLobbyEnterCallback(steamIDLobby);
-                }
             }).detach();
         }
     }
@@ -3022,24 +2999,19 @@ static uint64_t Intercepted_JoinLobby(void* self, uint64_t steamIDLobby) {
     return Hooked_ISteamMatchmaking_JoinLobby(self, steamIDLobby);
 }
 
-// Called from eos_proxy.cpp (or anywhere) when we know the real Steam lobby ID
 extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {
     if (lobbyID && lobbyID != g_activeLobbyID) {
+        // PROTECTION: If g_activeLobbyID is already a real Steam lobby (0x0186...),
+        // do not let a non-lobby / individual SteamID overwrite it and wipe P2P peers.
+        bool isCurrentRealLobby = ((g_activeLobbyID >> 56) == 1) && (((g_activeLobbyID >> 48) & 0xFF) == 0x86);
+        bool isNewRealLobby = ((lobbyID >> 56) == 1) && (((lobbyID >> 48) & 0xFF) == 0x86);
+        if (isCurrentRealLobby && !isNewRealLobby) {
+            ReFixLog("ReFix_NotifyLobbyID: Ignored non-lobby ID %llu because real lobby %llu is already active", lobbyID, g_activeLobbyID);
+            return;
+        }
+
         g_activeLobbyID = lobbyID;
         ReFixLog("ReFix_NotifyLobbyID: tracking lobby=%llu", lobbyID);
-
-        // Inject game_filter tag into the Steam Lobby so RequestLobbyList filters locate it
-        if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0') {
-            void* matchmaking = nullptr;
-            typedef void* (*fn_SteamMatchmaking_t)();
-            auto pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
-            if (!pfnMM) pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmaking");
-            if (pfnMM) matchmaking = pfnMM();
-            if (matchmaking) {
-                Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, lobbyID, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
-                ReFixLog("  -> Injected '%s'='%s' into Steam Lobby %llu", g_config.lobbyFilterKey, g_config.lobbyFilterValue, lobbyID);
-            }
-        }
 
         UpdateP2PPeers(lobbyID);
 
@@ -3210,21 +3182,32 @@ static bool EnsureOriginal() {
     g_pfn_GSInitSafe            = (fn_SteamGameServer_InitSafe_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_InitSafe");
     g_pfn_SteamAPIInit_Internal = (fn_SteamInternal_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamInternal_SteamAPI_Init");
 
-    g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamFriends_GetPersonaName");
+    g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamFriends_GetPersonaName");
     if (!g_pfn_GetPersonaName)
-        g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress(g_hOriginalDll, "SteamFriends");
+        g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamFriends");
 
-    g_pfn_SteamFriends   = (fn_SteamFriends_v017_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamFriends_v017");
-    if (!g_pfn_SteamFriends)
-        g_pfn_SteamFriends = (fn_SteamFriends_v017_t)GetProcAddress(g_hOriginalDll, "SteamFriends");
+    const char* friendsVersions[] = {
+        "SteamAPI_SteamFriends_v017", "SteamAPI_SteamFriends_v016", "SteamAPI_SteamFriends_v015",
+        "SteamAPI_SteamFriends_v014", "SteamAPI_SteamFriends_v013", "SteamFriends", nullptr
+    };
+    for (int i = 0; friendsVersions[i]; i++) {
+        g_pfn_SteamFriends = (fn_SteamFriends_v017_t)GetProcAddress((HMODULE)g_hOriginalDll, friendsVersions[i]);
+        if (g_pfn_SteamFriends) break;
+    }
 
-    g_pfn_GetSteamID = (fn_GetSteamID_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamUser_GetSteamID");
+    g_pfn_GetSteamID = (fn_GetSteamID_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamUser_GetSteamID");
     if (!g_pfn_GetSteamID)
-        g_pfn_GetSteamID = (fn_GetSteamID_t)GetProcAddress(g_hOriginalDll, "SteamUser");
+        g_pfn_GetSteamID = (fn_GetSteamID_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUser");
 
-    g_pfn_SteamUser  = (fn_SteamUser_v021_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamUser_v021");
-    if (!g_pfn_SteamUser)
-        g_pfn_SteamUser = (fn_SteamUser_v021_t)GetProcAddress(g_hOriginalDll, "SteamUser");
+    const char* userVersions[] = {
+        "SteamAPI_SteamUser_v021", "SteamAPI_SteamUser_v020", "SteamAPI_SteamUser_v019",
+        "SteamAPI_SteamUser_v018", "SteamAPI_SteamUser_v017", "SteamAPI_SteamUser_v016",
+        "SteamAPI_SteamUser_v015", "SteamAPI_SteamUser_v014", "SteamUser", nullptr
+    };
+    for (int i = 0; userVersions[i]; i++) {
+        g_pfn_SteamUser = (fn_SteamUser_v021_t)GetProcAddress((HMODULE)g_hOriginalDll, userVersions[i]);
+        if (g_pfn_SteamUser) break;
+    }
 
     g_pfn_RegisterCallback   = (fn_SteamAPI_RegisterCallback_t)GetProcAddress(g_hOriginalDll, "SteamAPI_RegisterCallback");
     g_pfn_RegisterCallResult = (fn_SteamAPI_RegisterCallResult_t)GetProcAddress(g_hOriginalDll, "SteamAPI_RegisterCallResult");

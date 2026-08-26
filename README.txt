@@ -1,5 +1,5 @@
 ====================================================================
-               ReFix Deployment Suite v1.2 (Standalone)
+               ReFix Deployment Suite v1.22 (Standalone)
 ====================================================================
 
 INCLUDED TOOLS:
