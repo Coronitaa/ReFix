@@ -45,8 +45,8 @@ echo [*] Building winmm.dll proxy...
 cl /nologo /O2 /EHsc /std:c++17 /LD src\winmm_proxy.cpp src\server_browser_gui.cpp build\winmm_fwd.obj /Febuild\winmm.dll user32.lib kernel32.lib advapi32.lib comctl32.lib /link /DEF:src\winmm_proxy.def
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling winmm.dll & exit /b 1 )
 
-echo [*] Building EOSSDK-Win64-Shipping.dll and RedboneEOS.dll proxy...
-cl /nologo /O2 /EHsc /std:c++17 /LD src\eos_proxy.cpp src\identity\online_identity_provider.cpp src\eos\eos_identity.cpp src\eos\eos_callbacks.cpp src\eos\eos_connect.cpp src\eos\eos_lobby.cpp src\refix_online\refix_wire.cpp src\refix_online\refix_backend_protocol.cpp src\refix_online\refix_backend_state.cpp src\refix_online\refix_backend_client.cpp src\eos_core\eos_room_manager.cpp src\upnp_firewall.cpp build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll user32.lib kernel32.lib advapi32.lib ws2_32.lib wininet.lib ole32.lib oleaut32.lib /link /DEF:src\eos_proxy.def
+echo [*] Building EOSSDK-Win64-Shipping.dll and RedboneEOS.dll (ReFix EOS v3 emulator)...
+cl /nologo /O2 /Zi /EHsc /std:c++17 /DEOS_MONOLITHIC=1 /Isrc\eossdk src\eossdk\eos_module.cpp src\eossdk\core\refix_common.cpp src\eossdk\core\refix_config.cpp src\eossdk\core\refix_log.cpp src\eossdk\core\refix_hash.cpp src\eossdk\core\eos_ids.cpp src\eossdk\core\eos_identity.cpp src\eossdk\core\eos_dispatch.cpp src\eossdk\core\lobby_model.cpp src\eossdk\core\eos_online.cpp src\eossdk\net\refix_transport.cpp src\eossdk\net\lobby_directory.cpp src\eossdk\api\eos_api_platform.cpp src\eossdk\api\eos_api_connect.cpp src\eossdk\api\eos_api_user.cpp src\eossdk\api\eos_api_lobby.cpp src\eossdk\api\eos_api_sessions.cpp src\eossdk\api\eos_api_p2p.cpp src\eossdk\api\eos_api_storage.cpp /LD build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll /Fdbuild\eos.pdb user32.lib kernel32.lib advapi32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib /link /DEF:src\eos_proxy.def /DEBUG /MAP:build\eos.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling EOSSDK-Win64-Shipping.dll & exit /b 1 )
 copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
 
