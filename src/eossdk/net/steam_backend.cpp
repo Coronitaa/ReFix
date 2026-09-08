@@ -10,6 +10,7 @@
 #include "isteamnetworkingmessages.h"
 
 #include <atomic>
+#include <cstring>
 
 namespace refix {
 namespace {
@@ -683,6 +684,12 @@ void SteamBackend::Pump() {
     // asking in the background: by the time the title runs a search the results
     // are already here instead of one round trip away. This runs on the tick
     // thread, which is where the title itself calls Steam.
+    // Steam only holds persona names it has had a reason to cache, so a title
+    // that reads its friends list straight from ISteamFriends draws blank rows
+    // for everyone else. Asking Steam for those names fills its cache, and the
+    // title's own next read finds them.
+    PrimeFriendNames();
+
     const uint64_t now = NowMs();
     if (now - m_lastListMs >= 3000) {
         m_lastListMs = now;
@@ -777,6 +784,41 @@ bool SteamBackend::OpenInviteOverlay(const std::string& lobbyId) {
 // Everything a Steam callback asked for, performed on the tick thread where
 // calling back into Steam and into the lobby directory is safe.
 // ---------------------------------------------------------------------------
+void SteamBackend::PrimeFriendNames() {
+    if (!m_available || !g_api.RequestUserInformation ||
+        !g_api.GetFriendCount || !g_api.GetFriendByIndex || !g_api.GetFriendPersonaName)
+        return;
+    if (m_namesPrimed) return;
+
+    const uint64_t now = NowMs();
+    if (m_lastPrimeMs && now - m_lastPrimeMs < 4000) return;
+    m_lastPrimeMs = now;
+
+    const int count = g_api.GetFriendCount(g_api.FriendsIface, k_EFriendFlagImmediate);
+    int missing = 0, asked = 0;
+    for (int i = 0; i < count; i++) {
+        const uint64 id = g_api.GetFriendByIndex(g_api.FriendsIface, i, k_EFriendFlagImmediate);
+        if (!id) continue;
+        const char* n = g_api.GetFriendPersonaName(g_api.FriendsIface, id);
+        if (n && *n && std::strcmp(n, "[unknown]") != 0) continue;
+        missing++;
+        // true: we only need the name, not the avatar.
+        if (g_api.RequestUserInformation(g_api.FriendsIface, id, 1)) asked++;
+    }
+    if (missing == 0) {
+        m_namesPrimed = true;
+        RFLOG(Net, "SteamBackend: all %d friend name(s) are known to Steam", count);
+        return;
+    }
+    if (++m_primePasses >= 8) {          // Steam has had long enough
+        m_namesPrimed = true;
+        RFLOG(Net, "SteamBackend: %d of %d friend name(s) still unknown to Steam; giving up asking",
+              missing, count);
+        return;
+    }
+    RFLOG(Net, "SteamBackend: asked Steam for %d of %d missing friend name(s)", asked, missing);
+}
+
 void SteamBackend::DrainDeferred() {
     std::vector<Deferred> work;
     {

@@ -140,6 +140,8 @@ struct UserInfoBlock {
     EOS_UserInfo Info;
     std::string  DisplayName;
     std::string  Nickname;
+    std::string  Country;
+    std::string  Language;
 };
 std::mutex                                g_userInfoMutex;
 std::map<EOS_UserInfo*, UserInfoBlock*>   g_userInfoBlocks;
@@ -160,10 +162,18 @@ EOS_DECLARE_FUNC(EOS_EResult) EOS_UserInfo_CopyUserInfo(EOS_HUserInfo Handle, co
 
     auto* block = new UserInfoBlock();
     block->DisplayName = name;
+    block->Nickname    = name;
+    block->Language    = "en";
     std::memset(&block->Info, 0, sizeof(block->Info));
     block->Info.ApiVersion  = EOS_USERINFO_COPYUSERINFO_API_LATEST;
     block->Info.UserId      = Options->TargetUserId;
     block->Info.DisplayName = block->DisplayName.c_str();
+    // Titles read whichever of these three they trust; leaving the sanitized
+    // name null is what turns a friends list into a column of blank rows.
+    block->Info.DisplayNameSanitized = block->DisplayName.c_str();
+    block->Info.Nickname             = block->Nickname.c_str();
+    block->Info.PreferredLanguage    = block->Language.c_str();
+    RFLOG(Auth, "EOS_UserInfo_CopyUserInfo -> '%s'", block->DisplayName.c_str());
     {
         std::lock_guard<std::mutex> lock(g_userInfoMutex);
         g_userInfoBlocks[&block->Info] = block;
@@ -203,6 +213,7 @@ EOS_DECLARE_FUNC(void) EOS_Friends_QueryFriends(EOS_HFriends Handle, const EOS_F
 
 EOS_DECLARE_FUNC(int32_t) EOS_Friends_GetFriendsCount(EOS_HFriends Handle, const EOS_Friends_GetFriendsCountOptions* Options) {
     std::lock_guard<std::mutex> lock(g_friendsMutex);
+    RFLOG(Auth, "EOS_Friends_GetFriendsCount -> %zu", g_friends.size());
     return (int32_t)g_friends.size();
 }
 

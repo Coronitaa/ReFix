@@ -84,6 +84,7 @@ private:
     SteamBackend() = default;
     void HandleLobbyList(uint32_t count);
     void DrainDeferred();
+    void PrimeFriendNames();
     void AdoptCreatedLobby(int result, uint64_t steamLobby);
     void WriteLobbyRecord(uint64_t steamLobby, const LobbyRecord& record);
     bool ReadLobbyRecord(uint64_t steamLobby, LobbyRecord& out);
@@ -93,6 +94,9 @@ private:
     // Which spelling of the AppID key the next lobby-list request filters on.
     mutable int  m_listSweep = 0;
     uint64_t     m_lastListMs = 0;
+    uint64_t     m_lastPrimeMs = 0;
+    int          m_primePasses = 0;
+    bool         m_namesPrimed = false;
 };
 
 } // namespace refix

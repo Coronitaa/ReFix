@@ -90,6 +90,9 @@ void RefreshFileList() {
     if (h != INVALID_HANDLE_VALUE) {
         do {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            // An empty file is not a save. Listing one would tell a title its
+            // cloud slot is populated and then hand it nothing.
+            if (fd.nFileSizeLow == 0 && fd.nFileSizeHigh == 0) continue;
             FileEntry e;
             e.Name = fd.cFileName;
             e.Size = fd.nFileSizeLow;
@@ -238,18 +241,15 @@ EOS_DECLARE_FUNC(EOS_HPlayerDataStorageFileTransferRequest) EOS_PlayerDataStorag
     std::vector<uint8_t> data;
     if (valid) data = ReadWholeFile(StorageRoot() + name, ok);
 
-    // A brand-new player has no cloud file yet. The real service answers
-    // EOS_NotFound, and a title that treats that as a hard failure never gets
-    // as far as writing its first save - which is exactly how a cloud-save
-    // indicator ends up stuck on "Error" with nothing ever persisted. Handing
-    // back an empty file instead lets the title initialise from defaults and
-    // start saving; the file appears on disk the moment it does.
+    // A brand-new player has no cloud file yet, and the real service answers
+    // EOS_NotFound - which is what we answer too. Handing back an empty file
+    // instead is offered for titles that treat NotFound as a hard failure, but
+    // it is off by default: an empty blob is not a save, and a title that
+    // deserialises one is worse off than a title told the file is absent.
     const bool missingIsEmpty = ok ? false
-        : Config::Get().GetBool("Storage", "TreatMissingFileAsEmpty", true);
+        : Config::Get().GetBool("Storage", "TreatMissingFileAsEmpty", false);
     if (missingIsEmpty && valid) {
         ok = true;
-        // Create it for real, so the next QueryFileList reports the file as
-        // present instead of the title seeing an empty cloud again.
         std::ofstream create(StorageRoot() + name, std::ios::binary | std::ios::app);
     }
 
@@ -280,7 +280,8 @@ EOS_DECLARE_FUNC(EOS_HPlayerDataStorageFileTransferRequest) EOS_PlayerDataStorag
         }
         if (request->Cancelled) result = ER::EOS_Canceled;
         RFLOG(Core, "PlayerDataStorage_ReadFile('%s') -> %d (%zu bytes)%s", name.c_str(), (int)result, data.size(),
-              (missingIsEmpty && data.empty()) ? " [no cloud file yet; reported as empty so the title can create one]" : "");
+              (result == ER::EOS_NotFound) ? " [no cloud file yet - the same answer the real service gives]"
+              : (missingIsEmpty && data.empty()) ? " [reported as empty by configuration]" : "");
         if (CompletionCallback) {
             EOS_PlayerDataStorage_ReadFileCallbackInfo info{};
             info.ResultCode  = result;
