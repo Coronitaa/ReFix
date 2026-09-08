@@ -111,11 +111,14 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
         }
     }
 
-    // 2. Explicit configuration.
+    // 2. An explicit [User] SteamId. Deliberately NOT [Unreal.Steam] SteamId:
+    //    that key ships with a placeholder value, so honouring it would hand
+    //    every player on every machine the same account.
     if (externalId.empty()) {
-        std::string configured = cfg.GetString("User", "SteamId", "");
-        if (configured.empty()) configured = cfg.GetString("Unreal.Steam", "SteamId", "");
-        if (!configured.empty() && configured.find_first_not_of("0123456789") == std::string::npos) {
+        std::string configured = Trim(cfg.GetString("User", "SteamId", ""));
+        const bool numeric = !configured.empty() &&
+                             configured.find_first_not_of("0123456789") == std::string::npos;
+        if (numeric && configured != "76561198000000001") {
             externalId = configured;
             source = "config";
         }
@@ -137,6 +140,13 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
     m_local = BuildUser(externalId, type, displayName);
     m_resolved = true;
 
+    if (credentialType < 0) {
+        // Something asked who the player is before the title presented a
+        // credential. The answer is then a fallback, not the real account, so
+        // make that impossible to miss in the trace.
+        RFLOG(Auth, "WARNING: identity resolved BEFORE EOS_Connect_Login, so the Steam "
+                    "ticket was not available and a fallback was used.");
+    }
     RFLOG(Auth, "Identity resolved via %s: external=%s type=%d name='%s' PUID=%s EAID=%s (credType=%d)",
           source, externalId.c_str(), (int)type, displayName.c_str(),
           m_local.Puid.c_str(), m_local.Eaid.c_str(), credentialType);

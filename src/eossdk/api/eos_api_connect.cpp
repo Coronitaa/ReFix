@@ -18,6 +18,7 @@
 #include "../core/eos_identity.h"
 #include "../core/eos_dispatch.h"
 #include "../eos_module.h"
+#include "../net/lobby_directory.h"
 
 using namespace refix;
 
@@ -99,6 +100,7 @@ EOS_DECLARE_FUNC(void) EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_
     if (!puid) { fail(ER::EOS_InvalidAuth, "identity could not be derived"); return; }
 
     RFLOG(Auth, "EOS_Connect_Login: '%s' -> PUID=%s", user.DisplayName.c_str(), user.Puid.c_str());
+    LobbyDirectory::Get().SetLocalPuid(user.Puid);
 
     if (CompletionDelegate) {
         Dispatcher::Get().Post([CompletionDelegate, ClientData, puid]() {

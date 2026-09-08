@@ -53,6 +53,11 @@ void LobbyDirectory::BeginMessage(Writer& w, uint8_t type) const {
     w.Str(m_scope);
 }
 
+void LobbyDirectory::SetLocalPuid(const std::string& puid) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_localPuid = puid;
+}
+
 bool LobbyDirectory::Start(const std::string& scope) {
     if (m_running) return true;
     m_scope = scope;
@@ -359,6 +364,20 @@ void LobbyDirectory::OnDatagram(const Endpoint& from, const uint8_t* data, size_
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_hosted.count(record.LobbyId)) return;
+            // Somebody else is advertising a lobby owned by *our* id. The two
+            // installs will fight over every packet addressed to that id, so
+            // say so plainly rather than letting it fail mysteriously later.
+            if (!m_localPuid.empty() && record.OwnerPuid == m_localPuid &&
+                !(record.HostAddress == Transport::Get().LocalEndpoint())) {
+                if (!m_warnedDuplicateIdentity) {
+                    m_warnedDuplicateIdentity = true;
+                    RFLOG(Lobby, "DUPLICATE IDENTITY: %s at %s is advertising a lobby owned by "
+                                 "our own ProductUserId. Set a different [User] Instance "
+                                 "(or REFIX_USER_INSTANCE) on one of them.",
+                          record.OwnerPuid.c_str(), record.HostAddress.ToString().c_str());
+                }
+                return;
+            }
             record.LastSeenMs = NowMillis();
             if (!record.HostAddress.Valid()) record.HostAddress = from;
             auto it = m_known.find(record.LobbyId);
@@ -416,16 +435,33 @@ void LobbyDirectory::OnDatagram(const Endpoint& from, const uint8_t* data, size_
         ER result = ER::EOS_NotFound;
         LobbyRecord updated;
         bool isNew = false;
+        bool duplicateIdentity = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             auto it = m_hosted.find(lobbyId);
+            const bool fromElsewhere = !(from == Transport::Get().LocalEndpoint());
+
             if (it == m_hosted.end()) {
                 result = ER::EOS_NotFound;
+            } else if (fromElsewhere && joiner.Puid == it->second.OwnerPuid) {
+                // A different process is presenting the host's own identity.
+                // That happens when two copies of the game run on one machine
+                // under the same account: both derive the same ProductUserId.
+                // Accepting it would silently produce a one-member lobby that
+                // the second player can never appear in, so refuse loudly.
+                result = ER::EOS_DuplicateNotAllowed;
+                duplicateIdentity = true;
             } else if (it->second.Permission == EOS_ELobbyPermissionLevel::EOS_LPL_INVITEONLY) {
                 result = ER::EOS_Lobby_NotAllowed;
-            } else if (it->second.FindMember(joiner.Puid)) {
-                result = ER::EOS_Success;                 // idempotent re-join
-                updated = it->second;
+            } else if (const LobbyMember* existing = it->second.FindMember(joiner.Puid)) {
+                if (fromElsewhere && existing->Address.Valid() && !(existing->Address == from)) {
+                    // Same id, different machine: also a duplicate identity.
+                    result = ER::EOS_DuplicateNotAllowed;
+                    duplicateIdentity = true;
+                } else {
+                    result = ER::EOS_Success;             // genuine re-join
+                    updated = it->second;
+                }
             } else if (it->second.AvailableSlots() == 0) {
                 result = ER::EOS_Lobby_TooManyPlayers;
             } else {
@@ -435,7 +471,17 @@ void LobbyDirectory::OnDatagram(const Endpoint& from, const uint8_t* data, size_
                 result = ER::EOS_Success;
                 isNew = true;
             }
-            if (result == ER::EOS_Success) m_addresses[joiner.Puid] = joiner.Address;
+            // Never let a joiner's address replace the host's own entry.
+            if (result == ER::EOS_Success && joiner.Puid != it->second.OwnerPuid)
+                m_addresses[joiner.Puid] = joiner.Address;
+        }
+
+        if (duplicateIdentity) {
+            RFLOG(Lobby, "REJECTED join for %s: the joining player presents the same "
+                         "ProductUserId as someone already in the lobby (%s). Two instances "
+                         "on one PC share a Steam account and therefore an identity - give "
+                         "the second one a different [User] Instance (or REFIX_USER_INSTANCE).",
+                  lobbyId.c_str(), joiner.Puid.c_str());
         }
 
         Writer w;

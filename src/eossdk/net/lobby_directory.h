@@ -43,6 +43,12 @@ public:
 
     // `scope` isolates one title's lobbies from another's on a shared network.
     bool Start(const std::string& scope);
+
+    // Told to us once EOS_Connect_Login has resolved the local player. The
+    // transport comes up before login, so this cannot be a Start() argument:
+    // asking for the identity that early would resolve it from configuration
+    // instead of from the credential the title is about to present.
+    void SetLocalPuid(const std::string& puid);
     void Stop();
 
     // Installing the lobby events must not detach a P2P handler that was
@@ -93,6 +99,8 @@ private:
 
     mutable std::mutex                     m_mutex;
     std::string                            m_scope;
+    std::string                            m_localPuid;
+    bool                                   m_warnedDuplicateIdentity = false;
     std::map<std::string, LobbyRecord>     m_hosted;
     std::map<std::string, LobbyRecord>     m_known;
     std::map<std::string, Endpoint>        m_addresses;
