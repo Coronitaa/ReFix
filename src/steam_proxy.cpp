@@ -1527,6 +1527,9 @@ struct ReFixConfig {
     bool enableLog = true;
     bool enableConsole = false;
     bool enableServerBrowser = true;
+    // Traces every ISteamFriends enumeration call the title makes. Off by
+    // default: a title with a large friends list makes thousands of these.
+    bool logFriendsApi = false;
 };
 
 static ReFixConfig g_config;
@@ -1648,6 +1651,7 @@ static void LoadConfig() {
     g_enableLogAllowed = g_config.enableLog;
     g_config.enableConsole = ReadBool("Debug", "EnableConsole", false);
     g_config.enableServerBrowser = ReadBool("Debug", "EnableServerBrowser", true);
+    g_config.logFriendsApi = ReadBool("Debug", "LogFriendsApi", false);
 }
 
 void ReFixLog(const char* fmt, ...) {
@@ -1842,6 +1846,21 @@ typedef bool(*fn_VTable_GetItemInstallInfo_t)(void* self, uint64_t nPublishedFil
 typedef void(*fn_VTable_ActivateGameOverlayInviteDialog_t)(void* self, uint64_t steamIDLobby);
 typedef bool(*fn_VTable_SetRichPresence_t)(void* self, const char* pchKey, const char* pchValue);
 
+// ISteamFriends enumeration, as the title's own friends UI walks it. These are
+// pass-through hooks: they exist so the log shows exactly what the title asked
+// for and exactly what Steam answered, which is the only way to tell a missing
+// name from a row the title invented itself.
+typedef int         (*fn_VTable_GetFriendCount_t)(void* self, int iFriendFlags);
+typedef int         (*fn_VTable_GetFriendRelationship_t)(void* self, uint64_t steamIDFriend);
+typedef int         (*fn_VTable_GetFriendPersonaState_t)(void* self, uint64_t steamIDFriend);
+typedef const char* (*fn_VTable_GetFriendPersonaName_t)(void* self, uint64_t steamIDFriend);
+typedef int         (*fn_VTable_GetFriendsGroupCount_t)(void* self);
+typedef int         (*fn_VTable_GetFriendsGroupMembersCount_t)(void* self, int16_t friendsGroupID);
+typedef bool        (*fn_VTable_HasFriend_t)(void* self, uint64_t steamIDFriend, int iFriendFlags);
+typedef bool        (*fn_VTable_RequestUserInformation_t)(void* self, uint64_t steamIDUser, bool bRequireNameOnly);
+typedef bool        (*fn_VTable_InviteUserToGame_t)(void* self, uint64_t steamIDFriend, const char* pchConnectString);
+typedef int         (*fn_VTable_GetCoplayFriendCount_t)(void* self);
+
 static fn_VTable_RequestLobbyList_t g_orig_VTable_RequestLobbyList = nullptr;
 static fn_VTable_AddStringFilter_t g_orig_VTable_AddStringFilter = nullptr;
 static fn_VTable_AddDistanceFilter_t g_orig_VTable_AddDistanceFilter = nullptr;
@@ -1861,6 +1880,17 @@ static fn_VTable_GetSubscribedItems_t g_orig_VTable_GetSubscribedItems = nullptr
 static fn_VTable_GetItemInstallInfo_t g_orig_VTable_GetItemInstallInfo = nullptr;
 static fn_VTable_ActivateGameOverlayInviteDialog_t g_orig_VTable_ActivateGameOverlayInviteDialog = nullptr;
 static fn_VTable_SetRichPresence_t g_orig_VTable_SetRichPresence = nullptr;
+
+static fn_VTable_GetFriendCount_t              g_orig_VTable_GetFriendCount = nullptr;
+static fn_VTable_GetFriendRelationship_t       g_orig_VTable_GetFriendRelationship = nullptr;
+static fn_VTable_GetFriendPersonaState_t       g_orig_VTable_GetFriendPersonaState = nullptr;
+static fn_VTable_GetFriendPersonaName_t        g_orig_VTable_GetFriendPersonaName = nullptr;
+static fn_VTable_GetFriendsGroupCount_t        g_orig_VTable_GetFriendsGroupCount = nullptr;
+static fn_VTable_GetFriendsGroupMembersCount_t g_orig_VTable_GetFriendsGroupMembersCount = nullptr;
+static fn_VTable_HasFriend_t                   g_orig_VTable_HasFriend = nullptr;
+static fn_VTable_RequestUserInformation_t      g_orig_VTable_RequestUserInformation = nullptr;
+static fn_VTable_InviteUserToGame_t            g_orig_VTable_InviteUserToGame = nullptr;
+static fn_VTable_GetCoplayFriendCount_t        g_orig_VTable_GetCoplayFriendCount = nullptr;
 
 struct ReFix_FriendGameInfo_t {
     uint64_t m_gameID;
@@ -2011,11 +2041,108 @@ static uint32_t Hooked_ISteamUGC_GetNumSubscribedItems(void* self) {
     return validCount;
 }
 
+// Opening Steam's invite dialog needs the id of a lobby that exists on Valve's
+// matchmaking service. A title running on EOS has no such id to give - it hands
+// over whatever its own online layer calls a session - so the dialog would open
+// against nothing and invites would go nowhere. The Steam lobby ReFix keeps in
+// step with the title's session is the right target, so it is substituted here.
 static void Hooked_ISteamFriends_ActivateGameOverlayInviteDialog(void* self, uint64_t steamIDLobby) {
-    ReFixLog("ISteamFriends::ActivateGameOverlayInviteDialog Hook called for lobby=%llu", steamIDLobby);
-    if (g_orig_VTable_ActivateGameOverlayInviteDialog) {
-        g_orig_VTable_ActivateGameOverlayInviteDialog(self, steamIDLobby);
+    uint64_t target = steamIDLobby;
+    if (g_activeLobbyID != 0 && steamIDLobby != g_activeLobbyID) {
+        ReFixLog("ISteamFriends::ActivateGameOverlayInviteDialog Hook: retargeting %llu -> Steam lobby %llu",
+                 steamIDLobby, g_activeLobbyID);
+        target = g_activeLobbyID;
+    } else {
+        ReFixLog("ISteamFriends::ActivateGameOverlayInviteDialog Hook called for lobby=%llu", steamIDLobby);
     }
+    if (g_orig_VTable_ActivateGameOverlayInviteDialog) {
+        g_orig_VTable_ActivateGameOverlayInviteDialog(self, target);
+    }
+}
+
+// The same substitution for the direct invite path. An empty connect string is
+// filled in with the one the friends list already advertises, so an invite sent
+// from inside the game lands the friend in the same lobby as one sent from the
+// Steam overlay.
+static bool Hooked_ISteamFriends_InviteUserToGame(void* self, uint64_t steamIDFriend, const char* pchConnectString) {
+    char rebuilt[128] = {0};
+    const char* connect = pchConnectString;
+    if ((!connect || !*connect) && g_activeLobbyID != 0) {
+        _snprintf_s(rebuilt, sizeof(rebuilt), _TRUNCATE, "+connect_lobby %llu", g_activeLobbyID);
+        connect = rebuilt;
+    }
+    ReFixLog("ISteamFriends::InviteUserToGame Hook: friend=%llu connect='%s'%s",
+             steamIDFriend, connect ? connect : "",
+             (connect != pchConnectString) ? " (supplied by ReFix)" : "");
+    if (g_orig_VTable_InviteUserToGame) {
+        return g_orig_VTable_InviteUserToGame(self, steamIDFriend, connect);
+    }
+    return false;
+}
+
+// --- friends enumeration trace ---------------------------------------------
+static int Hooked_ISteamFriends_GetFriendCount(void* self, int iFriendFlags) {
+    int n = g_orig_VTable_GetFriendCount ? g_orig_VTable_GetFriendCount(self, iFriendFlags) : 0;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] GetFriendCount(flags=0x%X) -> %d", (unsigned)iFriendFlags, n);
+    return n;
+}
+
+static int Hooked_ISteamFriends_GetFriendRelationship(void* self, uint64_t steamIDFriend) {
+    int r = g_orig_VTable_GetFriendRelationship ? g_orig_VTable_GetFriendRelationship(self, steamIDFriend) : 0;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] GetFriendRelationship(%llu) -> %d", steamIDFriend, r);
+    return r;
+}
+
+static int Hooked_ISteamFriends_GetFriendPersonaState(void* self, uint64_t steamIDFriend) {
+    int r = g_orig_VTable_GetFriendPersonaState ? g_orig_VTable_GetFriendPersonaState(self, steamIDFriend) : 0;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] GetFriendPersonaState(%llu) -> %d", steamIDFriend, r);
+    return r;
+}
+
+static const char* Hooked_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
+    const char* n = g_orig_VTable_GetFriendPersonaName ? g_orig_VTable_GetFriendPersonaName(self, steamIDFriend) : nullptr;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] GetFriendPersonaName(%llu) -> '%s'", steamIDFriend, n ? n : "<null>");
+    return n;
+}
+
+static int Hooked_ISteamFriends_GetFriendsGroupCount(void* self) {
+    int n = g_orig_VTable_GetFriendsGroupCount ? g_orig_VTable_GetFriendsGroupCount(self) : 0;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] GetFriendsGroupCount() -> %d", n);
+    return n;
+}
+
+static int Hooked_ISteamFriends_GetFriendsGroupMembersCount(void* self, int16_t friendsGroupID) {
+    int n = g_orig_VTable_GetFriendsGroupMembersCount ? g_orig_VTable_GetFriendsGroupMembersCount(self, friendsGroupID) : 0;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] GetFriendsGroupMembersCount(%d) -> %d", (int)friendsGroupID, n);
+    return n;
+}
+
+static bool Hooked_ISteamFriends_HasFriend(void* self, uint64_t steamIDFriend, int iFriendFlags) {
+    bool r = g_orig_VTable_HasFriend ? g_orig_VTable_HasFriend(self, steamIDFriend, iFriendFlags) : false;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] HasFriend(%llu, 0x%X) -> %d", steamIDFriend, (unsigned)iFriendFlags, (int)r);
+    return r;
+}
+
+static bool Hooked_ISteamFriends_RequestUserInformation(void* self, uint64_t steamIDUser, bool bRequireNameOnly) {
+    bool r = g_orig_VTable_RequestUserInformation ? g_orig_VTable_RequestUserInformation(self, steamIDUser, bRequireNameOnly) : false;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] RequestUserInformation(%llu, nameOnly=%d) -> %d (0 = already cached)",
+                 steamIDUser, (int)bRequireNameOnly, (int)r);
+    return r;
+}
+
+static int Hooked_ISteamFriends_GetCoplayFriendCount(void* self) {
+    int n = g_orig_VTable_GetCoplayFriendCount ? g_orig_VTable_GetCoplayFriendCount(self) : 0;
+    if (g_config.logFriendsApi)
+        ReFixLog("[FRIENDS] GetCoplayFriendCount() -> %d", n);
+    return n;
 }
 
 static bool Hooked_ISteamFriends_SetRichPresence(void* self, const char* pchKey, const char* pchValue) {
@@ -2836,9 +2963,24 @@ static void InstallVTableHooks() {
     if (pfnFriends) {
         void* pFriends = pfnFriends();
         if (pFriends) {
-            HookVTableMethod(pFriends, 8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed);
-            HookVTableMethod(pFriends, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
-            HookVTableMethod(pFriends, 43, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
+            // ISteamFriends017 slot numbers, in declaration order. Slot 15 is
+            // GetFriendsGroupMembersCount, not the invite dialog: hooking the
+            // dialog there replaced a function the title uses to lay out its
+            // friends list and left the real dialog unhooked, so invites were
+            // opened against a lobby id that means nothing to Steam.
+            HookVTableMethod(pFriends,  3, (void*)Hooked_ISteamFriends_GetFriendCount,              (void**)&g_orig_VTable_GetFriendCount);
+            HookVTableMethod(pFriends,  5, (void*)Hooked_ISteamFriends_GetFriendRelationship,       (void**)&g_orig_VTable_GetFriendRelationship);
+            HookVTableMethod(pFriends,  6, (void*)Hooked_ISteamFriends_GetFriendPersonaState,       (void**)&g_orig_VTable_GetFriendPersonaState);
+            HookVTableMethod(pFriends,  7, (void*)Hooked_ISteamFriends_GetFriendPersonaName,        (void**)&g_orig_VTable_GetFriendPersonaName);
+            HookVTableMethod(pFriends,  8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed,         (void**)&g_orig_VTable_GetFriendGamePlayed);
+            HookVTableMethod(pFriends, 12, (void*)Hooked_ISteamFriends_GetFriendsGroupCount,        (void**)&g_orig_VTable_GetFriendsGroupCount);
+            HookVTableMethod(pFriends, 15, (void*)Hooked_ISteamFriends_GetFriendsGroupMembersCount, (void**)&g_orig_VTable_GetFriendsGroupMembersCount);
+            HookVTableMethod(pFriends, 17, (void*)Hooked_ISteamFriends_HasFriend,                   (void**)&g_orig_VTable_HasFriend);
+            HookVTableMethod(pFriends, 33, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
+            HookVTableMethod(pFriends, 37, (void*)Hooked_ISteamFriends_RequestUserInformation,      (void**)&g_orig_VTable_RequestUserInformation);
+            HookVTableMethod(pFriends, 43, (void*)Hooked_ISteamFriends_SetRichPresence,             (void**)&g_orig_VTable_SetRichPresence);
+            HookVTableMethod(pFriends, 49, (void*)Hooked_ISteamFriends_InviteUserToGame,            (void**)&g_orig_VTable_InviteUserToGame);
+            HookVTableMethod(pFriends, 50, (void*)Hooked_ISteamFriends_GetCoplayFriendCount,        (void**)&g_orig_VTable_GetCoplayFriendCount);
         }
     }
 

@@ -6,6 +6,18 @@
 // exactly - the title's data callback is invoked chunk by chunk on the tick
 // thread and its return value is respected - because titles use it to stream
 // straight into their own buffers.
+//
+// The cloud slot is also kept in step with the engine's own local save. An
+// Unreal title writes its progress to %LOCALAPPDATA%\<Project>\Saved\SaveGames
+// under a slot named after the player ("cLeon_Default_<UserId>.sav") and then
+// mirrors that blob into the cloud under the bare slot name ("cLeon_Default").
+// Without a real service behind it the cloud half of that pair never appears,
+// so the title reports its cloud state as an error even though the save on disk
+// is perfectly healthy. SaveGameBridge closes the loop: whenever the title asks
+// what is in the cloud, any local save belonging to this player that is newer
+// than the cloud copy is promoted into it first. The player's own file is the
+// only source - nothing is ever invented - and the local save is never written
+// to, so the engine stays the sole owner of its own storage.
 #include "../core/refix_common.h"
 #include "../core/refix_log.h"
 #include "../core/refix_config.h"
@@ -82,7 +94,154 @@ std::vector<uint8_t> ReadWholeFile(const std::string& path, bool& ok) {
     return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
+// --- bridge to the engine's own save directory -----------------------------
+
+uint64_t FileTimeToU64(const FILETIME& ft) {
+    ULARGE_INTEGER t{};
+    t.LowPart  = ft.dwLowDateTime;
+    t.HighPart = ft.dwHighDateTime;
+    return t.QuadPart;
+}
+
+// Size and last-write time of a file, or false if it is not there.
+bool StatFile(const std::string& path, uint64_t& size, uint64_t& written) {
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad)) return false;
+    if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+    size    = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    written = FileTimeToU64(fad.ftLastWriteTime);
+    return true;
+}
+
+// The Unreal project name. The shipping executable lives in
+// <Project>\Binaries\<Platform>\, and the engine derives its user directory
+// from that same project name, so one can be read off the other.
+std::string ProjectName() {
+    std::string cfg = Config::Get().GetString("Storage", "ProjectName", "");
+    if (!cfg.empty()) return cfg;
+
+    std::string dir = GameDirectory();
+    while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+    std::vector<std::string> parts;
+    size_t start = 0;
+    for (size_t i = 0; i <= dir.size(); ++i) {
+        if (i == dir.size() || dir[i] == '\\' || dir[i] == '/') {
+            if (i > start) parts.push_back(dir.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    for (size_t i = parts.size(); i-- > 1; ) {
+        if (ToLower(parts[i]) == "binaries") return parts[i - 1];
+    }
+    return "";
+}
+
+// %LOCALAPPDATA%\<Project>\Saved\SaveGames\ - where the engine actually keeps
+// the player's progress.
+const std::string& SaveGamesDir() {
+    static std::string cache = [] {
+        std::string cfg = Config::Get().GetString("Storage", "SaveGamesDir", "");
+        if (!cfg.empty()) {
+            if (cfg.back() != '\\' && cfg.back() != '/') cfg += "\\";
+            return cfg;
+        }
+        std::string project = ProjectName();
+        if (project.empty()) return std::string();
+        char local[MAX_PATH] = {0};
+        DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", local, (DWORD)sizeof(local));
+        if (n == 0 || n >= sizeof(local)) return std::string();
+        return std::string(local) + "\\" + project + "\\Saved\\SaveGames\\";
+    }();
+    return cache;
+}
+
+// The suffixes the engine appends to a slot name for this player, most specific
+// first: the ProductUserId this session logged in as, and - for a title that was
+// played before on the same machine through Steam - the SteamID64 behind it.
+std::vector<std::string> LocalSlotSuffixes() {
+    std::vector<std::string> out;
+    const UserRecord& me = Identity::Get().LocalUser();
+    if (!me.Puid.empty()) out.push_back("_" + me.Puid);
+    if (me.External.Valid && !me.External.AccountId.empty())
+        out.push_back("_" + me.External.AccountId);
+    return out;
+}
+
+bool g_bridgeAnnounced = false;
+
+// Promotes the engine's own save into the cloud slot whenever the cloud copy is
+// missing, empty, or older. Never writes to the engine's directory.
+void SyncFromSaveGames() {
+    if (!Config::Get().GetBool("Storage", "MirrorLocalSaveGames", true)) return;
+    const std::string& saves = SaveGamesDir();
+    if (saves.empty()) return;
+
+    std::vector<std::string> suffixes = LocalSlotSuffixes();
+    if (suffixes.empty()) return;   // nobody is logged in yet
+
+    if (!g_bridgeAnnounced) {
+        g_bridgeAnnounced = true;
+        RFLOG(Core, "SaveGameBridge: engine save directory is %s (slot suffix '%s')",
+              saves.c_str(), suffixes[0].c_str());
+    }
+
+    // slot name -> (source path, priority) with priority 0 = best match.
+    std::map<std::string, std::pair<std::string, size_t>> best;
+
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA((saves + "*.sav").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (fd.nFileSizeLow == 0 && fd.nFileSizeHigh == 0) continue;
+        std::string file = fd.cFileName;
+        if (file.size() < 5) continue;
+        std::string stem = file.substr(0, file.size() - 4);          // drop ".sav"
+        for (size_t p = 0; p < suffixes.size(); ++p) {
+            const std::string& suffix = suffixes[p];
+            if (stem.size() <= suffix.size()) continue;
+            if (ToLower(stem.substr(stem.size() - suffix.size())) != ToLower(suffix)) continue;
+            std::string slot = stem.substr(0, stem.size() - suffix.size());
+            std::string src;
+            if (!SafeName(slot.c_str(), src)) break;
+            auto it = best.find(slot);
+            if (it == best.end() || p < it->second.second)
+                best[slot] = { saves + file, p };
+            break;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    for (const auto& kv : best) {
+        const std::string& slot = kv.first;
+        const std::string& src  = kv.second.first;
+        std::string dst = StorageRoot() + slot;
+
+        uint64_t srcSize = 0, srcTime = 0;
+        if (!StatFile(src, srcSize, srcTime) || srcSize == 0) continue;
+
+        uint64_t dstSize = 0, dstTime = 0;
+        const bool haveDst = StatFile(dst, dstSize, dstTime);
+        // An empty cloud file is not a save; it is the residue of an older
+        // build that answered "missing" with an empty blob. Drop it.
+        if (haveDst && dstSize == 0) {
+            DeleteFileA(dst.c_str());
+            RFLOG(Core, "SaveGameBridge: discarded empty cloud file '%s'", slot.c_str());
+        }
+        if (haveDst && dstSize != 0 && dstTime >= srcTime) continue;   // cloud is current
+
+        if (CopyFileA(src.c_str(), dst.c_str(), FALSE)) {
+            RFLOG(Core, "SaveGameBridge: '%s' <- %s (%llu bytes)", slot.c_str(), src.c_str(),
+                  (unsigned long long)srcSize);
+        } else {
+            RFLOG(Core, "SaveGameBridge: could not copy %s to '%s' (error %lu)",
+                  src.c_str(), slot.c_str(), (unsigned long)GetLastError());
+        }
+    }
+}
+
 void RefreshFileList() {
+    SyncFromSaveGames();
     std::vector<FileEntry> found;
     WIN32_FIND_DATAA fd{};
     std::string pattern = StorageRoot() + "*";
@@ -237,9 +396,22 @@ EOS_DECLARE_FUNC(EOS_HPlayerDataStorageFileTransferRequest) EOS_PlayerDataStorag
     auto dataCallback = Options ? Options->ReadFileDataCallback : nullptr;
     uint32_t chunkSize = (Options && Options->ReadChunkLengthBytes) ? Options->ReadChunkLengthBytes : 64 * 1024;
 
+    // Pick up anything the engine has written to its own save directory since
+    // the last time we looked, so the cloud slot answers with the player's real
+    // progress rather than with nothing.
+    SyncFromSaveGames();
+
     bool ok = false;
     std::vector<uint8_t> data;
     if (valid) data = ReadWholeFile(StorageRoot() + name, ok);
+    // A zero-length file is not a save. Older builds left one behind when they
+    // answered a missing file with an empty blob; reading it back as a success
+    // hands the title an empty buffer to deserialise, which is exactly what it
+    // reports as a cloud error. Treat it as what it is: nothing.
+    if (ok && data.empty()) {
+        ok = false;
+        DeleteFileA((StorageRoot() + name).c_str());
+    }
 
     // A brand-new player has no cloud file yet, and the real service answers
     // EOS_NotFound - which is what we answer too. Handing back an empty file
@@ -248,10 +420,7 @@ EOS_DECLARE_FUNC(EOS_HPlayerDataStorageFileTransferRequest) EOS_PlayerDataStorag
     // deserialises one is worse off than a title told the file is absent.
     const bool missingIsEmpty = ok ? false
         : Config::Get().GetBool("Storage", "TreatMissingFileAsEmpty", false);
-    if (missingIsEmpty && valid) {
-        ok = true;
-        std::ofstream create(StorageRoot() + name, std::ios::binary | std::ios::app);
-    }
+    if (missingIsEmpty && valid) ok = true;
 
     Dispatcher::Get().Post([=]() mutable {
         ER result = ER::EOS_Success;
