@@ -114,6 +114,7 @@ void LobbyRecord::Write(Writer& w) const {
     w.U32(Revision);
     w.U32(HostAddress.Ipv4);
     w.U16(HostAddress.Port);
+    w.U64(OwnerSteamId);
     WriteAttributes(w, Attributes);
     w.U32((uint32_t)Members.size());
     for (const auto& m : Members) {
@@ -121,6 +122,7 @@ void LobbyRecord::Write(Writer& w) const {
         w.Str(m.DisplayName);
         w.U32(m.Address.Ipv4);
         w.U16(m.Address.Port);
+        w.U64(m.SteamId);
         w.Bool(m.IsOwner);
         WriteAttributes(w, m.Attributes);
     }
@@ -141,6 +143,7 @@ bool LobbyRecord::Read(Reader& r, LobbyRecord& out) {
     out.Revision                      = r.U32();
     out.HostAddress.Ipv4              = r.U32();
     out.HostAddress.Port              = r.U16();
+    out.OwnerSteamId                  = r.U64();
     if (!ReadAttributes(r, out.Attributes)) return false;
 
     uint32_t memberCount = r.U32();
@@ -155,6 +158,7 @@ bool LobbyRecord::Read(Reader& r, LobbyRecord& out) {
         m.DisplayName  = r.Str(256);
         m.Address.Ipv4 = r.U32();
         m.Address.Port = r.U16();
+        m.SteamId      = r.U64();
         m.IsOwner      = r.Bool();
         if (!ReadAttributes(r, m.Attributes, 128)) return false;
         out.Members.push_back(std::move(m));
@@ -184,6 +188,24 @@ bool SearchParameter::Matches(const LobbyRecord& lobby) const {
                Op == EOS_EComparisonOp::EOS_CO_NOTANYOF;
     }
 
+    // ANYOF / ONEOF carry a *set*, which EOS transports as one string with the
+    // members separated by ';'. Comparing that string whole never matches, so a
+    // title looking for "any of my friends' lobbies" would find none of them.
+    auto inSet = [&]() {
+        if (actual.Type != EOS_ELobbyAttributeType::EOS_AT_STRING ||
+            Value.Type  != EOS_ELobbyAttributeType::EOS_AT_STRING)
+            return actual.Equals(Value);
+        const std::string& set = Value.AsUtf8;
+        size_t start = 0;
+        while (start <= set.size()) {
+            size_t end = set.find(';', start);
+            if (end == std::string::npos) end = set.size();
+            if (end > start && set.compare(start, end - start, actual.AsUtf8) == 0) return true;
+            start = end + 1;
+        }
+        return false;
+    };
+
     const int cmp = actual.Compare(Value);
     switch (Op) {
         case EOS_EComparisonOp::EOS_CO_EQUAL:              return actual.Equals(Value);
@@ -193,10 +215,10 @@ bool SearchParameter::Matches(const LobbyRecord& lobby) const {
         case EOS_EComparisonOp::EOS_CO_LESSTHAN:           return cmp < 0;
         case EOS_EComparisonOp::EOS_CO_LESSTHANOREQUAL:    return cmp <= 0;
         case EOS_EComparisonOp::EOS_CO_DISTANCE:           return true;   // no geo data to filter on
-        case EOS_EComparisonOp::EOS_CO_ANYOF:              return actual.Equals(Value);
-        case EOS_EComparisonOp::EOS_CO_NOTANYOF:           return !actual.Equals(Value);
-        case EOS_EComparisonOp::EOS_CO_ONEOF:              return actual.Equals(Value);
-        case EOS_EComparisonOp::EOS_CO_NOTONEOF:           return !actual.Equals(Value);
+        case EOS_EComparisonOp::EOS_CO_ANYOF:              return inSet();
+        case EOS_EComparisonOp::EOS_CO_NOTANYOF:           return !inSet();
+        case EOS_EComparisonOp::EOS_CO_ONEOF:              return inSet();
+        case EOS_EComparisonOp::EOS_CO_NOTONEOF:           return !inSet();
         case EOS_EComparisonOp::EOS_CO_CONTAINS:
             return actual.AsUtf8.find(Value.AsUtf8) != std::string::npos;
         default:                                           return true;

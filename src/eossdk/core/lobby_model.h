@@ -37,7 +37,8 @@ struct Attribute {
 struct LobbyMember {
     std::string            Puid;
     std::string            DisplayName;
-    Endpoint               Address;          // where to reach this member
+    Endpoint               Address;          // LAN endpoint, when reachable
+    uint64_t               SteamId = 0;      // set when the peer is reachable through Steam
     std::vector<Attribute> Attributes;       // member attributes, host-replicated
     bool                   IsOwner = false;
 };
@@ -58,7 +59,9 @@ struct LobbyRecord {
     std::vector<Attribute>   Attributes;
     std::vector<LobbyMember> Members;
 
-    Endpoint     HostAddress;                // where join requests go
+    Endpoint     HostAddress;                // where LAN join requests go
+    uint64_t     OwnerSteamId = 0;           // host's SteamID, for the WAN path
+    uint64_t     SteamLobbyId = 0;           // local only: the Steam lobby carrying this record
     uint64_t     LastSeenMs = 0;             // for expiring stale advertisements
     uint32_t     Revision = 0;               // increases on every host-side change
 

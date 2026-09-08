@@ -23,6 +23,7 @@
 #include "../core/eos_dispatch.h"
 #include "../core/eos_online.h"
 #include "../net/lobby_directory.h"
+#include "../net/steam_backend.h"
 #include "../eos_module.h"
 
 using namespace refix;
@@ -107,6 +108,7 @@ LobbyMember LocalMember() {
     m.Puid        = user.Puid;
     m.DisplayName = user.DisplayName;
     m.Address     = LobbyDirectory::Get().LocalEndpoint();
+    m.SteamId     = SteamBackend::Get().LocalSteamId();
     return m;
 }
 
@@ -232,6 +234,30 @@ void InstallDirectoryEvents() {
                 return info;
             });
     };
+    // The player accepted an invite from the Steam overlay. Both the lobby and
+    // the session interface are told: a title may be listening on either.
+    ev.OnInviteAccepted = [](const std::string& lobbyId, const std::string& fromPuid) {
+        EOS_ProductUserId local = Identity::Get().LocalPuid();
+        Dispatcher::Get().Broadcast<EOS_Lobby_JoinLobbyAcceptedCallbackInfo>(
+            NotifyKind::JoinLobbyAccepted, [local](void* clientData) {
+                EOS_Lobby_JoinLobbyAcceptedCallbackInfo info{};
+                info.ClientData   = clientData;
+                info.LocalUserId  = local;
+                info.UiEventId    = EOS_UI_EVENTID_INVALID;
+                return info;
+            });
+        Dispatcher::Get().Broadcast<EOS_Sessions_JoinSessionAcceptedCallbackInfo>(
+            NotifyKind::JoinSessionAccepted, [local](void* clientData) {
+                EOS_Sessions_JoinSessionAcceptedCallbackInfo info{};
+                info.ClientData  = clientData;
+                info.LocalUserId = local;
+                info.UiEventId   = EOS_UI_EVENTID_INVALID;
+                return info;
+            });
+        RFLOG(Lobby, "invite accepted through Steam for lobby %s (from %s)",
+              lobbyId.c_str(), fromPuid.c_str());
+    };
+
     LobbyDirectory::Get().SetEvents(std::move(ev));
 }
 
@@ -943,6 +969,7 @@ EOS_DECLARE_FUNC(void) EOS_LobbySearch_Find(EOS_HLobbySearch Handle, const EOS_L
     Dispatcher::Get().PostAfter(waitMs, [s, ClientData, CompletionDelegate]() {
         if (s->Magic != kMagicLobbySearch) return;
         std::vector<LobbyRecord> all = LobbyDirectory::Get().Snapshot();
+        bool logged = false;                     // one example is enough
         for (const auto& record : all) {
             if (s->Results.size() >= s->MaxResults) break;
             if (!s->LobbyIdFilter.empty() && record.LobbyId != s->LobbyIdFilter) continue;
@@ -950,7 +977,19 @@ EOS_DECLARE_FUNC(void) EOS_LobbySearch_Find(EOS_HLobbySearch Handle, const EOS_L
             if (record.Permission == EOS_ELobbyPermissionLevel::EOS_LPL_INVITEONLY) continue;
             bool matches = true;
             for (const auto& p : s->Parameters) {
-                if (!p.Matches(record)) { matches = false; break; }
+                if (!p.Matches(record)) {
+                    matches = false;
+                    // Which filter rejected which lobby is the single most
+                    // useful thing to know when a search comes back empty, and
+                    // it cannot be reconstructed after the fact.
+                    if (!logged) { logged = true;
+                    RFLOG(Lobby, "  search: lobby %s rejected by filter '%s' (wanted '%s', lobby has '%s')",
+                          record.LobbyId.c_str(), p.Key.c_str(), p.Value.Describe().c_str(),
+                          record.FindAttribute(p.Key)
+                              ? record.FindAttribute(p.Key)->Value.Describe().c_str()
+                              : "<absent>"); }
+                    break;
+                }
             }
             if (matches) s->Results.push_back(record);
         }

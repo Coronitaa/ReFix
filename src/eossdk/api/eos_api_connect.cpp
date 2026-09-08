@@ -101,6 +101,7 @@ EOS_DECLARE_FUNC(void) EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_
 
     RFLOG(Auth, "EOS_Connect_Login: '%s' -> PUID=%s", user.DisplayName.c_str(), user.Puid.c_str());
     LobbyDirectory::Get().SetLocalPuid(user.Puid);
+    LobbyDirectory::Get().SetLocalName(user.DisplayName);
 
     if (CompletionDelegate) {
         Dispatcher::Get().Post([CompletionDelegate, ClientData, puid]() {
@@ -313,6 +314,19 @@ EOS_DECLARE_FUNC(EOS_ProductUserId) EOS_Connect_GetExternalAccountMapping(EOS_HC
     const UserRecord& local = Identity::Get().LocalUser();
     if (local.External.Valid && local.External.AccountId == Options->TargetExternalUserId)
         return Identity::Get().LocalPuid();
+
+    // Any Steam account maps to the ProductUserId that account derives for
+    // itself, so a title can name a friend before ever meeting them online.
+    if (Options->AccountIdType == EAT::EOS_EAT_STEAM) {
+        const std::string external = Options->TargetExternalUserId;
+        if (!external.empty() && external.find_first_not_of("0123456789") == std::string::npos) {
+            // Record what we know about them too, so the title can go on to ask
+            // that ProductUserId about its external account and get an answer.
+            const UserRecord& peer =
+                Identity::Get().RememberExternalAccount(external, EAT::EOS_EAT_STEAM, "");
+            return IdRegistry::Get().Puid(peer.Puid);
+        }
+    }
     return nullptr;
 }
 

@@ -3,6 +3,7 @@
 // =============================================================================
 #include "eos_connect.h"
 #include "../identity/online_identity_provider.h"
+#include "../crypto_hash.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
@@ -90,7 +91,7 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
 
     // 1. Validation of Options & Credentials
     if (!Options || Options->ApiVersion <= 0 || !Options->Credentials) {
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Invalid parameters (Options=%p)", Options);
+        ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Invalid parameters (Options=%p) -> ResultCode=EOS_InvalidParameters", Options);
         EOS_Connect_LoginCallbackInfo cbInfo = {};
         cbInfo.ResultCode = EOS_InvalidParameters;
         cbInfo.ClientData = ClientData;
@@ -105,11 +106,22 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
     size_t tokenLen = token ? strlen(token) : 0;
     int credType = creds ? (int)creds->Type : -1;
 
-    ReFixEOS::LogDiagnostic("EOS_Connect_Login ENTER: Handle=%p, CredentialType=%d, TokenPresent=%s, TokenLength=%zu, Delegate=%p",
-        Handle, credType, (token != nullptr ? "TRUE" : "FALSE"), tokenLen, CompletionDelegate);
+    std::string tokenHexSha = token ? ReFixCrypto::ComputeSHA256Hex(token, tokenLen) : "NONE";
+    std::vector<uint8_t> tokenBytes = token ? ReFixCrypto::HexToBytes(token) : std::vector<uint8_t>();
+    std::string tokenBinarySha = !tokenBytes.empty() ? ReFixCrypto::ComputeSHA256Hex(tokenBytes.data(), tokenBytes.size()) : "NONE";
+
+    std::vector<uint8_t> capturedTicket = provider->GetCapturedTicketBytes();
+    std::string capturedTicketSha = !capturedTicket.empty() ?
+        ReFixCrypto::ComputeSHA256Hex(capturedTicket.data(), capturedTicket.size()) : "NONE";
+
+    bool tokenMatchesCaptured = (!tokenBytes.empty() && tokenBinarySha == capturedTicketSha && capturedTicketSha != "NONE");
+
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login ENTER: Handle=%p, CredentialType=%d, TokenLength=%zu, TokenHex_SHA256=%s, TokenBinary_SHA256=%s, Captured_SHA256=%s, TokenMatchesCaptured=%s, Delegate=%p",
+        Handle, credType, tokenLen, tokenHexSha.c_str(), tokenBinarySha.c_str(), capturedTicketSha.c_str(),
+        (tokenMatchesCaptured ? "TRUE" : "FALSE"), CompletionDelegate);
 
     if (creds->ApiVersion <= 0 || !token) {
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Invalid credentials struct (Token=NULL) -> ResultCode=EOS_InvalidParameters");
+        ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Invalid credentials struct (Token=NULL) -> ResultCode=EOS_InvalidParameters");
         EOS_Connect_LoginCallbackInfo cbInfo = {};
         cbInfo.ResultCode = EOS_InvalidParameters;
         cbInfo.ClientData = ClientData;
@@ -122,8 +134,8 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
     // 2. Validate Credential via Unified Identity Provider
     bool isValid = provider->ValidateCredential(credType, token);
     if (!isValid) {
-        ReFixEOS::LogDiagnostic("EOS_Connect_Login: Credential validation failed for CredentialType=%d, TokenLength=%zu -> ResultCode=EOS_InvalidAuth",
-            credType, tokenLen);
+        ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Credential validation FAILED for CredentialType=%d, TokenLength=%zu, TokenBinary_SHA256=%s -> ResultCode=EOS_InvalidAuth (4)",
+            credType, tokenLen, tokenBinarySha.c_str());
         EOS_Connect_LoginCallbackInfo cbInfo = {};
         cbInfo.ResultCode = EOS_InvalidAuth;
         cbInfo.ClientData = ClientData;
@@ -137,7 +149,7 @@ void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Opti
     EOS_ProductUserId localPuid = idMgr.GetLocalProductUserId();
     std::string puidStr = idMgr.GetLocalProductUserIdString();
 
-    ReFixEOS::LogDiagnostic("EOS_Connect_Login: Authentication SUCCESS (ResultCode=EOS_Success) -> PUID=%s, Mode=%s, Delegate=%p",
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Credential validation SUCCEEDED (Local ReFix Provider Validated) -> PUID=%s, Mode=%s, ResultCode=EOS_Success (0), Delegate=%p",
         puidStr.c_str(), (provider->GetMode() == ReFixIdentity::IdentityMode::Valve ? "valve" : "goldberg"), CompletionDelegate);
 
     EOS_Connect_LoginCallbackInfo cbInfo = {};
@@ -315,6 +327,7 @@ EOS_EResult EOS_Connect_CopyProductUserInfo(EOS_HConnect Handle, const EOS_Conne
     if (!info) return EOS_NotFound;
 
     *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserInfo: TargetUserId=%p -> ResultCode=EOS_Success", Options->TargetUserId);
     return EOS_Success;
 }
 
@@ -326,6 +339,7 @@ EOS_EResult EOS_Connect_CopyProductUserExternalAccountByIndex(EOS_HConnect Handl
     if (!info) return EOS_NotFound;
 
     *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserExternalAccountByIndex: Index=%d -> ResultCode=EOS_Success", Options->ExternalAccountInfoIndex);
     return EOS_Success;
 }
 
@@ -337,6 +351,7 @@ EOS_EResult EOS_Connect_CopyProductUserExternalAccountByAccountType(EOS_HConnect
     if (!info) return EOS_NotFound;
 
     *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserExternalAccountByAccountType: Type=%d -> ResultCode=EOS_Success", Options->AccountIdType);
     return EOS_Success;
 }
 
@@ -349,6 +364,7 @@ EOS_EResult EOS_Connect_CopyProductUserExternalAccountByAccountId(EOS_HConnect H
     if (!info) return EOS_NotFound;
 
     *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserExternalAccountByAccountId: AccountId='%s' -> ResultCode=EOS_Success", Options->AccountId);
     return EOS_Success;
 }
 
@@ -357,7 +373,9 @@ void EOS_Connect_ExternalAccountInfo_Release(EOS_Connect_ExternalAccountInfo* Ex
 }
 
 EOS_ProductUserId EOS_Connect_GetLoggedInUserByIndex(EOS_HConnect Handle, int32_t Index) {
-    return (Index == 0) ? ReFixEOS::IdentityManager::Get().GetLocalProductUserId() : nullptr;
+    auto puid = (Index == 0) ? ReFixEOS::IdentityManager::Get().GetLocalProductUserId() : nullptr;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_GetLoggedInUserByIndex(Index=%d) -> LocalUserId=%p", Index, puid);
+    return puid;
 }
 
 int32_t EOS_Connect_GetLoggedInUsersCount(EOS_HConnect Handle) {
@@ -366,7 +384,10 @@ int32_t EOS_Connect_GetLoggedInUsersCount(EOS_HConnect Handle) {
 
 EOS_ELoginStatus EOS_Connect_GetLoginStatus(EOS_HConnect Handle, EOS_ProductUserId LocalUserId) {
     if (!LocalUserId) return EOS_LS_NotLoggedIn;
-    return ReFixEOS::IdentityManager::Get().IsValidProductUserId(LocalUserId) ? EOS_LS_LoggedIn : EOS_LS_NotLoggedIn;
+    EOS_ELoginStatus status = ReFixEOS::IdentityManager::Get().IsValidProductUserId(LocalUserId) ? EOS_LS_LoggedIn : EOS_LS_NotLoggedIn;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_GetLoginStatus(LocalUserId=%p) -> Status=%d (%s)",
+        LocalUserId, (int)status, (status == EOS_LS_LoggedIn ? "LoggedIn" : "NotLoggedIn"));
+    return status;
 }
 
 EOS_NotificationId EOS_Connect_AddNotifyLoginStatusChanged(EOS_HConnect Handle, void* Options, void* ClientData, void* NotificationFn) {

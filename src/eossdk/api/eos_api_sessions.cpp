@@ -21,6 +21,7 @@
 #include "../core/eos_dispatch.h"
 #include "../core/eos_online.h"
 #include "../net/lobby_directory.h"
+#include "../net/steam_backend.h"
 #include "../eos_module.h"
 
 using namespace refix;
@@ -235,6 +236,7 @@ LobbyMember LocalMember() {
     m.Puid        = user.Puid;
     m.DisplayName = user.DisplayName;
     m.Address     = LobbyDirectory::Get().LocalEndpoint();
+    m.SteamId     = SteamBackend::Get().LocalSteamId();
     return m;
 }
 

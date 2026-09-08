@@ -169,13 +169,15 @@ static void LoadGameFilterConfig() {
         if (iniFilter[0] != '\0') {
             strncpy_s(g_gameFilter, sizeof(g_gameFilter), iniFilter, _TRUNCATE);
         } else if (realAppId[0] != '\0' && strcmp(realAppId, "0") != 0) {
-            sprintf_s(g_gameFilter, sizeof(g_gameFilter), "refix_game_%s", realAppId);
+            // Use AppID directly (not refix_game_ prefix) for interoperability
+            // with other emulators (OnlineFix, Goldberg) that use AppID as filter
+            strncpy_s(g_gameFilter, sizeof(g_gameFilter), realAppId, _TRUNCATE);
         } else {
             char appId[64] = "480";
             if (GetEnvironmentVariableA("SteamAppId", appId, sizeof(appId)) > 0 && appId[0] != '\0' && strcmp(appId, "0") != 0) {
-                sprintf_s(g_gameFilter, sizeof(g_gameFilter), "refix_game_%s", appId);
+                strncpy_s(g_gameFilter, sizeof(g_gameFilter), appId, _TRUNCATE);
             } else {
-                strcpy_s(g_gameFilter, "refix_game_default");
+                strcpy_s(g_gameFilter, "480");
             }
         }
     }

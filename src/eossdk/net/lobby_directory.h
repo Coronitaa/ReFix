@@ -16,6 +16,7 @@
 #include "../core/refix_common.h"
 #include "../core/lobby_model.h"
 #include "refix_transport.h"
+#include "steam_backend.h"
 #include <functional>
 #include <atomic>
 #include <thread>
@@ -32,9 +33,23 @@ struct DirectoryEvents {
     std::function<void(const std::string& lobbyId,
                        const std::string& fromPuid,
                        const std::string& inviteId)>                 OnInviteReceived;
+    // Raised when the player accepted an invite outside the game (the Steam
+    // overlay), so the title can be told to join.
+    std::function<void(const std::string& lobbyId,
+                       const std::string& fromPuid)>                 OnInviteAccepted;
     // A datagram addressed to the game's own P2P layer.
     std::function<void(const std::string& fromPuid, const std::string& socketName,
                        uint8_t channel, const uint8_t* data, size_t len)> OnP2PPacket;
+};
+
+// Where a peer can be reached. A peer discovered on the LAN has a UDP endpoint;
+// one discovered through Steam has a SteamID and is reachable from anywhere.
+// Both may be set, in which case Steam wins - it is the path that survives a
+// player changing network.
+struct PeerRef {
+    Endpoint Udp;
+    uint64_t SteamId = 0;
+    bool Valid() const { return SteamId != 0 || Udp.Valid(); }
 };
 
 class LobbyDirectory {
@@ -49,6 +64,7 @@ public:
     // asking for the identity that early would resolve it from configuration
     // instead of from the credential the title is about to present.
     void SetLocalPuid(const std::string& puid);
+    void SetLocalName(const std::string& name);
     void Stop();
 
     // Installing the lobby events must not detach a P2P handler that was
@@ -82,8 +98,8 @@ public:
     bool        IsHosting(const std::string& lobbyId) const;
 
     // --- peer addressing --------------------------------------------------
-    Endpoint    AddressOf(const std::string& puid) const;
-    void        RememberAddress(const std::string& puid, const Endpoint& ep);
+    PeerRef     AddressOf(const std::string& puid) const;
+    void        RememberAddress(const std::string& puid, const PeerRef& peer);
     bool        SendP2P(const std::string& toPuid, const std::string& socketName,
                         uint8_t channel, const void* data, size_t len);
 
@@ -91,23 +107,28 @@ public:
 
 private:
     LobbyDirectory() = default;
-    void OnDatagram(const Endpoint& from, const uint8_t* data, size_t len);
+    void OnDatagram(const PeerRef& from, const uint8_t* data, size_t len);
+    void EnsureSteam();
+    bool SendToPeer(const PeerRef& to, const void* data, size_t len);
+    void InstallSteamEvents();
     void MaintenanceLoop();
-    void Announce(const LobbyRecord& record, const Endpoint* to = nullptr);
+    void Announce(const LobbyRecord& record, const PeerRef* to = nullptr);
     void PublishUpdate(const LobbyRecord& record);
     void BeginMessage(Writer& w, uint8_t type) const;
 
     mutable std::mutex                     m_mutex;
     std::string                            m_scope;
     std::string                            m_localPuid;
+    std::string                            m_localName;
     bool                                   m_warnedDuplicateIdentity = false;
     std::map<std::string, LobbyRecord>     m_hosted;
     std::map<std::string, LobbyRecord>     m_known;
-    std::map<std::string, Endpoint>        m_addresses;
+    std::map<std::string, PeerRef>         m_addresses;
     DirectoryEvents                        m_events;
     std::atomic<bool>                      m_running{false};
     std::thread                            m_maintenance;
     uint64_t                               m_lastAnnounceMs = 0;
+    uint64_t                               m_lastSteamListMs = 0;
 };
 
 } // namespace refix

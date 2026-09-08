@@ -213,6 +213,11 @@ public:
         return BytesToHex(m_ticketBytes.data(), m_ticketBytes.size());
     }
 
+    std::vector<uint8_t> GetCapturedTicketBytes() override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_ticketBytes;
+    }
+
     uint32_t GetCapturedTicketHandle() override {
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_ticketHandle;
@@ -388,6 +393,11 @@ public:
             return BytesToHex((const uint8_t*)t.data(), t.size());
         }
         return BytesToHex(m_ticketBytes.data(), m_ticketBytes.size());
+    }
+
+    std::vector<uint8_t> GetCapturedTicketBytes() override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_ticketBytes;
     }
 
     uint32_t GetCapturedTicketHandle() override {

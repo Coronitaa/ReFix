@@ -39,6 +39,7 @@ public:
     virtual void SetCapturedSteamId(uint64_t steamId) = 0;
     virtual void SetCapturedDisplayName(const std::string& name) = 0;
     virtual std::string GetCapturedTicketHex() = 0;
+    virtual std::vector<uint8_t> GetCapturedTicketBytes() = 0;
     virtual uint32_t GetCapturedTicketHandle() = 0;
     virtual bool HasCapturedTicket() = 0;
 };

@@ -52,6 +52,15 @@ public:
 
     // Remote players learned from the network. Returns the interned id.
     void              RememberPeer(const UserRecord& rec);
+
+    // Records a player we know only by their external account - a Steam friend,
+    // or an id a title asked us to map. Without this the derived ProductUserId
+    // exists but nothing is known about it, and a title asking that id for its
+    // external account count is told zero, which reads as "this account is not
+    // linked to anything".
+    const UserRecord& RememberExternalAccount(const std::string& externalId,
+                                              EOS_EExternalAccountType type,
+                                              const std::string& displayName);
     const UserRecord* FindByPuid(const std::string& puid) const;
 
     // The product scope every derived id is salted with, so two different games
@@ -61,6 +70,12 @@ public:
     // Instance suffix (REFIX_USER_INSTANCE). Empty for a normal single install;
     // set it to run a second, independent player on the same PC.
     const std::string& InstanceTag() const { return m_instanceTag; }
+
+    // The ids another player with this external account would derive for
+    // themselves. Because the derivation is pure, we can name a friend's
+    // ProductUserId from their SteamID alone, without ever having met them.
+    std::string DerivePuidFor(const std::string& externalId) const;
+    std::string DeriveEaidFor(const std::string& externalId) const;
 
     static uint64_t SteamIdFromTicket(const void* data, size_t len);
     static std::vector<uint8_t> HexToBytes(const char* hex);

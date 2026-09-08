@@ -66,6 +66,14 @@ std::string Identity::HardwareFingerprint() const {
     return buf;
 }
 
+std::string Identity::DerivePuidFor(const std::string& externalId) const {
+    return DerivedId("refix.eos.puid|" + m_productScope + "|" + externalId + "|", 16);
+}
+
+std::string Identity::DeriveEaidFor(const std::string& externalId) const {
+    return DerivedId("refix.eos.eaid|" + m_productScope + "|" + externalId + "|", 16);
+}
+
 UserRecord Identity::BuildUser(const std::string& externalId, EOS_EExternalAccountType type,
                                const std::string& displayName) {
     const std::string salt = m_productScope + "|" + externalId + "|" + m_instanceTag;
@@ -166,6 +174,28 @@ void Identity::RememberPeer(const UserRecord& rec) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_peers[rec.Puid] = rec;
     IdRegistry::Get().Puid(rec.Puid);
+}
+
+const UserRecord& Identity::RememberExternalAccount(const std::string& externalId,
+                                                   EOS_EExternalAccountType type,
+                                                   const std::string& displayName) {
+    // Derived without the instance tag on purpose: this is the id that player
+    // derives for themselves on their own machine, which is what makes the
+    // mapping agree across installs.
+    const std::string puid = DerivePuidFor(externalId);
+    const std::string eaid = DeriveEaidFor(externalId);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    UserRecord& rec = m_peers[puid];
+    rec.Puid = puid;
+    rec.Eaid = eaid;
+    if (!displayName.empty()) rec.DisplayName = displayName;
+    rec.External.Valid     = true;
+    rec.External.Type      = type;
+    rec.External.AccountId = externalId;
+    if (!displayName.empty()) rec.External.DisplayName = displayName;
+    IdRegistry::Get().Puid(rec.Puid);
+    IdRegistry::Get().Eaid(rec.Eaid);
+    return rec;
 }
 
 const UserRecord* Identity::FindByPuid(const std::string& puid) const {

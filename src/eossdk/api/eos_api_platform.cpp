@@ -13,6 +13,8 @@
 #include "../core/eos_identity.h"
 #include "../core/eos_dispatch.h"
 #include "../eos_module.h"
+#include "../net/steam_backend.h"
+#include "../net/lobby_directory.h"
 
 namespace refix {
 
@@ -79,6 +81,9 @@ EOS_DECLARE_FUNC(void) EOS_Platform_Release(EOS_HPlatform Handle) {
 }
 
 EOS_DECLARE_FUNC(void) EOS_Platform_Tick(EOS_HPlatform Handle) {
+    // Steam messages are collected on the game's own thread, next to the
+    // callbacks they will produce.
+    SteamBackend::Get().Pump();
     size_t n = Dispatcher::Get().Drain();
     if (n) RFLOG(Platform, "EOS_Platform_Tick: dispatched %zu callback(s)", n);
 }
