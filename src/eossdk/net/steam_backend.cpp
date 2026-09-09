@@ -712,6 +712,19 @@ void SteamBackend::Pump() {
 // ---------------------------------------------------------------------------
 // Friends and invites
 // ---------------------------------------------------------------------------
+std::string SteamBackend::PersonaNameFor(uint64_t steamId) const {
+    if (!m_available || !steamId || !g_api.GetFriendPersonaName) return "";
+    const char* n = g_api.GetFriendPersonaName(g_api.FriendsIface, steamId);
+    // "[unknown]" is the literal placeholder Steam returns for an account whose
+    // persona it has not cached. Asking for the information is what makes Steam
+    // fetch it, so the next caller gets a real name instead of a blank row.
+    if (!n || !*n || std::strcmp(n, "[unknown]") == 0) {
+        if (g_api.RequestUserInformation) g_api.RequestUserInformation(g_api.FriendsIface, steamId, 1);
+        return "";
+    }
+    return n;
+}
+
 std::vector<SteamFriendInfo> SteamBackend::Friends() const {
     std::vector<SteamFriendInfo> out;
     if (!m_available || !g_api.GetFriendCount || !g_api.GetFriendByIndex) return out;

@@ -60,6 +60,11 @@ public:
 
     // --- friends and invites ---------------------------------------------
     std::vector<SteamFriendInfo> Friends() const;
+
+    // The persona name Steam holds for any account it knows - a friend, or
+    // anyone met in a lobby. Empty when Steam has never cached that person;
+    // asking is what makes Steam fetch it, so a later call has the answer.
+    std::string PersonaNameFor(uint64_t steamId) const;
     bool InviteToLobby(const std::string& lobbyId, uint64_t steamId);
     bool OpenInviteOverlay(const std::string& lobbyId);
 

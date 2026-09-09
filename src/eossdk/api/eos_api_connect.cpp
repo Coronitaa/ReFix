@@ -19,6 +19,7 @@
 #include "../core/eos_dispatch.h"
 #include "../eos_module.h"
 #include "../net/lobby_directory.h"
+#include "../net/steam_backend.h"
 
 using namespace refix;
 
@@ -36,10 +37,39 @@ struct ExternalAccountInfoBlock {
 std::mutex                                       g_blocksMutex;
 std::map<EOS_Connect_ExternalAccountInfo*, ExternalAccountInfoBlock*> g_blocks;
 
+// The name Steam holds for a given account id, if it holds one. A title that
+// draws its friends list from Connect asks each ProductUserId for its external
+// account and prints the DisplayName it finds there, so an empty one is a blank
+// row on screen. Nothing is invented: this is the same persona name Steam gives
+// its own friends list, and the record is updated so the next call is free.
+std::string SteamNameFor(const std::string& steamId) {
+    if (steamId.empty() || steamId.find_first_not_of("0123456789") != std::string::npos) return "";
+    uint64_t id = 0;
+    try { id = std::stoull(steamId); } catch (...) { return ""; }
+    return SteamBackend::Get().PersonaNameFor(id);
+}
+
+// The display name to hand out for a player, filling in from Steam the first
+// time we are asked about someone we only knew by their account id.
+std::string ResolveDisplayName(const UserRecord& user) {
+    if (!user.External.DisplayName.empty()) return user.External.DisplayName;
+    if (!user.DisplayName.empty())          return user.DisplayName;
+    if (user.External.Valid && user.External.Type == EAT::EOS_EAT_STEAM) {
+        std::string name = SteamNameFor(user.External.AccountId);
+        if (!name.empty()) {
+            Identity::Get().RememberExternalAccount(user.External.AccountId,
+                                                    EAT::EOS_EAT_STEAM, name);
+            RFLOG(Auth, "External account %s named '%s' by Steam",
+                  user.External.AccountId.c_str(), name.c_str());
+            return name;
+        }
+    }
+    return "";
+}
+
 EOS_Connect_ExternalAccountInfo* MakeExternalAccountInfo(const UserRecord& user) {
     auto* block = new ExternalAccountInfoBlock();
-    block->DisplayName = user.External.DisplayName.empty() ? user.DisplayName
-                                                           : user.External.DisplayName;
+    block->DisplayName = ResolveDisplayName(user);
     block->AccountId   = user.External.AccountId;
 
     std::memset(&block->Info, 0, sizeof(block->Info));
@@ -322,8 +352,8 @@ EOS_DECLARE_FUNC(EOS_ProductUserId) EOS_Connect_GetExternalAccountMapping(EOS_HC
         if (!external.empty() && external.find_first_not_of("0123456789") == std::string::npos) {
             // Record what we know about them too, so the title can go on to ask
             // that ProductUserId about its external account and get an answer.
-            const UserRecord& peer =
-                Identity::Get().RememberExternalAccount(external, EAT::EOS_EAT_STEAM, "");
+            const UserRecord& peer = Identity::Get().RememberExternalAccount(
+                external, EAT::EOS_EAT_STEAM, SteamNameFor(external));
             return IdRegistry::Get().Puid(peer.Puid);
         }
     }
