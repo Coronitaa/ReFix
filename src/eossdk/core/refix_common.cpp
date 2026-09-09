@@ -1,5 +1,7 @@
 #include "refix_common.h"
 #include <chrono>
+#include <cstdio>
+#include <winver.h>
 
 namespace refix {
 
@@ -25,6 +27,39 @@ const std::string& GameDirectory() {
         return pos == std::string::npos ? std::string(".\\") : p.substr(0, pos + 1);
     }();
     return dir;
+}
+
+const std::string& ExecutableProductName() {
+    static std::string name = [] {
+        char exe[MAX_PATH] = {0};
+        if (!GetModuleFileNameA(nullptr, exe, MAX_PATH)) return std::string();
+        DWORD ignored = 0;
+        DWORD size = GetFileVersionInfoSizeA(exe, &ignored);
+        if (!size) return std::string();
+        std::vector<uint8_t> block(size);
+        if (!GetFileVersionInfoA(exe, 0, size, block.data())) return std::string();
+
+        // The version resource is per-language; ask for whichever translation
+        // the executable actually shipped rather than assuming US English.
+        struct LangCp { WORD Lang; WORD CodePage; };
+        LangCp* langs = nullptr;
+        UINT langBytes = 0;
+        if (!VerQueryValueA(block.data(), "\\VarFileInfo\\Translation",
+                            (LPVOID*)&langs, &langBytes) || langBytes < sizeof(LangCp))
+            return std::string();
+
+        for (UINT i = 0; i < langBytes / sizeof(LangCp); ++i) {
+            char key[64];
+            snprintf(key, sizeof(key), "\\StringFileInfo\\%04x%04x\\ProductName",
+                     langs[i].Lang, langs[i].CodePage);
+            char* value = nullptr;
+            UINT valueLen = 0;
+            if (VerQueryValueA(block.data(), key, (LPVOID*)&value, &valueLen) && value && *value)
+                return Trim(std::string(value, valueLen ? valueLen - 1 : 0));
+        }
+        return std::string();
+    }();
+    return name;
 }
 
 std::string ToLower(std::string s) {

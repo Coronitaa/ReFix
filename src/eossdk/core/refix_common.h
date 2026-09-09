@@ -74,6 +74,11 @@ void        FreeString(const char* s);
 // Directory of the running game executable; ReFix.ini and ReFix.log live there.
 const std::string& GameDirectory();
 
+// The shipped title, read from the executable's own version resource. Empty
+// when the executable carries no version information. This is what lets ReFix
+// name the game in a message to a friend without being told what game it is.
+const std::string& ExecutableProductName();
+
 std::string ToLower(std::string s);
 std::string Trim(const std::string& s);
 

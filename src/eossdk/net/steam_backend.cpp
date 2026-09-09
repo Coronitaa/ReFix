@@ -62,6 +62,9 @@ struct SteamApi {
     steam_bool     (*RequestUserInformation)(ISteamFriends*, uint64, steam_bool) = nullptr;
     steam_bool     (*GetFriendGamePlayed)(ISteamFriends*, uint64, FriendGameInfo_t*) = nullptr;
     void           (*ActivateInviteDialog)(ISteamFriends*, uint64) = nullptr;
+    steam_bool     (*InviteUserToGame)(ISteamFriends*, uint64, const char*) = nullptr;
+    steam_bool     (*ReplyToFriendMessage)(ISteamFriends*, uint64, const char*) = nullptr;
+    steam_bool     (*SetListenForFriendsMessages)(ISteamFriends*, steam_bool) = nullptr;
     uint64         (*GetSteamID)(ISteamUser*) = nullptr;
 
     // networking messages
@@ -335,6 +338,9 @@ bool SteamBackend::Start() {
     Bind(g_api.RequestUserInformation,"SteamAPI_ISteamFriends_RequestUserInformation");
     Bind(g_api.GetFriendGamePlayed,   "SteamAPI_ISteamFriends_GetFriendGamePlayed");
     Bind(g_api.ActivateInviteDialog,  "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog");
+    Bind(g_api.InviteUserToGame,      "SteamAPI_ISteamFriends_InviteUserToGame");
+    Bind(g_api.ReplyToFriendMessage,  "SteamAPI_ISteamFriends_ReplyToFriendMessage");
+    Bind(g_api.SetListenForFriendsMessages, "SteamAPI_ISteamFriends_SetListenForFriendsMessages");
     Bind(g_api.SendMessageToUser,     "SteamAPI_ISteamNetworkingMessages_SendMessageToUser");
     Bind(g_api.ReceiveMessagesOnChannel, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel");
     Bind(g_api.AcceptSessionWithUser, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser");
@@ -763,8 +769,73 @@ std::vector<SteamFriendInfo> SteamBackend::Friends() const {
     return out;
 }
 
+// The name to call this game in an invite. The ini is authoritative; failing
+// that, the executable's own version resource usually carries the shipped
+// title, which is better than a placeholder and needs no configuration.
+static std::string InviteGameName() {
+    std::string name = Config::Get().GetString("Invites", "GameName", "");
+    if (name.empty()) {
+        name = Config::Get().GetString("Game", "GameName", "");
+        if (ToLower(name) == "genericgame") name.clear();
+    }
+    if (name.empty()) name = ExecutableProductName();
+    return name;
+}
+
+static std::string InviteStoreUrl() {
+    std::string url = Config::Get().GetString("Invites", "StoreUrl", "");
+    if (!url.empty()) return url;
+    const std::string appId = Config::Get().GetString("Steam", "RealAppId", "");
+    if (appId.empty() || appId.find_first_not_of("0123456789") != std::string::npos) return "";
+    // A store link is what makes the Steam client draw the game's artwork under
+    // the message; the chat API itself cannot carry an image.
+    return "https://store.steampowered.com/app/" + appId + "/";
+}
+
+static void Substitute(std::string& text, const std::string& token, const std::string& value) {
+    for (size_t at = text.find(token); at != std::string::npos; at = text.find(token, at)) {
+        text.replace(at, token.size(), value);
+        at += value.size();
+    }
+}
+
+std::string SteamBackend::InviteMessage() const {
+    std::string text = Config::Get().GetString(
+        "Invites", "Message",
+        "I'm inviting you to my room in {game}. Join me: {store}");
+    const std::string game  = InviteGameName();
+    const std::string store = InviteStoreUrl();
+    Substitute(text, "{game}",   game.empty() ? "my game" : game);
+    Substitute(text, "{store}",  store);
+    Substitute(text, "{player}", LocalPersonaName());
+    // A missing store link leaves a dangling separator behind; tidy it up.
+    while (!text.empty() && (text.back() == ' ' || text.back() == ':')) text.pop_back();
+    return text;
+}
+
+bool SteamBackend::SendChatMessage(uint64_t steamId, const std::string& text) {
+    if (!m_available || !g_api.ReplyToFriendMessage || !steamId || text.empty()) return false;
+    // Steam only routes a message from a game once the client has been told
+    // this process handles friend chat.
+    if (g_api.SetListenForFriendsMessages && !m_chatListening) {
+        m_chatListening = g_api.SetListenForFriendsMessages(g_api.FriendsIface, 1) != 0;
+    }
+    const bool sent = g_api.ReplyToFriendMessage(g_api.FriendsIface, steamId, text.c_str()) != 0;
+    RFLOG(Net, "SteamBackend: chat message to %llu -> %s (\"%s\")",
+          (unsigned long long)steamId, sent ? "sent" : "refused", text.c_str());
+    return sent;
+}
+
+bool SteamBackend::InviteToGame(uint64_t steamId, const std::string& connectString) {
+    if (!m_available || !g_api.InviteUserToGame || !steamId) return false;
+    const bool sent = g_api.InviteUserToGame(g_api.FriendsIface, steamId, connectString.c_str()) != 0;
+    RFLOG(Net, "SteamBackend: game invite to %llu ('%s') -> %s",
+          (unsigned long long)steamId, connectString.c_str(), sent ? "sent" : "refused");
+    return sent;
+}
+
 bool SteamBackend::InviteToLobby(const std::string& lobbyId, uint64_t steamId) {
-    if (!m_available || !g_api.InviteUserToLobby || !steamId) return false;
+    if (!m_available || !steamId) return false;
     uint64_t steamLobby = 0;
     {
         std::lock_guard<std::mutex> lock(S().Mutex);
@@ -772,10 +843,29 @@ bool SteamBackend::InviteToLobby(const std::string& lobbyId, uint64_t steamId) {
         if (it != S().Hosted.end()) steamLobby = it->second.SteamLobby;
         if (!steamLobby) for (const auto& kv : S().SteamToLobby) if (kv.second == lobbyId) { steamLobby = kv.first; break; }
     }
-    if (!steamLobby) return false;
-    const bool sent = g_api.InviteUserToLobby(g_api.Matchmaking, steamLobby, steamId) != 0;
+    if (!steamLobby) {
+        RFLOG(Net, "SteamBackend: invite to %llu skipped - lobby %s has no Steam lobby yet",
+              (unsigned long long)steamId, lobbyId.c_str());
+        return false;
+    }
+
+    bool sent = false;
+    if (g_api.InviteUserToLobby)
+        sent = g_api.InviteUserToLobby(g_api.Matchmaking, steamLobby, steamId) != 0;
     RFLOG(Net, "SteamBackend: invite to %llu for Steam lobby %llu -> %s",
           (unsigned long long)steamId, (unsigned long long)steamLobby, sent ? "sent" : "refused");
+
+    // The lobby invite is the one that carries a Join button, but it is only
+    // delivered to someone Steam considers in-game. The game invite reaches a
+    // friend who is merely online, so send it as well rather than instead.
+    char connect[128];
+    _snprintf_s(connect, sizeof(connect), _TRUNCATE, "+connect_lobby %llu",
+                (unsigned long long)steamLobby);
+    if (InviteToGame(steamId, connect)) sent = true;
+
+    if (Config::Get().GetBool("Invites", "SendSteamChatMessage", true))
+        SendChatMessage(steamId, InviteMessage());
+
     return sent;
 }
 

@@ -1,7 +1,9 @@
 #include "lobby_directory.h"
+#include <cstdlib>
 #include "../core/refix_config.h"
 #include "../core/refix_log.h"
 #include "../core/refix_hash.h"
+#include "../core/eos_identity.h"
 #include <chrono>
 
 namespace refix {
@@ -387,9 +389,30 @@ bool LobbyDirectory::Leave(const std::string& lobbyId, const std::string& puid) 
 
 bool LobbyDirectory::SendInvite(const std::string& lobbyId, const std::string& targetPuid) {
     LobbyRecord record;
-    if (!Get(lobbyId, record)) return false;
+    if (!Get(lobbyId, record)) {
+        RFLOG(Lobby, "invite: lobby %s is not one we know", lobbyId.c_str());
+        return false;
+    }
 
     PeerRef to = AddressOf(targetPuid);
+
+    // m_addresses only holds people we have actually heard from over the wire,
+    // so inviting a friend who is not already in a lobby with us found nothing
+    // and the invite went nowhere. But a ProductUserId derived from a Steam
+    // account is recorded with that account id the moment the title maps it, so
+    // the Steam id is known even for a friend we have never met online - which
+    // is exactly who a player wants to invite.
+    if (!to.SteamId) {
+        if (const UserRecord* peer = Identity::Get().FindByPuid(targetPuid)) {
+            if (peer->External.Valid && peer->External.Type == EAT::EOS_EAT_STEAM &&
+                !peer->External.AccountId.empty() &&
+                peer->External.AccountId.find_first_not_of("0123456789") == std::string::npos) {
+                to.SteamId = std::strtoull(peer->External.AccountId.c_str(), nullptr, 10);
+                RFLOG(Lobby, "invite to %s: addressed by Steam account %s",
+                      targetPuid.c_str(), peer->External.AccountId.c_str());
+            }
+        }
+    }
 
     // Prefer a real Steam invite: it reaches the player through the overlay and
     // their friends list even if the game is not currently showing our lobby.

@@ -65,6 +65,17 @@ public:
     // anyone met in a lobby. Empty when Steam has never cached that person;
     // asking is what makes Steam fetch it, so a later call has the answer.
     std::string PersonaNameFor(uint64_t steamId) const;
+
+    // Sends the friend a Steam chat message as the local player, and a "come
+    // play" invite carrying the connect string. Both are best effort: Steam
+    // refuses either one for a recipient who is offline or who does not accept
+    // messages from this account.
+    bool SendChatMessage(uint64_t steamId, const std::string& text);
+    bool InviteToGame(uint64_t steamId, const std::string& connectString);
+
+    // The text sent alongside an invite, with the game's name and store page
+    // filled in. Public so the same wording appears wherever an invite is sent.
+    std::string InviteMessage() const;
     bool InviteToLobby(const std::string& lobbyId, uint64_t steamId);
     bool OpenInviteOverlay(const std::string& lobbyId);
 
@@ -102,6 +113,7 @@ private:
     uint64_t     m_lastPrimeMs = 0;
     int          m_primePasses = 0;
     bool         m_namesPrimed = false;
+    bool         m_chatListening = false;
 };
 
 } // namespace refix
