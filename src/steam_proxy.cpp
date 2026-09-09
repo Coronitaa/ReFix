@@ -23,6 +23,8 @@
 #include <mutex>
 #include <unordered_map>
 #include <set>
+#include <map>
+#include <cctype>
 #include "upnp_firewall.h"
 #include "steam_p2p_hook.h"
 #include "minhook/MinHook.h"
@@ -1523,6 +1525,12 @@ struct ReFixConfig {
     std::string workshopAppId = "";
     uint32_t workshopAppIdNum = 0;
     bool autoCreateSteamAppIdFile = true;
+    // Which subscribed Workshop items belong to this game. Everything is
+    // subscribed through Spacewar's Workshop, so the item's own contents are
+    // what tells one game's mods from another's.
+    std::string workshopRequirePattern = "";
+    std::string workshopIncludeItems = "";
+    std::string workshopExcludeItems = "";
 
     bool enableLog = true;
     bool enableConsole = false;
@@ -1645,6 +1653,13 @@ static void LoadConfig() {
     g_config.workshopAppIdNum = (uint32_t)atoi(bufWorkshopAppId);
     if (g_config.workshopAppIdNum == 0) g_config.workshopAppIdNum = (g_config.realAppIdNum != 0 ? g_config.realAppIdNum : g_config.maskAppIdNum);
     g_config.autoCreateSteamAppIdFile = ReadBool("Workshop", "AutoCreateSteamAppIdFile", true);
+    char bufWsPattern[512], bufWsInclude[512], bufWsExclude[512];
+    ReadString("Workshop", "RequireFilePattern", "", bufWsPattern, sizeof(bufWsPattern));
+    ReadString("Workshop", "IncludeItems",       "", bufWsInclude, sizeof(bufWsInclude));
+    ReadString("Workshop", "ExcludeItems",       "", bufWsExclude, sizeof(bufWsExclude));
+    g_config.workshopRequirePattern = bufWsPattern;
+    g_config.workshopIncludeItems   = bufWsInclude;
+    g_config.workshopExcludeItems   = bufWsExclude;
 
     // [Debug]
     g_config.enableLog = ReadBool("Debug", "EnableLog", true);
@@ -1877,7 +1892,6 @@ static fn_VTable_BIsDlcInstalled_t g_orig_VTable_BIsDlcInstalled = nullptr;
 
 static fn_VTable_GetNumSubscribedItems_t g_orig_VTable_GetNumSubscribedItems = nullptr;
 static fn_VTable_GetSubscribedItems_t g_orig_VTable_GetSubscribedItems = nullptr;
-static fn_VTable_GetItemInstallInfo_t g_orig_VTable_GetItemInstallInfo = nullptr;
 static fn_VTable_ActivateGameOverlayInviteDialog_t g_orig_VTable_ActivateGameOverlayInviteDialog = nullptr;
 static fn_VTable_SetRichPresence_t g_orig_VTable_SetRichPresence = nullptr;
 
@@ -1970,41 +1984,148 @@ static bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, v
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Workshop: telling this game's subscribed items from everyone else's
+//
+// Every emulated title subscribes through Spacewar's Workshop, so a player's
+// subscription list is a mix of items for whatever games they play this way.
+// Steam itself cannot separate them - as far as it is concerned all of them
+// belong to AppID 480 - so the item's own contents are the only honest signal,
+// and a title handed someone else's mods will at best ignore them and at worst
+// fail to start. Three rules decide, cheapest and most explicit first: an id
+// the player listed by hand, a marker file naming an AppID, and finally a
+// filename pattern that identifies this title's mod kit.
+// ---------------------------------------------------------------------------
+
+// Case-insensitive '*' and '?' matching. Small enough to keep here rather than
+// take a dependency on shlwapi for one call.
+static bool WildcardMatchI(const char* text, const char* pattern) {
+    const char* star = nullptr;
+    const char* mark = nullptr;
+    while (*text) {
+        char t = (char)tolower((unsigned char)*text);
+        char p = (char)tolower((unsigned char)*pattern);
+        if (p == '?' || p == t) { ++text; ++pattern; continue; }
+        if (p == '*') { star = pattern++; mark = text; continue; }
+        if (star) { pattern = star + 1; text = ++mark; continue; }
+        return false;
+    }
+    while (*pattern == '*') ++pattern;
+    return *pattern == '\0';
+}
+
+static std::vector<std::string> SplitConfigList(const std::string& value) {
+    std::vector<std::string> out;
+    std::string current;
+    for (char c : value) {
+        if (c == ';' || c == ',') {
+            while (!current.empty() && current.front() == ' ') current.erase(current.begin());
+            while (!current.empty() && current.back() == ' ') current.pop_back();
+            if (!current.empty()) out.push_back(current);
+            current.clear();
+        } else {
+            current += c;
+        }
+    }
+    while (!current.empty() && current.front() == ' ') current.erase(current.begin());
+    while (!current.empty() && current.back() == ' ') current.pop_back();
+    if (!current.empty()) out.push_back(current);
+    return out;
+}
+
+static bool FolderHasMatchingFile(const std::string& dir, const std::vector<std::string>& patterns, int depth) {
+    if (depth > 4) return false;
+    WIN32_FIND_DATAA fd = {};
+    HANDLE h = FindFirstFileA((dir + "*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        std::string name = fd.cFileName;
+        if (name == "." || name == "..") continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (FolderHasMatchingFile(dir + name + "\\", patterns, depth + 1)) { found = true; break; }
+            continue;
+        }
+        for (const std::string& pattern : patterns) {
+            if (WildcardMatchI(name.c_str(), pattern.c_str())) { found = true; break; }
+        }
+        if (found) break;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+// One decision per item per session; the answer cannot change while the game
+// runs and the title asks for the whole list on every menu refresh.
+static std::map<uint64_t, bool> g_workshopVerdicts;
+static std::mutex g_workshopVerdictMutex;
+
+// GetItemInstallInfo lives at a different slot in every interface version, and
+// a title can hold more than one of them at once, so the pointer is kept per
+// vtable rather than in one global that the last hook would win.
+static std::map<void*, fn_VTable_GetItemInstallInfo_t> g_ugcInstallInfo;
+
+static fn_VTable_GetItemInstallInfo_t InstallInfoFor(void* pUGC) {
+    if (!pUGC) return nullptr;
+    void** vtable = *(void***)pUGC;
+    auto it = g_ugcInstallInfo.find((void*)vtable);
+    return it == g_ugcInstallInfo.end() ? nullptr : it->second;
+}
+
 static bool IsWorkshopItemCompatible(void* pUGC, uint64_t nPublishedFileID) {
-    if (!pUGC || !g_orig_VTable_GetItemInstallInfo) return true;
+    {
+        std::lock_guard<std::mutex> lg(g_workshopVerdictMutex);
+        auto it = g_workshopVerdicts.find(nPublishedFileID);
+        if (it != g_workshopVerdicts.end()) return it->second;
+    }
+
+    auto remember = [&](bool verdict, const char* why) {
+        {
+            std::lock_guard<std::mutex> lg(g_workshopVerdictMutex);
+            g_workshopVerdicts[nPublishedFileID] = verdict;
+        }
+        ReFixLog("Workshop item %llu: %s (%s)", nPublishedFileID, verdict ? "kept" : "hidden", why);
+        return verdict;
+    };
+
+    const std::string id = std::to_string(nPublishedFileID);
+    for (const std::string& allowed : SplitConfigList(g_config.workshopIncludeItems))
+        if (allowed == id) return remember(true, "listed in IncludeItems");
+    for (const std::string& blocked : SplitConfigList(g_config.workshopExcludeItems))
+        if (blocked == id) return remember(false, "listed in ExcludeItems");
+
+    // Without the install folder there is nothing to inspect. An item that is
+    // still downloading is not evidence of anything, so it stays visible.
+    fn_VTable_GetItemInstallInfo_t installInfo = InstallInfoFor(pUGC);
+    if (!installInfo) return true;
     uint64_t sizeOnDisk = 0;
     char folder[MAX_PATH] = { 0 };
     uint32_t timestamp = 0;
-    if (!g_orig_VTable_GetItemInstallInfo(pUGC, nPublishedFileID, &sizeOnDisk, folder, sizeof(folder), &timestamp)) {
+    if (!installInfo(pUGC, nPublishedFileID, &sizeOnDisk, folder, sizeof(folder), &timestamp))
         return true;
-    }
     if (folder[0] == '\0') return true;
 
     std::string folderStr(folder);
     if (folderStr.back() != '\\' && folderStr.back() != '/') folderStr += "\\";
 
+    // A packager who states which game the item is for is believed outright.
     char appidBuf[64] = { 0 };
-    std::string refixAppIdFile = folderStr + "refix_appid.txt";
     FILE* f = nullptr;
-    fopen_s(&f, refixAppIdFile.c_str(), "r");
-    if (!f) {
-        std::string steamAppIdFile = folderStr + "steam_appid.txt";
-        fopen_s(&f, steamAppIdFile.c_str(), "r");
-    }
+    fopen_s(&f, (folderStr + "refix_appid.txt").c_str(), "r");
+    if (!f) fopen_s(&f, (folderStr + "steam_appid.txt").c_str(), "r");
     if (f) {
-        if (fgets(appidBuf, sizeof(appidBuf), f)) {
+        const bool read = fgets(appidBuf, sizeof(appidBuf), f) != nullptr;
+        fclose(f);
+        if (read) {
             uint32_t fileAppId = (uint32_t)atoi(appidBuf);
-            fclose(f);
-            if (fileAppId != 0 && g_config.realAppIdNum != 0 && fileAppId != g_config.realAppIdNum) {
-                ReFixLog("IsWorkshopItemCompatible: Item %llu belongs to AppID %u, skipping (realAppId=%u)",
-                         nPublishedFileID, fileAppId, g_config.realAppIdNum);
-                return false;
-            }
-        } else {
-            fclose(f);
+            if (fileAppId != 0 && g_config.realAppIdNum != 0)
+                return remember(fileAppId == g_config.realAppIdNum, "declared AppID in the item folder");
         }
     }
-    return true;
+
+    std::vector<std::string> patterns = SplitConfigList(g_config.workshopRequirePattern);
+    if (patterns.empty()) return true;   // no way to tell, and guessing would hide real mods
+    return remember(FolderHasMatchingFile(folderStr, patterns, 0), "RequireFilePattern");
 }
 
 static uint32_t Hooked_ISteamUGC_GetSubscribedItems(void* self, uint64_t* pvecPublishedFileID, uint32_t cMaxEntries) {
@@ -2018,7 +2139,7 @@ static uint32_t Hooked_ISteamUGC_GetSubscribedItems(void* self, uint64_t* pvecPu
             pvecPublishedFileID[validCount++] = pvecPublishedFileID[i];
         }
     }
-    ReFixLog("ISteamUGC::GetSubscribedItems Hook: total=%u, compatible=%u", count, validCount);
+    ReFixLog("ISteamUGC::GetSubscribedItems Hook: total=%u, for this game=%u", count, validCount);
     return validCount;
 }
 
@@ -2037,15 +2158,55 @@ static uint32_t Hooked_ISteamUGC_GetNumSubscribedItems(void* self) {
             validCount++;
         }
     }
-    ReFixLog("ISteamUGC::GetNumSubscribedItems Hook: total=%u, compatible=%u", total, validCount);
+    ReFixLog("ISteamUGC::GetNumSubscribedItems Hook: total=%u, for this game=%u", total, validCount);
     return validCount;
 }
 
-// Opening Steam's invite dialog needs the id of a lobby that exists on Valve's
-// matchmaking service. A title running on EOS has no such id to give - it hands
-// over whatever its own online layer calls a session - so the dialog would open
-// against nothing and invites would go nowhere. The Steam lobby ReFix keeps in
-// step with the title's session is the right target, so it is substituted here.
+// ISteamUGC gained methods with every interface revision, so the slot a given
+// call sits in depends on the version the title asked for. Reading the wrong
+// slot does not fail loudly - it calls a different function with the wrong
+// arguments - so the version is resolved before anything is hooked.
+struct UGCVTableLayout {
+    int Version;
+    int NumSubscribedItems;
+    int SubscribedItems;
+    int ItemInstallInfo;
+};
+static const UGCVTableLayout kUGCVTableLayouts[] = {
+    { 16, 67, 68, 70 },
+    { 17, 70, 71, 73 },
+    { 18, 70, 71, 73 },
+    { 19, 71, 72, 74 },
+    { 20, 74, 75, 77 },
+};
+
+static std::set<void*> s_hookedUgcVtables;
+
+static void EnsureUGCInterfaceHooked(void* pUGC, const char* pszVersion) {
+    if (!pUGC || !pszVersion) return;
+    int version = 0;
+    for (const char* p = pszVersion; *p; ++p) {
+        if (*p >= '0' && *p <= '9') { version = atoi(p); break; }
+    }
+    const UGCVTableLayout* layout = nullptr;
+    for (const auto& candidate : kUGCVTableLayouts)
+        if (candidate.Version == version) { layout = &candidate; break; }
+    if (!layout) {
+        ReFixLog("EnsureUGCInterfaceHooked: unknown ISteamUGC version '%s'; subscribed items are passed through untouched", pszVersion);
+        return;
+    }
+
+    void** vtable = *(void***)pUGC;
+    if (!vtable) return;
+    if (!s_hookedUgcVtables.insert((void*)vtable).second) return;
+
+    g_ugcInstallInfo[(void*)vtable] = (fn_VTable_GetItemInstallInfo_t)vtable[layout->ItemInstallInfo];
+    HookVTableMethod(pUGC, layout->NumSubscribedItems, (void*)Hooked_ISteamUGC_GetNumSubscribedItems, (void**)&g_orig_VTable_GetNumSubscribedItems);
+    HookVTableMethod(pUGC, layout->SubscribedItems,    (void*)Hooked_ISteamUGC_GetSubscribedItems,    (void**)&g_orig_VTable_GetSubscribedItems);
+    ReFixLog("EnsureUGCInterfaceHooked: Hooked UGC interface %p (vtable=%p, version='%s', idx %d,%d, install info %d)",
+             pUGC, vtable, pszVersion, layout->NumSubscribedItems, layout->SubscribedItems, layout->ItemInstallInfo);
+}
+
 static void Hooked_ISteamFriends_ActivateGameOverlayInviteDialog(void* self, uint64_t steamIDLobby) {
     uint64_t target = steamIDLobby;
     if (g_activeLobbyID != 0 && steamIDLobby != g_activeLobbyID) {
@@ -2892,19 +3053,21 @@ static void EnsureUserInterfaceHooked(void* pUser, const char* pszVersion) {
     ReFixLog("EnsureUserInterfaceHooked: Hooked user interface %p (vtable=%p, version='%s', idx 13,14,17)", pUser, vtable, pszVersion ? pszVersion : "unknown");
 }
 
+static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
+    if (!iface || !pszVersion) return;
+    if (strstr(pszVersion, "SteamUser")   || strstr(pszVersion, "STEAMUSER"))   EnsureUserInterfaceHooked(iface, pszVersion);
+    else if (strstr(pszVersion, "SteamUGC") || strstr(pszVersion, "STEAMUGC"))  EnsureUGCInterfaceHooked(iface, pszVersion);
+}
+
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
     void* iface = g_pfn_FindOrCreateUserInterface ? g_pfn_FindOrCreateUserInterface(hSteamUser, pszVersion) : nullptr;
-    if (iface && pszVersion && strstr(pszVersion, "SteamUser")) {
-        EnsureUserInterfaceHooked(iface, pszVersion);
-    }
+    HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
 
 static void* Intercepted_SteamInternal_CreateInterface(const char* pszVersion) {
     void* iface = g_pfn_SteamInternal_CreateInterface ? g_pfn_SteamInternal_CreateInterface(pszVersion) : nullptr;
-    if (iface && pszVersion && strstr(pszVersion, "SteamUser")) {
-        EnsureUserInterfaceHooked(iface, pszVersion);
-    }
+    HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
 
@@ -2984,18 +3147,18 @@ static void InstallVTableHooks() {
         }
     }
 
-    // 6. ISteamUGC
-    fn_GetInterface_t pfnUGC = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUGC_v016");
-    if (!pfnUGC) pfnUGC = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUGC");
-    if (pfnUGC) {
-        void* pUGC = pfnUGC();
-        if (pUGC) {
-            void** vtable = *(void***)pUGC;
-            if (vtable && vtable[30]) {
-                g_orig_VTable_GetItemInstallInfo = (fn_VTable_GetItemInstallInfo_t)vtable[30];
-            }
-            HookVTableMethod(pUGC, 27, (void*)Hooked_ISteamUGC_GetNumSubscribedItems, (void**)&g_orig_VTable_GetNumSubscribedItems);
-            HookVTableMethod(pUGC, 28, (void*)Hooked_ISteamUGC_GetSubscribedItems, (void**)&g_orig_VTable_GetSubscribedItems);
+    // 6. ISteamUGC is hooked where the title asks for it, not here: the slot a
+    // call sits in moves with the interface version, and only the version
+    // string the title passes says which layout its vtable has. Hooking the
+    // accessor for one hardcoded version patched an interface the title never
+    // used, at slots that belonged to entirely different functions.
+    {
+        for (const auto& layout : kUGCVTableLayouts) {
+            char accessor[64];
+            _snprintf_s(accessor, sizeof(accessor), _TRUNCATE, "SteamAPI_SteamUGC_v%03d", layout.Version);
+            auto pfn = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, accessor);
+            if (!pfn) continue;
+            if (void* pUGC = pfn()) EnsureUGCInterfaceHooked(pUGC, accessor);
         }
     }
 
