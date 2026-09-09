@@ -802,7 +802,7 @@ static void Substitute(std::string& text, const std::string& token, const std::s
 std::string SteamBackend::InviteMessage() const {
     std::string text = Config::Get().GetString(
         "Invites", "Message",
-        "I'm inviting you to my room in {game}. Join me: {store}");
+        "I'm inviting you to my room in {game}");
     const std::string game  = InviteGameName();
     const std::string store = InviteStoreUrl();
     Substitute(text, "{game}",   game.empty() ? "my game" : game);
@@ -855,13 +855,18 @@ bool SteamBackend::InviteToLobby(const std::string& lobbyId, uint64_t steamId) {
     RFLOG(Net, "SteamBackend: invite to %llu for Steam lobby %llu -> %s",
           (unsigned long long)steamId, (unsigned long long)steamLobby, sent ? "sent" : "refused");
 
-    // The lobby invite is the one that carries a Join button, but it is only
-    // delivered to someone Steam considers in-game. The game invite reaches a
-    // friend who is merely online, so send it as well rather than instead.
-    char connect[128];
-    _snprintf_s(connect, sizeof(connect), _TRUNCATE, "+connect_lobby %llu",
-                (unsigned long long)steamLobby);
-    if (InviteToGame(steamId, connect)) sent = true;
+    // Steam raises its own "has invited you to play" notification for each of
+    // these, so sending both put two of them in the friend's chat for one press
+    // of the button. The lobby invite is the one that carries a Join button, so
+    // it is the one that goes; the game invite is kept as a fallback for when
+    // Steam refuses it, which happens when the recipient is online but not in
+    // a state Steam will hand a lobby to.
+    if (!sent) {
+        char connect[128];
+        _snprintf_s(connect, sizeof(connect), _TRUNCATE, "+connect_lobby %llu",
+                    (unsigned long long)steamLobby);
+        sent = InviteToGame(steamId, connect);
+    }
 
     if (Config::Get().GetBool("Invites", "SendSteamChatMessage", true))
         SendChatMessage(steamId, InviteMessage());
