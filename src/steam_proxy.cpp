@@ -3055,8 +3055,13 @@ static void EnsureUserInterfaceHooked(void* pUser, const char* pszVersion) {
 
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (!iface || !pszVersion) return;
-    if (strstr(pszVersion, "SteamUser")   || strstr(pszVersion, "STEAMUSER"))   EnsureUserInterfaceHooked(iface, pszVersion);
-    else if (strstr(pszVersion, "SteamUGC") || strstr(pszVersion, "STEAMUGC"))  EnsureUGCInterfaceHooked(iface, pszVersion);
+    // The ISteamUser condition is deliberately the one it has always been.
+    // EnsureUserInterfaceHooked patches slots 13, 14 and 17, which is the
+    // ISteamUser023 layout; widening the match would hand that layout to older
+    // interface versions where those slots hold different functions, and slots
+    // 13 and 14 are the ticket calls the whole sign-in rests on.
+    if (strstr(pszVersion, "SteamUser")) EnsureUserInterfaceHooked(iface, pszVersion);
+    else if (strstr(pszVersion, "SteamUGC") || strstr(pszVersion, "STEAMUGC")) EnsureUGCInterfaceHooked(iface, pszVersion);
 }
 
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
