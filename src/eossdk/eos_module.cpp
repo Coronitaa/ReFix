@@ -17,6 +17,9 @@
 #include "core/refix_log.h"
 #include "core/eos_dispatch.h"
 #include "eos_module.h"
+#include "api/eos_api_passthrough.h"
+
+HMODULE g_hDllModule = nullptr;
 
 namespace refix {
 
@@ -202,7 +205,35 @@ void InitialiseModule() {
     for (int i = 0; i < kExportCount; i++)
         g_eosProcs[i] = g_stubs ? (void*)&g_stubs[i] : nullptr;
 
+    std::string mode = ToLower(Config::Get().GetString("EOS", "Mode", "auto"));
+    std::string onlineMode = ToLower(Config::Get().GetString("Online", "Mode", "valve"));
+
+    bool usePassthrough = false;
+    if (mode == "passthrough") {
+        usePassthrough = true;
+    } else if (mode == "emulated") {
+        usePassthrough = false;
+    } else { // auto
+        if (onlineMode == "valve" && HasOriginalSdk()) {
+            usePassthrough = true;
+        } else {
+            usePassthrough = false;
+        }
+    }
+
     Registrar reg;
+
+    if (usePassthrough) {
+        RFLOG(Core, "ReFix EOS SDK Mode: Passthrough (Cloud WAN via genuine EOSSDK_original.dll)");
+        if (InitialisePassthrough(reg)) {
+            RFLOG(Core, "ReFix EOS v3 Passthrough online: %d exports forwarded, %d hooks registered",
+                  kExportCount - reg.Missing(), reg.Bound());
+            return;
+        }
+        RFLOG(Core, "Passthrough initialisation failed; falling back to standalone emulation mode");
+    }
+
+    RFLOG(Core, "ReFix EOS SDK Mode: Emulated (Standalone ReFix EOS v3 RedboneEOS for LAN)");
     RegisterPlatformApi(reg);
     RegisterConnectApi(reg);
     RegisterAuthApi(reg);
@@ -230,6 +261,7 @@ extern "C" REFIX_EXPORTED_DATA int ReFix() {
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_hDllModule = module;
         DisableThreadLibraryCalls(module);
         refix::InitialiseModule();
     }

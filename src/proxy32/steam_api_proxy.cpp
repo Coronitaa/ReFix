@@ -810,6 +810,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
         InitDummyInstance();
+        ApplyEnvironmentOverrides();
         EnsureOrigLoaded();
         LogMsg("ReFix x86 steam_api.dll attached to process");
     }

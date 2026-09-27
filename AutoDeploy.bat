@@ -395,6 +395,7 @@ echo EnableOverlay=true
 echo OverlayAppId=!MASK_APPID!
 echo.
 echo [EOS]
+echo Mode=passthrough
 echo DeviceIdAuth=true
 echo.
 echo [User]

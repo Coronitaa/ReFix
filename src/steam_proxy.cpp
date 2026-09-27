@@ -2050,11 +2050,20 @@ static bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, v
     if (!pInterface) return false;
     void** vtable = *(void***)pInterface;
     if (!vtable || !vtable[vtableIndex]) return false;
-    void* pTarget = vtable[vtableIndex];
-    if (MH_CreateHook(pTarget, pHookFn, ppOriginalFn) == MH_OK) {
-        MH_EnableHook(pTarget);
-        ReFixLog("VTable Hook Installed: Interface %p index %d (Target %p -> Hook %p)",
-                 pInterface, vtableIndex, pTarget, pHookFn);
+
+    void* pOriginal = vtable[vtableIndex];
+    if (pOriginal == pHookFn) return true; // Already hooked
+
+    if (ppOriginalFn && !*ppOriginalFn) {
+        *ppOriginalFn = pOriginal;
+    }
+
+    DWORD oldProtect = 0;
+    if (VirtualProtect(&vtable[vtableIndex], sizeof(void*), PAGE_READWRITE, &oldProtect)) {
+        vtable[vtableIndex] = pHookFn;
+        VirtualProtect(&vtable[vtableIndex], sizeof(void*), oldProtect, &oldProtect);
+        ReFixLog("VTable Slot Patched: Interface %p index %d (Original %p -> Hook %p)",
+                 pInterface, vtableIndex, pOriginal, pHookFn);
         return true;
     }
     return false;
@@ -2842,7 +2851,7 @@ struct Steam_GetTicketForWebApiResponse_t {
     uint32_t m_hAuthTicket;
     int32_t  m_eResult;
     int32_t  m_cubTicket;
-    uint8_t  m_rgubTicket[1024];
+    uint8_t  m_rgubTicket[2560];
 };
 #pragma pack(pop)
 
@@ -2852,7 +2861,7 @@ struct PendingSyntheticWebApiCallback {
     int32_t  eResult;
     int32_t  cubTicket;
     uint32_t corrId;
-    uint8_t  rgubTicket[1024];
+    uint8_t  rgubTicket[2560];
     int      framesRemaining;
 };
 
@@ -2865,7 +2874,7 @@ static Steam_GetTicketForWebApiResponse_t g_manualDispatch168Data = {};
 static void DispatchSyntheticWebApiCallbacks();
 
 static void QueueSyntheticWebApiCallback168(uint32_t handle, const uint8_t* pTicket, uint32_t ticketSize, uint32_t corrId = 0) {
-    if (!pTicket || ticketSize == 0 || ticketSize > 1024) return;
+    if (!pTicket || ticketSize == 0 || ticketSize > 2560) return;
     std::string sha = ReFixCrypto::ComputeSHA256Hex(pTicket, ticketSize);
 
     PendingSyntheticWebApiCallback cb = {};
@@ -2875,7 +2884,7 @@ static void QueueSyntheticWebApiCallback168(uint32_t handle, const uint8_t* pTic
     cb.corrId = corrId;
     memset(cb.rgubTicket, 0, sizeof(cb.rgubTicket));
     memcpy(cb.rgubTicket, pTicket, ticketSize);
-    cb.framesRemaining = 0; // Ready immediately on next RunCallbacks
+    cb.framesRemaining = 0; // Ready on next RunCallbacks
 
     {
         std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
@@ -2892,8 +2901,6 @@ static void QueueSyntheticWebApiCallback168(uint32_t handle, const uint8_t* pTic
 
     ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] QueueSyntheticWebApiCallback168: Enqueued Callback 168 (Handle=%u, Size=%u bytes, Ticket_SHA256=%s)",
              corrId, handle, ticketSize, sha.c_str());
-
-    DispatchSyntheticWebApiCallbacks();
 }
 
 typedef void (*fn_CallbackRun_t)(void* self, void* pvParam);
@@ -2906,11 +2913,11 @@ static std::mutex g_callbackHookMutex;
 static void Hooked_Callback_Run_168(void* self, void* pvParam) {
     if (pvParam) {
         auto* resp = (Steam_GetTicketForWebApiResponse_t*)pvParam;
-        std::string sha = (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) ?
+        std::string sha = (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) ?
             ReFixCrypto::ComputeSHA256Hex(resp->m_rgubTicket, (size_t)resp->m_cubTicket) : "NONE";
         ReFixLog("[STEAM:AUTH] Intercepted live Callback 168 (WebApi Ticket): Handle=%u, Result=%d, Size=%d bytes, Ticket_SHA256=%s",
                  resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket, sha.c_str());
-        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) {
+        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
             std::lock_guard<std::mutex> lg(g_callbackMutex);
             g_lastAuthTicketHandle = resp->m_hAuthTicket;
             g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
@@ -2933,11 +2940,11 @@ static void Hooked_Callback_Run_168(void* self, void* pvParam) {
 static void Hooked_Callback_Run2_168(void* self, void* pvParam, bool bIOFailure, uint64_t hSteamAPICall) {
     if (pvParam) {
         auto* resp = (Steam_GetTicketForWebApiResponse_t*)pvParam;
-        std::string sha = (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) ?
+        std::string sha = (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) ?
             ReFixCrypto::ComputeSHA256Hex(resp->m_rgubTicket, (size_t)resp->m_cubTicket) : "NONE";
         ReFixLog("[STEAM:AUTH] Intercepted live Callback 168 Run2 (WebApi Ticket): Handle=%u, Result=%d, Size=%d bytes, Ticket_SHA256=%s",
                  resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket, sha.c_str());
-        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) {
+        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
             std::lock_guard<std::mutex> lg(g_callbackMutex);
             g_lastAuthTicketHandle = resp->m_hAuthTicket;
             g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
@@ -3039,7 +3046,7 @@ static uint32_t Internal_GetAuthTicketForWebApi(void* self, const char* pchIdent
     ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] Native GetAuthTicketForWebApi called (NativeHandle=%u). Triggering Synthetic Callback 168 backed by genuine Steam Session Ticket...",
              corrId, nativeHandle);
 
-    uint8_t sessionTicket[1024] = { 0 };
+    uint8_t sessionTicket[2560] = { 0 };
     uint32_t sessionTicketSize = 0;
     uint32_t sessionTicketHandle = 0;
 
@@ -3135,8 +3142,8 @@ static void EnsureUserInterfaceHooked(void* pUser, const char* pszVersion) {
         }
     }
 
-    if (verNum >= 22 || verNum == 0) {
-        // ISteamUser022 / 023 layout:
+    if (verNum >= 23 || verNum == 0) {
+        // ISteamUser023 layout (Steamworks 1.57+):
         // Slot 13: GetAuthSessionTicket
         // Slot 14: GetAuthTicketForWebApi
         // Slot 17: CancelAuthTicket
@@ -3528,7 +3535,7 @@ public:
         auto* resp = (Steam_GetTicketForWebApiResponse_t*)pvParam;
         ReFixLog("[STEAM] Callback 168 (GetTicketForWebApiResponse) received: handle=%u, result=%d, cubTicket=%d",
                  resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket);
-        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) {
+        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
             g_lastAuthTicketHandle = resp->m_hAuthTicket;
             g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
             ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
@@ -4472,7 +4479,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                     auto* resp = (Steam_GetTicketForWebApiResponse_t*)msg->m_pubParam;
                     ReFixLog("[STEAM] ManualDispatch captured Callback 168 (WebApi Ticket): handle=%u, result=%d, cubTicket=%d",
                              resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket);
-                    if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 1024) {
+                    if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
                         std::lock_guard<std::mutex> lg(g_callbackMutex);
                         g_lastAuthTicketHandle = resp->m_hAuthTicket;
                         g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
