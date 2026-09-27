@@ -227,6 +227,7 @@ if not "!EXISTING_REAL_APPID!"=="" if not "!EXISTING_REAL_APPID!"=="480" (
 set "CUSTOM_USERNAME="
 set /p "CUSTOM_USERNAME=Enter Custom Username (Optional - Enter to use Steam name): "
 if "!CUSTOM_USERNAME!"=="" set "CUSTOM_USERNAME=!EXISTING_USERNAME!"
+if "!CUSTOM_USERNAME!"=="" set "CUSTOM_USERNAME=%USERNAME%"
 set "LAN_PORT=47584"
 set "CUSTOM_BROADCASTS="
 goto AFTER_MODE_PROMPTS
@@ -238,6 +239,7 @@ echo:
 set "CUSTOM_USERNAME="
 set /p "CUSTOM_USERNAME=Enter Player Username (Leave empty to auto-generate): "
 if "!CUSTOM_USERNAME!"=="" set "CUSTOM_USERNAME=!EXISTING_USERNAME!"
+if "!CUSTOM_USERNAME!"=="" set "CUSTOM_USERNAME=%USERNAME%"
 
 set "REAL_APPID="
 if not "!EXISTING_REAL_APPID!"=="" if not "!EXISTING_REAL_APPID!"=="480" (

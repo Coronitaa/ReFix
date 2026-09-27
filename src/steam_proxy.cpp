@@ -1710,6 +1710,8 @@ static void LoadConfig() {
             strcpy_s(bufUser, sizeof(bufUser), envName);
         } else if (GetEnvironmentVariableA("SteamPersonaName", envName, sizeof(envName)) > 0 && envName[0]) {
             strcpy_s(bufUser, sizeof(bufUser), envName);
+        } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            strcpy_s(bufUser, sizeof(bufUser), envName);
         } else {
             strcpy_s(bufUser, sizeof(bufUser), "Player");
         }
@@ -1871,9 +1873,94 @@ static void EnsureSteamAppIdFile(const char* appIdStr) {
     }
 }
 
+static void WriteTextFileIfChanged(const std::string& filePath, const std::string& content) {
+    HANDLE hFile = CreateFileA(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size == content.size()) {
+            std::string existing(size, '\0');
+            DWORD read = 0;
+            ReadFile(hFile, &existing[0], size, &read, NULL);
+            CloseHandle(hFile);
+            if (existing == content) return;
+        } else {
+            CloseHandle(hFile);
+        }
+    }
+    HANDLE hWrite = CreateFileA(filePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hWrite != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(hWrite, content.c_str(), (DWORD)content.size(), &written, NULL);
+        CloseHandle(hWrite);
+    }
+}
+
+static void SyncGoldbergSettings() {
+    std::string exeDir = GetExeDir();
+    std::string proxyDir = GetProxyDllDir();
+
+    std::vector<std::string> targetDirs;
+    targetDirs.push_back(exeDir);
+    if (proxyDir != exeDir) targetDirs.push_back(proxyDir);
+
+    std::string finalAppId = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
+    if (finalAppId.empty() || finalAppId == "0") finalAppId = "480";
+
+    std::string finalName = g_config.playerName;
+    if (finalName.empty() || finalName == "Player" || finalName == "Noob") {
+        char envName[128] = { 0 };
+        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            finalName = envName;
+        } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            finalName = envName;
+        } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            finalName = envName;
+        } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            finalName = envName;
+        } else {
+            finalName = "Player";
+        }
+        g_config.playerName = finalName;
+    }
+
+    std::string finalSteamId = g_config.steamId;
+    if (finalSteamId.empty()) {
+        char envId[64] = { 0 };
+        if (GetEnvironmentVariableA("REFIX_STEAM_ID", envId, sizeof(envId)) > 0 && envId[0]) {
+            finalSteamId = envId;
+        } else {
+            finalSteamId = "76561198511814903";
+        }
+        g_config.steamId = finalSteamId;
+    }
+
+    std::string lang = g_config.language.empty() ? "english" : g_config.language;
+
+    for (const auto& dir : targetDirs) {
+        std::string settingsDir = dir + "steam_settings";
+        CreateDirectoryA(settingsDir.c_str(), NULL);
+
+        WriteTextFileIfChanged(settingsDir + "\\force_account_name.txt", finalName);
+        WriteTextFileIfChanged(settingsDir + "\\force_steamid.txt", finalSteamId);
+        WriteTextFileIfChanged(settingsDir + "\\force_language.txt", lang);
+        WriteTextFileIfChanged(settingsDir + "\\steam_appid.txt", finalAppId);
+
+        DeleteFileA((settingsDir + "\\offline.txt").c_str());
+        DeleteFileA((settingsDir + "\\disable_lan_only.txt").c_str());
+
+        std::string userIni = "[user::general]\naccount_name=" + finalName + "\naccount_steamid=" + finalSteamId + "\nlanguage=" + lang + "\n";
+        WriteTextFileIfChanged(settingsDir + "\\configs.user.ini", userIni);
+
+        std::string appIni = "[app::general]\nappid=" + finalAppId + "\n";
+        WriteTextFileIfChanged(settingsDir + "\\configs.app.ini", appIni);
+    }
+    ReFixLog("SyncGoldbergSettings: name='%s', steamId='%s', appId='%s'", finalName.c_str(), finalSteamId.c_str(), finalAppId.c_str());
+}
+
 static void ApplySteamEnv() {
     LoadConfig();
     if (g_isGoldbergMode) {
+        SyncGoldbergSettings();
         std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
         if (targetApp.empty() || targetApp == "0") targetApp = "480";
         SetEnvironmentVariableA("SteamAppId", targetApp.c_str());
@@ -2640,8 +2727,14 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
     LoadConfig();
-    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u", targetApp);
+    uint32_t targetApp = 0;
+    if (!g_isGoldbergMode) {
+        targetApp = (g_config.maskAppIdNum != 0) ? g_config.maskAppIdNum : g_config.realAppIdNum;
+    } else {
+        targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    }
+    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Mode=%s)",
+             targetApp, g_isGoldbergMode ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -2713,8 +2806,14 @@ static void* Hooked_ISteamMatchmakingServers_RequestInternetServerList(
 
 static uint32_t Hooked_ISteamUtils_GetAppID(void* self) {
     LoadConfig();
-    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-    ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u", targetApp);
+    uint32_t targetApp = 0;
+    if (!g_isGoldbergMode) {
+        targetApp = (g_config.maskAppIdNum != 0) ? g_config.maskAppIdNum : g_config.realAppIdNum;
+    } else {
+        targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    }
+    ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u (Mode=%s)",
+             targetApp, g_isGoldbergMode ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -3164,6 +3263,8 @@ static void EnsureUserInterfaceHooked(void* pUser, const char* pszVersion) {
     }
 }
 
+static void EnsureFriendsInterfaceHooked(void* pFriends, const char* pszVersion);
+
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (!iface || !pszVersion) return;
     // The ISteamUser condition is deliberately the one it has always been.
@@ -3173,6 +3274,7 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     // 13 and 14 are the ticket calls the whole sign-in rests on.
     if (strstr(pszVersion, "SteamUser")) EnsureUserInterfaceHooked(iface, pszVersion);
     else if (strstr(pszVersion, "SteamUGC") || strstr(pszVersion, "STEAMUGC")) EnsureUGCInterfaceHooked(iface, pszVersion);
+    else if (strstr(pszVersion, "SteamFriends")) EnsureFriendsInterfaceHooked(iface, pszVersion);
 }
 
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
@@ -3193,6 +3295,70 @@ static void* Intercepted_SteamAPI_ISteamClient_GetISteamUser(void* self, uint32_
         EnsureUserInterfaceHooked(iface, pchVersion);
     }
     return iface;
+}
+
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamFriends_t)(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion);
+static fn_SteamAPI_ISteamClient_GetISteamFriends_t g_pfn_ISteamClient_GetISteamFriends = nullptr;
+
+static void* Intercepted_SteamAPI_ISteamClient_GetISteamFriends(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion) {
+    void* iface = g_pfn_ISteamClient_GetISteamFriends ? g_pfn_ISteamClient_GetISteamFriends(self, hSteamUser, hSteamPipe, pchVersion) : nullptr;
+    if (iface) {
+        EnsureFriendsInterfaceHooked(iface, pchVersion);
+    }
+    return iface;
+}
+
+typedef const char* (*fn_VTable_GetPersonaName_t)(void* self);
+static fn_VTable_GetPersonaName_t g_orig_VTable_GetPersonaName = nullptr;
+
+static const char* Hooked_ISteamFriends_GetPersonaName(void* self) {
+    const char* n = nullptr;
+    if (g_orig_VTable_GetPersonaName && self) {
+        __try {
+            n = g_orig_VTable_GetPersonaName(self);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            n = nullptr;
+        }
+    } else if (g_pfn_GetPersonaName && self) {
+        __try {
+            n = g_pfn_GetPersonaName(self);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            n = nullptr;
+        }
+    }
+    if (n && n[0] != '\0' && strcmp(n, "Noob") != 0) {
+        return n;
+    }
+    if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
+        return g_config.playerName.c_str();
+    }
+    char envName[128] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+        g_config.playerName = envName;
+        return g_config.playerName.c_str();
+    } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+        g_config.playerName = envName;
+        return g_config.playerName.c_str();
+    } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+        g_config.playerName = envName;
+        return g_config.playerName.c_str();
+    } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+        g_config.playerName = envName;
+        return g_config.playerName.c_str();
+    }
+    if (n && n[0] != '\0') return n;
+    return "Player";
+}
+
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamFriends_GetPersonaName(void* self) {
+    return Hooked_ISteamFriends_GetPersonaName(self);
+}
+
+static void EnsureFriendsInterfaceHooked(void* pFriends, const char* pszVersion) {
+    if (!pFriends) return;
+    HookVTableMethod(pFriends, 0, (void*)Hooked_ISteamFriends_GetPersonaName, (void**)&g_orig_VTable_GetPersonaName);
+    ReFixLog("EnsureFriendsInterfaceHooked: Hooked GetPersonaName (slot 0) for %p (version='%s')",
+             pFriends, pszVersion ? pszVersion : "unknown");
 }
 
 static bool g_vtableHooksInstalled = false;
@@ -3236,30 +3402,23 @@ static void InstallVTableHooks() {
         }
     }
 
-    // 5. ISteamFriends
-    fn_GetInterface_t pfnFriends = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamFriends_v017");
-    if (!pfnFriends) pfnFriends = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamFriends");
-    if (pfnFriends) {
-        void* pFriends = pfnFriends();
-        if (pFriends) {
-            // ISteamFriends017 slot numbers, in declaration order. Slot 15 is
-            // GetFriendsGroupMembersCount, not the invite dialog: hooking the
-            // dialog there replaced a function the title uses to lay out its
-            // friends list and left the real dialog unhooked, so invites were
-            // opened against a lobby id that means nothing to Steam.
-            HookVTableMethod(pFriends,  3, (void*)Hooked_ISteamFriends_GetFriendCount,              (void**)&g_orig_VTable_GetFriendCount);
-            HookVTableMethod(pFriends,  5, (void*)Hooked_ISteamFriends_GetFriendRelationship,       (void**)&g_orig_VTable_GetFriendRelationship);
-            HookVTableMethod(pFriends,  6, (void*)Hooked_ISteamFriends_GetFriendPersonaState,       (void**)&g_orig_VTable_GetFriendPersonaState);
-            HookVTableMethod(pFriends,  7, (void*)Hooked_ISteamFriends_GetFriendPersonaName,        (void**)&g_orig_VTable_GetFriendPersonaName);
-            HookVTableMethod(pFriends,  8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed,         (void**)&g_orig_VTable_GetFriendGamePlayed);
-            HookVTableMethod(pFriends, 12, (void*)Hooked_ISteamFriends_GetFriendsGroupCount,        (void**)&g_orig_VTable_GetFriendsGroupCount);
-            HookVTableMethod(pFriends, 15, (void*)Hooked_ISteamFriends_GetFriendsGroupMembersCount, (void**)&g_orig_VTable_GetFriendsGroupMembersCount);
-            HookVTableMethod(pFriends, 17, (void*)Hooked_ISteamFriends_HasFriend,                   (void**)&g_orig_VTable_HasFriend);
-            HookVTableMethod(pFriends, 33, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
-            HookVTableMethod(pFriends, 37, (void*)Hooked_ISteamFriends_RequestUserInformation,      (void**)&g_orig_VTable_RequestUserInformation);
-            HookVTableMethod(pFriends, 43, (void*)Hooked_ISteamFriends_SetRichPresence,             (void**)&g_orig_VTable_SetRichPresence);
-            HookVTableMethod(pFriends, 49, (void*)Hooked_ISteamFriends_InviteUserToGame,            (void**)&g_orig_VTable_InviteUserToGame);
-            HookVTableMethod(pFriends, 50, (void*)Hooked_ISteamFriends_GetCoplayFriendCount,        (void**)&g_orig_VTable_GetCoplayFriendCount);
+    // 5. ISteamFriends (Slot 0 is GetPersonaName across ALL SteamFriends versions v001-v018)
+    const char* friendsAccessors[] = {
+        "SteamAPI_SteamFriends_v018",
+        "SteamAPI_SteamFriends_v017",
+        "SteamAPI_SteamFriends_v016",
+        "SteamAPI_SteamFriends_v015",
+        "SteamFriends_v018",
+        "SteamFriends_v017",
+        "SteamFriends"
+    };
+    for (const char* acc : friendsAccessors) {
+        fn_GetInterface_t pfnFriends = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, acc);
+        if (pfnFriends) {
+            void* pFriends = pfnFriends();
+            if (pFriends) {
+                EnsureFriendsInterfaceHooked(pFriends, acc);
+            }
         }
     }
 
@@ -4009,6 +4168,17 @@ static bool EnsureOriginal() {
         ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamFriends_GetFriendGamePlayed");
     }
 
+    int idxGetFriends = FindSteamExportIndex("SteamAPI_ISteamClient_GetISteamFriends");
+    if (idxGetFriends >= 0) {
+        g_pfn_ISteamClient_GetISteamFriends = (fn_SteamAPI_ISteamClient_GetISteamFriends_t)g_steamProcs[idxGetFriends];
+        g_steamProcs[idxGetFriends] = (FARPROC)Intercepted_SteamAPI_ISteamClient_GetISteamFriends;
+    }
+
+    int idxGetPersonaName = FindSteamExportIndex("SteamAPI_ISteamFriends_GetPersonaName");
+    if (idxGetPersonaName >= 0) {
+        g_steamProcs[idxGetPersonaName] = (FARPROC)SteamAPI_ISteamFriends_GetPersonaName;
+    }
+
     int idxAddStringFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
     if (idxAddStringFilter >= 0) g_pfn_AddRequestLobbyListStringFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t)g_steamProcs[idxAddStringFilter];
 
@@ -4175,8 +4345,8 @@ static void CapturePersonaName() {
         }
     }
 
-    if (!name || name[0] == '\0') {
-        if (!g_config.playerName.empty() && g_config.playerName != "Player") {
+    if (!name || name[0] == '\0' || strcmp(name, "Noob") == 0) {
+        if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
             name = g_config.playerName.c_str();
         } else {
             char envName[128] = { 0 };
@@ -4187,6 +4357,9 @@ static void CapturePersonaName() {
                 g_config.playerName = envName;
                 name = g_config.playerName.c_str();
             } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                g_config.playerName = envName;
+                name = g_config.playerName.c_str();
+            } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
                 g_config.playerName = envName;
                 name = g_config.playerName.c_str();
             }

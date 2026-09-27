@@ -261,6 +261,8 @@ switch ($OnlineMode) {
         # Enables direct .exe launching with full Steam Overlay injection.
         Write-Host "  [Valve Mode] Deploying ReFix proxy steam_api64.dll with Steam Overlay injection..." -ForegroundColor Cyan
         $proxyPath = Join-Path $BinDir "steam_api64.dll"
+        $valveStockDll = Join-Path $BinDir "valve\steam_api64.dll"
+        $goldbergDll = Join-Path $BinDir "goldberg\steam_api64.dll"
         if (-not (Test-Path $proxyPath)) {
             Write-Host "  [ERROR] ReFix proxy steam_api64.dll not found at: $proxyPath" -ForegroundColor Red
             exit 1
@@ -268,23 +270,48 @@ switch ($OnlineMode) {
         foreach ($dir in $pluginDirs) {
             $valvePath = Join-Path $dir "steam_api64_valve.dll"
             $steamPath = Join-Path $dir "steam_api64.dll"
-            if (Test-Path $steamPath) {
-                $isAlreadyProxy = $false
-                if (Test-Path $proxyPath) {
-                    if ((Get-Item $steamPath).Length -eq (Get-Item $proxyPath).Length) {
-                        $isAlreadyProxy = $true
-                    }
-                }
-                if (-not (Test-Path $valvePath)) {
-                    if (-not $isAlreadyProxy) {
-                        Rename-Item -Path $steamPath -NewName "steam_api64_valve.dll" -Force
-                        Write-Host "  [OK] Backed up original steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
-                    } else {
-                        Write-Host "  [NOTICE] Existing steam_api64.dll in $dir is already ReFix proxy (skipping backup to preserve original)" -ForegroundColor Yellow
+            $origPath  = Join-Path $dir "steam_api64_original.dll"
+
+            # Check if existing $valvePath is actually Goldberg (e.g. from previous Goldberg deployment)
+            $isGoldbergAtValve = $false
+            if (Test-Path $valvePath) {
+                if (Test-Path $goldbergDll) {
+                    if ((Get-Item $valvePath).Length -eq (Get-Item $goldbergDll).Length) {
+                        $isGoldbergAtValve = $true
                     }
                 }
             }
-            Copy-Item -Path $proxyPath -Destination $dir -Force
+
+            # If $origPath exists, make sure $valvePath is restored from $origPath
+            if (Test-Path $origPath) {
+                if ((-not (Test-Path $valvePath)) -or $isGoldbergAtValve) {
+                    Copy-Item -Path $origPath -Destination $valvePath -Force
+                    Write-Host "  [OK] Restored original Valve DLL from $origPath -> steam_api64_valve.dll in $dir" -ForegroundColor Green
+                    $isGoldbergAtValve = $false
+                }
+            } elseif (Test-Path $steamPath) {
+                $isAlreadyProxy = ((Get-Item $steamPath).Length -eq (Get-Item $proxyPath).Length)
+                $isGoldbergAtSteam = (Test-Path $goldbergDll) -and ((Get-Item $steamPath).Length -eq (Get-Item $goldbergDll).Length)
+                if ((-not $isAlreadyProxy) -and (-not $isGoldbergAtSteam)) {
+                    # This is genuine original DLL
+                    Copy-Item -Path $steamPath -Destination $origPath -Force
+                    Copy-Item -Path $steamPath -Destination $valvePath -Force
+                    Write-Host "  [OK] Preserved original steam_api64.dll -> steam_api64_original.dll & steam_api64_valve.dll in $dir" -ForegroundColor Green
+                    $isGoldbergAtValve = $false
+                }
+            }
+
+            # If valvePath is still missing or still Goldberg, use stock genuine Valve DLL as fallback
+            if ((-not (Test-Path $valvePath)) -or $isGoldbergAtValve) {
+                if (Test-Path $valveStockDll) {
+                    Copy-Item -Path $valveStockDll -Destination $valvePath -Force
+                    Write-Host "  [OK] Deployed stock genuine Valve steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
+                } else {
+                    Write-Host "  [WARNING] Genuine Valve steam_api64.dll not found; Steam Spacewar overlay/connection may fail!" -ForegroundColor Red
+                }
+            }
+
+            Copy-Item -Path $proxyPath -Destination $steamPath -Force
             Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
         }
 
@@ -314,10 +341,27 @@ switch ($OnlineMode) {
             }
         }
 
+        # Detect if game is 32-bit (x86) to prevent fatal 64-bit DLL injection into 32-bit processes
+        $isX86Game = ($pluginDirs32.Count -gt 0)
+        $gameExesInDir = Get-ChildItem -Path $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
+        foreach ($ge in $gameExesInDir) {
+            try {
+                $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
+                if ($peBytes.Length -ge 0x40) {
+                    $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
+                    if ($peOffset + 6 -le $peBytes.Length) {
+                        $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
+                        if ($mach -eq 0x014c) { $isX86Game = $true; break }
+                        elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
+                    }
+                }
+            } catch {}
+        }
+
         # Also deploy winmm.dll to ExeDir for early Steam Overlay injection (64-bit only)
-        $isX86Only = ($pluginDirs32.Count -gt 0 -and $pluginDirs.Count -eq 0)
         $winmmPath = Join-Path $BinDir "winmm.dll"
-        if ((Test-Path $winmmPath) -and (-not $isX86Only)) {
+        if ((Test-Path $winmmPath) -and (-not $isX86Game)) {
             $targetWinmm = Join-Path $ExeDir "winmm.dll"
             $targetWinmmOrig = Join-Path $ExeDir "winmm_o.dll"
             if ((Test-Path $targetWinmm) -and (-not (Test-Path $targetWinmmOrig)) -and ((Get-Item $targetWinmm).Length -ne (Get-Item $winmmPath).Length)) {
@@ -325,10 +369,29 @@ switch ($OnlineMode) {
             }
             Copy-Item -Path $winmmPath -Destination $targetWinmm -Force
             Write-Host "  [OK] Deployed ReFix winmm.dll proxy to root folder $ExeDir for early Steam Overlay injection" -ForegroundColor Green
+        } elseif ($isX86Game) {
+            # Critical: Ensure no 64-bit winmm.dll remains in 32-bit game directory
+            $strayWinmm = Join-Path $ExeDir "winmm.dll"
+            if (Test-Path $strayWinmm) {
+                try {
+                    $wBytes = [System.IO.File]::ReadAllBytes($strayWinmm)
+                    if ($wBytes.Length -ge 0x40) {
+                        $peOff = [System.BitConverter]::ToInt32($wBytes, 0x3C)
+                        $mach = [System.BitConverter]::ToUInt16($wBytes, $peOff + 4)
+                        if ($mach -eq 0x8664) {
+                            Remove-Item -Path $strayWinmm -Force -ErrorAction SilentlyContinue
+                            Write-Host "  [CRITICAL FIX] Removed stray 64-bit winmm.dll from 32-bit game directory: $strayWinmm" -ForegroundColor Yellow
+                        }
+                    }
+                } catch {}
+            }
         }
 
         # Synchronize ReFix.ini in ExeDir
         $reFixIniPath = Join-Path $ExeDir "ReFix.ini"
+        $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir
+        $finalUserName = if ($UserName) { $UserName } else { $identity.Name }
+        $finalSteamId = $identity.SteamId
         $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
         $bypassVal = if ($DLCMode -eq "none") { "false" } else { "true" }
         $maskVal = if ($MaskAppId) { $MaskAppId } else { "480" }
@@ -370,8 +433,8 @@ Mode=passthrough
 DeviceIdAuth=true
 
 [User]
-Name=$UserName
-SteamId=
+Name=$finalUserName
+SteamId=$finalSteamId
 
 [Online]
 Mode=valve
@@ -488,8 +551,28 @@ ForcePublicIPInLobby=true
             }
 
             $proxyPath = Join-Path $BinDir "steam_api64.dll"
-            
-            # Always place Goldberg DLL as steam_api64_valve.dll
+            $origPath  = Join-Path $dir "steam_api64_original.dll"
+
+            # Preserve genuine Valve DLL before placing Goldberg as steam_api64_valve.dll
+            if (Test-Path $valvePath) {
+                if ((Get-Item $valvePath).Length -ne (Get-Item $goldbergDll).Length) {
+                    if (-not (Test-Path $origPath)) {
+                        Copy-Item -Path $valvePath -Destination $origPath -Force
+                        Write-Host "  [OK] Preserved genuine Valve DLL -> steam_api64_original.dll in $dir" -ForegroundColor Green
+                    }
+                }
+            } elseif (Test-Path $steamPath) {
+                $isAlreadyProxy = (Test-Path $proxyPath) -and ((Get-Item $steamPath).Length -eq (Get-Item $proxyPath).Length)
+                $isAlreadyGoldberg = ((Get-Item $steamPath).Length -eq (Get-Item $goldbergDll).Length)
+                if ((-not $isAlreadyProxy) -and (-not $isAlreadyGoldberg)) {
+                    if (-not (Test-Path $origPath)) {
+                        Copy-Item -Path $steamPath -Destination $origPath -Force
+                        Write-Host "  [OK] Preserved genuine Valve DLL -> steam_api64_original.dll in $dir" -ForegroundColor Green
+                    }
+                }
+            }
+
+            # Place Goldberg DLL as steam_api64_valve.dll
             Copy-Item -Path $goldbergDll -Destination $valvePath -Force
             Write-Host "  [OK] Deployed Goldberg emulator backend as steam_api64_valve.dll to $dir" -ForegroundColor Green
 

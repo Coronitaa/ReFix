@@ -14,19 +14,6 @@ enum ESteamAPIInitResult {
 
 static HMODULE g_hOrig = NULL;
 
-// Dummy VTable for unsupported interfaces
-static void* __cdecl DummyFunction() { return nullptr; }
-static void* g_dummyVTable[256] = { 0 };
-static void* g_pDummyInstance = nullptr;
-
-static void InitDummyInstance() {
-    if (g_pDummyInstance) return;
-    for (int i = 0; i < 256; i++) {
-        g_dummyVTable[i] = (void*)&DummyFunction;
-    }
-    static void* s_dummyObj = (void*)&g_dummyVTable;
-    g_pDummyInstance = (void*)&s_dummyObj;
-}
 
 static void LogMsg(const char* fmt, ...) {
     char buf[1024];
@@ -176,13 +163,19 @@ static void ApplyEnvironmentOverrides() {
     }
 }
 
+static inline bool IsValidInterfacePtr(void* p) {
+    return ((uintptr_t)p >= 0x10000);
+}
+
 // Helpers to get interfaces from orig
 static void* GetOrigInterface(const char* name) {
     EnsureOrigLoaded();
     if (!g_hOrig) return nullptr;
     typedef void* (__cdecl *fn_Get_t)();
     auto pfn = (fn_Get_t)GetProcAddress(g_hOrig, name);
-    return pfn ? pfn() : nullptr;
+    if (!pfn) return nullptr;
+    void* res = pfn();
+    return IsValidInterfacePtr(res) ? res : nullptr;
 }
 
 extern "C" {
@@ -373,12 +366,11 @@ __declspec(dllexport) void* __cdecl SteamInternal_CreateInterface(const char* ps
     auto pfnOrig = (fn_Create_t)GetProcAddress(g_hOrig, "SteamInternal_CreateInterface");
     if (pfnOrig) {
         void* res = pfnOrig(pszVersion);
-        if (res) return res;
+        if (IsValidInterfacePtr(res)) return res;
     }
 
-    InitDummyInstance();
-    LogMsg("SteamInternal_CreateInterface('%s') fallback to dummy (%p)", pszVersion, g_pDummyInstance);
-    return g_pDummyInstance;
+    LogMsg("SteamInternal_CreateInterface('%s') not found -> returning nullptr", pszVersion);
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
@@ -389,28 +381,27 @@ __declspec(dllexport) void* __cdecl SteamInternal_FindOrCreateUserInterface(uint
     auto pfnOrig = (fn_FindOrCreate_t)GetProcAddress(g_hOrig, "SteamInternal_FindOrCreateUserInterface");
     if (pfnOrig) {
         void* res = pfnOrig(hSteamUser, pszVersion);
-        if (res) return res;
+        if (IsValidInterfacePtr(res)) return res;
     }
 
     if (strstr(pszVersion, "SteamNetworkingUtils")) {
         void* p = GetOrigInterface("SteamAPI_SteamNetworkingUtils_v003");
         if (!p) p = GetOrigInterface("SteamNetworkingUtils");
-        if (p) return p;
+        if (IsValidInterfacePtr(p)) return p;
     }
     if (strstr(pszVersion, "SteamNetworkingSockets")) {
         void* p = GetOrigInterface("SteamAPI_SteamNetworkingSockets_v009");
         if (!p) p = GetOrigInterface("SteamNetworkingSockets");
-        if (p) return p;
+        if (IsValidInterfacePtr(p)) return p;
     }
     if (strstr(pszVersion, "SteamNetworkingMessages")) {
         void* p = GetOrigInterface("SteamAPI_SteamNetworkingMessages_v002");
         if (!p) p = GetOrigInterface("SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
-        if (p) return p;
+        if (IsValidInterfacePtr(p)) return p;
     }
 
-    InitDummyInstance();
-    LogMsg("SteamInternal_FindOrCreateUserInterface(%u, '%s') fallback to dummy (%p)", hSteamUser, pszVersion, g_pDummyInstance);
-    return g_pDummyInstance;
+    LogMsg("SteamInternal_FindOrCreateUserInterface(%u, '%s') not found -> returning nullptr", hSteamUser, pszVersion);
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamInternal_FindOrCreateGameServerInterface(uint32_t hSteamUser, const char* pszVersion) {
@@ -420,10 +411,9 @@ __declspec(dllexport) void* __cdecl SteamInternal_FindOrCreateGameServerInterfac
     auto pfnOrig = (fn_FindOrCreate_t)GetProcAddress(g_hOrig, "SteamInternal_FindOrCreateGameServerInterface");
     if (pfnOrig) {
         void* res = pfnOrig(hSteamUser, pszVersion);
-        if (res) return res;
+        if (IsValidInterfacePtr(res)) return res;
     }
-    InitDummyInstance();
-    return g_pDummyInstance;
+    return nullptr;
 }
 
 // Flat getters called by CSteamAPIContext::Init
@@ -434,20 +424,19 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamUser(void* se
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamUser");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamUser023");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamUser022");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamUser021");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamUser020");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamUser");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamFriends(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -457,20 +446,19 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamFriends(void*
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamFriends");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamFriends018");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamFriends017");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamFriends016");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamFriends015");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamFriends");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamUtils(void* self, uint32_t hPipe, const char* ver) {
@@ -480,20 +468,19 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamUtils(void* s
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamUtils");
     if (pfn) {
         void* r = pfn(self, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hPipe, "SteamUtils010");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hPipe, "SteamUtils009");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hPipe, "SteamUtils008");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hPipe, "SteamUtils007");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamUtils");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMatchmaking(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -502,14 +489,13 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMatchmaking(v
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamMatchmaking");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamMatchMaking009");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamMatchmaking");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMatchmakingServers(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -518,14 +504,13 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMatchmakingSe
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamMatchmakingServers");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamMatchMakingServers002");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamMatchmakingServers");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamUserStats(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -534,16 +519,15 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamUserStats(voi
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamUserStats");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMUSERSTATS_INTERFACE_VERSION012");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamUserStats011");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamUserStats");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamApps(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -552,14 +536,13 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamApps(void* se
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamApps");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMAPPS_INTERFACE_VERSION008");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamApps");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamNetworking(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -568,14 +551,13 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamNetworking(vo
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamNetworking");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "SteamNetworking006");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamNetworking");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamRemoteStorage(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -584,16 +566,15 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamRemoteStorage
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamRemoteStorage");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMREMOTESTORAGE_INTERFACE_VERSION016");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMREMOTESTORAGE_INTERFACE_VERSION014");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamRemoteStorage");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamScreenshots(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -602,28 +583,21 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamScreenshots(v
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamScreenshots");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMSCREENSHOTS_INTERFACE_VERSION003");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamScreenshots");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamGameSearch(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
-    EnsureOrigLoaded();
-    typedef void* (__cdecl *fn_t)(void*, uint32_t, uint32_t, const char*);
-    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamGameSearch");
-    if (pfn) {
-        void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
-    }
-    void* p = GetOrigInterface("SteamGameSearch");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    // In legacy steam_api_o.dll, GetISteamGameSearch invoked ISteamClient vtable slot 0x4C.
+    // In modern Steam client, slot 0x4C is GetIPCCallCount() returning uint32 (e.g. 1).
+    // Returning 1 causes Unity/IL2CPP to dereference 0x00000001 and crash!
+    // Returning nullptr cleanly informs Unity that GameSearch is not present.
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamController(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -632,12 +606,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamController(vo
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamController");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamController");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamHTTP(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -646,14 +619,13 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamHTTP(void* se
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamHTTP");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMHTTP_INTERFACE_VERSION003");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamHTTP");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamUGC(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -662,20 +634,19 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamUGC(void* sel
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamUGC");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMUGC_INTERFACE_VERSION021");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMUGC_INTERFACE_VERSION017");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMUGC_INTERFACE_VERSION016");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
         r = pfn(self, hUser, hPipe, "STEAMUGC_INTERFACE_VERSION014");
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamUGC");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMusic(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -684,12 +655,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMusic(void* s
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamMusic");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamMusic");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMusicRemote(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -698,12 +668,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamMusicRemote(v
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamMusicRemote");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamMusicRemote");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamHTMLSurface(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -712,12 +681,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamHTMLSurface(v
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamHTMLSurface");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamHTMLSurface");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamInventory(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -726,12 +694,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamInventory(voi
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamInventory");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamInventory");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamVideo(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -740,12 +707,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamVideo(void* s
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamVideo");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamVideo");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamParentalSettings(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -754,12 +720,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamParentalSetti
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamParentalSettings");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamParentalSettings");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamInput(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -768,12 +733,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamInput(void* s
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamInput");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamInput");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamParties(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -782,12 +746,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamParties(void*
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamParties");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamParties");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamRemotePlay(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -796,12 +759,11 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamRemotePlay(vo
     auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamRemotePlay");
     if (pfn) {
         void* r = pfn(self, hUser, hPipe, ver);
-        if (r) return r;
+        if (IsValidInterfacePtr(r)) return r;
     }
     void* p = GetOrigInterface("SteamRemotePlay");
-    if (p) return p;
-    InitDummyInstance();
-    return g_pDummyInstance;
+    if (IsValidInterfacePtr(p)) return p;
+    return nullptr;
 }
 
 } // extern "C"
@@ -809,7 +771,6 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamRemotePlay(vo
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
-        InitDummyInstance();
         ApplyEnvironmentOverrides();
         EnsureOrigLoaded();
         LogMsg("ReFix x86 steam_api.dll attached to process");
