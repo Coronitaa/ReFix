@@ -1263,32 +1263,60 @@ FixedRegion=$PhotonRegion
         if ($redpointFolder) { $eosDirs += $redpointFolder.FullName }
     }
     
-    # Always ensure ExeDir is in eosDirs if EOS is present so the proxy is placed beside the shipping executable
-    if ($eosDirs.Count -gt 0 -and ($eosDirs -notcontains $ExeDir)) {
-        $eosDirs += $ExeDir
+    $isDeviceIdAuth = $false
+    if (Test-Path $reFixIni) {
+        $iniText = Get-Content $reFixIni -Raw -ErrorAction SilentlyContinue
+        if ($iniText -match "(?im)^\s*DeviceIdAuth\s*=\s*true") {
+            $isDeviceIdAuth = $true
+        }
     }
 
-    if ($eosDirs.Count -gt 0 -and (Test-Path $eosProxyPath)) {
-        $proxySize = (Get-Item $eosProxyPath).Length
+    if ($OnlineMode -eq "valve" -and $isDeviceIdAuth) {
+        Write-Host "  [EOS] Game uses cloud DeviceIdAuth in Valve Online mode. Preserving genuine EOSSDK..." -ForegroundColor Cyan
         foreach ($dir in $eosDirs) {
             $eosOriginal = Join-Path $dir "EOSSDK_original.dll"
             $eosPath = Join-Path $dir "EOSSDK-Win64-Shipping.dll"
-
-            if (Test-Path $eosPath) {
-                $curSize = (Get-Item $eosPath).Length
-                if ($curSize -ne $proxySize -and (-not (Test-Path $eosOriginal))) {
-                    Rename-Item -Path $eosPath -NewName "EOSSDK_original.dll" -Force
-                    Write-Host "  [OK] Renamed original EOSSDK -> EOSSDK_original.dll in $dir" -ForegroundColor Green
-                }
+            if (Test-Path $eosOriginal) {
+                Copy-Item -Path $eosOriginal -Destination $eosPath -Force
+                Write-Host "  [OK] Restored genuine EOSSDK-Win64-Shipping.dll in $dir" -ForegroundColor Green
             }
-            Copy-Item -Path $eosProxyPath -Destination $dir -Force
-            Write-Host "  [OK] Deployed EOSSDK-Win64-Shipping.dll proxy to $dir" -ForegroundColor Green
+        }
+        $exeEos = Join-Path $ExeDir "EOSSDK-Win64-Shipping.dll"
+        $exeEosOrig = Join-Path $ExeDir "EOSSDK_original.dll"
+        if ((Test-Path $exeEos) -and (-not (Test-Path $exeEosOrig)) -and (Test-Path $eosProxyPath)) {
+            if ((Get-Item $exeEos).Length -eq (Get-Item $eosProxyPath).Length) {
+                Remove-Item -Path $exeEos -Force -ErrorAction SilentlyContinue
+                Write-Host "  [OK] Cleaned redundant EOS proxy from $ExeDir" -ForegroundColor Green
+            }
+        }
+    } else {
+        # Always ensure ExeDir is in eosDirs if EOS is present so the proxy is placed beside the shipping executable
+        if ($eosDirs.Count -gt 0 -and ($eosDirs -notcontains $ExeDir)) {
+            $eosDirs += $ExeDir
+        }
 
-            # If RedboneEOS.dll exists, replace with proxy
-            $targetRedbone = Join-Path $dir "RedboneEOS.dll"
-            if (Test-Path $targetRedbone) {
-                Copy-Item -Path $redboneProxyPath -Destination $targetRedbone -Force
-                Write-Host "  [OK] Deployed RedboneEOS.dll proxy to $dir" -ForegroundColor Green
+        if ($eosDirs.Count -gt 0 -and (Test-Path $eosProxyPath)) {
+            $proxySize = (Get-Item $eosProxyPath).Length
+            foreach ($dir in $eosDirs) {
+                $eosOriginal = Join-Path $dir "EOSSDK_original.dll"
+                $eosPath = Join-Path $dir "EOSSDK-Win64-Shipping.dll"
+
+                if (Test-Path $eosPath) {
+                    $curSize = (Get-Item $eosPath).Length
+                    if ($curSize -ne $proxySize -and (-not (Test-Path $eosOriginal))) {
+                        Rename-Item -Path $eosPath -NewName "EOSSDK_original.dll" -Force
+                        Write-Host "  [OK] Renamed original EOSSDK -> EOSSDK_original.dll in $dir" -ForegroundColor Green
+                    }
+                }
+                Copy-Item -Path $eosProxyPath -Destination $dir -Force
+                Write-Host "  [OK] Deployed EOSSDK-Win64-Shipping.dll proxy to $dir" -ForegroundColor Green
+
+                # If RedboneEOS.dll exists, replace with proxy
+                $targetRedbone = Join-Path $dir "RedboneEOS.dll"
+                if (Test-Path $targetRedbone) {
+                    Copy-Item -Path $redboneProxyPath -Destination $targetRedbone -Force
+                    Write-Host "  [OK] Deployed RedboneEOS.dll proxy to $dir" -ForegroundColor Green
+                }
             }
         }
     }
