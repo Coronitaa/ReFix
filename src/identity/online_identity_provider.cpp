@@ -309,9 +309,15 @@ public:
     AuthCredentialData GetAuthCredential() override {
         std::lock_guard<std::mutex> lock(m_mutex);
         AuthCredentialData cred;
-        cred.credentialType = 5; // EOS_ECT_DEVICEID_ACCESS_TOKEN
         cred.ticketHandle = m_ticketHandle;
-        cred.token = "goldberg_token_" + std::to_string(m_steamId);
+        if (!m_ticketBytes.empty()) {
+            cred.credentialType = 3; // EOS_ECT_STEAM_SESSION_TICKET
+            cred.rawTicket = m_ticketBytes;
+            cred.token = BytesToHex(m_ticketBytes.data(), m_ticketBytes.size());
+        } else {
+            cred.credentialType = 5; // EOS_ECT_DEVICEID_ACCESS_TOKEN
+            cred.token = "goldberg_token_" + std::to_string(m_steamId);
+        }
         return cred;
     }
 
@@ -411,13 +417,43 @@ public:
 
 private:
     void RefreshFromEnvironment() {
-        char envBuf[128] = { 0 };
+        char envBuf[512] = { 0 };
         if (GetEnvironmentVariableA("REFIX_STEAM_ID", envBuf, sizeof(envBuf)) > 0) {
             uint64_t sid = _strtoui64(envBuf, nullptr, 10);
             if (sid != 0) m_steamId = sid;
+        } else if (GetEnvironmentVariableA("REFIX_STEAMID", envBuf, sizeof(envBuf)) > 0) {
+            uint64_t sid = _strtoui64(envBuf, nullptr, 10);
+            if (sid != 0) m_steamId = sid;
+        } else if (GetEnvironmentVariableA("SteamID", envBuf, sizeof(envBuf)) > 0) {
+            uint64_t sid = _strtoui64(envBuf, nullptr, 10);
+            if (sid != 0) m_steamId = sid;
+        } else if (GetEnvironmentVariableA("SteamId", envBuf, sizeof(envBuf)) > 0) {
+            uint64_t sid = _strtoui64(envBuf, nullptr, 10);
+            if (sid != 0) m_steamId = sid;
         }
-        if (GetEnvironmentVariableA("REFIX_USERNAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
+
+        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
             m_displayName = envBuf;
+        } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
+            m_displayName = envBuf;
+        } else if (GetEnvironmentVariableA("REFIX_USERNAME", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
+            m_displayName = envBuf;
+        } else if (GetEnvironmentVariableA("SteamPersonaName", envBuf, sizeof(envBuf)) > 0 && envBuf[0] != '\0') {
+            m_displayName = envBuf;
+        }
+
+        if (m_ticketBytes.empty()) {
+            char ticketHex[4096] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", ticketHex, sizeof(ticketHex)) > 0 && ticketHex[0] != '\0') {
+                std::vector<uint8_t> tb;
+                if (HexToBytes(ticketHex, tb) && !tb.empty()) {
+                    m_ticketBytes = std::move(tb);
+                }
+            }
+            char handleBuf[32] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", handleBuf, sizeof(handleBuf)) > 0) {
+                m_ticketHandle = (uint32_t)strtoul(handleBuf, nullptr, 10);
+            }
         }
     }
 

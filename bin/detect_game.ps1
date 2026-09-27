@@ -210,6 +210,20 @@ if ($eosFiles.Count -gt 0) { $hasEos = $true }
 $redpointFolders = Get-ChildItem -Path $target -Filter "*Redpoint*" -Recurse -Directory -ErrorAction SilentlyContinue
 if ($redpointFolders.Count -gt 0) { $hasEos = $true }
 
+# 5. Architecture detection (x86 vs x64)
+# A game is flagged as x86 when it ships steam_api.dll (32-bit) without steam_api64.dll,
+# or when Unity Plugins\x86 subfolder is present.
+$isX86 = $false
+$steamApi32s = Get-ChildItem -Path $target -Filter "steam_api.dll" -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq "steam_api.dll" }
+$steamApi64s = Get-ChildItem -Path $target -Filter "steam_api64.dll" -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike "*valve*" -and $_.Name -notlike "*_o.dll*" }
+$pluginsX86Dirs = Get-ChildItem -Path $target -Directory -Filter "x86" -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Parent.Name -eq "Plugins" }
+
+if ($steamApi32s.Count -gt 0 -and $steamApi64s.Count -eq 0) { $isX86 = $true }
+if ($pluginsX86Dirs.Count -gt 0)                              { $isX86 = $true }
+
 # Build candidate exe list for interactive picker (up to top 5)
 $candidateList = @()
 foreach ($item in ($sortedExes | Select-Object -First 5)) {
@@ -225,4 +239,5 @@ Write-Output "GAME_NAME=$gameName"
 Write-Output "DETECTED_APPID=$detectedAppId"
 Write-Output "HAS_STEAM=$hasSteam"
 Write-Output "HAS_EOS=$hasEos"
+Write-Output "IS_X86=$isX86"
 Write-Output "CANDIDATE_EXES=$candidateListStr"

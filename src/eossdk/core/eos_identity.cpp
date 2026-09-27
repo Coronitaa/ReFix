@@ -39,15 +39,15 @@ std::vector<uint8_t> Identity::HexToBytes(const char* hex) {
     return out;
 }
 
-// A Steam app/session ticket starts with a 20-byte GC block:
-//   uint32 blockLength (20) | uint64 gcToken | uint64 steamId | uint32 timestamp
+// A Steam app/session ticket starts with a 20-byte or 24-byte GC block:
+//   uint32 blockLength (20 or 24) | uint64 gcToken | uint64 steamId | uint32 timestamp
 // so the owning account is available without contacting Steam at all.
 uint64_t Identity::SteamIdFromTicket(const void* data, size_t len) {
     if (!data || len < 20) return 0;
     const uint8_t* p = (const uint8_t*)data;
     uint32_t blockLen = 0;
     std::memcpy(&blockLen, p, 4);
-    if (blockLen != 20 || len < 24) return 0;
+    if ((blockLen != 20 && blockLen != 24) || len < 20) return 0;
     uint64_t steamId = 0;
     std::memcpy(&steamId, p + 12, 8);
     // Individual accounts on the public universe: 0x0110000100000000 | accountId.
@@ -98,8 +98,18 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
 
     std::string displayName = cfg.GetString("User", "Name", "");
     if (displayName.empty() || ToLower(displayName) == "player") {
+        std::string personaCfg = cfg.GetString("User", "PersonaName", "");
+        if (!personaCfg.empty()) displayName = personaCfg;
+    }
+    if (displayName.empty() || ToLower(displayName) == "player") {
         char persona[128] = {0};
         if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", persona, sizeof(persona)) > 0 && persona[0])
+            displayName = persona;
+        else if (GetEnvironmentVariableA("REFIX_USER_NAME", persona, sizeof(persona)) > 0 && persona[0])
+            displayName = persona;
+        else if (GetEnvironmentVariableA("REFIX_USERNAME", persona, sizeof(persona)) > 0 && persona[0])
+            displayName = persona;
+        else if (GetEnvironmentVariableA("SteamPersonaName", persona, sizeof(persona)) > 0 && persona[0])
             displayName = persona;
     }
 
@@ -129,6 +139,8 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
         if (numeric && configured != "76561198000000001") {
             externalId = configured;
             source = "config";
+            type = EAT::EOS_EAT_STEAM;
+            m_externalValid = true;
         }
     }
 
@@ -138,7 +150,7 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
         // the machine itself, exactly like an EOS DeviceId login.
         externalId = DerivedId("refix.device|" + HardwareFingerprint(), 8);
         type = EAT::EOS_EAT_EPIC;
-        m_externalValid = false;
+        m_externalValid = true;
         source = "device";
     }
 

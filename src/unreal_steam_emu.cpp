@@ -45,6 +45,7 @@
 #include "include/steam/isteamfriends017.h"
 #include "include/steam/isteamnetworkingsockets.h"
 #include "include/steam/isteamnetworkingutils.h"
+#include "include/steam/isteamnetworkingmessages.h"
 
 #include "unreal_steam_emu.h"
 #include "unreal_detect.h"
@@ -124,6 +125,19 @@ namespace UnrealSteamEmu {
         return 0x0110000100000000ULL | accountID;
     }
 
+    static void SyncTicketToEnvironment(const uint8_t* data, size_t size, uint32_t handle) {
+        if (!data || size == 0) return;
+        static const char hexChars[] = "0123456789abcdef";
+        std::string hexStr;
+        hexStr.reserve(size * 2);
+        for (size_t i = 0; i < size; ++i) {
+            hexStr.push_back(hexChars[(data[i] >> 4) & 0x0F]);
+            hexStr.push_back(hexChars[data[i] & 0x0F]);
+        }
+        SetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", hexStr.c_str());
+        SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", std::to_string(handle).c_str());
+    }
+
     static void LoadConfig() {
         char exePath[MAX_PATH];
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
@@ -131,30 +145,128 @@ namespace UnrealSteamEmu {
         size_t lastSlash = exeDir.find_last_of("\\/");
         if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash + 1);
 
+        std::vector<std::string> iniCandidates = {
+            exeDir + "ReFix.ini",
+            exeDir + "..\\ReFix.ini",
+            exeDir + "..\\..\\ReFix.ini",
+            exeDir + "..\\..\\..\\ReFix.ini",
+            exeDir + "..\\..\\..\\..\\ReFix.ini"
+        };
         std::string iniPath = exeDir + "ReFix.ini";
-        DWORD dwAttr = GetFileAttributesA(iniPath.c_str());
-        if (dwAttr == INVALID_FILE_ATTRIBUTES) {
-            iniPath = exeDir + "..\\..\\ReFix.ini";
+        for (const auto& cand : iniCandidates) {
+            if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                iniPath = cand;
+                break;
+            }
         }
 
-        char buf[256];
-        GetPrivateProfileStringA("Unreal.Steam", "PersonaName", "", buf, sizeof(buf), iniPath.c_str());
-        if (buf[0]) g_personaName = buf;
-        else {
-            GetPrivateProfileStringA("User", "PersonaName", "Player", buf, sizeof(buf), iniPath.c_str());
+        std::vector<std::string> nameFiles = {
+            exeDir + "steam_settings\\force_account_name.txt",
+            exeDir + "..\\steam_settings\\force_account_name.txt",
+            exeDir + "..\\..\\steam_settings\\force_account_name.txt",
+            exeDir + "..\\..\\..\\steam_settings\\force_account_name.txt"
+        };
+        std::string goldbergName = "";
+        for (const auto& nf : nameFiles) {
+            std::ifstream file(nf);
+            if (file.is_open()) {
+                std::string line;
+                if (std::getline(file, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+                    while (!line.empty() && line.front() == ' ') line.erase(line.begin());
+                    if (!line.empty()) {
+                        goldbergName = line;
+                        break;
+                    }
+                }
+            }
+        }
+
+        std::vector<std::string> sidFiles = {
+            exeDir + "steam_settings\\force_steamid.txt",
+            exeDir + "..\\steam_settings\\force_steamid.txt",
+            exeDir + "..\\..\\steam_settings\\force_steamid.txt",
+            exeDir + "..\\..\\..\\steam_settings\\force_steamid.txt"
+        };
+        uint64_t goldbergSteamId = 0;
+        for (const auto& sf : sidFiles) {
+            std::ifstream file(sf);
+            if (file.is_open()) {
+                std::string line;
+                if (std::getline(file, line)) {
+                    uint64_t sid = _strtoui64(line.c_str(), nullptr, 10);
+                    if (sid != 0) {
+                        goldbergSteamId = sid;
+                        break;
+                    }
+                }
+            }
+        }
+
+        char buf[256] = { 0 };
+        // Priority 1: [User] Name
+        GetPrivateProfileStringA("User", "Name", "", buf, sizeof(buf), iniPath.c_str());
+        // Priority 2: [Unreal.Steam] PersonaName
+        if (buf[0] == '\0') {
+            GetPrivateProfileStringA("Unreal.Steam", "PersonaName", "", buf, sizeof(buf), iniPath.c_str());
+        }
+        // Priority 3: [User] PersonaName
+        if (buf[0] == '\0') {
+            GetPrivateProfileStringA("User", "PersonaName", "", buf, sizeof(buf), iniPath.c_str());
+        }
+        // Priority 4: [User] Username
+        if (buf[0] == '\0') {
+            GetPrivateProfileStringA("User", "Username", "", buf, sizeof(buf), iniPath.c_str());
+        }
+        // Priority 5: Goldberg steam_settings/force_account_name.txt
+        if (buf[0] == '\0' && !goldbergName.empty()) {
+            strncpy_s(buf, sizeof(buf), goldbergName.c_str(), _TRUNCATE);
+        }
+        // Priority 6: Environment variables
+        if (buf[0] == '\0') {
+            char envName[128] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+            } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+            } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+            } else if (GetEnvironmentVariableA("SteamPersonaName", envName, sizeof(envName)) > 0 && envName[0]) {
+                strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+            }
+        }
+        if (buf[0] != '\0') {
             g_personaName = buf;
+        } else {
+            g_personaName = "Player";
         }
 
-        char bufId[64];
+        char bufId[64] = { 0 };
         GetPrivateProfileStringA("Unreal.Steam", "SteamId", "", bufId, sizeof(bufId), iniPath.c_str());
         if (bufId[0]) {
             g_localSteamID = _strtoui64(bufId, nullptr, 10);
-        } else {
-            GetPrivateProfileStringA("User", "SteamId", "0", bufId, sizeof(bufId), iniPath.c_str());
-            g_localSteamID = _strtoui64(bufId, nullptr, 10);
-            if (g_localSteamID == 0) {
-                g_localSteamID = GenerateDeterministicSteamID();
+        }
+        if (g_localSteamID == 0) {
+            GetPrivateProfileStringA("User", "SteamId", "", bufId, sizeof(bufId), iniPath.c_str());
+            if (bufId[0]) g_localSteamID = _strtoui64(bufId, nullptr, 10);
+        }
+        if (g_localSteamID == 0 && goldbergSteamId != 0) {
+            g_localSteamID = goldbergSteamId;
+        }
+        if (g_localSteamID == 0) {
+            char envSid[64] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_ID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                g_localSteamID = _strtoui64(envSid, nullptr, 10);
+            } else if (GetEnvironmentVariableA("REFIX_STEAMID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                g_localSteamID = _strtoui64(envSid, nullptr, 10);
+            } else if (GetEnvironmentVariableA("SteamID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                g_localSteamID = _strtoui64(envSid, nullptr, 10);
+            } else if (GetEnvironmentVariableA("SteamId", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                g_localSteamID = _strtoui64(envSid, nullptr, 10);
             }
+        }
+        if (g_localSteamID == 0) {
+            g_localSteamID = GenerateDeterministicSteamID();
         }
 
         char bufApp[64];
@@ -195,11 +307,25 @@ namespace UnrealSteamEmu {
             }
         }
 
+        // Export identity environment variables for EOSSDK and all subsystems
+        SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", g_personaName.c_str());
+        SetEnvironmentVariableA("REFIX_USER_NAME", g_personaName.c_str());
+        SetEnvironmentVariableA("REFIX_USERNAME", g_personaName.c_str());
+        SetEnvironmentVariableA("SteamPersonaName", g_personaName.c_str());
+
+        char sidStr[32];
+        sprintf_s(sidStr, "%llu", g_localSteamID);
+        SetEnvironmentVariableA("REFIX_STEAM_ID", sidStr);
+        SetEnvironmentVariableA("REFIX_STEAMID", sidStr);
+        SetEnvironmentVariableA("SteamID", sidStr);
+        SetEnvironmentVariableA("SteamId", sidStr);
+
         // Apply Steam AppID environment variables
         char appIdStr[32];
         sprintf_s(appIdStr, "%u", g_appID);
         SetEnvironmentVariableA("SteamAppId", appIdStr);
         SetEnvironmentVariableA("SteamGameId", appIdStr);
+        SetEnvironmentVariableA("STEAM_COMPAT_APP_ID", appIdStr);
     }
 
     // =========================================================================
@@ -471,12 +597,18 @@ namespace UnrealSteamEmu {
                     peer.port = ntohs(fromAddr.sin_port);
                     peer.lastSeen = std::chrono::steady_clock::now();
 
-                    if (hdr->msgType == 2 && pLen > 0) { // Lobby Announcement
+                    if (hdr->msgType == 1 && pLen > 0) { // Ping with persona name
+                        peer.personaName.assign((char*)payload, pLen);
+                    } else if (hdr->msgType == 2 && pLen > 0) { // Lobby Announcement
                         std::string meta((char*)payload, pLen);
                         std::stringstream ss(meta);
                         uint64_t lID = 0, lOwner = 0;
                         int lMax = 4;
+                        std::string ownerName;
                         ss >> lID >> lOwner >> lMax;
+                        if (ss >> ownerName && !ownerName.empty()) {
+                            peer.personaName = ownerName;
+                        }
                         if (lID != 0) {
                             LobbyInfo& lob = g_lobbies[lID];
                             lob.id = lID;
@@ -648,16 +780,29 @@ namespace UnrealSteamEmu {
         virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket, const SteamNetworkingIdentity *pSteamNetworkingIdentity) override {
             uint32_t ticketLen = 152;
             if (pTicket && cbMaxTicket >= (int)ticketLen) {
-                uint32_t* p = (uint32_t*)pTicket;
-                p[0] = 1; // ticket format version
-                *(uint64_t*)(p + 1) = g_localSteamID;
-                p[3] = g_appID;
-                p[4] = 0x7F000001; // 127.0.0.1
-                p[5] = (uint32_t)::time(NULL);
-                memset((uint8_t*)pTicket + 24, 0xCC, ticketLen - 24);
+                uint64_t steam_id = g_localSteamID;
+                uint64_t token = 0xA5A5A5A5A5A5A5A5ULL ^ steam_id;
+                uint32_t date = (uint32_t)::time(NULL);
+                uint32_t gc_len = 20;
+
+                uint8_t* p = (uint8_t*)pTicket;
+                memset(p, 0, ticketLen);
+                memcpy(p + 0, &gc_len, 4);
+                memcpy(p + 4, &token, 8);
+                memcpy(p + 12, &steam_id, 8);
+                memcpy(p + 20, &date, 4);
+                uint32_t app = g_appID;
+                memcpy(p + 24, &app, 4);
+                uint32_t ip = 0x0100007F; // 127.0.0.1
+                memcpy(p + 28, &ip, 4);
+                memcpy(p + 32, &ip, 4);
+                for (size_t i = 36; i < ticketLen; i++) {
+                    p[i] = (uint8_t)((token >> ((i % 8) * 8)) ^ (steam_id >> ((i % 8) * 8)) ^ (uint8_t)i);
+                }
                 if (pcbTicket) *pcbTicket = ticketLen;
 
                 HAuthTicket hTicket = ++g_nextAuthTicket;
+                SyncTicketToEnvironment(p, ticketLen, hTicket);
 
                 GetAuthSessionTicketResponse_t resp = {};
                 resp.m_hAuthTicket = hTicket;
@@ -730,20 +875,29 @@ namespace UnrealSteamEmu {
             ReFixLog("[UnrealSteam] GetAuthTicketForWebApi: Generating ticket %u for identity '%s'",
                      hTicket, pchIdentity ? pchIdentity : "null");
 
-            // Generate deterministic 256-byte ticket payload for EOS
-            std::vector<uint8_t> ticketData(256, 0);
-            uint64_t sid = g_localSteamID;
+            uint64_t steam_id = g_localSteamID;
+            uint64_t token = 0xA5A5A5A5A5A5A5A5ULL ^ steam_id;
+            uint32_t date = (uint32_t)::time(NULL);
+            uint32_t gc_len = 20;
+
+            std::vector<uint8_t> ticketData(152, 0);
+            memcpy(ticketData.data() + 0, &gc_len, 4);
+            memcpy(ticketData.data() + 4, &token, 8);
+            memcpy(ticketData.data() + 12, &steam_id, 8);
+            memcpy(ticketData.data() + 20, &date, 4);
             uint32_t app = g_appID;
-            uint32_t tNow = (uint32_t)::time(NULL);
-            memcpy(ticketData.data() + 0, &sid, sizeof(sid));
-            memcpy(ticketData.data() + 8, &app, sizeof(app));
-            memcpy(ticketData.data() + 12, &tNow, sizeof(tNow));
+            memcpy(ticketData.data() + 24, &app, 4);
+            uint32_t ip = 0x0100007F; // 127.0.0.1
+            memcpy(ticketData.data() + 28, &ip, 4);
+            memcpy(ticketData.data() + 32, &ip, 4);
             if (pchIdentity) {
-                strncpy_s((char*)(ticketData.data() + 16), 64, pchIdentity, _TRUNCATE);
+                strncpy_s((char*)(ticketData.data() + 36), ticketData.size() - 36, pchIdentity, _TRUNCATE);
             }
             for (size_t i = 80; i < ticketData.size(); i++) {
-                ticketData[i] = (uint8_t)((hTicket * 31 + i * 13) & 0xFF);
+                ticketData[i] = (uint8_t)((token >> ((i % 8) * 8)) ^ (steam_id >> ((i % 8) * 8)) ^ (uint8_t)i);
             }
+
+            SyncTicketToEnvironment(ticketData.data(), ticketData.size(), hTicket);
 
             GetTicketForWebApiResponse_t resp = {};
             resp.m_hAuthTicket = hTicket;
@@ -772,6 +926,9 @@ namespace UnrealSteamEmu {
             if (pchPersonaName && pchPersonaName[0] != '\0') {
                 g_personaName = pchPersonaName;
                 SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", g_personaName.c_str());
+                SetEnvironmentVariableA("REFIX_USER_NAME", g_personaName.c_str());
+                SetEnvironmentVariableA("REFIX_USERNAME", g_personaName.c_str());
+                SetEnvironmentVariableA("SteamPersonaName", g_personaName.c_str());
             }
             SetPersonaNameResponse_t resp = {};
             resp.m_bSuccess = true;
@@ -806,6 +963,9 @@ namespace UnrealSteamEmu {
         }
 
         virtual const char *GetFriendPersonaName(CSteamID steamIDFriend) override {
+            if (steamIDFriend.ConvertToUint64() == g_localSteamID) {
+                return g_personaName.c_str();
+            }
             auto it = g_peers.find(steamIDFriend.ConvertToUint64());
             if (it != g_peers.end() && !it->second.personaName.empty()) {
                 return it->second.personaName.c_str();
@@ -1760,8 +1920,9 @@ namespace UnrealSteamEmu {
             if (cbAllocateBuffer > 0) {
                 msg->m_pData = (void*)(msg + 1);
                 msg->m_cbSize = cbAllocateBuffer;
-                msg->m_pfnFreeData = [](SteamNetworkingMessage_t *pMsg) { free(pMsg); };
             }
+            msg->m_pfnFreeData = [](SteamNetworkingMessage_t *pMsg) { /* embedded */ };
+            msg->m_pfnRelease = [](SteamNetworkingMessage_t *pMsg) { free(pMsg); };
             return msg;
         }
         virtual ESteamNetworkingAvailability GetRelayNetworkStatus(SteamRelayNetworkStatus_t *pDetails) override {
@@ -1840,6 +2001,108 @@ namespace UnrealSteamEmu {
         }
     };
     static CSteamNetworkingUtilsEmu g_steamNetworkingUtilsInstance;
+
+    // --- ISteamNetworkingMessages ---
+    class CSteamNetworkingMessagesEmu : public ISteamNetworkingMessages {
+    public:
+        virtual EResult SendMessageToUser(const SteamNetworkingIdentity &identityRemote, const void *pubData, uint32 cubData, int nSendFlags, int nRemoteChannel) override {
+            if (!pubData || cubData == 0) return k_EResultOK;
+
+            // Packet format for type 5 (P2P): [int32 channel][message payload]
+            std::vector<uint8_t> payload(sizeof(int32_t) + cubData);
+            *(int32_t*)payload.data() = nRemoteChannel;
+            memcpy(payload.data() + sizeof(int32_t), pubData, cubData);
+
+            uint64_t targetSteamID = identityRemote.GetSteamID64();
+
+            // Try unicast to peer if address is known
+            bool sentUnicast = false;
+            if (targetSteamID != 0 && g_udpSocket != INVALID_SOCKET) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_peers.find(targetSteamID);
+                if (it != g_peers.end() && it->second.ip != 0 && it->second.port != 0) {
+                    std::vector<uint8_t> netBuf(sizeof(NetPacketHeader) + payload.size());
+                    NetPacketHeader* hdr = (NetPacketHeader*)netBuf.data();
+                    hdr->magic = 0x52464958;
+                    hdr->msgType = 5; // P2P
+                    hdr->senderID = g_localSteamID;
+                    hdr->appID = g_appID;
+                    hdr->payloadLen = (uint32_t)payload.size();
+                    memcpy(netBuf.data() + sizeof(NetPacketHeader), payload.data(), payload.size());
+
+                    sockaddr_in dest = {};
+                    dest.sin_family = AF_INET;
+                    dest.sin_port = htons(it->second.port);
+                    dest.sin_addr.s_addr = htonl(it->second.ip);
+                    sendto(g_udpSocket, (const char*)netBuf.data(), (int)netBuf.size(), 0, (sockaddr*)&dest, sizeof(dest));
+                    sentUnicast = true;
+                }
+            }
+
+            if (!sentUnicast) {
+                BroadcastNetPacket(5, payload.data(), payload.size());
+            }
+
+            return k_EResultOK;
+        }
+
+        virtual int ReceiveMessagesOnChannel(int nLocalChannel, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages) override {
+            if (!ppOutMessages || nMaxMessages <= 0) return 0;
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+
+            auto it = g_p2pIncoming.find(nLocalChannel);
+            if (it == g_p2pIncoming.end() || it->second.empty()) return 0;
+
+            int count = 0;
+            while (!it->second.empty() && count < nMaxMessages) {
+                P2PPacket pkt = std::move(it->second.front());
+                it->second.pop();
+
+                SteamNetworkingMessage_t* msg = g_steamNetworkingUtilsInstance.AllocateMessage((int)pkt.data.size());
+                if (msg) {
+                    if (!pkt.data.empty() && msg->m_pData) {
+                        memcpy(msg->m_pData, pkt.data.data(), pkt.data.size());
+                    }
+                    msg->m_identityPeer.SetSteamID64(pkt.senderID);
+                    msg->m_nChannel = nLocalChannel;
+                    msg->m_nFlags = k_nSteamNetworkingSend_Reliable;
+                    msg->m_usecTimeReceived = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    ppOutMessages[count++] = msg;
+                }
+            }
+            return count;
+        }
+
+        virtual bool AcceptSessionWithUser(const SteamNetworkingIdentity &identityRemote) override {
+            return true;
+        }
+
+        virtual bool CloseSessionWithUser(const SteamNetworkingIdentity &identityRemote) override {
+            return true;
+        }
+
+        virtual bool CloseChannelWithUser(const SteamNetworkingIdentity &identityRemote, int nLocalChannel) override {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            g_p2pIncoming.erase(nLocalChannel);
+            return true;
+        }
+
+        virtual ESteamNetworkingConnectionState GetSessionConnectionInfo(const SteamNetworkingIdentity &identityRemote, SteamNetConnectionInfo_t *pConnectionInfo, SteamNetConnectionRealTimeStatus_t *pQuickStatus) override {
+            if (pConnectionInfo) {
+                memset(pConnectionInfo, 0, sizeof(SteamNetConnectionInfo_t));
+                pConnectionInfo->m_identityRemote = identityRemote;
+                pConnectionInfo->m_eState = k_ESteamNetworkingConnectionState_Connected;
+            }
+            if (pQuickStatus) {
+                memset(pQuickStatus, 0, sizeof(SteamNetConnectionRealTimeStatus_t));
+                pQuickStatus->m_eState = k_ESteamNetworkingConnectionState_Connected;
+                pQuickStatus->m_nPing = 5;
+            }
+            return k_ESteamNetworkingConnectionState_Connected;
+        }
+    };
+    static CSteamNetworkingMessagesEmu g_steamNetworkingMessagesInstance;
 
     // --- ISteamRemoteStorage ---
     class CSteamRemoteStorageEmu : public ISteamRemoteStorage {
@@ -2522,6 +2785,8 @@ namespace UnrealSteamEmu {
             return &g_steamNetworkingSocketsInstance;
         if (strstr(pchVersion, "SteamNetworkingUtils") || strstr(pchVersion, "STEAMNETWORKINGUTILS"))
             return &g_steamNetworkingUtilsInstance;
+        if (strstr(pchVersion, "SteamNetworkingMessages") || strstr(pchVersion, "STEAMNETWORKINGMESSAGES"))
+            return &g_steamNetworkingMessagesInstance;
         if (strstr(pchVersion, "SteamNetworking") || strstr(pchVersion, "STEAMNETWORKING"))
             return &g_steamNetworkingInstance;
         if (strstr(pchVersion, "STEAMREMOTESTORAGE") || strstr(pchVersion, "SteamRemoteStorage"))
@@ -2600,6 +2865,7 @@ namespace UnrealSteamEmu {
     void* GetSteamNetworking() { return &g_steamNetworkingInstance; }
     void* GetSteamNetworkingSockets() { return &g_steamNetworkingSocketsInstance; }
     void* GetSteamNetworkingUtils() { return &g_steamNetworkingUtilsInstance; }
+    void* GetSteamNetworkingMessages() { return &g_steamNetworkingMessagesInstance; }
     void* GetSteamRemoteStorage() { return &g_steamRemoteStorageInstance; }
     void* GetSteamUGC() { return &g_steamUGCInstance; }
     void* GetSteamGameServer() { return &g_steamGameServerInstance; }
@@ -2640,6 +2906,9 @@ namespace UnrealSteamEmu {
         // Queue SteamServersConnected_t on startup
         SteamServersConnected_t conn = {};
         PostCallback(SteamServersConnected_t::k_iCallback, &conn, sizeof(conn), 0.01);
+
+        // Broadcast NetPacket Ping with our persona name so LAN peers discover us immediately
+        BroadcastNetPacket(1, g_personaName.c_str(), g_personaName.size());
 
         ReFixLog("=================================================================");
         ReFixLog("  Re:Goldberg for Unreal Engine Initialized Successfully");
@@ -2709,5 +2978,15 @@ namespace UnrealSteamEmu {
 
     bool IsInitialized() {
         return g_bInitialized;
+    }
+}
+
+extern "C" {
+    __declspec(dllexport) void* SteamAPI_SteamNetworkingMessages_SteamAPI_v002() {
+        return UnrealSteamEmu::GetSteamNetworkingMessages();
+    }
+
+    __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002() {
+        return UnrealSteamEmu::GetSteamNetworkingMessages();
     }
 }

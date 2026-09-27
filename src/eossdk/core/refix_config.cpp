@@ -8,26 +8,38 @@ Config& Config::Get() { static Config c; return c; }
 Config::Config() { Load(); }
 
 void Config::Load() {
-    m_iniPath = GameDirectory() + "ReFix.ini";
-    std::ifstream f(m_iniPath);
-    if (!f.is_open()) return;
-    m_found = true;
+    std::string base = GameDirectory();
+    std::string candidates[] = {
+        base + "ReFix.ini",
+        base + "..\\ReFix.ini",
+        base + "..\\..\\ReFix.ini",
+        base + "..\\..\\..\\ReFix.ini",
+        base + "..\\..\\..\\..\\ReFix.ini"
+    };
 
-    std::string line, section;
-    while (std::getline(f, line)) {
-        line = Trim(line);
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        if (line.front() == '[' && line.back() == ']') {
-            section = ToLower(Trim(line.substr(1, line.size() - 2)));
-            continue;
+    for (const auto& path : candidates) {
+        std::ifstream f(path);
+        if (f.is_open()) {
+            m_iniPath = path;
+            m_found = true;
+            std::string line, section;
+            while (std::getline(f, line)) {
+                line = Trim(line);
+                if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+                if (line.front() == '[' && line.back() == ']') {
+                    section = ToLower(Trim(line.substr(1, line.size() - 2)));
+                    continue;
+                }
+                size_t eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = ToLower(Trim(line.substr(0, eq)));
+                std::string val = Trim(line.substr(eq + 1));
+                size_t comment = val.find(" ;");
+                if (comment != std::string::npos) val = Trim(val.substr(0, comment));
+                m_values[section][key] = val;
+            }
+            break;
         }
-        size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        std::string key = ToLower(Trim(line.substr(0, eq)));
-        std::string val = Trim(line.substr(eq + 1));
-        size_t comment = val.find(" ;");
-        if (comment != std::string::npos) val = Trim(val.substr(0, comment));
-        m_values[section][key] = val;
     }
 }
 

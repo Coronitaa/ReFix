@@ -195,6 +195,97 @@ EOS_DECLARE_FUNC(void) EOS_UserInfo_Release(EOS_UserInfo* UserInfo) {
     delete block;
 }
 
+namespace {
+struct BestDisplayNameBlock {
+    EOS_UserInfo_BestDisplayName Info;
+    std::string DisplayName;
+    std::string Nickname;
+};
+std::mutex                                             g_bestDisplayNameMutex;
+std::map<EOS_UserInfo_BestDisplayName*, BestDisplayNameBlock*> g_bestDisplayNameBlocks;
+} // namespace
+
+EOS_DECLARE_FUNC(EOS_EResult) EOS_UserInfo_CopyBestDisplayName(EOS_HUserInfo Handle, const EOS_UserInfo_CopyBestDisplayNameOptions* Options, EOS_UserInfo_BestDisplayName** OutBestDisplayName) {
+    if (!Options || !OutBestDisplayName) return ER::EOS_InvalidParameters;
+    *OutBestDisplayName = nullptr;
+
+    std::string name;
+    if (Options->TargetUserId == Identity::Get().LocalEaid()) {
+        name = Identity::Get().LocalUser().DisplayName;
+    } else if (const FriendEntry* f = FindFriendByEaid(Options->TargetUserId)) {
+        name = f->Name;
+    } else {
+        name = Identity::Get().LocalUser().DisplayName;
+    }
+    if (name.empty()) name = "Player";
+
+    auto* block = new BestDisplayNameBlock();
+    block->DisplayName = name;
+    block->Nickname    = name;
+    std::memset(&block->Info, 0, sizeof(block->Info));
+    block->Info.ApiVersion           = EOS_USERINFO_BESTDISPLAYNAME_API_LATEST;
+    block->Info.UserId               = Options->TargetUserId;
+    block->Info.DisplayName          = block->DisplayName.c_str();
+    block->Info.DisplayNameSanitized = block->DisplayName.c_str();
+    block->Info.Nickname             = block->Nickname.c_str();
+    block->Info.PlatformType         = EOS_OPT_Epic;
+
+    RFLOG(Auth, "EOS_UserInfo_CopyBestDisplayName -> '%s'", block->DisplayName.c_str());
+    {
+        std::lock_guard<std::mutex> lock(g_bestDisplayNameMutex);
+        g_bestDisplayNameBlocks[&block->Info] = block;
+    }
+    *OutBestDisplayName = &block->Info;
+    return ER::EOS_Success;
+}
+
+EOS_DECLARE_FUNC(EOS_EResult) EOS_UserInfo_CopyBestDisplayNameWithPlatform(EOS_HUserInfo Handle, const EOS_UserInfo_CopyBestDisplayNameWithPlatformOptions* Options, EOS_UserInfo_BestDisplayName** OutBestDisplayName) {
+    if (!Options || !OutBestDisplayName) return ER::EOS_InvalidParameters;
+    *OutBestDisplayName = nullptr;
+
+    std::string name;
+    if (Options->TargetUserId == Identity::Get().LocalEaid()) {
+        name = Identity::Get().LocalUser().DisplayName;
+    } else if (const FriendEntry* f = FindFriendByEaid(Options->TargetUserId)) {
+        name = f->Name;
+    } else {
+        name = Identity::Get().LocalUser().DisplayName;
+    }
+    if (name.empty()) name = "Player";
+
+    auto* block = new BestDisplayNameBlock();
+    block->DisplayName = name;
+    block->Nickname    = name;
+    std::memset(&block->Info, 0, sizeof(block->Info));
+    block->Info.ApiVersion           = EOS_USERINFO_BESTDISPLAYNAME_API_LATEST;
+    block->Info.UserId               = Options->TargetUserId;
+    block->Info.DisplayName          = block->DisplayName.c_str();
+    block->Info.DisplayNameSanitized = block->DisplayName.c_str();
+    block->Info.Nickname             = block->Nickname.c_str();
+    block->Info.PlatformType         = Options->TargetPlatformType;
+
+    RFLOG(Auth, "EOS_UserInfo_CopyBestDisplayNameWithPlatform -> '%s'", block->DisplayName.c_str());
+    {
+        std::lock_guard<std::mutex> lock(g_bestDisplayNameMutex);
+        g_bestDisplayNameBlocks[&block->Info] = block;
+    }
+    *OutBestDisplayName = &block->Info;
+    return ER::EOS_Success;
+}
+
+EOS_DECLARE_FUNC(void) EOS_UserInfo_BestDisplayName_Release(EOS_UserInfo_BestDisplayName* BestDisplayName) {
+    if (!BestDisplayName) return;
+    BestDisplayNameBlock* block = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_bestDisplayNameMutex);
+        auto it = g_bestDisplayNameBlocks.find(BestDisplayName);
+        if (it == g_bestDisplayNameBlocks.end()) return;
+        block = it->second;
+        g_bestDisplayNameBlocks.erase(it);
+    }
+    delete block;
+}
+
 // ===========================================================================
 // Friends
 // ===========================================================================
@@ -266,6 +357,9 @@ void RegisterUserApi(Registrar& reg) {
     REFIX_BIND(reg, EOS_UserInfo_QueryUserInfo);
     REFIX_BIND(reg, EOS_UserInfo_CopyUserInfo);
     REFIX_BIND(reg, EOS_UserInfo_Release);
+    REFIX_BIND(reg, EOS_UserInfo_CopyBestDisplayName);
+    REFIX_BIND(reg, EOS_UserInfo_CopyBestDisplayNameWithPlatform);
+    REFIX_BIND(reg, EOS_UserInfo_BestDisplayName_Release);
 
     REFIX_BIND(reg, EOS_Friends_QueryFriends);
     REFIX_BIND(reg, EOS_Friends_GetFriendsCount);

@@ -1538,6 +1538,11 @@ struct ReFixConfig {
     // Traces every ISteamFriends enumeration call the title makes. Off by
     // default: a title with a large friends list makes thousands of these.
     bool logFriendsApi = false;
+
+    // [User]
+    std::string playerName = "Player";
+    std::string steamId = "";
+    uint64_t steamIdNum = 0;
 };
 
 static ReFixConfig g_config;
@@ -1546,10 +1551,23 @@ static void LoadConfig() {
     if (g_configLoaded) return;
     g_configLoaded = true;
 
+    std::vector<std::string> iniCandidates = {
+        GetExeDir() + "ReFix.ini",
+        GetExeDir() + "..\\ReFix.ini",
+        GetExeDir() + "..\\..\\ReFix.ini",
+        GetExeDir() + "..\\..\\..\\ReFix.ini",
+        GetExeDir() + "..\\..\\..\\..\\ReFix.ini",
+        GetProxyDllDir() + "ReFix.ini",
+        GetProxyDllDir() + "..\\ReFix.ini",
+        GetProxyDllDir() + "..\\..\\ReFix.ini",
+        GetProxyDllDir() + "..\\..\\..\\ReFix.ini"
+    };
     std::string ini = GetExeDir() + "ReFix.ini";
-    DWORD attrib = GetFileAttributesA(ini.c_str());
-    if (attrib == INVALID_FILE_ATTRIBUTES) {
-        ini = GetProxyDllDir() + "ReFix.ini";
+    for (const auto& cand : iniCandidates) {
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ini = cand;
+            break;
+        }
     }
 
     auto ReadBool = [&](const char* section, const char* key, bool defaultVal) -> bool {
@@ -1667,6 +1685,43 @@ static void LoadConfig() {
     g_config.enableConsole = ReadBool("Debug", "EnableConsole", false);
     g_config.enableServerBrowser = ReadBool("Debug", "EnableServerBrowser", true);
     g_config.logFriendsApi = ReadBool("Debug", "LogFriendsApi", false);
+
+    // [User]
+    char bufUser[256] = { 0 };
+    ReadString("User", "Name", "", bufUser, sizeof(bufUser));
+    if (bufUser[0] == '\0') {
+        ReadString("User", "PersonaName", "", bufUser, sizeof(bufUser));
+    }
+    if (bufUser[0] == '\0') {
+        char envName[128] = { 0 };
+        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            strcpy_s(bufUser, sizeof(bufUser), envName);
+        } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            strcpy_s(bufUser, sizeof(bufUser), envName);
+        } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            strcpy_s(bufUser, sizeof(bufUser), envName);
+        } else if (GetEnvironmentVariableA("SteamPersonaName", envName, sizeof(envName)) > 0 && envName[0]) {
+            strcpy_s(bufUser, sizeof(bufUser), envName);
+        } else {
+            strcpy_s(bufUser, sizeof(bufUser), "Player");
+        }
+    }
+    g_config.playerName = bufUser;
+
+    char bufSid[64] = { 0 };
+    ReadString("User", "SteamId", "", bufSid, sizeof(bufSid));
+    if (bufSid[0] == '\0') {
+        char envSid[64] = { 0 };
+        if (GetEnvironmentVariableA("REFIX_STEAM_ID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+            strcpy_s(bufSid, sizeof(bufSid), envSid);
+        } else if (GetEnvironmentVariableA("REFIX_STEAMID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+            strcpy_s(bufSid, sizeof(bufSid), envSid);
+        }
+    }
+    g_config.steamId = bufSid;
+    if (bufSid[0] != '\0') {
+        g_config.steamIdNum = _strtoui64(bufSid, nullptr, 10);
+    }
 }
 
 void ReFixLog(const char* fmt, ...) {
@@ -1830,6 +1885,19 @@ static void ApplySteamEnv() {
 
     if (!g_config.language.empty()) {
         SetEnvironmentVariableA("SteamLanguage", g_config.language.c_str());
+    }
+
+    if (!g_config.playerName.empty()) {
+        SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", g_config.playerName.c_str());
+        SetEnvironmentVariableA("REFIX_USER_NAME", g_config.playerName.c_str());
+        SetEnvironmentVariableA("REFIX_USERNAME", g_config.playerName.c_str());
+        SetEnvironmentVariableA("SteamPersonaName", g_config.playerName.c_str());
+    }
+    if (!g_config.steamId.empty()) {
+        SetEnvironmentVariableA("REFIX_STEAM_ID", g_config.steamId.c_str());
+        SetEnvironmentVariableA("REFIX_STEAMID", g_config.steamId.c_str());
+        SetEnvironmentVariableA("SteamID", g_config.steamId.c_str());
+        SetEnvironmentVariableA("SteamId", g_config.steamId.c_str());
     }
 
     if (g_config.enableOverlay && !g_isGoldbergMode) {
@@ -2706,7 +2774,7 @@ static std::vector<uint8_t> GenerateDummyAuthTicket() {
     uint64_t steam_id = GetMachineUniqueSteamID();
     uint64_t token = GetMachineUniqueToken();
     uint32_t date = (uint32_t)time(nullptr);
-    uint32_t gc_len = 24;
+    uint32_t gc_len = 20;
 
     std::vector<uint8_t> ticket(72, 0);
     memcpy(ticket.data(), &gc_len, 4);
@@ -3047,10 +3115,38 @@ static void EnsureUserInterfaceHooked(void* pUser, const char* pszVersion) {
     }
     s_hookedUserVtables.insert((void*)vtable);
 
-    HookVTableMethod(pUser, 13, (void*)Hooked_ISteamUser_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
-    HookVTableMethod(pUser, 14, (void*)Hooked_ISteamUser_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi);
-    HookVTableMethod(pUser, 17, (void*)Hooked_ISteamUser_CancelAuthTicket, (void**)&g_orig_VTable_CancelAuthTicket);
-    ReFixLog("EnsureUserInterfaceHooked: Hooked user interface %p (vtable=%p, version='%s', idx 13,14,17)", pUser, vtable, pszVersion ? pszVersion : "unknown");
+    int verNum = 0;
+    if (pszVersion) {
+        const char* p = pszVersion;
+        while (*p) {
+            if (isdigit((unsigned char)*p)) {
+                verNum = atoi(p);
+                break;
+            }
+            p++;
+        }
+    }
+
+    if (verNum >= 22 || verNum == 0) {
+        // ISteamUser022 / 023 layout:
+        // Slot 13: GetAuthSessionTicket
+        // Slot 14: GetAuthTicketForWebApi
+        // Slot 17: CancelAuthTicket
+        HookVTableMethod(pUser, 13, (void*)Hooked_ISteamUser_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
+        HookVTableMethod(pUser, 14, (void*)Hooked_ISteamUser_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi);
+        HookVTableMethod(pUser, 17, (void*)Hooked_ISteamUser_CancelAuthTicket, (void**)&g_orig_VTable_CancelAuthTicket);
+        ReFixLog("EnsureUserInterfaceHooked: Hooked user interface %p (vtable=%p, version='%s', verNum=%d, idx 13,14,17)",
+                 pUser, vtable, pszVersion ? pszVersion : "unknown", verNum);
+    } else {
+        // ISteamUser021 and earlier layout:
+        // Slot 13: GetAuthSessionTicket
+        // Slot 14: BeginAuthSession (DO NOT hook as WebApi!)
+        // Slot 16: CancelAuthTicket (Slot 17 is UserHasLicenseForApp)
+        HookVTableMethod(pUser, 13, (void*)Hooked_ISteamUser_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
+        HookVTableMethod(pUser, 16, (void*)Hooked_ISteamUser_CancelAuthTicket, (void**)&g_orig_VTable_CancelAuthTicket);
+        ReFixLog("EnsureUserInterfaceHooked: Hooked user interface %p (vtable=%p, version='%s', verNum=%d, idx 13,16 - legacy layout)",
+                 pUser, vtable, pszVersion ? pszVersion : "unknown", verNum);
+    }
 }
 
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
@@ -3804,16 +3900,12 @@ static bool EnsureOriginal() {
     g_pfn_SteamAPIInit_Internal = (fn_SteamInternal_SteamAPI_Init_t)GetProcAddress(g_hOriginalDll, "SteamInternal_SteamAPI_Init");
 
     g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamFriends_GetPersonaName");
-    if (!g_pfn_GetPersonaName)
-        g_pfn_GetPersonaName = (fn_GetPersonaName_t)GetProcAddress(g_hOriginalDll, "SteamFriends");
 
     g_pfn_SteamFriends   = (fn_SteamFriends_v017_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamFriends_v017");
     if (!g_pfn_SteamFriends)
         g_pfn_SteamFriends = (fn_SteamFriends_v017_t)GetProcAddress(g_hOriginalDll, "SteamFriends");
 
     g_pfn_GetSteamID = (fn_GetSteamID_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamUser_GetSteamID");
-    if (!g_pfn_GetSteamID)
-        g_pfn_GetSteamID = (fn_GetSteamID_t)GetProcAddress(g_hOriginalDll, "SteamUser");
 
     g_pfn_SteamUser  = (fn_SteamUser_v021_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamUser_v021");
     if (!g_pfn_SteamUser)
@@ -4053,28 +4145,90 @@ static bool EnsureOriginal() {
 }
 
 static void CapturePersonaName() {
-    if (!g_pfn_GetPersonaName || !g_pfn_SteamFriends) return;
-    void* friends = g_pfn_SteamFriends();
-    if (!friends) return;
-    const char* name = g_pfn_GetPersonaName(friends);
+    const char* name = nullptr;
+    if (g_pfn_GetPersonaName && g_pfn_SteamFriends) {
+        void* friends = g_pfn_SteamFriends();
+        if (friends) name = g_pfn_GetPersonaName(friends);
+    } else if (g_pfn_SteamFriends) {
+        void* friends = g_pfn_SteamFriends();
+        if (friends) {
+            void** vtable = *(void***)friends;
+            if (vtable && vtable[0]) {
+                typedef const char* (*fn_vtable_GetPersonaName)(void*);
+                name = ((fn_vtable_GetPersonaName)vtable[0])(friends);
+            }
+        }
+    }
+
+    if (!name || name[0] == '\0') {
+        if (!g_config.playerName.empty() && g_config.playerName != "Player") {
+            name = g_config.playerName.c_str();
+        } else {
+            char envName[128] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                g_config.playerName = envName;
+                name = g_config.playerName.c_str();
+            } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                g_config.playerName = envName;
+                name = g_config.playerName.c_str();
+            } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                g_config.playerName = envName;
+                name = g_config.playerName.c_str();
+            }
+        }
+    }
+
     if (name && name[0] != '\0') {
         SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", name);
+        SetEnvironmentVariableA("REFIX_USER_NAME", name);
+        SetEnvironmentVariableA("REFIX_USERNAME", name);
+        SetEnvironmentVariableA("SteamPersonaName", name);
         ReFixLog("CapturePersonaName: %s", name);
         ReFixIdentity::GetActiveIdentityProvider()->SetCapturedDisplayName(name);
     }
+
+    uint64_t steamId = 0;
     if (g_pfn_GetSteamID && g_pfn_SteamUser) {
         void* user = g_pfn_SteamUser();
+        if (user) steamId = g_pfn_GetSteamID(user);
+    } else if (g_pfn_SteamUser) {
+        void* user = g_pfn_SteamUser();
         if (user) {
-            uint64_t steamId = g_pfn_GetSteamID(user);
-            if (steamId != 0) {
-                g_capturedSteamID = steamId;
-                char idStr[32];
-                sprintf_s(idStr, sizeof(idStr), "%llu", steamId);
-                SetEnvironmentVariableA("REFIX_STEAM_ID", idStr);
-                ReFixLog("CaptureSteamID: %s", idStr);
-                ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamId(steamId);
+            void** vtable = *(void***)user;
+            if (vtable && vtable[2]) {
+                typedef uint64_t (*fn_vtable_GetSteamID64)(void*);
+                steamId = ((fn_vtable_GetSteamID64)vtable[2])(user);
             }
         }
+    }
+
+    if (steamId == 0) {
+        if (g_config.steamIdNum != 0) {
+            steamId = g_config.steamIdNum;
+        } else {
+            char envSid[64] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_ID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                steamId = _strtoui64(envSid, nullptr, 10);
+            } else if (GetEnvironmentVariableA("REFIX_STEAMID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                steamId = _strtoui64(envSid, nullptr, 10);
+            } else if (GetEnvironmentVariableA("SteamID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                steamId = _strtoui64(envSid, nullptr, 10);
+            } else if (GetEnvironmentVariableA("SteamId", envSid, sizeof(envSid)) > 0 && envSid[0]) {
+                steamId = _strtoui64(envSid, nullptr, 10);
+            }
+        }
+    }
+
+    if (steamId != 0) {
+        g_capturedSteamID = steamId;
+        char idStr[32];
+        sprintf_s(idStr, sizeof(idStr), "%llu", steamId);
+        SetEnvironmentVariableA("REFIX_STEAM_ID", idStr);
+        SetEnvironmentVariableA("REFIX_STEAMID", idStr);
+        SetEnvironmentVariableA("SteamID", idStr);
+        SetEnvironmentVariableA("SteamId", idStr);
+        ReFixLog("CaptureSteamID: %s", idStr);
+        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamId(steamId);
     }
 }
 

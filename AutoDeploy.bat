@@ -82,14 +82,16 @@ set "GAME_EXE_PATH="
 set "DEFAULT_GAME_NAME="
 set "DETECTED_APPID="
 set "CANDIDATE_EXES="
+set "IS_X86=False"
 
 if exist "!BIN_DIR!\detect_game.ps1" (
     for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "!BIN_DIR!\detect_game.ps1" -TargetDir "!TARGET_DIR!" ^<nul`) do (
-        if /i "%%A"=="ENGINE_TYPE" set "ENGINE_TYPE=%%B"
-        if /i "%%A"=="EXE_DIR" set "EXE_DIR=%%B"
-        if /i "%%A"=="GAME_EXE_PATH" set "GAME_EXE_PATH=%%B"
-        if /i "%%A"=="GAME_NAME" set "DEFAULT_GAME_NAME=%%B"
+        if /i "%%A"=="ENGINE_TYPE"    set "ENGINE_TYPE=%%B"
+        if /i "%%A"=="EXE_DIR"        set "EXE_DIR=%%B"
+        if /i "%%A"=="GAME_EXE_PATH"  set "GAME_EXE_PATH=%%B"
+        if /i "%%A"=="GAME_NAME"      set "DEFAULT_GAME_NAME=%%B"
         if /i "%%A"=="DETECTED_APPID" set "DETECTED_APPID=%%B"
+        if /i "%%A"=="IS_X86"         set "IS_X86=%%B"
         if /i "%%A"=="CANDIDATE_EXES" set "CANDIDATE_EXES=%%B"
     )
 )
@@ -102,6 +104,11 @@ echo [DETECTION] Detected Engine Type: !ENGINE_TYPE!
 echo [DETECTION] Executable Location: "!EXE_DIR!"
 if not "!GAME_EXE_PATH!"=="" echo [DETECTION] Game Executable: "!GAME_EXE_PATH!"
 if not "!DETECTED_APPID!"=="" echo [DETECTION] Detected Steam AppID: !DETECTED_APPID!
+if /i "!IS_X86!"=="True" (
+    echo [DETECTION] Architecture: x86 (32-bit) - ReFix proxy32 will be deployed
+) else (
+    echo [DETECTION] Architecture: x64 (64-bit)
+)
 echo:
 
 :: Executable Location and Selection Prompt

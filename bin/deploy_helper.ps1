@@ -174,9 +174,9 @@ function Unpack-SteamStubIfProtected {
 Write-Host "[1/6] Inspecting executables for SteamStub DRM..." -ForegroundColor Cyan
 Unpack-SteamStubIfProtected -TargetFolder $TargetDir -ToolsBinDir $BinDir
 
-# Step 2: Handle steam_api64.dll according to selected mode
+# Step 2: Handle steam_api64.dll (x64) and steam_api.dll (x86) according to selected mode
 # ============================================================
-Write-Host "[2/6] Processing steam_api64.dll instances..." -ForegroundColor Cyan
+Write-Host "[2/6] Processing steam_api DLL instances (x64 + x86)..." -ForegroundColor Cyan
 
 # Discover all steam_api64.dll or backup steam_api64_valve.dll locations
 $pluginDirs = @()
@@ -219,6 +219,37 @@ if ($unityPluginDirs.Count -gt 0) {
 # For Unreal Engine, also ensure ExeDir is in pluginDirs so steam_api64.dll is deployed beside the shipping executable
 if ($EngineType -eq "Unreal" -and ($pluginDirs -notcontains $ExeDir)) {
     $pluginDirs += $ExeDir
+}
+
+# -------------------------------------------------------
+# x86 discovery: detect steam_api.dll (32-bit) locations
+# Handles Unity IL2CPP x86 games (e.g. *_Data\Plugins\x86 or game root)
+# -------------------------------------------------------
+$pluginDirs32 = @()
+
+# Unity x86 plugin subfolder: *_Data\Plugins\x86
+foreach ($uData in $unityDataDirs) {
+    $p32 = Join-Path $uData.FullName "Plugins\x86"
+    if (Test-Path $p32) {
+        if ($pluginDirs32 -notcontains $p32) { $pluginDirs32 += $p32 }
+    }
+}
+
+# Scan for standalone steam_api.dll (exactly "steam_api.dll", not steam_api64.dll)
+$steamDlls32 = Get-ChildItem -Path $TargetDir -Filter "steam_api.dll" -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq "steam_api.dll" }
+foreach ($dll32 in $steamDlls32) {
+    if ($pluginDirs32 -notcontains $dll32.DirectoryName) { $pluginDirs32 += $dll32.DirectoryName }
+}
+
+# Also pick up dirs that only have steam_api_o.dll or steam_api_valve.dll (already-deployed x86)
+$valveDlls32 = Get-ChildItem -Path $TargetDir -Filter "steam_api_valve.dll" -Recurse -ErrorAction SilentlyContinue
+foreach ($v32 in $valveDlls32) {
+    if ($pluginDirs32 -notcontains $v32.DirectoryName) { $pluginDirs32 += $v32.DirectoryName }
+}
+
+if ($pluginDirs32.Count -gt 0) {
+    Write-Host "  [x86] Detected 32-bit steam_api.dll location(s): $($pluginDirs32 -join ', ')" -ForegroundColor Yellow
 }
 
 if ($pluginDirs.Count -eq 0) { $pluginDirs += $ExeDir }
@@ -438,6 +469,64 @@ ForcePublicIPInLobby=true
             Copy-Item -Path $proxyPath -Destination $steamPath -Force
             Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
         }
+
+        # --- x86 deployment: Re:Goldberg for 32-bit games (Unity IL2CPP x86, etc.) ---
+        # Pattern: goldberg x86 -> steam_api_o.dll (backend loaded by proxy32)
+        #          ReFix proxy32 -> steam_api.dll (intercepts Steamworks.NET)
+        if ($pluginDirs32.Count -gt 0) {
+            $goldbergDll32 = Join-Path $BinDir "goldberg\steam_api.dll"
+            $proxyDll32    = Join-Path $BinDir "x86\steam_api.dll"
+
+            if (-not (Test-Path $goldbergDll32)) {
+                Write-Host "  [NOTICE] Goldberg x86 backend not found at $goldbergDll32 - skipping x86 deployment" -ForegroundColor Yellow
+            } elseif (-not (Test-Path $proxyDll32)) {
+                Write-Host "  [NOTICE] ReFix proxy x86 not found at $proxyDll32 - skipping x86 deployment (run build_x86.bat first)" -ForegroundColor Yellow
+            } else {
+                Write-Host "  [Re:Goldberg x86] Deploying 32-bit backend + proxy to $($pluginDirs32.Count) location(s)..." -ForegroundColor Cyan
+                foreach ($dir32 in $pluginDirs32) {
+                    $steamPath32   = Join-Path $dir32 "steam_api.dll"
+                    $backendPath32 = Join-Path $dir32 "steam_api_o.dll"     # Goldberg x86 backend
+                    $origPath32    = Join-Path $dir32 "steam_api_original.dll"  # Original Steam (preserved)
+
+                    # Backup original steam_api.dll if it is not our proxy32 (compare sizes)
+                    if (Test-Path $steamPath32) {
+                        $existingSz = (Get-Item $steamPath32).Length
+                        $proxySz    = (Get-Item $proxyDll32).Length
+                        if ($existingSz -ne $proxySz) {
+                            # Not our proxy - could be original Steam or goldberg; preserve as _original
+                            if (-not (Test-Path $origPath32)) {
+                                Copy-Item -Path $steamPath32 -Destination $origPath32 -Force
+                                Write-Host "  [OK] Backed up original x86 steam_api.dll -> steam_api_original.dll in $dir32" -ForegroundColor Green
+                            }
+                        }
+                    }
+
+                    # Deploy Goldberg x86 as backend (steam_api_o.dll loaded by proxy32's EnsureOrigLoaded)
+                    Copy-Item -Path $goldbergDll32 -Destination $backendPath32 -Force
+                    Write-Host "  [OK] Deployed Goldberg x86 emulator as steam_api_o.dll to $dir32" -ForegroundColor Green
+
+                    # Deploy ReFix proxy32 as steam_api.dll
+                    Copy-Item -Path $proxyDll32 -Destination $steamPath32 -Force
+                    Write-Host "  [OK] Deployed ReFix proxy x86 steam_api.dll to $dir32" -ForegroundColor Green
+
+                    # Generate steam_interfaces.txt for this x86 dir if tool is available
+                    if (Test-Path $genTool) {
+                        try {
+                            $origWd32 = Get-Location
+                            Set-Location $dir32
+                            & $genTool $backendPath32 | Out-Null
+                            Set-Location $origWd32
+                            $genFile32 = Join-Path $dir32 "steam_interfaces.txt"
+                            if (Test-Path $genFile32) {
+                                Write-Host "  [OK] Generated steam_interfaces.txt for x86 dir $dir32" -ForegroundColor Green
+                            }
+                        } catch {
+                            Write-Host "  [NOTICE] x86 interface generator: $_" -ForegroundColor Yellow
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -477,10 +566,14 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
         Write-Host "  [OK] Initialized portable save directory: $savesDir" -ForegroundColor Green
     }
 
-    # Populate steam_settings in ExeDir and all plugin directories
+    # Populate steam_settings in ExeDir and all plugin directories (x64 + x86)
     $settingsDirsToPopulate = @($ExeDir)
     foreach ($pDir in $pluginDirs) {
         if ($settingsDirsToPopulate -notcontains $pDir) { $settingsDirsToPopulate += $pDir }
+    }
+    # Also populate x86 dirs (e.g. HushHush_Data\Plugins\x86) so goldberg x86 backend finds its config
+    foreach ($pDir32 in $pluginDirs32) {
+        if ($settingsDirsToPopulate -notcontains $pDir32) { $settingsDirsToPopulate += $pDir32 }
     }
 
     foreach ($baseDir in $settingsDirsToPopulate) {
