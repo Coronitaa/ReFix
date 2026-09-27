@@ -30,6 +30,7 @@
 #include "minhook/MinHook.h"
 #include "identity/online_identity_provider.h"
 #include "crypto_hash.h"
+#include "unreal_detect.h"
 
 static std::atomic<uint32_t> g_authCorrelationCounter{ 0 };
 
@@ -1588,11 +1589,18 @@ static void LoadConfig() {
     // [Game]
     char bufGameName[128], bufEngine[64];
     ReadString("Game", "GameName", "Shift At Midnight", bufGameName, sizeof(bufGameName));
-    ReadString("Game", "EngineType", "Unity", bufEngine, sizeof(bufEngine));
+    ReadString("Game", "EngineType", "Auto", bufEngine, sizeof(bufEngine));
     g_config.gameName = bufGameName;
     g_config.engineType = bufEngine;
     g_godotIsEngine = (_stricmp(g_config.engineType.c_str(), "Godot") == 0);
     g_unrealIsEngine = (_stricmp(g_config.engineType.c_str(), "Unreal") == 0);
+    if (!g_unrealIsEngine && (_stricmp(g_config.engineType.c_str(), "Auto") == 0 || g_config.engineType.empty() || _stricmp(g_config.engineType.c_str(), "Unity") == 0)) {
+        if (UnrealDetect_IsUnrealProcess()) {
+            g_unrealIsEngine = true;
+            g_config.engineType = "Unreal";
+            ReFixLog("EngineType auto-detected as Unreal Engine (Winsock P2P hooks will be installed)");
+        }
+    }
 
     // [Steam]
     char bufMask[64], bufReal[64], bufLang[64];
@@ -2917,7 +2925,7 @@ static void Hooked_Callback_Run_168(void* self, void* pvParam) {
         auto it = g_origCallbackRun.find(self);
         if (it != g_origCallbackRun.end()) orig = it->second;
     }
-    if (orig) {
+    if (orig && orig != (fn_CallbackRun_t)Hooked_Callback_Run_168) {
         orig(self, pvParam);
     }
 }
@@ -2944,7 +2952,7 @@ static void Hooked_Callback_Run2_168(void* self, void* pvParam, bool bIOFailure,
         auto it = g_origCallbackRun2.find(self);
         if (it != g_origCallbackRun2.end()) orig = it->second;
     }
-    if (orig) {
+    if (orig && orig != (fn_CallbackRun2_t)Hooked_Callback_Run2_168) {
         orig(self, pvParam, bIOFailure, hSteamAPICall);
     }
 }
@@ -3666,7 +3674,7 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
 
     if (iCallback == 168 && pCallback) {
         void** vtable = *(void***)pCallback;
-        if (vtable) {
+        if (vtable && vtable[0] != (void*)Hooked_Callback_Run_168) {
             std::lock_guard<std::mutex> lg(g_callbackHookMutex);
             if (g_origCallbackRun.find(pCallback) == g_origCallbackRun.end()) {
                 g_origCallbackRun[pCallback] = (fn_CallbackRun_t)vtable[0];

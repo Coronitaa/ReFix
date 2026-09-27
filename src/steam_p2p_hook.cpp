@@ -102,11 +102,13 @@ static std::unordered_map<uint64_t, uint32_t> g_steamIDToIP;
 struct RecvPacket {
     std::vector<uint8_t> data;
     uint64_t             fromSteamID;
+    uint16_t             fromPort;
 };
 
 static std::mutex           g_recvMutex;
 static std::deque<RecvPacket> g_recvQueue;
 static const size_t         k_maxRecvQueue = 4096;
+static std::atomic<SOCKET>  g_lastGameSocket{ INVALID_SOCKET };
 
 // =============================================================================
 // Logging
@@ -325,6 +327,7 @@ static bool P2PPumpStep() {
                         RecvPacket pkt;
                         pkt.data.assign(pktBuf, pktBuf + bytesRead);
                         pkt.fromSteamID = fromID;
+                        pkt.fromPort = 7777;
                         g_recvQueue.push_back(std::move(pkt));
                     }
                 }
@@ -359,11 +362,15 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen)
 {
-    // Only intercept IPv4 UDP to known peer IPs
+    // Only intercept IPv4 UDP
     if (to && to->sa_family == AF_INET && len > 0) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(to);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
+
+        if (destPort == 7777 || destPort == 7778 || destPort == 27015 || (destPort >= 7770 && destPort <= 7790)) {
+            g_lastGameSocket.store(s);
+        }
 
         uint64_t steamID = 0;
         {
@@ -371,17 +378,27 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
             auto it = g_ipToSteamID.find(destIP);
             if (it != g_ipToSteamID.end()) {
                 steamID = it->second;
-            } else if ((destPort == 7777 || destPort == 7778 || destPort == 27015 || destIP == 0x7F000001u || destIP == 0) && g_ipToSteamID.size() == 1) {
-                // If game connects to server port or loopback and we have 1 known peer (the host), redirect!
+                g_lastGameSocket.store(s);
+            } else if ((destPort == 7777 || destPort == 7778 || destPort == 27015 ||
+                        (destIP & 0xFF000000u) == 0x7F000000u || destIP == 0 ||
+                        (destIP & 0xFFFF0000u) == 0xC0A80000u || (destIP & 0xFF000000u) == 0x0A000000u) &&
+                       g_ipToSteamID.size() == 1) {
+                // If game connects to server port or loopback/private subnet and we have 1 known peer (the host), redirect!
                 steamID = g_ipToSteamID.begin()->second;
+                g_lastGameSocket.store(s);
             }
         }
 
-        if (steamID != 0 && g_pSteamNetworking) {
-            // Redirect through Steam P2P
-            bool ok = ISteamNetworking_SendP2PPacket(g_pSteamNetworking, steamID,
-                buf, (uint32_t)len, k_EP2PSendUnreliable, k_nChannel);
-            return ok ? len : SOCKET_ERROR;
+        if (steamID != 0) {
+            if (!g_pSteamNetworking) {
+                g_pSteamNetworking = ResolveSteamNetworking();
+            }
+            if (g_pSteamNetworking) {
+                // Redirect through Steam P2P SDR relay
+                bool ok = ISteamNetworking_SendP2PPacket(g_pSteamNetworking, steamID,
+                    buf, (uint32_t)len, k_EP2PSendUnreliable, k_nChannel);
+                return ok ? len : SOCKET_ERROR;
+            }
         }
     }
 
@@ -393,11 +410,26 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
 static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
     struct sockaddr* from, int* fromlen)
 {
-    // Check our P2P receive queue first
-    {
+    SOCKET gameSock = g_lastGameSocket.load();
+    if (gameSock == INVALID_SOCKET) {
+        sockaddr_in localAddr{};
+        int localLen = sizeof(localAddr);
+        if (getsockname(s, (sockaddr*)&localAddr, &localLen) == 0) {
+            uint16_t lport = ntohs(localAddr.sin_port);
+            if (lport == 7777 || lport == 7778 || lport == 27015 || (lport >= 7770 && lport <= 7790)) {
+                g_lastGameSocket.store(s);
+                gameSock = s;
+            }
+        }
+    }
+
+    // Check our P2P receive queue if this is the game socket or game socket not yet known
+    if (gameSock == INVALID_SOCKET || s == gameSock) {
         std::lock_guard<std::mutex> lg(g_recvMutex);
         if (!g_recvQueue.empty()) {
-            RecvPacket& pkt = g_recvQueue.front();
+            RecvPacket pkt = std::move(g_recvQueue.front());
+            g_recvQueue.pop_front();
+
             int copyLen = (int)pkt.data.size();
             if (copyLen > len) copyLen = len;
             memcpy(buf, pkt.data.data(), copyLen);
@@ -405,19 +437,20 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
             if (from && fromlen && *fromlen >= (int)sizeof(struct sockaddr_in)) {
                 struct sockaddr_in* sin = reinterpret_cast<struct sockaddr_in*>(from);
                 sin->sin_family = AF_INET;
-                sin->sin_port   = htons(7777);
+                sin->sin_port   = htons(pkt.fromPort ? pkt.fromPort : 7777);
 
-                uint32_t srcIP = 0;
+                uint32_t srcIP = 0x7F000001u;
                 {
-                    // look up IP for this SteamID (brief unlock not needed — already under recvMutex)
+                    std::lock_guard<std::mutex> lgPeer(g_peerMutex);
                     auto it = g_steamIDToIP.find(pkt.fromSteamID);
-                    if (it != g_steamIDToIP.end()) srcIP = it->second;
+                    if (it != g_steamIDToIP.end()) {
+                        srcIP = it->second;
+                    }
                 }
                 sin->sin_addr.s_addr = htonl(srcIP);
                 *fromlen = sizeof(struct sockaddr_in);
             }
 
-            g_recvQueue.pop_front();
             return copyLen;
         }
     }
@@ -467,7 +500,22 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
     {
         std::lock_guard<std::mutex> lg(g_recvMutex);
         if (!g_recvQueue.empty() && result <= 0) {
+            SOCKET gameSock = g_lastGameSocket.load();
             if (hasInRead && readfds) {
+                if (gameSock != INVALID_SOCKET) {
+                    bool inSet = false;
+                    for (u_int i = 0; i < inRead.fd_count; ++i) {
+                        if (inRead.fd_array[i] == gameSock) {
+                            inSet = true;
+                            break;
+                        }
+                    }
+                    if (inSet) {
+                        FD_ZERO(readfds);
+                        FD_SET(gameSock, readfds);
+                        return 1;
+                    }
+                }
                 *readfds = inRead;
                 return (int)readfds->fd_count;
             }
@@ -556,8 +604,12 @@ void Uninstall() {
         g_pumpThread = nullptr;
     }
 
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
+
     g_pSteamNetworking = nullptr;
     g_hooksInstalled = false;
+    g_lastGameSocket.store(INVALID_SOCKET);
 }
 
 void RegisterPeer(uint64_t steamID, uint32_t ipv4_host) {
@@ -618,3 +670,18 @@ extern "C" void SteamP2PHook_ForceResolve() {
         SteamP2PHook::Log("[ForceResolve] WARNING: ISteamNetworking still not resolved post-Init");
     }
 }
+
+extern "C" {
+__declspec(dllexport) void ReFix_RegisterP2PPeer(uint64_t steamID, uint32_t ipv4_host) {
+    SteamP2PHook::RegisterPeer(steamID, ipv4_host);
+}
+
+__declspec(dllexport) void ReFix_RegisterP2PPeerStr(uint64_t steamID, const char* ipStr) {
+    if (!ipStr || !*ipStr) return;
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ipStr, &addr) == 1) {
+        SteamP2PHook::RegisterPeer(steamID, ntohl(addr.s_addr));
+    }
+}
+}
+

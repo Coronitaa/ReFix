@@ -98,7 +98,7 @@ bool Bind(T& fn, const char* name) {
 // them finds us; on our side we accept any of them and never filter server-side,
 // so we can never exclude someone else's lobby by accident.
 // ---------------------------------------------------------------------------
-const char* const kAppIdKeys[] = { "appid", "AppID", "game_appid", "gameappid" };
+const char* const kAppIdKeys[] = { "RealAppId", "realappid", "appid", "AppID", "game_appid", "gameappid", "OnlineFix", "game_filter" };
 const char* const kNameKeys[]  = { "name", "lobby_name", "servername" };
 
 const char* const kKeyRecordCount = "refix_eos_parts";
@@ -248,6 +248,18 @@ std::string LobbyString(uint64_t lobby, const char* key) {
     return v ? std::string(v) : std::string();
 }
 
+static void NotifyP2PHookOfPeer(uint64_t steamId, uint32_t ipv4) {
+    if (!steamId || !ipv4) return;
+    HMODULE hSteam = g_api.Module;
+    if (!hSteam) hSteam = GetModuleHandleA("steam_api64.dll");
+    if (!hSteam) hSteam = GetModuleHandleA("steam_api.dll");
+    if (hSteam) {
+        typedef void (*fn_Reg_t)(uint64_t, uint32_t);
+        auto fn = (fn_Reg_t)GetProcAddress(hSteam, "ReFix_RegisterP2PPeer");
+        if (fn) fn(steamId, ipv4);
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -280,7 +292,22 @@ bool SteamBackend::Start() {
     // on. Published so other emulators recognise the lobby.
     m_gameAppId = cfg.GetString("Steam", "RealAppId", "");
     if (m_gameAppId.empty() || m_gameAppId == "480")
+        m_gameAppId = cfg.GetString("Main", "RealAppId", "");
+    if (m_gameAppId.empty() || m_gameAppId == "480")
         m_gameAppId = cfg.GetString("Steam", "WorkshopAppId", "");
+    if (m_gameAppId.empty() || m_gameAppId == "480") {
+        std::string gameName = cfg.GetString("Game", "GameName", "");
+        if (!gameName.empty() && gameName != "DefaultGame" && gameName != "Shift At Midnight") {
+            uint32_t hash = 2166136261u;
+            for (char c : gameName) {
+                hash ^= (uint8_t)tolower(c);
+                hash *= 16777619u;
+            }
+            uint32_t synthAppId = 1000000u + (hash % 8000000u);
+            m_gameAppId = std::to_string(synthAppId);
+            RFLOG(Net, "SteamBackend: RealAppId derived from GameName '%s' -> %s", gameName.c_str(), m_gameAppId.c_str());
+        }
+    }
 
     g_api.Module = GetModuleHandleA("steam_api64.dll");
     if (!g_api.Module) {
@@ -538,6 +565,9 @@ bool SteamBackend::ReadLobbyRecord(uint64_t steamLobby, LobbyRecord& out) {
     out.LastSeenMs = NowMs();
     out.SteamLobbyId = steamLobby;
     if (g_api.GetLobbyOwner) out.OwnerSteamId = g_api.GetLobbyOwner(g_api.Matchmaking, steamLobby);
+    if (out.OwnerSteamId != 0 && out.HostAddress.Ipv4 != 0) {
+        NotifyP2PHookOfPeer(out.OwnerSteamId, out.HostAddress.Ipv4);
+    }
     return true;
 }
 

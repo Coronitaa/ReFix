@@ -44,3 +44,8 @@ namespace SteamP2PHook {
     void Log(const char* fmt, ...);
 
 } // namespace SteamP2PHook
+
+extern "C" {
+    __declspec(dllexport) void ReFix_RegisterP2PPeer(uint64_t steamID, uint32_t ipv4_host);
+    __declspec(dllexport) void ReFix_RegisterP2PPeerStr(uint64_t steamID, const char* ipStr);
+}

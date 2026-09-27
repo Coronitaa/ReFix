@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // ReFix - UPnP & Windows Firewall Native Network Helper Implementation
 // =============================================================================
 
@@ -99,7 +99,15 @@ bool MapUPnPPort(uint16_t port, const wchar_t* description) {
     wchar_t wLocalIP[64];
     MultiByteToWideChar(CP_ACP, 0, localIP.c_str(), -1, wLocalIP, 64);
 
-    hr = pPortMappings->Add((LONG)port, (BSTR)L"UDP", (LONG)port, (BSTR)wLocalIP, VARIANT_TRUE, (BSTR)description, &pPortMapping);
+    BSTR bstrProto = SysAllocString(L"UDP");
+    BSTR bstrLocalIP = SysAllocString(wLocalIP);
+    BSTR bstrDesc = SysAllocString(description);
+
+    hr = pPortMappings->Add((LONG)port, bstrProto, (LONG)port, bstrLocalIP, VARIANT_TRUE, bstrDesc, &pPortMapping);
+
+    SysFreeString(bstrProto);
+    SysFreeString(bstrLocalIP);
+    SysFreeString(bstrDesc);
 
     if (pPortMapping) pPortMapping->Release();
     pPortMappings->Release();
@@ -116,7 +124,9 @@ void UnmapUPnPPort(uint16_t port) {
 
     if (SUCCEEDED(CoCreateInstance(CLSID_UPnPNAT, NULL, CLSCTX_INPROC_SERVER, IID_IUPnPNAT, (void**)&pUNat)) && pUNat) {
         if (SUCCEEDED(pUNat->get_StaticPortMappingCollection(&pPortMappings)) && pPortMappings) {
-            pPortMappings->Remove((LONG)port, (BSTR)L"UDP");
+            BSTR bstrProto = SysAllocString(L"UDP");
+            pPortMappings->Remove((LONG)port, bstrProto);
+            SysFreeString(bstrProto);
             pPortMappings->Release();
         }
         pUNat->Release();
@@ -129,7 +139,6 @@ std::string GetLocalIP() {
 
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) == SOCKET_ERROR) {
-        WSACleanup();
         return "127.0.0.1";
     }
 
@@ -146,7 +155,6 @@ std::string GetLocalIP() {
         freeaddrinfo(info);
     }
 
-    WSACleanup();
     return ip;
 }
 

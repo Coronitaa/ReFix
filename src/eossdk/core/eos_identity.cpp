@@ -3,6 +3,8 @@
 #include "refix_hash.h"
 #include "refix_log.h"
 #include "eos_online.h"
+#include "net/steam_backend.h"
+#include <fstream>
 
 namespace refix {
 
@@ -92,7 +94,7 @@ UserRecord Identity::BuildUser(const std::string& externalId, EOS_EExternalAccou
 
 const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char* token) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_resolved) return m_local;
+    if (m_resolved && credentialType < 0) return m_local;
 
     auto& cfg = Config::Get();
 
@@ -111,6 +113,39 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
             displayName = persona;
         else if (GetEnvironmentVariableA("SteamPersonaName", persona, sizeof(persona)) > 0 && persona[0])
             displayName = persona;
+    }
+    if (displayName.empty() || ToLower(displayName) == "player") {
+        std::string steamName = SteamBackend::Get().LocalPersonaName();
+        if (!steamName.empty() && ToLower(steamName) != "player") {
+            displayName = steamName;
+        }
+    }
+    if (displayName.empty() || ToLower(displayName) == "player") {
+        char exePath[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        char* slash = strrchr(exePath, '\\');
+        if (!slash) slash = strrchr(exePath, '/');
+        if (slash) *(slash + 1) = '\0';
+        std::string exeDir(exePath);
+        std::vector<std::string> nameFiles = {
+            exeDir + "steam_settings\\force_account_name.txt",
+            exeDir + "..\\steam_settings\\force_account_name.txt",
+            exeDir + "..\\..\\steam_settings\\force_account_name.txt"
+        };
+        for (const auto& nf : nameFiles) {
+            std::ifstream file(nf);
+            if (file.is_open()) {
+                std::string line;
+                if (std::getline(file, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+                    while (!line.empty() && line.front() == ' ') line.erase(line.begin());
+                    if (!line.empty()) {
+                        displayName = line;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     std::string externalId;

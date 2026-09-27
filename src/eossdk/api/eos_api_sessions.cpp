@@ -160,6 +160,16 @@ EOS_SessionDetails_Info* MakeSessionInfo(const LobbyRecord& r) {
     block->HostAddress = ReservedString(r, REFIX_SESSION_HOST_KEY, r.HostAddress.ToString());
     block->BucketId    = r.BucketId;
 
+    if (r.OwnerSteamId != 0 && r.HostAddress.Ipv4 != 0) {
+        HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+        if (!hSteam) hSteam = GetModuleHandleA("steam_api.dll");
+        if (hSteam) {
+            typedef void (*fn_Reg_t)(uint64_t, uint32_t);
+            auto fn = (fn_Reg_t)GetProcAddress(hSteam, "ReFix_RegisterP2PPeer");
+            if (fn) fn(r.OwnerSteamId, r.HostAddress.Ipv4);
+        }
+    }
+
     std::memset(&block->Settings, 0, sizeof(block->Settings));
     block->Settings.ApiVersion           = EOS_SESSIONDETAILS_SETTINGS_API_LATEST;
     block->Settings.BucketId             = block->BucketId.c_str();

@@ -3,6 +3,8 @@ EXPORTS
     ReFix_NotifyLobbyID
     ReFix_NotifyLobbyMemberChange
     ReFix_Steam_GetCapturedTicketData
+    ReFix_RegisterP2PPeer
+    ReFix_RegisterP2PPeerStr
     GetHSteamPipe=GetHSteamPipe_proxy
     GetHSteamUser=GetHSteamUser_proxy
     SteamAPI_GetHSteamPipe=SteamAPI_GetHSteamPipe_proxy

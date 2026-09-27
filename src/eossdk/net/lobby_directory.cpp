@@ -469,6 +469,7 @@ bool LobbyDirectory::SendP2P(const std::string& toPuid, const std::string& socke
     if (!to.Valid()) return false;
     Writer w;
     BeginMessage(w, MSG_P2P);
+    w.Str(m_localPuid);
     w.Str(socketName);
     w.U8(channel);
     w.Bytes(data, len);
@@ -778,13 +779,13 @@ void LobbyDirectory::OnDatagram(const PeerRef& from, const uint8_t* data, size_t
     }
 
     case MSG_P2P: {
+        std::string fromPuid = r.Str(64);
         std::string socketName = r.Str(256);
         uint8_t channel = r.U8();
         std::vector<uint8_t> payload = r.Bytes(64 * 1024);
         if (!r.Ok()) return;
-        // Identify the sender by the address it announced itself with.
-        std::string fromPuid;
-        {
+        // If fromPuid wasn't explicitly populated (legacy wire format), fallback to reverse address lookup
+        if (fromPuid.empty()) {
             std::lock_guard<std::mutex> lock(m_mutex);
             for (const auto& kv : m_addresses) {
                 if ((from.SteamId && kv.second.SteamId == from.SteamId) ||
