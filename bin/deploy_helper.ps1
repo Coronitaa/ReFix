@@ -288,9 +288,30 @@ switch ($OnlineMode) {
             Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
         }
 
-        # Also deploy winmm.dll to ExeDir for early Steam Overlay injection (before Unity initializes DirectX)
+        # Also deploy x86 proxy if 32-bit game detected
+        if ($pluginDirs32.Count -gt 0) {
+            $proxyPath32 = Join-Path $BinDir "x86\steam_api.dll"
+            if (Test-Path $proxyPath32) {
+                foreach ($dir32 in $pluginDirs32) {
+                    $valvePath32 = Join-Path $dir32 "steam_api_o.dll"
+                    $steamPath32 = Join-Path $dir32 "steam_api.dll"
+                    if (Test-Path $steamPath32) {
+                        $isAlreadyProxy = ((Get-Item $steamPath32).Length -eq (Get-Item $proxyPath32).Length)
+                        if ((-not (Test-Path $valvePath32)) -and (-not $isAlreadyProxy)) {
+                            Rename-Item -Path $steamPath32 -NewName "steam_api_o.dll" -Force
+                            Write-Host "  [OK] Backed up original x86 steam_api.dll -> steam_api_o.dll in $dir32" -ForegroundColor Green
+                        }
+                    }
+                    Copy-Item -Path $proxyPath32 -Destination $steamPath32 -Force
+                    Write-Host "  [OK] Deployed ReFix proxy x86 steam_api.dll to $dir32" -ForegroundColor Green
+                }
+            }
+        }
+
+        # Also deploy winmm.dll to ExeDir for early Steam Overlay injection (64-bit only)
+        $isX86Only = ($pluginDirs32.Count -gt 0 -and $pluginDirs.Count -eq 0)
         $winmmPath = Join-Path $BinDir "winmm.dll"
-        if (Test-Path $winmmPath) {
+        if ((Test-Path $winmmPath) -and (-not $isX86Only)) {
             $targetWinmm = Join-Path $ExeDir "winmm.dll"
             $targetWinmmOrig = Join-Path $ExeDir "winmm_o.dll"
             if ((Test-Path $targetWinmm) -and (-not (Test-Path $targetWinmmOrig)) -and ((Get-Item $targetWinmm).Length -ne (Get-Item $winmmPath).Length)) {

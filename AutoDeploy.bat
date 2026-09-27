@@ -59,9 +59,12 @@ if "!TARGET_DIR!"=="" (
     goto ERROR_EXIT
 )
 
-:: Strip trailing backslash and quotes if present
+:: Strip trailing backslash, slash, spaces and quotes if present
 set "TARGET_DIR=!TARGET_DIR:"=!"
-if "!TARGET_DIR:~-1!"=="\" set "TARGET_DIR=!TARGET_DIR:~0,-1!"
+:TRIM_TARGET_DIR
+if "!TARGET_DIR:~-1!"==" " set "TARGET_DIR=!TARGET_DIR:~0,-1!" & goto TRIM_TARGET_DIR
+if "!TARGET_DIR:~-1!"=="\" set "TARGET_DIR=!TARGET_DIR:~0,-1!" & goto TRIM_TARGET_DIR
+if "!TARGET_DIR:~-1!"=="/" set "TARGET_DIR=!TARGET_DIR:~0,-1!" & goto TRIM_TARGET_DIR
 
 if not exist "!TARGET_DIR!" (
     echo:
@@ -105,9 +108,9 @@ echo [DETECTION] Executable Location: "!EXE_DIR!"
 if not "!GAME_EXE_PATH!"=="" echo [DETECTION] Game Executable: "!GAME_EXE_PATH!"
 if not "!DETECTED_APPID!"=="" echo [DETECTION] Detected Steam AppID: !DETECTED_APPID!
 if /i "!IS_X86!"=="True" (
-    echo [DETECTION] Architecture: x86 (32-bit) - ReFix proxy32 will be deployed
+    echo [DETECTION] Architecture: x86 [32-bit] - ReFix proxy32 will be deployed
 ) else (
-    echo [DETECTION] Architecture: x64 (64-bit)
+    echo [DETECTION] Architecture: x64 [64-bit]
 )
 echo:
 
@@ -329,8 +332,9 @@ echo ====================================================================
 echo Starting ReFix Deployment... (Mode: !ONLINE_MODE_NAME!)
 echo ====================================================================
 
-:: Step 1: Copy winmm.dll proxy only if in Valve mode
+:: Step 1: Copy winmm.dll proxy only if in Valve mode and 64-bit
 if "!ONLINE_MODE_NAME!"=="goldberg" goto SKIP_WINMM_DEPLOY
+if /i "!IS_X86!"=="True" goto SKIP_WINMM_DEPLOY
 if not exist "!BIN_DIR!\winmm.dll" goto SKIP_WINMM_DEPLOY
 
 echo [1/6] Deploying winmm.dll proxy...
