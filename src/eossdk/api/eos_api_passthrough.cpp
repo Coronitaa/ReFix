@@ -26,6 +26,7 @@ using EOS_Connect_CreateUser_Fn = void (EOS_CALL*)(EOS_HConnect, const EOS_Conne
 using EOS_Connect_GetProductUserExternalAccountCount_Fn = uint32_t (EOS_CALL*)(EOS_HConnect, const EOS_Connect_GetProductUserExternalAccountCountOptions*);
 using EOS_Connect_CopyProductUserExternalAccountByAccountType_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserExternalAccountByAccountTypeOptions*, EOS_Connect_ExternalAccountInfo**);
 using EOS_Connect_CopyProductUserExternalAccountByIndex_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserExternalAccountByIndexOptions*, EOS_Connect_ExternalAccountInfo**);
+using EOS_Connect_CopyProductUserExternalAccountByAccountId_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserExternalAccountByAccountIdOptions*, EOS_Connect_ExternalAccountInfo**);
 using EOS_Connect_CopyProductUserInfo_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserInfoOptions*, EOS_Connect_ExternalAccountInfo**);
 using EOS_Connect_ExternalAccountInfo_Release_Fn = void (EOS_CALL*)(EOS_Connect_ExternalAccountInfo*);
 
@@ -36,8 +37,10 @@ static EOS_Connect_CreateUser_Fn g_orig_EOS_Connect_CreateUser = nullptr;
 static EOS_Connect_GetProductUserExternalAccountCount_Fn g_orig_EOS_Connect_GetProductUserExternalAccountCount = nullptr;
 static EOS_Connect_CopyProductUserExternalAccountByAccountType_Fn g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountType = nullptr;
 static EOS_Connect_CopyProductUserExternalAccountByIndex_Fn g_orig_EOS_Connect_CopyProductUserExternalAccountByIndex = nullptr;
+static EOS_Connect_CopyProductUserExternalAccountByAccountId_Fn g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountId = nullptr;
 static EOS_Connect_CopyProductUserInfo_Fn g_orig_EOS_Connect_CopyProductUserInfo = nullptr;
 static EOS_Connect_ExternalAccountInfo_Release_Fn g_orig_EOS_Connect_ExternalAccountInfo_Release = nullptr;
+static EOS_ProductUserId g_localProductUserId = nullptr;
 
 std::string DllDirectory() {
     char buf[MAX_PATH] = { 0 };
@@ -130,6 +133,8 @@ struct DeviceIdAuthContext {
     EOS_Connect_Credentials DeviceCreds{};
     EOS_Connect_UserLoginInfo UserLoginInfo{};
     EOS_Connect_LoginOptions LoginOptions{};
+    EOS_Connect_CreateDeviceIdOptions CreateDeviceOptions{};
+    EOS_Connect_CreateUserOptions CreateUserOptions{};
     EOS_ContinuanceToken ContinuanceToken = nullptr;
 };
 
@@ -171,10 +176,10 @@ EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_Login(
     if (ctx->DisplayName.size() > 32) ctx->DisplayName.resize(32);
 
     if (g_orig_EOS_Connect_CreateDeviceId) {
-        EOS_Connect_CreateDeviceIdOptions devOpts{};
-        devOpts.ApiVersion = EOS_CONNECT_CREATEDEVICEID_API_LATEST;
-        devOpts.DeviceModel = "PC Windows";
-        g_orig_EOS_Connect_CreateDeviceId(Handle, &devOpts, ctx, OnCreateDeviceIdCallback);
+        ctx->CreateDeviceOptions = {};
+        ctx->CreateDeviceOptions.ApiVersion = EOS_CONNECT_CREATEDEVICEID_API_LATEST;
+        ctx->CreateDeviceOptions.DeviceModel = "PC Windows";
+        g_orig_EOS_Connect_CreateDeviceId(Handle, &ctx->CreateDeviceOptions, ctx, OnCreateDeviceIdCallback);
     } else {
         DoDeviceIdLogin(ctx);
     }
@@ -232,6 +237,7 @@ static void EOS_CALL OnDeviceIdLoginCallback(const EOS_Connect_LoginCallbackInfo
 
     if (res == (int)EOS_EResult::EOS_Success) {
         RFLOG(Auth, "[Passthrough] EOS_Connect_Login succeeded via DeviceId! LocalUserId = %p", Data->LocalUserId);
+        g_localProductUserId = Data->LocalUserId;
         if (ctx->OriginalCompletionDelegate) {
             EOS_Connect_LoginCallbackInfo cbInfo = *Data;
             cbInfo.ClientData = ctx->OriginalClientData;
@@ -242,10 +248,10 @@ static void EOS_CALL OnDeviceIdLoginCallback(const EOS_Connect_LoginCallbackInfo
         RFLOG(Auth, "[Passthrough] User not registered yet (EOS_InvalidUser, 3). Advancing to Stage 3: EOS_Connect_CreateUser...");
         if (g_orig_EOS_Connect_CreateUser && Data->ContinuanceToken) {
             ctx->ContinuanceToken = Data->ContinuanceToken;
-            EOS_Connect_CreateUserOptions createOpts{};
-            createOpts.ApiVersion = EOS_CONNECT_CREATEUSER_API_LATEST;
-            createOpts.ContinuanceToken = ctx->ContinuanceToken;
-            g_orig_EOS_Connect_CreateUser(ctx->Handle, &createOpts, ctx, OnCreateUserCallback);
+            ctx->CreateUserOptions = {};
+            ctx->CreateUserOptions.ApiVersion = EOS_CONNECT_CREATEUSER_API_LATEST;
+            ctx->CreateUserOptions.ContinuanceToken = ctx->ContinuanceToken;
+            g_orig_EOS_Connect_CreateUser(ctx->Handle, &ctx->CreateUserOptions, ctx, OnCreateUserCallback);
             return;
         } else {
             RFLOG(Auth, "[Passthrough] Cannot create user: g_orig_EOS_Connect_CreateUser missing or null ContinuanceToken");
@@ -276,6 +282,7 @@ static void EOS_CALL OnCreateUserCallback(const EOS_Connect_CreateUserCallbackIn
 
     if (res == (int)EOS_EResult::EOS_Success) {
         RFLOG(Auth, "[Passthrough] User created successfully! Minted LocalUserId = %p", Data->LocalUserId);
+        g_localProductUserId = Data->LocalUserId;
         if (ctx->OriginalCompletionDelegate) {
             EOS_Connect_LoginCallbackInfo loginInfo{};
             loginInfo.ResultCode = EOS_EResult::EOS_Success;
@@ -318,6 +325,9 @@ EOS_DECLARE_FUNC(uint32_t) Passthrough_EOS_Connect_GetProductUserExternalAccount
         realCount = g_orig_EOS_Connect_GetProductUserExternalAccountCount(Handle, Options);
     }
     if (realCount == 0 && Options && Options->TargetUserId) {
+        if (g_localProductUserId && Options->TargetUserId != g_localProductUserId) {
+            return 0u;
+        }
         return 1u;
     }
     return realCount;
@@ -336,6 +346,10 @@ EOS_DECLARE_FUNC(EOS_EResult) Passthrough_EOS_Connect_CopyProductUserExternalAcc
         if (res == EOS_EResult::EOS_Success && *OutExternalAccountInfo != nullptr) {
             return EOS_EResult::EOS_Success;
         }
+    }
+
+    if (g_localProductUserId && Options->TargetUserId != g_localProductUserId) {
+        return EOS_EResult::EOS_NotFound;
     }
 
     if (Options->AccountIdType == EAT::EOS_EAT_STEAM || (int)Options->AccountIdType == 1) {
@@ -380,6 +394,31 @@ EOS_DECLARE_FUNC(EOS_EResult) Passthrough_EOS_Connect_CopyProductUserExternalAcc
     }
 
     if (Options->ExternalAccountInfoIndex == 0) {
+        EOS_Connect_CopyProductUserExternalAccountByAccountTypeOptions typeOpts{};
+        typeOpts.ApiVersion = 1;
+        typeOpts.TargetUserId = Options->TargetUserId;
+        typeOpts.AccountIdType = EAT::EOS_EAT_STEAM;
+        return Passthrough_EOS_Connect_CopyProductUserExternalAccountByAccountType(Handle, &typeOpts, OutExternalAccountInfo);
+    }
+    return EOS_EResult::EOS_NotFound;
+}
+
+EOS_DECLARE_FUNC(EOS_EResult) Passthrough_EOS_Connect_CopyProductUserExternalAccountByAccountId(
+    EOS_HConnect Handle,
+    const EOS_Connect_CopyProductUserExternalAccountByAccountIdOptions* Options,
+    EOS_Connect_ExternalAccountInfo** OutExternalAccountInfo
+) {
+    if (!Options || !OutExternalAccountInfo) return EOS_EResult::EOS_InvalidParameters;
+    *OutExternalAccountInfo = nullptr;
+
+    if (g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountId) {
+        EOS_EResult res = g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountId(Handle, Options, OutExternalAccountInfo);
+        if (res == EOS_EResult::EOS_Success && *OutExternalAccountInfo != nullptr) {
+            return EOS_EResult::EOS_Success;
+        }
+    }
+
+    if (Options->AccountId && (std::string(Options->AccountId) == GetPlayerSteamId())) {
         EOS_Connect_CopyProductUserExternalAccountByAccountTypeOptions typeOpts{};
         typeOpts.ApiVersion = 1;
         typeOpts.TargetUserId = Options->TargetUserId;
@@ -466,6 +505,7 @@ bool InitialisePassthrough(Registrar& reg) {
     g_orig_EOS_Connect_GetProductUserExternalAccountCount = (EOS_Connect_GetProductUserExternalAccountCount_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_GetProductUserExternalAccountCount");
     g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountType = (EOS_Connect_CopyProductUserExternalAccountByAccountType_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyProductUserExternalAccountByAccountType");
     g_orig_EOS_Connect_CopyProductUserExternalAccountByIndex = (EOS_Connect_CopyProductUserExternalAccountByIndex_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyProductUserExternalAccountByIndex");
+    g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountId = (EOS_Connect_CopyProductUserExternalAccountByAccountId_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyProductUserExternalAccountByAccountId");
     g_orig_EOS_Connect_CopyProductUserInfo = (EOS_Connect_CopyProductUserInfo_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyProductUserInfo");
     g_orig_EOS_Connect_ExternalAccountInfo_Release = (EOS_Connect_ExternalAccountInfo_Release_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_ExternalAccountInfo_Release");
 
@@ -476,6 +516,7 @@ bool InitialisePassthrough(Registrar& reg) {
     reg.Bind("EOS_Connect_GetProductUserExternalAccountCount", (void*)&Passthrough_EOS_Connect_GetProductUserExternalAccountCount);
     reg.Bind("EOS_Connect_CopyProductUserExternalAccountByAccountType", (void*)&Passthrough_EOS_Connect_CopyProductUserExternalAccountByAccountType);
     reg.Bind("EOS_Connect_CopyProductUserExternalAccountByIndex", (void*)&Passthrough_EOS_Connect_CopyProductUserExternalAccountByIndex);
+    reg.Bind("EOS_Connect_CopyProductUserExternalAccountByAccountId", (void*)&Passthrough_EOS_Connect_CopyProductUserExternalAccountByAccountId);
     reg.Bind("EOS_Connect_CopyProductUserInfo", (void*)&Passthrough_EOS_Connect_CopyProductUserInfo);
     reg.Bind("EOS_Connect_ExternalAccountInfo_Release", (void*)&Passthrough_EOS_Connect_ExternalAccountInfo_Release);
 

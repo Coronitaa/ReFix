@@ -1331,74 +1331,7 @@ FixedRegion=$PhotonRegion
     $rootAppIdPath = Join-Path $TargetDir "steam_appid.txt"
     [System.IO.File]::WriteAllText($rootAppIdPath, "$targetAppId`r`n")
 
-    # 2. Deploy EOSSDK-Win64-Shipping.dll / RedboneEOS.dll proxy if game uses EOS / Redpoint
-    $eosProxyPath = Join-Path $BinDir "EOSSDK-Win64-Shipping.dll"
-    $redboneProxyPath = Join-Path $BinDir "RedboneEOS.dll"
-    if (-not (Test-Path $redboneProxyPath) -and (Test-Path $eosProxyPath)) {
-        $redboneProxyPath = $eosProxyPath
-    }
-
-    $eosDlls = Get-ChildItem -Path $TargetDir -Filter "EOSSDK-Win64-Shipping.dll" -Recurse -File -ErrorAction SilentlyContinue
-    $redboneDlls = Get-ChildItem -Path $TargetDir -Filter "RedboneEOS*.dll" -Recurse -File -ErrorAction SilentlyContinue
-    
-    $eosDirs = @()
-    foreach ($dll in $eosDlls) {
-        if ($eosDirs -notcontains $dll.DirectoryName) { $eosDirs += $dll.DirectoryName }
-    }
-    foreach ($dll in $redboneDlls) {
-        if ($eosDirs -notcontains $dll.DirectoryName) { $eosDirs += $dll.DirectoryName }
-    }
-
-    if ($eosDirs.Count -eq 0) {
-        $redpointFolder = Get-ChildItem -Path $TargetDir -Filter "RedpointEOS" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($redpointFolder) { $eosDirs += $redpointFolder.FullName }
-    }
-    
-    # 2. Deploy Dual-Mode EOSSDK-Win64-Shipping.dll / RedboneEOS.dll proxy if game uses EOS / Redpoint
-    $eosProxyPath = Join-Path $BinDir "EOSSDK-Win64-Shipping.dll"
-    $redboneProxyPath = Join-Path $BinDir "RedboneEOS.dll"
-    if (-not (Test-Path $redboneProxyPath) -and (Test-Path $eosProxyPath)) {
-        $redboneProxyPath = $eosProxyPath
-    }
-
-    if ($eosDirs.Count -gt 0 -and (Test-Path $eosProxyPath)) {
-        $proxySize = (Get-Item $eosProxyPath).Length
-        foreach ($dir in $eosDirs) {
-            $eosOriginal = Join-Path $dir "EOSSDK_original.dll"
-            $eosPath = Join-Path $dir "EOSSDK-Win64-Shipping.dll"
-
-            if (Test-Path $eosPath) {
-                $curSize = (Get-Item $eosPath).Length
-                if ($curSize -ne $proxySize -and (-not (Test-Path $eosOriginal))) {
-                    Rename-Item -Path $eosPath -NewName "EOSSDK_original.dll" -Force
-                    Write-Host "  [OK] Preserved original EOSSDK -> EOSSDK_original.dll in $dir" -ForegroundColor Green
-                }
-            }
-            Copy-Item -Path $eosProxyPath -Destination $eosPath -Force
-            Write-Host "  [OK] Deployed Dual-Mode EOSSDK-Win64-Shipping.dll proxy to $dir" -ForegroundColor Green
-
-            # If RedboneEOS.dll exists, replace with proxy
-            $targetRedbone = Join-Path $dir "RedboneEOS.dll"
-            if (Test-Path $targetRedbone) {
-                Copy-Item -Path $redboneProxyPath -Destination $targetRedbone -Force
-                Write-Host "  [OK] Deployed RedboneEOS.dll proxy to $dir" -ForegroundColor Green
-            }
-        }
-
-        # If EOS was found in a subfolder (like RedpointEOS), clean up redundant proxy from ExeDir
-        if ($eosDirs.Count -gt 0 -and ($eosDirs -notcontains $ExeDir)) {
-            $exeEos = Join-Path $ExeDir "EOSSDK-Win64-Shipping.dll"
-            $exeEosOrig = Join-Path $ExeDir "EOSSDK_original.dll"
-            if ((Test-Path $exeEos) -and (-not (Test-Path $exeEosOrig))) {
-                if ((Get-Item $exeEos).Length -eq $proxySize) {
-                    Remove-Item -Path $exeEos -Force -ErrorAction SilentlyContinue
-                    Write-Host "  [OK] Cleaned redundant EOS proxy from $ExeDir" -ForegroundColor Green
-                }
-            }
-        }
-    }
-
-    # 3. Deploy winmm.dll proxy to Unreal root folder ExeDir
+    # 2. Deploy winmm.dll proxy to Unreal root folder ExeDir
     $winmmPath = Join-Path $BinDir "winmm.dll"
     if (Test-Path $winmmPath) {
         $targetWinmm = Join-Path $ExeDir "winmm.dll"
@@ -1422,4 +1355,78 @@ FixedRegion=$PhotonRegion
         [System.IO.File]::WriteAllText($rootAppIdPath, "$targetAppId`r`n")
     }
 }
+
+# ============================================================
+# Step 5: Universal Epic Online Services (EOS) & Redpoint Deployment
+# (Applies to all engines: Unity, Unreal, Godot, Custom)
+# ============================================================
+Write-Host "[5/6] Checking for Epic Online Services (EOS / Redbone)..." -ForegroundColor Cyan
+
+$eosProxyPath = Join-Path $BinDir "EOSSDK-Win64-Shipping.dll"
+$redboneProxyPath = Join-Path $BinDir "RedboneEOS.dll"
+if (-not (Test-Path $redboneProxyPath) -and (Test-Path $eosProxyPath)) {
+    $redboneProxyPath = $eosProxyPath
+}
+
+$eosDlls = Get-ChildItem -Path $TargetDir -Filter "EOSSDK-Win64-Shipping.dll" -Recurse -File -ErrorAction SilentlyContinue
+$redboneDlls = Get-ChildItem -Path $TargetDir -Filter "RedboneEOS*.dll" -Recurse -File -ErrorAction SilentlyContinue
+
+$eosDirs = @()
+foreach ($dll in $eosDlls) {
+    if ($eosDirs -notcontains $dll.DirectoryName) { $eosDirs += $dll.DirectoryName }
+}
+foreach ($dll in $redboneDlls) {
+    if ($eosDirs -notcontains $dll.DirectoryName) { $eosDirs += $dll.DirectoryName }
+}
+
+if ($eosDirs.Count -eq 0) {
+    $redpointFolder = Get-ChildItem -Path $TargetDir -Filter "RedpointEOS" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($redpointFolder) { $eosDirs += $redpointFolder.FullName }
+}
+
+if ($eosDirs.Count -gt 0 -and (Test-Path $eosProxyPath)) {
+    $proxySize = (Get-Item $eosProxyPath).Length
+    foreach ($dir in $eosDirs) {
+        $eosOriginal = Join-Path $dir "EOSSDK_original.dll"
+        $eosPath = Join-Path $dir "EOSSDK-Win64-Shipping.dll"
+
+        if (Test-Path $eosPath) {
+            $curSize = (Get-Item $eosPath).Length
+            if ($curSize -ne $proxySize -and (-not (Test-Path $eosOriginal))) {
+                Rename-Item -Path $eosPath -NewName "EOSSDK_original.dll" -Force
+                Write-Host "  [OK] Preserved original EOSSDK -> EOSSDK_original.dll in $dir" -ForegroundColor Green
+            }
+        }
+        Copy-Item -Path $eosProxyPath -Destination $eosPath -Force
+        Write-Host "  [OK] Deployed Dual-Mode EOSSDK-Win64-Shipping.dll proxy to $dir" -ForegroundColor Green
+
+        # If RedboneEOS.dll exists, replace with proxy
+        $targetRedbone = Join-Path $dir "RedboneEOS.dll"
+        if (Test-Path $targetRedbone) {
+            Copy-Item -Path $redboneProxyPath -Destination $targetRedbone -Force
+            Write-Host "  [OK] Deployed RedboneEOS.dll proxy to $dir" -ForegroundColor Green
+        }
+    }
+
+    # If EOS was found in a subfolder (like Unity Plugins\x86_64 or RedpointEOS), clean up redundant proxy from ExeDir
+    if ($eosDirs.Count -gt 0 -and ($eosDirs -notcontains $ExeDir)) {
+        $exeEos = Join-Path $ExeDir "EOSSDK-Win64-Shipping.dll"
+        $exeEosOrig = Join-Path $ExeDir "EOSSDK_original.dll"
+        if ((Test-Path $exeEos) -and (-not (Test-Path $exeEosOrig))) {
+            if ((Get-Item $exeEos).Length -eq $proxySize) {
+                Remove-Item -Path $exeEos -Force -ErrorAction SilentlyContinue
+                Write-Host "  [OK] Cleaned redundant EOS proxy from $ExeDir" -ForegroundColor Green
+            }
+        }
+    }
+} else {
+    Write-Host "  [INFO] No Epic Online Services (EOS) libraries detected in game files." -ForegroundColor Gray
+}
+
+# ============================================================
+# Step 6: Final Verification & Summary
+# ============================================================
+Write-Host "[6/6] Verifying ReFix deployment..." -ForegroundColor Cyan
+Write-Host "  [SUCCESS] ReFix deployment successfully completed for $GameName!" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Cyan
 
