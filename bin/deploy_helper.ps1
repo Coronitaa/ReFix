@@ -1324,6 +1324,15 @@ if ($EngineType -eq "Unity") {
                         }
                     }
                     
+                    $patchVoiceId = $AppIdVoice
+                    if (-not $patchVoiceId -and (Test-Path $targetIni)) {
+                        $iniContent = Get-Content $targetIni
+                        foreach ($l in $iniContent) {
+                            if ($l -match "^\s*AppIdVoice\s*=\s*([a-f0-9\-]{36})") { $patchVoiceId = $Matches[1].Trim() }
+                            if ($l -match "^\s*PhotonVoiceAppId\s*=\s*([a-f0-9\-]{36})") { $patchVoiceId = $Matches[1].Trim() }
+                        }
+                    }
+
                     if ($patchAppId -and $patchAppId.Length -eq 36 -and $patchAppId -ne $defaultFusionGuid) {
                         $backupLvl = "$($lvl.FullName).original"
                         if (-not (Test-Path $backupLvl)) {
@@ -1332,8 +1341,20 @@ if ($EngineType -eq "Unity") {
                         }
                         $newBytes = [System.Text.Encoding]::ASCII.GetBytes($patchAppId)
                         [System.Array]::Copy($newBytes, 0, $lvlBytes, $foundIdx, 36)
-                        [System.IO.File]::WriteAllBytes($lvl.FullName, $lvlBytes)
                         Write-Host "  [SUCCESS] Patched Photon Fusion AppID -> $patchAppId in $($lvl.Name) at offset $foundIdx" -ForegroundColor Green
+
+                        # Also patch paired Voice AppID at offset foundIdx + 40 if present
+                        $voiceIdx = $foundIdx + 40
+                        if ($patchVoiceId -and $patchVoiceId.Length -eq 36 -and $lvlBytes.Length -ge ($voiceIdx + 36)) {
+                            $strAtVoice = [System.Text.Encoding]::ASCII.GetString($lvlBytes, $voiceIdx, 36)
+                            if ($strAtVoice -match "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") {
+                                $newVoiceBytes = [System.Text.Encoding]::ASCII.GetBytes($patchVoiceId)
+                                [System.Array]::Copy($newVoiceBytes, 0, $lvlBytes, $voiceIdx, 36)
+                                Write-Host "  [SUCCESS] Patched paired Photon Voice AppID -> $patchVoiceId in $($lvl.Name) at offset $voiceIdx" -ForegroundColor Green
+                            }
+                        }
+
+                        [System.IO.File]::WriteAllBytes($lvl.FullName, $lvlBytes)
                     } else {
                         Write-Host "  [INFO] Photon Fusion AppID is PlaySide default or operating via UNAE SDR/P2P tunnel. (To use custom AppID, set AppIdFusion in ReFix.ini)" -ForegroundColor Gray
                     }
@@ -1341,6 +1362,35 @@ if ($EngineType -eq "Unity") {
             } catch {
                 Write-Host "  [NOTICE] Error scanning $($lvl.Name): $_" -ForegroundColor Yellow
             }
+        }
+    }
+
+    # ------------------------------------------------------------
+    # Photon Fusion / IL2CPP Authentication Bypass Patch
+    # For Dumb Ways to Build: suppress Steam ticket injection so Photon connects anonymously
+    # ------------------------------------------------------------
+    $gameAssemblyPath = Join-Path $TargetDir "GameAssembly.dll"
+    if (Test-Path $gameAssemblyPath) {
+        try {
+            $gaBytes = [System.IO.File]::ReadAllBytes($gameAssemblyPath)
+            $offset1 = 0xB12CF0
+            $offset2 = 0xB12FC0
+            if ($gaBytes.Length -gt ($offset2 + 5)) {
+                if ($gaBytes[$offset1] -eq 0x48 -and $gaBytes[$offset1 + 1] -eq 0x89 -and
+                    $gaBytes[$offset2] -eq 0x48 -and $gaBytes[$offset2 + 1] -eq 0x89) {
+                    $gaBackup = "$gameAssemblyPath.original"
+                    if (-not (Test-Path $gaBackup)) {
+                        Copy-Item -Path $gameAssemblyPath -Destination $gaBackup -Force
+                        Write-Host "  [OK] Preserved original GameAssembly.dll -> GameAssembly.dll.original" -ForegroundColor Green
+                    }
+                    $gaBytes[$offset1] = [byte]0xC3
+                    $gaBytes[$offset2] = [byte]0xC3
+                    [System.IO.File]::WriteAllBytes($gameAssemblyPath, $gaBytes)
+                    Write-Host "  [SUCCESS] Patched GameAssembly.dll: ApplyAuthenticationTicketParameters -> ret (Enables anonymous Photon Fusion & Voice)" -ForegroundColor Green
+                }
+            }
+        } catch {
+            Write-Host "  [NOTICE] Error inspecting GameAssembly.dll: $_" -ForegroundColor Yellow
         }
     }
 
