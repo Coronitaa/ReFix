@@ -1474,6 +1474,18 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
         serverIP = g_pfn_GetLobbyData(matchmaking, lobbyID, "SERVER_IP");
         if (!serverIP || serverIP[0] == '\0')
             serverIP = g_pfn_GetLobbyData(matchmaking, lobbyID, "connect");
+        if (!serverIP || serverIP[0] == '\0')
+            serverIP = g_pfn_GetLobbyData(matchmaking, lobbyID, "refix_p2p_ip");
+    }
+
+    uint16_t lobbyPort = 7777;
+    if (g_pfn_GetLobbyData) {
+        const char* pPort = g_pfn_GetLobbyData(matchmaking, lobbyID, "refix_p2p_port");
+        if (!pPort || pPort[0] == '\0') pPort = g_pfn_GetLobbyData(matchmaking, lobbyID, "port");
+        if (pPort && pPort[0] != '\0') {
+            int p = atoi(pPort);
+            if (p > 0 && p <= 65535) lobbyPort = (uint16_t)p;
+        }
     }
 
     // Also register the lobby owner (Host)
@@ -1494,14 +1506,14 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
                 ownerIP = 0x0A000001u | (uint32_t)(ownerID & 0x00FFFFFFu);
             }
             if (!g_godotIsEngine) {
-                SteamP2PHook::RegisterPeer(ownerID, ownerIP);
+                SteamP2PHook::RegisterPeer(ownerID, ownerIP, lobbyPort);
             }
         }
     }
 
     if (!g_pfn_GetNumLobbyMembers || !g_pfn_GetLobbyMemberByIndex) return;
     int count = g_pfn_GetNumLobbyMembers(matchmaking, lobbyID);
-    ReFixLog("UpdateP2PPeers: lobby=%llu members=%d (serverIP='%s')", lobbyID, count, serverIP ? serverIP : "");
+    ReFixLog("UpdateP2PPeers: lobby=%llu members=%d (serverIP='%s', port=%u)", lobbyID, count, serverIP ? serverIP : "", lobbyPort);
 
     for (int i = 0; i < count; i++) {
         uint64_t memberID = g_pfn_GetLobbyMemberByIndex(matchmaking, lobbyID, i);
@@ -1524,7 +1536,7 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
 
         // Skip Winsock peer registration for Godot — it uses ISteamNetworkingSockets, not raw UDP
         if (!g_godotIsEngine) {
-            SteamP2PHook::RegisterPeer(memberID, ip4);
+            SteamP2PHook::RegisterPeer(memberID, ip4, lobbyPort);
         }
     }
 }
@@ -1598,6 +1610,12 @@ struct ReFixConfig {
     // [Invites]
     bool sendSteamChatMessageOnInvite = true;
     std::string inviteMessage = "";   // empty = use built-in default
+
+    // [P2P]
+    bool enableWAN = true;
+    uint16_t p2pPort = 7777;
+    bool allowRelay = true;
+    bool forcePublicIPInLobby = true;
 };
 
 static ReFixConfig g_config;
@@ -1794,6 +1812,12 @@ static void LoadConfig() {
                "[ReFix] I invited you to play {game}. Join me:",
                bufInviteMsg, sizeof(bufInviteMsg));
     g_config.inviteMessage = bufInviteMsg;
+
+    // [P2P]
+    g_config.enableWAN = ReadBool("P2P", "EnableWAN", true);
+    g_config.p2pPort = (uint16_t)GetPrivateProfileIntA("P2P", "P2PPort", 7777, ini.c_str());
+    g_config.allowRelay = ReadBool("P2P", "AllowRelay", true);
+    g_config.forcePublicIPInLobby = ReadBool("P2P", "ForcePublicIPInLobby", true);
 }
 
 void ReFixLog(const char* fmt, ...) {
@@ -4062,17 +4086,20 @@ extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {
         g_activeLobbyID = lobbyID;
         ReFixLog("ReFix_NotifyLobbyID: tracking lobby=%llu", lobbyID);
 
-        // Inject game_filter tag into the Steam Lobby so RequestLobbyList filters locate it
-        if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0') {
-            void* matchmaking = nullptr;
-            typedef void* (*fn_SteamMatchmaking_t)();
-            auto pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
-            if (!pfnMM) pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmaking");
-            if (pfnMM) matchmaking = pfnMM();
-            if (matchmaking) {
+        // Inject game_filter and P2P port into the Steam Lobby
+        void* matchmaking = nullptr;
+        typedef void* (*fn_SteamMatchmaking_t)();
+        auto pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
+        if (!pfnMM) pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmaking");
+        if (pfnMM) matchmaking = pfnMM();
+        if (matchmaking) {
+            if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0') {
                 Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, lobbyID, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
                 ReFixLog("  -> Injected '%s'='%s' into Steam Lobby %llu", g_config.lobbyFilterKey, g_config.lobbyFilterValue, lobbyID);
             }
+            char portStr[16];
+            sprintf_s(portStr, sizeof(portStr), "%u", g_config.p2pPort ? g_config.p2pPort : 7777);
+            Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, lobbyID, "refix_p2p_port", portStr);
         }
 
         UpdateP2PPeers(lobbyID);
@@ -4718,8 +4745,8 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
-        if (g_unrealIsEngine && !g_isGoldbergMode) {
+        // Install Winsock -> Steam P2P redirect hooks (All engines except Godot in Valve Online mode)
+        if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
             ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
             // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
@@ -4846,8 +4873,8 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
-        if (g_unrealIsEngine && !g_isGoldbergMode) {
+        // Install Winsock -> Steam P2P redirect hooks (All engines except Godot in Valve Online mode)
+        if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();

@@ -95,6 +95,8 @@ static std::mutex g_peerMutex;
 static std::unordered_map<uint32_t, uint64_t> g_ipToSteamID;
 // SteamID -> IP (host byte order)  [for injecting source in recvfrom]
 static std::unordered_map<uint64_t, uint32_t> g_steamIDToIP;
+// SteamID -> Port [for injecting source port in recvfrom]
+static std::unordered_map<uint64_t, uint16_t> g_steamIDToPort;
 
 // ---------------------------------------------------------------------------
 // Received packet ring buffer (pump thread -> hooked recvfrom)
@@ -355,8 +357,26 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
 }
 
 // =============================================================================
+// =============================================================================
 // Hooked Winsock functions
 // =============================================================================
+
+static bool IsGamePort(uint16_t port) {
+    static uint16_t s_iniPort = 0;
+    if (s_iniPort == 0) {
+        char buf[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, buf, MAX_PATH);
+        std::string p(buf);
+        size_t pos = p.find_last_of("\\/");
+        std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
+        s_iniPort = (uint16_t)GetPrivateProfileIntA("P2P", "P2PPort", 7777, ini.c_str());
+    }
+    if (port == s_iniPort) return true;
+    if (port >= 7770 && port <= 7799) return true;
+    if (port >= 27015 && port <= 27035) return true;
+    if (port == 5055 || port == 5056 || port == 5058) return true;
+    return false;
+}
 
 // ------ sendto ---------------------------------------------------------------
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
@@ -368,7 +388,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
 
-        if (destPort == 7777 || destPort == 7778 || destPort == 27015 || (destPort >= 7770 && destPort <= 7790)) {
+        if (IsGamePort(destPort)) {
             g_lastGameSocket.store(s);
         }
 
@@ -378,13 +398,15 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
             auto it = g_ipToSteamID.find(destIP);
             if (it != g_ipToSteamID.end()) {
                 steamID = it->second;
+                g_steamIDToPort[steamID] = destPort;
                 g_lastGameSocket.store(s);
-            } else if ((destPort == 7777 || destPort == 7778 || destPort == 27015 ||
+            } else if ((IsGamePort(destPort) ||
                         (destIP & 0xFF000000u) == 0x7F000000u || destIP == 0 ||
                         (destIP & 0xFFFF0000u) == 0xC0A80000u || (destIP & 0xFF000000u) == 0x0A000000u) &&
                        g_ipToSteamID.size() == 1) {
                 // If game connects to server port or loopback/private subnet and we have 1 known peer (the host), redirect!
                 steamID = g_ipToSteamID.begin()->second;
+                g_steamIDToPort[steamID] = destPort;
                 g_lastGameSocket.store(s);
             }
         }
@@ -416,7 +438,7 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
         int localLen = sizeof(localAddr);
         if (getsockname(s, (sockaddr*)&localAddr, &localLen) == 0) {
             uint16_t lport = ntohs(localAddr.sin_port);
-            if (lport == 7777 || lport == 7778 || lport == 27015 || (lport >= 7770 && lport <= 7790)) {
+            if (IsGamePort(lport)) {
                 g_lastGameSocket.store(s);
                 gameSock = s;
             }
@@ -437,8 +459,8 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
             if (from && fromlen && *fromlen >= (int)sizeof(struct sockaddr_in)) {
                 struct sockaddr_in* sin = reinterpret_cast<struct sockaddr_in*>(from);
                 sin->sin_family = AF_INET;
-                sin->sin_port   = htons(pkt.fromPort ? pkt.fromPort : 7777);
 
+                uint16_t srcPort = 7777;
                 uint32_t srcIP = 0x7F000001u;
                 {
                     std::lock_guard<std::mutex> lgPeer(g_peerMutex);
@@ -446,7 +468,14 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
                     if (it != g_steamIDToIP.end()) {
                         srcIP = it->second;
                     }
+                    auto itPort = g_steamIDToPort.find(pkt.fromSteamID);
+                    if (itPort != g_steamIDToPort.end()) {
+                        srcPort = itPort->second;
+                    } else if (pkt.fromPort) {
+                        srcPort = pkt.fromPort;
+                    }
                 }
+                sin->sin_port   = htons(srcPort);
                 sin->sin_addr.s_addr = htonl(srcIP);
                 *fromlen = sizeof(struct sockaddr_in);
             }
@@ -612,7 +641,7 @@ void Uninstall() {
     g_lastGameSocket.store(INVALID_SOCKET);
 }
 
-void RegisterPeer(uint64_t steamID, uint32_t ipv4_host) {
+void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     if (!steamID || !ipv4_host) return;
 
     std::lock_guard<std::mutex> lg(g_peerMutex);
@@ -625,6 +654,9 @@ void RegisterPeer(uint64_t steamID, uint32_t ipv4_host) {
 
     g_steamIDToIP[steamID]  = ipv4_host;
     g_ipToSteamID[ipv4_host] = steamID;
+    if (port != 0) {
+        g_steamIDToPort[steamID] = port;
+    }
 
     // Immediately accept any incoming P2P session from this peer
     if (g_pSteamNetworking) {
@@ -634,7 +666,7 @@ void RegisterPeer(uint64_t steamID, uint32_t ipv4_host) {
     char ipStr[32];
     uint32_t n = htonl(ipv4_host);
     inet_ntop(AF_INET, &n, ipStr, sizeof(ipStr));
-    Log("RegisterPeer: SteamID=%llu <-> IP=%s", steamID, ipStr);
+    Log("RegisterPeer: SteamID=%llu <-> IP=%s (port=%u)", steamID, ipStr, port);
 }
 
 void UnregisterPeer(uint64_t steamID) {
@@ -643,6 +675,10 @@ void UnregisterPeer(uint64_t steamID) {
     if (it != g_steamIDToIP.end()) {
         g_ipToSteamID.erase(it->second);
         g_steamIDToIP.erase(it);
+        auto itPort = g_steamIDToPort.find(steamID);
+        if (itPort != g_steamIDToPort.end()) {
+            g_steamIDToPort.erase(itPort);
+        }
         Log("UnregisterPeer: SteamID=%llu removed", steamID);
     }
 }

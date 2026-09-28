@@ -35,7 +35,7 @@ namespace SteamP2PHook {
     // Register a mapping: when the game tries to send UDP to ipv4 (host byte order):port,
     // the packets will be sent via Steam P2P to steamID instead.
     // Call whenever a new lobby member is detected (LobbyDataUpdate, LobbyChatUpdate).
-    void RegisterPeer(uint64_t steamID, uint32_t ipv4_host);
+    void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port = 0);
 
     // Remove a peer mapping (e.g. when they leave the lobby).
     void UnregisterPeer(uint64_t steamID);

@@ -395,7 +395,8 @@ switch ($OnlineMode) {
         $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
         $bypassVal = if ($DLCMode -eq "none") { "false" } else { "true" }
         $maskVal = if ($MaskAppId) { $MaskAppId } else { "480" }
-        $realVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
+        $isNanosocketsGame = (Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+        $p2pPortVal = if ($isNanosocketsGame) { "27015" } else { "7777" }
         $reFixIniContent = @"
 ; =============================================================================
 ; ReFix Universal Configuration File
@@ -446,7 +447,7 @@ LocalIP=
 
 [P2P]
 EnableWAN=true
-P2PPort=7777
+P2PPort=$p2pPortVal
 AllowRelay=true
 ForcePublicIPInLobby=true
 "@
@@ -970,6 +971,70 @@ if ($EngineType -eq "Unity") {
             $dirAppIdPath = Join-Path $dir "steam_appid.txt"
             [System.IO.File]::WriteAllText($dirAppIdPath, "$targetAppId`r`n")
             Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in $dir" -ForegroundColor Green
+        }
+    }
+
+    # ------------------------------------------------------------
+    # Photon Fusion / nanosockets Detection & Asset Configuration
+    # ------------------------------------------------------------
+    $nanosocketsDll = Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($nanosocketsDll) {
+        Write-Host "  [DETECT] Detected Photon Fusion nanosockets transport: $($nanosocketsDll.FullName)" -ForegroundColor Cyan
+        
+        # Check for level0 or serialized assets containing Photon AppID
+        $level0Files = Get-ChildItem -Path $TargetDir -Filter "level0" -Recurse -File -ErrorAction SilentlyContinue
+        foreach ($lvl in $level0Files) {
+            try {
+                $lvlBytes = [System.IO.File]::ReadAllBytes($lvl.FullName)
+                $defaultFusionGuid = "1d51fe8a-4821-4958-86c2-896b93277d81"
+                $defaultBytes = [System.Text.Encoding]::ASCII.GetBytes($defaultFusionGuid)
+                
+                # Check if file contains default Fusion AppID
+                $foundIdx = -1
+                for ($i = 0; $i -le ($lvlBytes.Length - 36); $i++) {
+                    $matched = $true
+                    for ($j = 0; $j -lt 36; $j++) {
+                        if ($lvlBytes[$i + $j] -ne $defaultBytes[$j]) {
+                            $matched = $false
+                            break
+                        }
+                    }
+                    if ($matched) {
+                        $foundIdx = $i
+                        break
+                    }
+                }
+                
+                if ($foundIdx -ge 0) {
+                    Write-Host "  [DETECT] Located Photon Fusion AppID in $($lvl.Name) at offset $foundIdx" -ForegroundColor Yellow
+                    
+                    # Determine target AppID to patch (if provided)
+                    $patchAppId = $PhotonAppId
+                    if (-not $patchAppId -and (Test-Path $reFixIni)) {
+                        $iniContent = Get-Content $reFixIni -ErrorAction SilentlyContinue
+                        foreach ($l in $iniContent) {
+                            if ($l -match "^\s*PhotonAppId\s*=\s*([a-f0-9\-]{36})") { $patchAppId = $Matches[1].Trim() }
+                            if ($l -match "^\s*PhotonFusionAppId\s*=\s*([a-f0-9\-]{36})") { $patchAppId = $Matches[1].Trim() }
+                        }
+                    }
+                    
+                    if ($patchAppId -and $patchAppId.Length -eq 36 -and $patchAppId -ne $defaultFusionGuid) {
+                        $backupLvl = "$($lvl.FullName).original"
+                        if (-not (Test-Path $backupLvl)) {
+                            Copy-Item -Path $lvl.FullName -Destination $backupLvl -Force
+                            Write-Host "  [OK] Preserved original level0 -> $($lvl.Name).original" -ForegroundColor Green
+                        }
+                        $newBytes = [System.Text.Encoding]::ASCII.GetBytes($patchAppId)
+                        [System.Array]::Copy($newBytes, 0, $lvlBytes, $foundIdx, 36)
+                        [System.IO.File]::WriteAllBytes($lvl.FullName, $lvlBytes)
+                        Write-Host "  [SUCCESS] Patched Photon Fusion AppID -> $patchAppId in $($lvl.Name)" -ForegroundColor Green
+                    } else {
+                        Write-Host "  [INFO] Photon Fusion AppID is PlaySide default. (To use custom AppID, set PhotonAppId in ReFix.ini)" -ForegroundColor Gray
+                    }
+                }
+            } catch {
+                Write-Host "  [NOTICE] Error scanning $($lvl.Name): $_" -ForegroundColor Yellow
+            }
         }
     }
 
