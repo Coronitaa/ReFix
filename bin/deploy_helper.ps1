@@ -15,8 +15,11 @@ param(
     [string]$DLCMode = "all",
     [string]$ListenPort = "47584",
     [string]$CustomBroadcasts = "",
-    [string]$NetworkTopology = "",
-    [string]$RecommendedPort = ""
+    [string]$AppIdRealtime = "",
+    [string]$AppIdFusion = "",
+    [string]$AppIdVoice = "",
+    [string]$ArbitrationMode = "auto",
+    [string]$DefaultRegion = "sa"
 )
 
 # Clean paths by trimming trailing quotes/slashes
@@ -25,23 +28,9 @@ if ($BinDir)    { $BinDir    = $BinDir.TrimEnd('\').Trim('"') }
 if ($ExeDir)    { $ExeDir    = $ExeDir.TrimEnd('\').Trim('"') }
 if (-not $ExeDir) { $ExeDir  = $TargetDir }
 
-if (-not $NetworkTopology) {
-    $hasNanosockets = (Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasPhoton = (Get-ChildItem -Path $TargetDir -Filter "*Photon*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasFusion = (Get-ChildItem -Path $TargetDir -Filter "*Fusion*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    if ($hasNanosockets -or ($hasFusion -and $hasPhoton)) {
-        $NetworkTopology = "P2P_HYBRID"
-    } elseif ($hasPhoton -and -not $hasNanosockets) {
-        $NetworkTopology = "PHOTON_CLOUD"
-    } else {
-        $NetworkTopology = "P2P_SOCKETS"
-    }
-}
-
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host " [ReFix Deploy Engine] Target:   $TargetDir" -ForegroundColor Cyan
-Write-Host " [ReFix Deploy Engine] Mode:     $OnlineMode ($EngineType)" -ForegroundColor Cyan
-Write-Host " [ReFix Deploy Engine] Topology: $NetworkTopology" -ForegroundColor Cyan
+Write-Host " [ReFix Deploy Engine] Target: $TargetDir" -ForegroundColor Cyan
+Write-Host " [ReFix Deploy Engine] Mode:   $OnlineMode ($EngineType)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 # ------------------------------------------------------------
@@ -126,6 +115,278 @@ function Get-Or-Generate-Identity {
 
 # ============================================================
 # ------------------------------------------------------------
+# Helper: UNAE Network Topology Detection Engine (PowerShell)
+# ------------------------------------------------------------
+function Detect-UNAE-Topology {
+    param([string]$TargetDir)
+
+    $hasPhotonRealtime = (Get-ChildItem -Path $TargetDir -Filter "PhotonRealtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhoton3Unity   = (Get-ChildItem -Path $TargetDir -Filter "Photon3Unity3D.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhotonVoice    = (Get-ChildItem -Path $TargetDir -Filter "PhotonVoice.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhotonFusion   = (Get-ChildItem -Path $TargetDir -Filter "Fusion.Runtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasNanosockets    = (Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasMirror         = (Get-ChildItem -Path $TargetDir -Filter "Mirror.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasKcp            = (Get-ChildItem -Path $TargetDir -Filter "kcp2k.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasEOS            = (Get-ChildItem -Path $TargetDir -Filter "*EOSSDK*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+
+    $il2cppMeta = Get-ChildItem -Path $TargetDir -Filter "global-metadata.dat" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $il2cppPUN = $false
+    $il2cppFusion = $false
+    if ($il2cppMeta) {
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($il2cppMeta.FullName)
+            $contentStr = [System.Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min($bytes.Length, 4194304))
+            if ($contentStr -match "Photon\.Pun|ConnectToRegionMaster|PhotonHandler") { $il2cppPUN = $true }
+            if ($contentStr -match "Fusion\.NetworkRunner|Fusion\.Runtime") { $il2cppFusion = $true }
+            if ($contentStr -match "Photon\.Voice|VoiceClient") { $hasPhotonVoice = $true }
+        } catch {}
+    }
+
+    # Topologia B: Multiplexado Hibrido (Fusion + nanosockets, Mirror + EOS WebRTC)
+    # Se prioriza sobre Topologia C para evitar que juegos hibridos con voz auxiliar
+    # (como Dumb Ways to Build) sean erróneamente clasificados como Cloud Relay estricto.
+    if ($hasPhotonFusion -or $il2cppFusion -or $hasNanosockets -or $hasMirror -or $hasKcp -or $hasEOS) {
+        $port = if ($hasNanosockets -or $hasPhotonFusion -or $il2cppFusion) { "27015" } else { "7777" }
+        return @{
+            Topology = "TopologyB"
+            Name = "Topologia B: Multiplexado Hibrido (EOS P2P / Mirror / Fusion)"
+            Transport = "WAN: Steam SDR P2P (AppID 480) / LAN: Sockets Directos (Hold Buffer)"
+            Color = "Cyan"
+            DirectP2PAllowed = $true
+            P2PPort = $port
+        }
+    } elseif ($hasPhotonRealtime -or $hasPhoton3Unity -or $il2cppPUN -or $hasPhotonVoice) {
+        return @{
+            Topology = "TopologyC"
+            Name = "Topologia C: Cloud-Relay Estricto (PUN 2 / Photon Voice)"
+            Transport = "Tier 4 Photon Cloud Relay (DRPI Preservacion Dinamica)"
+            Color = "Yellow"
+            DirectP2PAllowed = $false
+            P2PPort = "7777"
+        }
+    } else {
+        return @{
+            Topology = "TopologyA"
+            Name = "Topologia A: Sockets Directos (P2P Puro / LAN / SDR)"
+            Transport = "Tier 1 LAN Autonoma / Tier 2 WAN Steam SDR P2P"
+            Color = "Green"
+            DirectP2PAllowed = $true
+            P2PPort = "7777"
+        }
+    }
+}
+
+# ------------------------------------------------------------
+# Helper: Unified ReFix.ini Generator (UNAE v3.0 Specification)
+# ------------------------------------------------------------
+function Generate-UNAE-ReFixIni {
+    param(
+        [string]$IniPath,
+        [hashtable]$P
+    )
+
+    $existing = @{}
+    if (Test-Path $IniPath) {
+        $curSec = "General"
+        Get-Content $IniPath -ErrorAction SilentlyContinue | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -match "^\[(.*)\]$") {
+                $curSec = $Matches[1].Trim()
+            } elseif ($line -match "^([^=;]+)=(.*)$") {
+                $existing["$curSec/$($Matches[1].Trim())"] = $Matches[2].Trim()
+            }
+        }
+    }
+
+    $Pick = {
+        param($sec, $key, $fallback)
+        if ($existing.ContainsKey("$sec/$key") -and $existing["$sec/$key"] -ne "") {
+            return $existing["$sec/$key"]
+        }
+        return $fallback
+    }
+
+    $realtimeCandidate = if ($P.AppIdRealtime) { $P.AppIdRealtime } elseif ($P.PhotonAppId) { $P.PhotonAppId } else { "" }
+    $regionCandidate   = if ($P.DefaultRegion) { $P.DefaultRegion } elseif ($P.PhotonRegion) { $P.PhotonRegion } else { "sa" }
+
+    $appIdRealtime = & $Pick "Photon" "AppIdRealtime" $realtimeCandidate
+    $appIdFusion   = & $Pick "Photon" "AppIdFusion"   $P.AppIdFusion
+    $appIdVoice    = & $Pick "Voice"  "AppIdVoice"    $P.AppIdVoice
+    $arbMode       = & $Pick "Network" "Mode"         $P.ArbitrationMode
+    $defRegion     = & $Pick "Photon" "DefaultRegion" $regionCandidate
+    $bypassVal     = if ($P.DLCMode -eq "none") { "false" } else { "true" }
+    $eosMode       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "emulated" } else { "passthrough" }
+    $eosAuth       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
+
+    $existingDiscoveryPort = if ($existing.ContainsKey("Network/DiscoveryPort") -and $existing["Network/DiscoveryPort"] -ne "") {
+        $existing["Network/DiscoveryPort"]
+    } elseif ($existing.ContainsKey("Network/ListenPort") -and $existing["Network/ListenPort"] -ne "") {
+        $existing["Network/ListenPort"]
+    } else {
+        $P.ListenPort
+    }
+
+    $existingP2PPort = if ($existing.ContainsKey("P2P/P2PPort") -and $existing["P2P/P2PPort"] -ne "") {
+        $existing["P2P/P2PPort"]
+    } else {
+        $P.P2PPort
+    }
+
+    $customBroadcasts = & $Pick "Network" "CustomBroadcasts" $P.CustomBroadcasts
+
+    $iniContent = @"
+; =============================================================================
+; ReFix Universal Network Arbitration Engine (UNAE) Configuration
+; =============================================================================
+
+[Game]
+GameName=$($P.GameName)
+EngineType=$($P.EngineType)
+
+[Network]
+; Modo global de arbitraje:
+;   auto         - Deteccion automatica de capacidades, topologia y cascada inteligente (Recomendado).
+;   force_p2p    - Fuerza transporte P2P directo (Tier 1 LAN / Tier 2 SDR). Falla si el juego requiere cloud relay.
+;   force_relay  - Salta P2P directo y enruta inmediatamente a traves de nubes de relevo (EOS / Photon).
+;   force_lan    - Aisla la conectividad a la subred local (Tier 1 exclusivo, sin salidas a Internet).
+;   offline      - Desactiva toda actividad de red externa; emulacion local absoluta.
+Mode = $arbMode
+
+; Puerto base de escucha y descubrimiento UDP para Re:Goldberg y UNAE LAN (Default: 47584)
+DiscoveryPort = $existingDiscoveryPort
+
+; Grupo de multidifusion IPv4 para descubrimiento sin configuracion en la misma subred
+DiscoveryGroup = 239.255.71.84
+
+; Tiempo de espera de respuesta de hosts locales en LAN antes de evaluar WAN (milisegundos)
+LanProbeTimeoutMs = 2500
+
+; IPs de difusion adicionales para VPNs (Radmin, Hamachi, ZeroTier) separadas por comas
+CustomBroadcasts = $customBroadcasts
+
+; Registro detallado del motor de arbitraje en ReFix.log
+VerboseArbitrationLog = true
+
+
+; =============================================================================
+; Direct P2P & Valve Steam Datagram Relay (SDR) Tunneling
+; =============================================================================
+[P2P]
+; Habilita los hooks de intercepcion sobre ws2_32.dll (sendto, recvfrom, connect, select, bind)
+EnableWinsockHooks = true
+
+; Enruta paquetes UDP de juegos a traves del tunel ISteamNetworking SDR de Valve (AppID 480)
+EnableSteamSDR = true
+
+; Permite la retransmision por servidores mundiales de Valve si no hay conexion P2P directa
+AllowRelay = true
+
+; Puerto UDP principal de la sesion de juego (Default: 7777 para Unreal/Mirror, 27015 para Fusion)
+P2PPort = $existingP2PPort
+
+; Tiempo de espera de negociacion de sesion P2P antes de activar fallback (milisegundos)
+PeerHandshakeTimeoutMs = 5000
+
+; Maximo porcentaje de perdida de paquetes tolerable antes de transicionar de Tier (Default: 40)
+MaxPacketLossTolerance = 40
+
+
+; =============================================================================
+; Photon Ecosystem & Cloud Relay Configuration (PUN 2, Realtime & Fusion)
+; =============================================================================
+[Photon]
+; Proveedor de backend para el ecosistema Photon:
+;   ReFixCloud      - Infraestructura gestionada/local ReFix (Cero costo, alto rendimiento).
+;   OfficialPhoton  - Conexion a la nube publica de Photon Engine (Requiere AppIDs validos).
+;   CustomPhoton    - Servidores privados self-hosted (Photon Server / Luxon).
+Backend = OfficialPhoton
+
+; Clave de Aplicacion desacoplada para Photon Realtime y PUN 2 (Sincronizacion de juego y salas)
+AppIdRealtime = $appIdRealtime
+
+; Clave de Aplicacion desacoplada para Photon Fusion (Tick simulation / Prediccion de estado)
+AppIdFusion = $appIdFusion
+
+; Gestion de Regiones:
+;   dynamic - Preserva fielmente la region seleccionada por el usuario en la UI del juego (Recomendado).
+;   auto    - Realiza sondeo de ping y conecta automaticamente a la region de menor latencia.
+;   fixed   - Fuerza estaticamente la region definida en DefaultRegion, bloqueando la UI del juego.
+RegionMode = dynamic
+
+; Region por defecto o de contingencia (sa, us, usw, use, eu, asia, jp, ru)
+DefaultRegion = $defRegion
+
+; Preserva la seleccion de region del jugador en interfaces como Phasmophobia y R.E.P.O.
+PreserveGameUiRegion = true
+
+
+; =============================================================================
+; Positional Audio & Voice Communications Subsystem
+; =============================================================================
+[Voice]
+; Backend de transmision de voz:
+;   PhotonVoice - Utiliza el canal desacoplado Photon Voice 2 (Opus 24-48kHz).
+;   EOSRTC      - Utiliza las salas de voz WebRTC de Epic Online Services.
+;   SteamVoice  - Utiliza la API ISteamUser::GetVoice de Steamworks.
+;   Disabled    - Desactiva el subsistema de comunicaciones por voz.
+Backend = PhotonVoice
+
+; Clave de Aplicacion desacoplada exclusiva para Photon Voice 2
+; NOTA CRITICA: No reutilizar la misma clave de AppIdRealtime para evitar agotar el limite de CCU.
+AppIdVoice = $appIdVoice
+
+; Tasa de muestreo de audio / Bitrate de voz (en bps, Default: 32000)
+Bitrate = 32000
+
+; Activa la intercepcion de atenuacion espacial 3D segun la distancia entre avatares
+EnableProximityVoice = true
+
+
+; =============================================================================
+; Emulated Steam Subsystems & User Identity
+; =============================================================================
+[Online]
+Mode = $($P.OnlineMode)
+
+[Steam]
+MaskAppId = $($P.MaskAppId)
+RealAppId = $($P.RealAppId)
+Language = $($P.Language)
+BypassLicenseCheck = $bypassVal
+DLCs = $($P.DLCs)
+
+[User]
+Name = $($P.UserName)
+AutoGenerateSteamId = $($P.AutoGenerateSteamId)
+SteamId = $($P.SteamId)
+
+[Matchmaking]
+EnableLobbyFilter = false
+LobbyFilterKey = game_filter
+LobbyFilterValue = $($P.MaskAppId)
+LobbyDistanceFilter = worldwide
+MaxLobbyResults = 50
+
+[ServerBrowser]
+OverrideServerListAppId = false
+ServerListAppId = 480
+
+[Storage]
+LocalSave = saves
+
+[EOS]
+Mode = $eosMode
+DeviceIdAuth = $eosAuth
+
+[Debug]
+EnableLog = true
+EnableConsole = false
+"@
+    [System.IO.File]::WriteAllText($IniPath, $iniContent)
+}
+
+# ============================================================
+# ------------------------------------------------------------
 # Helper: SteamStub DRM Detector & Automatic Unpacker
 # ------------------------------------------------------------
 function Unpack-SteamStubIfProtected {
@@ -192,7 +453,19 @@ Unpack-SteamStubIfProtected -TargetFolder $TargetDir -ToolsBinDir $BinDir
 
 # Step 2: Handle steam_api64.dll (x64) and steam_api.dll (x86) according to selected mode
 # ============================================================
-Write-Host "[2/6] Processing steam_api DLL instances (x64 + x86)..." -ForegroundColor Cyan
+Write-Host "[2/6] Processing steam_api DLL instances (x64 + x86) & UNAE Network Topology..." -ForegroundColor Cyan
+
+# Detect Network Topology via UNAE Engine Classifier
+$unaeTopology = Detect-UNAE-Topology -TargetDir $TargetDir
+Write-Host ""
+Write-Host " ============================================================" -ForegroundColor DarkGray
+Write-Host " [UNAE Engine] Clasificacion de Topologia de Red:" -ForegroundColor Cyan
+Write-Host "   -> Topologia Detectada: $($unaeTopology.Name)" -ForegroundColor $($unaeTopology.Color)
+Write-Host "   -> Transporte Optimo:   $($unaeTopology.Transport)" -ForegroundColor White
+Write-Host "   -> Direct P2P Allowed:  $($unaeTopology.DirectP2PAllowed)" -ForegroundColor $(if ($unaeTopology.DirectP2PAllowed) { "Green" } else { "Yellow" })
+Write-Host "   -> Puerto Asignado:     $($unaeTopology.P2PPort)" -ForegroundColor Cyan
+Write-Host " ============================================================" -ForegroundColor DarkGray
+Write-Host ""
 
 # Discover all steam_api64.dll or backup steam_api64_valve.dll locations
 $pluginDirs = @()
@@ -359,20 +632,29 @@ switch ($OnlineMode) {
 
         # Detect if game is 32-bit (x86) to prevent fatal 64-bit DLL injection into 32-bit processes
         $isX86Game = ($pluginDirs32.Count -gt 0)
-        $gameExesInDir = Get-ChildItem -Path $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
-        foreach ($ge in $gameExesInDir) {
-            try {
-                $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
-                if ($peBytes.Length -ge 0x40) {
-                    $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
-                    if ($peOffset + 6 -le $peBytes.Length) {
-                        $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
-                        if ($mach -eq 0x014c) { $isX86Game = $true; break }
-                        elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
+        if (-not $isX86Game) {
+            $gameExesInDir = Get-ChildItem -Path $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
+            
+            $candidateExes = @()
+            $mainExe = $gameExesInDir | Where-Object { $_.Name -like "*$GameName*" } | Select-Object -First 1
+            if ($mainExe) { $candidateExes += $mainExe }
+            $candidateExes += ($gameExesInDir | Where-Object { $_.Name -notlike "*Launcher*" -and ($mainExe -eq $null -or $_.FullName -ne $mainExe.FullName) })
+            $candidateExes += ($gameExesInDir | Where-Object { $_.Name -like "*Launcher*" })
+
+            foreach ($ge in $candidateExes) {
+                try {
+                    $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
+                    if ($peBytes.Length -ge 0x40) {
+                        $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
+                        if ($peOffset + 6 -le $peBytes.Length) {
+                            $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
+                            if ($mach -eq 0x014c) { $isX86Game = $true; break }
+                            elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
+                        }
                     }
-                }
-            } catch {}
+                } catch {}
+            }
         }
 
         # Also deploy winmm.dll to ExeDir for early Steam Overlay injection (64-bit only)
@@ -409,70 +691,33 @@ switch ($OnlineMode) {
         $finalUserName = if ($UserName) { $UserName } else { $identity.Name }
         $finalSteamId = $identity.SteamId
         $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
-        $bypassVal = if ($DLCMode -eq "none") { "false" } else { "true" }
         $maskVal = if ($MaskAppId) { $MaskAppId } else { "480" }
-        $p2pPortVal = if ($RecommendedPort) { $RecommendedPort } elseif ($isNanosocketsGame -or $NetworkTopology -eq "P2P_HYBRID") { "27015" } else { "7777" }
-        $reFixIniContent = @"
-; =============================================================================
-; ReFix Universal Configuration File
-; =============================================================================
+        $p2pPortVal = if ($unaeTopology -and $unaeTopology.P2PPort) { $unaeTopology.P2PPort } else { "7777" }
 
-[Game]
-GameName=$GameName
-EngineType=$EngineType
-
-[Matchmaking]
-EnableLobbyFilter=false
-LobbyFilterKey=game_filter
-LobbyFilterValue=$filterVal
-LobbyDistanceFilter=Worldwide
-MaxLobbyResults=50
-
-[ServerBrowser]
-OverrideServerListAppId=false
-ServerListAppId=480
-Language=english
-
-[Steam]
-MaskAppId=$maskVal
-RealAppId=$realVal
-Language=$Language
-BypassLicenseCheck=$bypassVal
-DLCs=$DLCs
-
-[Overlay]
-EnableOverlay=true
-OverlayAppId=$maskVal
-
-[EOS]
-Mode=passthrough
-DeviceIdAuth=true
-
-[User]
-Name=$finalUserName
-SteamId=$finalSteamId
-
-[Online]
-Mode=valve
-
-[Network]
-Topology=$NetworkTopology
-GameFilter=$filterVal
-PublicIP=
-LocalIP=
-
-[P2P]
-EnableWAN=true
-P2PPort=$p2pPortVal
-AllowRelay=true
-ForcePublicIPInLobby=true
-
-[Photon]
-PhotonAppId=$PhotonAppId
-PhotonRegion=$PhotonRegion
-"@
-        [System.IO.File]::WriteAllText($reFixIniPath, $reFixIniContent)
-        Write-Host "  [OK] Configured ReFix.ini in $ExeDir (Topology: $NetworkTopology, Port: $p2pPortVal)" -ForegroundColor Green
+        Generate-UNAE-ReFixIni -IniPath $reFixIniPath -P @{
+            GameName            = $GameName
+            EngineType          = $EngineType
+            OnlineMode          = "valve"
+            MaskAppId           = $maskVal
+            RealAppId           = $filterVal
+            Language            = $Language
+            DLCMode             = $DLCMode
+            DLCs                = $DLCs
+            UserName            = $finalUserName
+            SteamId             = $finalSteamId
+            AutoGenerateSteamId = $identity.AutoGenerateSteamId
+            ListenPort          = $ListenPort
+            CustomBroadcasts    = $CustomBroadcasts
+            AppIdRealtime       = $AppIdRealtime
+            PhotonAppId         = $PhotonAppId
+            AppIdFusion         = $AppIdFusion
+            AppIdVoice          = $AppIdVoice
+            ArbitrationMode     = $ArbitrationMode
+            DefaultRegion       = $DefaultRegion
+            PhotonRegion        = $PhotonRegion
+            P2PPort             = $p2pPortVal
+        }
+        Write-Host "  [OK] Configured unified ReFix.ini in $ExeDir" -ForegroundColor Green
     }
 
     "photon" {
@@ -506,6 +751,40 @@ PhotonRegion=$PhotonRegion
             Copy-Item -Path $proxyPath -Destination $dir -Force
             Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
         }
+
+        # Synchronize unified ReFix.ini in ExeDir for UNAE and DRPI
+        $reFixIniPath = Join-Path $ExeDir "ReFix.ini"
+        $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir
+        $finalUserName = if ($UserName) { $UserName } else { $identity.Name }
+        $finalSteamId = $identity.SteamId
+        $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
+        $maskVal = if ($MaskAppId) { $MaskAppId } else { "480" }
+        $p2pPortVal = if ($unaeTopology -and $unaeTopology.P2PPort) { $unaeTopology.P2PPort } else { "7777" }
+
+        Generate-UNAE-ReFixIni -IniPath $reFixIniPath -P @{
+            GameName            = $GameName
+            EngineType          = $EngineType
+            OnlineMode          = "photon"
+            MaskAppId           = $maskVal
+            RealAppId           = $filterVal
+            Language            = $Language
+            DLCMode             = $DLCMode
+            DLCs                = $DLCs
+            UserName            = $finalUserName
+            SteamId             = $finalSteamId
+            AutoGenerateSteamId = $identity.AutoGenerateSteamId
+            ListenPort          = $ListenPort
+            CustomBroadcasts    = $CustomBroadcasts
+            AppIdRealtime       = $AppIdRealtime
+            PhotonAppId         = $PhotonAppId
+            AppIdFusion         = $AppIdFusion
+            AppIdVoice          = $AppIdVoice
+            ArbitrationMode     = $ArbitrationMode
+            DefaultRegion       = $DefaultRegion
+            PhotonRegion        = $PhotonRegion
+            P2PPort             = $p2pPortVal
+        }
+        Write-Host "  [OK] Configured unified ReFix.ini in $ExeDir" -ForegroundColor Green
     }
 
     { $_ -in @("goldberg", "offline", "lan") } {
@@ -689,6 +968,15 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
     if (-not $finalLanguage) { $finalLanguage = "english" }
 
     $finalListenPort = $ListenPort
+    if (-not $finalListenPort -or $finalListenPort -eq "47584") {
+        if (Test-Path $reFixIniPath) {
+            $iniContent = Get-Content $reFixIniPath -ErrorAction SilentlyContinue
+            foreach ($line in $iniContent) {
+                if ($line -match "^\s*DiscoveryPort\s*=\s*([0-9]+)") { $finalListenPort = $Matches[1].Trim() }
+                elseif ($line -match "^\s*ListenPort\s*=\s*([0-9]+)") { $finalListenPort = $Matches[1].Trim() }
+            }
+        }
+    }
     if (-not $finalListenPort) { $finalListenPort = "47584" }
 
     # Create local saves folder in ExeDir for portable storage
@@ -823,57 +1111,30 @@ unlock_all_dlc=$unlockAllDlcStr
     }
 
     # Synchronize and write unified ReFix.ini in ExeDir
-    $reFixIniContent = @"
-; =============================================================================
-; ReFix Universal Configuration File
-; =============================================================================
-
-[Game]
-GameName=$GameName
-EngineType=$EngineType
-
-[Online]
-Mode=goldberg
-
-[Steam]
-MaskAppId=$MaskAppId
-RealAppId=$finalRealAppId
-Language=$finalLanguage
-BypassLicenseCheck=$bypassLicenseVal
-DLCs=$DLCs
-
-[Matchmaking]
-EnableLobbyFilter=false
-LobbyFilterKey=game_filter
-LobbyFilterValue=
-LobbyDistanceFilter=worldwide
-MaxLobbyResults=50
-
-[ServerBrowser]
-OverrideServerListAppId=false
-ServerListAppId=480
-
-[User]
-Name=$($identity.Name)
-AutoGenerateSteamId=$($identity.AutoGenerateSteamId)
-SteamId=$($identity.SteamId)
-
-[Network]
-ListenPort=$finalListenPort
-CustomBroadcasts=$CustomBroadcasts
-
-[Storage]
-LocalSave=saves
-
-[Debug]
-EnableLog=true
-EnableConsole=false
-
-[EOS]
-Mode=emulated
-DeviceIdAuth=false
-"@
-    [System.IO.File]::WriteAllText($reFixIniPath, $reFixIniContent)
+    $p2pPortVal = if ($unaeTopology -and $unaeTopology.P2PPort) { $unaeTopology.P2PPort } else { "7777" }
+    Generate-UNAE-ReFixIni -IniPath $reFixIniPath -P @{
+        GameName            = $GameName
+        EngineType          = $EngineType
+        OnlineMode          = "goldberg"
+        MaskAppId           = $MaskAppId
+        RealAppId           = $finalRealAppId
+        Language            = $finalLanguage
+        DLCMode             = $effectiveDlcMode
+        DLCs                = $DLCs
+        UserName            = $identity.Name
+        SteamId             = $identity.SteamId
+        AutoGenerateSteamId = $identity.AutoGenerateSteamId
+        ListenPort          = $finalListenPort
+        CustomBroadcasts    = $CustomBroadcasts
+        AppIdRealtime       = $AppIdRealtime
+        PhotonAppId         = $PhotonAppId
+        AppIdFusion         = $AppIdFusion
+        AppIdVoice          = $AppIdVoice
+        ArbitrationMode     = $ArbitrationMode
+        DefaultRegion       = $DefaultRegion
+        PhotonRegion        = $PhotonRegion
+        P2PPort             = $p2pPortVal
+    }
     Write-Host "  [OK] Written unified ReFix.ini in $ExeDir" -ForegroundColor Green
 
     # Generate portable 1-click LAN Firewall helper for USB / other PCs
@@ -915,6 +1176,7 @@ DeviceIdAuth=false
         "set `"LAN_PORT=$finalListenPort`"",
         'if exist "!SCRIPT_DIR!\ReFix.ini" (',
         '    for /f "tokens=1,* delims==" %%A in (''type "!SCRIPT_DIR!\ReFix.ini"'') do (',
+        '        if /i "%%A"=="DiscoveryPort" set "LAN_PORT=%%B"',
         '        if /i "%%A"=="ListenPort" set "LAN_PORT=%%B"',
         '    )',
         ')',
@@ -970,11 +1232,11 @@ if ($EngineType -eq "Unity") {
         $iniLines = Get-Content $reFixIni -ErrorAction SilentlyContinue
         foreach ($line in $iniLines) {
             if ($OnlineMode -eq "valve") {
-                if ($line -match "^MaskAppId=(.+)") { $targetAppId = $Matches[1].Trim() }
+                if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
             } else {
-                if ($line -match "^RealAppId=(.+)") { $targetAppId = $Matches[1].Trim() }
+                if ($line -match "^\s*RealAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
                 if ($targetAppId -eq "0" -or -not $targetAppId) {
-                    if ($line -match "^MaskAppId=(.+)") { $targetAppId = $Matches[1].Trim() }
+                    if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
                 }
             }
         }
@@ -1009,19 +1271,41 @@ if ($EngineType -eq "Unity") {
                 $defaultFusionGuid = "1d51fe8a-4821-4958-86c2-896b93277d81"
                 $defaultBytes = [System.Text.Encoding]::ASCII.GetBytes($defaultFusionGuid)
                 
-                # Check if file contains default Fusion AppID
+                # Check known offset 16052 first or scan full file
                 $foundIdx = -1
-                for ($i = 0; $i -le ($lvlBytes.Length - 36); $i++) {
-                    $matched = $true
+                if ($lvlBytes.Length -ge (16052 + 36)) {
+                    $matched16052 = $true
                     for ($j = 0; $j -lt 36; $j++) {
-                        if ($lvlBytes[$i + $j] -ne $defaultBytes[$j]) {
-                            $matched = $false
+                        if ($lvlBytes[16052 + $j] -ne $defaultBytes[$j]) {
+                            $matched16052 = $false
                             break
                         }
                     }
-                    if ($matched) {
-                        $foundIdx = $i
-                        break
+                    if ($matched16052) {
+                        $foundIdx = 16052
+                    } else {
+                        # Check if offset 16052 contains a 36-char GUID string
+                        $strAt16052 = [System.Text.Encoding]::ASCII.GetString($lvlBytes, 16052, 36)
+                        if ($strAt16052 -match "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") {
+                            $foundIdx = 16052
+                        }
+                    }
+                }
+
+                # If not found at 16052, perform full file scan for default PlaySide GUID
+                if ($foundIdx -lt 0) {
+                    for ($i = 0; $i -le ($lvlBytes.Length - 36); $i++) {
+                        $matched = $true
+                        for ($j = 0; $j -lt 36; $j++) {
+                            if ($lvlBytes[$i + $j] -ne $defaultBytes[$j]) {
+                                $matched = $false
+                                break
+                            }
+                        }
+                        if ($matched) {
+                            $foundIdx = $i
+                            break
+                        }
                     }
                 }
                 
@@ -1029,12 +1313,14 @@ if ($EngineType -eq "Unity") {
                     Write-Host "  [DETECT] Located Photon Fusion AppID in $($lvl.Name) at offset $foundIdx" -ForegroundColor Yellow
                     
                     # Determine target AppID to patch (if provided)
-                    $patchAppId = $PhotonAppId
+                    $patchAppId = $AppIdFusion
+                    if (-not $patchAppId) { $patchAppId = $PhotonAppId }
                     if (-not $patchAppId -and (Test-Path $reFixIni)) {
                         $iniContent = Get-Content $reFixIni -ErrorAction SilentlyContinue
                         foreach ($l in $iniContent) {
-                            if ($l -match "^\s*PhotonAppId\s*=\s*([a-f0-9\-]{36})") { $patchAppId = $Matches[1].Trim() }
+                            if ($l -match "^\s*AppIdFusion\s*=\s*([a-f0-9\-]{36})") { $patchAppId = $Matches[1].Trim() }
                             if ($l -match "^\s*PhotonFusionAppId\s*=\s*([a-f0-9\-]{36})") { $patchAppId = $Matches[1].Trim() }
+                            if ($l -match "^\s*PhotonAppId\s*=\s*([a-f0-9\-]{36})") { $patchAppId = $Matches[1].Trim() }
                         }
                     }
                     
@@ -1047,9 +1333,9 @@ if ($EngineType -eq "Unity") {
                         $newBytes = [System.Text.Encoding]::ASCII.GetBytes($patchAppId)
                         [System.Array]::Copy($newBytes, 0, $lvlBytes, $foundIdx, 36)
                         [System.IO.File]::WriteAllBytes($lvl.FullName, $lvlBytes)
-                        Write-Host "  [SUCCESS] Patched Photon Fusion AppID -> $patchAppId in $($lvl.Name)" -ForegroundColor Green
+                        Write-Host "  [SUCCESS] Patched Photon Fusion AppID -> $patchAppId in $($lvl.Name) at offset $foundIdx" -ForegroundColor Green
                     } else {
-                        Write-Host "  [INFO] Photon Fusion AppID is PlaySide default. (To use custom AppID, set PhotonAppId in ReFix.ini)" -ForegroundColor Gray
+                        Write-Host "  [INFO] Photon Fusion AppID is PlaySide default or operating via UNAE SDR/P2P tunnel. (To use custom AppID, set AppIdFusion in ReFix.ini)" -ForegroundColor Gray
                     }
                 }
             } catch {
@@ -1255,8 +1541,8 @@ if ($EngineType -eq "Unity") {
         }
     }
 
-    # --- Photon mode / Photon Cloud Topology: Deploy BepInEx + UniversalPhotonFix ---
-    if ($OnlineMode -eq "photon" -or ($NetworkTopology -eq "PHOTON_CLOUD" -and $OnlineMode -ne "goldberg")) {
+    # --- Photon mode: Deploy BepInEx + UniversalPhotonFix ---
+    if ($OnlineMode -eq "photon") {
         if ($EngineType -ne "Unity") {
             Write-Host "  [ERROR] Photon mode is only supported for Unity games!" -ForegroundColor Red
             exit 1
@@ -1317,10 +1603,19 @@ if ($EngineType -eq "Unity") {
 
         $reFixIni = Join-Path $ExeDir "ReFix.ini"
         $steamAppIdValue = "480"
+        $effectiveRealtime = if ($PhotonAppId) { $PhotonAppId } else { $AppIdRealtime }
+        $effectiveVoice = $AppIdVoice
+        $effectiveFusion = $AppIdFusion
+        $effectiveRegion = if ($PhotonRegion) { $PhotonRegion } else { $DefaultRegion }
+
         if (Test-Path $reFixIni) {
             $iniContent = Get-Content $reFixIni -ErrorAction SilentlyContinue
             foreach ($line in $iniContent) {
-                if ($line -match "^MaskAppId=(.+)") { $steamAppIdValue = $Matches[1].Trim() }
+                if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $steamAppIdValue = $Matches[1].Trim() }
+                if (-not $effectiveRealtime -and $line -match "^\s*AppIdRealtime\s*=\s*(.+)") { $effectiveRealtime = $Matches[1].Trim() }
+                if (-not $effectiveVoice -and $line -match "^\s*AppIdVoice\s*=\s*(.+)") { $effectiveVoice = $Matches[1].Trim() }
+                if (-not $effectiveFusion -and $line -match "^\s*AppIdFusion\s*=\s*(.+)") { $effectiveFusion = $Matches[1].Trim() }
+                if ($line -match "^\s*DefaultRegion\s*=\s*(.+)") { $effectiveRegion = $Matches[1].Trim() }
             }
         }
 
@@ -1332,7 +1627,7 @@ if ($EngineType -eq "Unity") {
 ; Auto-generated by ReFix AutoDeploy (Photon mode)
 ;
 ; This file is read by BepInEx/UniversalPhotonFix at game startup.
-; To change Photon settings, edit ReFix.ini [Online] section
+; To change Photon settings, edit ReFix.ini [Photon] section
 ; and re-run AutoDeploy, or edit this file directly.
 ;
 ; Get your free Photon AppID at:
@@ -1342,18 +1637,18 @@ if ($EngineType -eq "Unity") {
 
 [Settings]
 SteamAppId=$steamAppIdValue
-AppIdRealtime=$PhotonAppId
-AppIdVoice=
-AppIdFusion=
+AppIdRealtime=$effectiveRealtime
+AppIdVoice=$effectiveVoice
+AppIdFusion=$effectiveFusion
 Auth=None
-FixedRegion=$PhotonRegion
+FixedRegion=$effectiveRegion
 "@
         [System.IO.File]::WriteAllText($kirigiriPath, $kirigiriContent)
-        Write-Host "  [OK] Generated Kirigiri.ini (AppIdRealtime=$PhotonAppId, FixedRegion=$PhotonRegion)" -ForegroundColor Green
+        Write-Host "  [OK] Generated Kirigiri.ini (AppIdRealtime=$effectiveRealtime, FixedRegion=$effectiveRegion)" -ForegroundColor Green
 
-        if (-not $PhotonAppId) {
-            Write-Host "  [REMINDER] PhotonAppIdRealtime is empty!" -ForegroundColor Yellow
-            Write-Host "  [REMINDER] Edit Kirigiri.ini or ReFix.ini [Online] section before launching the game." -ForegroundColor Yellow
+        if (-not $effectiveRealtime) {
+            Write-Host "  [REMINDER] Photon AppIdRealtime is empty!" -ForegroundColor Yellow
+            Write-Host "  [REMINDER] Edit Kirigiri.ini or ReFix.ini [Photon] section before launching the game." -ForegroundColor Yellow
         }
     }
 
@@ -1366,9 +1661,9 @@ FixedRegion=$PhotonRegion
         $iniLines = Get-Content $reFixIni -ErrorAction SilentlyContinue
         foreach ($line in $iniLines) {
             if ($OnlineMode -eq "valve") {
-                if ($line -match "^MaskAppId=(.+)") { $targetAppId = $Matches[1].Trim() }
+                if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
             } else {
-                if ($line -match "^RealAppId=(.+)") { $targetAppId = $Matches[1].Trim() }
+                if ($line -match "^\s*RealAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
             }
         }
     }
@@ -1400,9 +1695,9 @@ FixedRegion=$PhotonRegion
         $iniLines = Get-Content $reFixIni -ErrorAction SilentlyContinue
         foreach ($line in $iniLines) {
             if ($OnlineMode -eq "valve") {
-                if ($line -match "^MaskAppId=(.+)") { $targetAppId = $Matches[1].Trim() }
+                if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
             } else {
-                if ($line -match "^RealAppId=(.+)") { $targetAppId = $Matches[1].Trim() }
+                if ($line -match "^\s*RealAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
             }
         }
     }

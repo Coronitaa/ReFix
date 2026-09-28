@@ -89,17 +89,13 @@ set "IS_X86=False"
 
 if exist "!BIN_DIR!\detect_game.ps1" (
     for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "!BIN_DIR!\detect_game.ps1" -TargetDir "!TARGET_DIR!" ^<nul`) do (
-        if /i "%%A"=="ENGINE_TYPE"      set "ENGINE_TYPE=%%B"
-        if /i "%%A"=="EXE_DIR"          set "EXE_DIR=%%B"
-        if /i "%%A"=="GAME_EXE_PATH"    set "GAME_EXE_PATH=%%B"
-        if /i "%%A"=="GAME_NAME"        set "DEFAULT_GAME_NAME=%%B"
-        if /i "%%A"=="DETECTED_APPID"   set "DETECTED_APPID=%%B"
-        if /i "%%A"=="IS_X86"           set "IS_X86=%%B"
-        if /i "%%A"=="IS_IL2CPP"        set "IS_IL2CPP=%%B"
-        if /i "%%A"=="NETWORK_TOPOLOGY" set "NETWORK_TOPOLOGY=%%B"
-        if /i "%%A"=="NETWORK_DETAILS"  set "NETWORK_DETAILS=%%B"
-        if /i "%%A"=="RECOMMENDED_PORT" set "RECOMMENDED_PORT=%%B"
-        if /i "%%A"=="CANDIDATE_EXES"   set "CANDIDATE_EXES=%%B"
+        if /i "%%A"=="ENGINE_TYPE"    set "ENGINE_TYPE=%%B"
+        if /i "%%A"=="EXE_DIR"        set "EXE_DIR=%%B"
+        if /i "%%A"=="GAME_EXE_PATH"  set "GAME_EXE_PATH=%%B"
+        if /i "%%A"=="GAME_NAME"      set "DEFAULT_GAME_NAME=%%B"
+        if /i "%%A"=="DETECTED_APPID" set "DETECTED_APPID=%%B"
+        if /i "%%A"=="IS_X86"         set "IS_X86=%%B"
+        if /i "%%A"=="CANDIDATE_EXES" set "CANDIDATE_EXES=%%B"
     )
 )
 
@@ -108,24 +104,13 @@ if "!DEFAULT_GAME_NAME!"=="" (
 )
 
 echo [DETECTION] Detected Engine Type: !ENGINE_TYPE!
-if /i "!IS_IL2CPP!"=="True" (
-    echo [DETECTION] Scripting Backend:   IL2CPP [AOT Compiled]
-) else if "!ENGINE_TYPE!"=="Unity" (
-    echo [DETECTION] Scripting Backend:   Mono [Managed JIT]
-)
 echo [DETECTION] Executable Location: "!EXE_DIR!"
 if not "!GAME_EXE_PATH!"=="" echo [DETECTION] Game Executable: "!GAME_EXE_PATH!"
 if not "!DETECTED_APPID!"=="" echo [DETECTION] Detected Steam AppID: !DETECTED_APPID!
 if /i "!IS_X86!"=="True" (
-    echo [DETECTION] Architecture:        x86 [32-bit] - ReFix proxy32 will be deployed
+    echo [DETECTION] Architecture: x86 [32-bit] - ReFix proxy32 will be deployed
 ) else (
-    echo [DETECTION] Architecture:        x64 [64-bit]
-)
-if not "!NETWORK_TOPOLOGY!"=="" (
-    echo [DETECTION] Red / Topologia:     !NETWORK_TOPOLOGY! [!NETWORK_DETAILS!]
-    if not "!RECOMMENDED_PORT!"=="0" (
-        echo [DETECTION] Puerto P2P:          !RECOMMENDED_PORT!
-    )
+    echo [DETECTION] Architecture: x64 [64-bit]
 )
 echo:
 
@@ -193,6 +178,7 @@ if exist "!EXE_DIR!\ReFix.ini" (
         )
         if /i "%%A"=="Name" set "EXISTING_USERNAME=%%B"
         if /i "%%A"=="SteamId" set "EXISTING_STEAMID=%%B"
+        if /i "%%A"=="DiscoveryPort" set "EXISTING_LAN_PORT=%%B"
         if /i "%%A"=="ListenPort" set "EXISTING_LAN_PORT=%%B"
     )
 )
@@ -366,25 +352,24 @@ echo [1/6] Skipping winmm.dll proxy for offline/native mode...
 
 :: Steps 2 & 3: Run PowerShell helper for deployment & configuration synchronization
 if exist "!BIN_DIR!\deploy_helper.ps1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "!BIN_DIR!\deploy_helper.ps1" -TargetDir "!TARGET_DIR!" -BinDir "!BIN_DIR!" -ExeDir "!EXE_DIR!" -EngineType "!ENGINE_TYPE!" -OnlineMode "!ONLINE_MODE_NAME!" -GameName "!GAME_NAME!" -UserName "!CUSTOM_USERNAME!" -RealAppId "!REAL_APPID!" -MaskAppId "!MASK_APPID!" -Language "english" -DLCs "!DLCS!" -DLCMode "!DLC_MODE!" -ListenPort "!LAN_PORT!" -CustomBroadcasts "!CUSTOM_BROADCASTS!" -PhotonAppId "!PHOTON_APPID!" -PhotonRegion "!PHOTON_REGION!" -NetworkTopology "!NETWORK_TOPOLOGY!" -RecommendedPort "!RECOMMENDED_PORT!"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "!BIN_DIR!\deploy_helper.ps1" -TargetDir "!TARGET_DIR!" -BinDir "!BIN_DIR!" -ExeDir "!EXE_DIR!" -EngineType "!ENGINE_TYPE!" -OnlineMode "!ONLINE_MODE_NAME!" -GameName "!GAME_NAME!" -UserName "!CUSTOM_USERNAME!" -RealAppId "!REAL_APPID!" -MaskAppId "!MASK_APPID!" -Language "english" -DLCs "!DLCS!" -DLCMode "!DLC_MODE!" -ListenPort "!LAN_PORT!" -CustomBroadcasts "!CUSTOM_BROADCASTS!" -PhotonAppId "!PHOTON_APPID!" -PhotonRegion "!PHOTON_REGION!"
 ) else (
     echo [ERROR] !BIN_DIR!\deploy_helper.ps1 missing!
     goto ERROR_EXIT
 )
 
-:: Step 4 & 5: Verify configuration and steam_appid.txt (Valve mode)
+:: Step 4 & 5: Ensure steam_appid.txt exists if not created by deploy_helper.ps1
 if "!ONLINE_MODE_NAME!"=="goldberg" goto SKIP_VALVE_MANUAL_INI
 
-echo [4/6] Verifying steam_appid.txt...
 if not exist "!EXE_DIR!\steam_appid.txt" (
+    echo [4/6] Generating steam_appid.txt...
     echo !MASK_APPID!> "!EXE_DIR!\steam_appid.txt"
     echo [OK] Created steam_appid.txt (AppID: !MASK_APPID!)
 ) else (
-    echo [OK] Verified steam_appid.txt
+    echo [4/6] Verified steam_appid.txt is present.
 )
 
-echo [5/6] Verifying ReFix configuration...
-echo [OK] ReFix.ini and persistent identity synchronized by ReFix Deploy Engine.
+echo [5/6] Configuration synchronized via UNAE specifications.
 
 :SKIP_VALVE_MANUAL_INI
 

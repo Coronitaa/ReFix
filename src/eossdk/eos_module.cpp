@@ -248,6 +248,17 @@ void InitialiseModule() {
           kExportCount, reg.Bound(), reg.Missing(),
           EOS_MAJOR_VERSION, EOS_MINOR_VERSION, EOS_PATCH_VERSION,
           Config::Get().IniFound() ? Config::Get().IniPath().c_str() : "<not found>");
+
+    // Coordinate with UNAE (Universal Network Arbitration Engine) if loaded
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (!hSteam) hSteam = GetModuleHandleA("steam_api64_valve.dll");
+    if (hSteam) {
+        auto pfnUNAE = (void(*)())GetProcAddress(hSteam, "UNAE_Initialize");
+        if (pfnUNAE) {
+            pfnUNAE();
+            RFLOG(Core, "UNAE initialized via steam_api64 proxy");
+        }
+    }
 }
 
 } // namespace refix

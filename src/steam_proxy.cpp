@@ -31,6 +31,7 @@
 #include "identity/online_identity_provider.h"
 #include "crypto_hash.h"
 #include "unreal_detect.h"
+#include "unae/unae.h"
 
 static std::atomic<uint32_t> g_authCorrelationCounter{ 0 };
 
@@ -1488,13 +1489,29 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
         }
     }
 
-    // Also register the lobby owner (Host)
+    uint64_t mySteamID = g_capturedSteamID;
+    if (mySteamID == 0) {
+        typedef void* (*fn_SteamUser_t)();
+        auto pfnUser = (fn_SteamUser_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUser_v021");
+        if (!pfnUser) pfnUser = (fn_SteamUser_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUser");
+        if (pfnUser) {
+            void* pUser = pfnUser();
+            if (pUser) {
+                typedef uint64_t (__thiscall* fn_GetSteamID_t)(void*);
+                void** vt = *(void***)pUser;
+                auto fnGetID = (fn_GetSteamID_t)vt[2];
+                mySteamID = fnGetID(pUser);
+            }
+        }
+    }
+
+    // Also register the lobby owner (Host) if it's a remote host
     typedef uint64_t (*fn_GetLobbyOwner_t)(void*, uint64_t);
     auto pfnGetOwner = (fn_GetLobbyOwner_t)GetProcAddress((HMODULE)g_hOriginalDll,
         "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     if (pfnGetOwner) {
         uint64_t ownerID = pfnGetOwner(matchmaking, lobbyID);
-        if (ownerID != 0) {
+        if (ownerID != 0 && (mySteamID == 0 || ownerID != mySteamID)) {
             uint32_t ownerIP = 0;
             if (serverIP && serverIP[0] != '\0') {
                 struct in_addr addr;
@@ -1517,7 +1534,7 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
 
     for (int i = 0; i < count; i++) {
         uint64_t memberID = g_pfn_GetLobbyMemberByIndex(matchmaking, lobbyID, i);
-        if (!memberID) continue;
+        if (!memberID || (mySteamID != 0 && memberID == mySteamID)) continue;
 
         // Resolve IP: use SERVER_IP from lobby data for the host; for other members
         // we derive a synthetic IP from their SteamID so sendto can find them.
@@ -4098,7 +4115,9 @@ extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {
                 ReFixLog("  -> Injected '%s'='%s' into Steam Lobby %llu", g_config.lobbyFilterKey, g_config.lobbyFilterValue, lobbyID);
             }
             char portStr[16];
-            sprintf_s(portStr, sizeof(portStr), "%u", g_config.p2pPort ? g_config.p2pPort : 7777);
+            uint16_t effectivePort = SteamP2PHook::GetBoundGamePort();
+            if (effectivePort == 0) effectivePort = g_config.p2pPort ? g_config.p2pPort : 7777;
+            sprintf_s(portStr, sizeof(portStr), "%u", effectivePort);
             Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, lobbyID, "refix_p2p_port", portStr);
         }
 
@@ -4120,6 +4139,23 @@ extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {
                 g_pfn_SetRichPresence(friends, "connect", connectString);
                 ReFixLog("  -> Updated Steam Rich Presence connect string: '%s'", connectString);
             }
+        }
+    }
+}
+
+extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort) {
+    uint64_t targetLobby = g_hostedLobbyID != 0 ? g_hostedLobbyID : g_activeLobbyID;
+    if (targetLobby != 0) {
+        void* matchmaking = nullptr;
+        typedef void* (*fn_SteamMatchmaking_t)();
+        auto pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
+        if (!pfnMM) pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmaking");
+        if (pfnMM) matchmaking = pfnMM();
+        if (matchmaking) {
+            char portStr[16];
+            sprintf_s(portStr, sizeof(portStr), "%u", newPort);
+            Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, targetLobby, "refix_p2p_port", portStr);
+            ReFixLog("[PortVirtualization] Dynamically updated Steam Lobby %llu refix_p2p_port -> %u", targetLobby, newPort);
         }
     }
 }
@@ -4745,15 +4781,20 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (All engines except Godot in Valve Online mode)
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
+
+        // 1. Initialize UNAE Engine (Runtime capability scan, topology classifier, cascade arbiter, DRPI)
+        UNAE::Initialize();
+
+        // 2. Install Winsock -> Steam P2P redirect hooks
+        if (!g_godotIsEngine && !g_isGoldbergMode && UNAE::IsDirectP2PAllowed()) {
             SteamP2PHook::Install(g_hOriginalDll);
             ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
             // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         } else {
-            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
+            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d, unaeDirectP2PAllowed=%d)",
+                g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode, UNAE::IsDirectP2PAllowed());
         }
         InstallVTableHooks();
     }
@@ -4806,10 +4847,14 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
     ReFixLog("SteamAPI_InitFlat: result=%d, msg='%s'", result, targetErr);
     if (result == 0) {
         CapturePersonaName();
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
+        UNAE::Initialize();
+        if (!g_godotIsEngine && !g_isGoldbergMode && UNAE::IsDirectP2PAllowed()) {
             SteamP2PHook::Install(g_hOriginalDll);
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
+        } else {
+            ReFixLog("SteamAPI_InitFlat: Winsock P2P hook skipped (godot=%d, goldberg=%d, unaeDirectP2PAllowed=%d)",
+                g_godotIsEngine, g_isGoldbergMode, UNAE::IsDirectP2PAllowed());
         }
         InstallVTableHooks();
     }
@@ -4873,13 +4918,18 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (All engines except Godot in Valve Online mode)
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
+        // 1. Initialize UNAE Engine (Runtime capability scan, topology classifier, cascade arbiter, DRPI)
+        UNAE::Initialize();
+
+        // 2. Install Winsock -> Steam P2P redirect hooks (All engines except Godot in Valve Online mode)
+        if (!g_godotIsEngine && !g_isGoldbergMode && UNAE::IsDirectP2PAllowed()) {
             SteamP2PHook::Install(g_hOriginalDll);
+            ReFixLog("SteamInternal_SteamAPI_Init: Steam P2P Winsock hooks installed");
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         } else {
-            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
+            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d, unaeDirectP2PAllowed=%d)",
+                g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode, UNAE::IsDirectP2PAllowed());
         }
         InstallVTableHooks();
     }
