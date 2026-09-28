@@ -1367,7 +1367,8 @@ if ($EngineType -eq "Unity") {
 
     # ------------------------------------------------------------
     # Photon Fusion / IL2CPP Authentication Bypass Patch
-    # For Dumb Ways to Build: suppress Steam ticket injection so Photon connects anonymously
+    # For Dumb Ways to Build: force AuthType = CustomAuthenticationType.None (255)
+    # and suppress Steam ticket injection so Photon connects anonymously without 403 / AUT-004
     # ------------------------------------------------------------
     $gameAssemblyPath = Join-Path $TargetDir "GameAssembly.dll"
     if (Test-Path $gameAssemblyPath) {
@@ -1375,18 +1376,47 @@ if ($EngineType -eq "Unity") {
             $gaBytes = [System.IO.File]::ReadAllBytes($gameAssemblyPath)
             $offset1 = 0xB12CF0
             $offset2 = 0xB12FC0
-            if ($gaBytes.Length -gt ($offset2 + 5)) {
-                if ($gaBytes[$offset1] -eq 0x48 -and $gaBytes[$offset1 + 1] -eq 0x89 -and
-                    $gaBytes[$offset2] -eq 0x48 -and $gaBytes[$offset2 + 1] -eq 0x89) {
-                    $gaBackup = "$gameAssemblyPath.original"
-                    if (-not (Test-Path $gaBackup)) {
-                        Copy-Item -Path $gameAssemblyPath -Destination $gaBackup -Force
-                        Write-Host "  [OK] Preserved original GameAssembly.dll -> GameAssembly.dll.original" -ForegroundColor Green
-                    }
+            $offsetAuth = 0xB13737
+            $offsetVoiceAuth = 0xB13A27
+            $modified = $false
+
+            if ($gaBytes.Length -gt ($offsetVoiceAuth + 10)) {
+                $gaBackup = "$gameAssemblyPath.original"
+                if (-not (Test-Path $gaBackup)) {
+                    Copy-Item -Path $gameAssemblyPath -Destination $gaBackup -Force
+                    Write-Host "  [OK] Preserved original GameAssembly.dll -> GameAssembly.dll.original" -ForegroundColor Green
+                }
+
+                # 1. Neutralize ApplyAuthenticationTicketParameters -> ret (0xC3)
+                if ($gaBytes[$offset1] -eq 0x48 -and $gaBytes[$offset1 + 1] -eq 0x89) {
                     $gaBytes[$offset1] = [byte]0xC3
+                    $modified = $true
+                }
+                if ($gaBytes[$offset2] -eq 0x48 -and $gaBytes[$offset2 + 1] -eq 0x89) {
                     $gaBytes[$offset2] = [byte]0xC3
+                    $modified = $true
+                }
+
+                # 2. Force AuthType = CustomAuthenticationType.None (0xFF / 255) in CreateAuthenticationValues
+                # Pattern: b0 01 eb 02 32 c0 88 43 10 -> b0 ff eb 02 b0 ff 88 43 10
+                if ($gaBytes[$offsetAuth] -eq 0xB0) {
+                    $gaBytes[$offsetAuth + 1] = [byte]0xFF
+                    $gaBytes[$offsetAuth + 4] = [byte]0xB0
+                    $gaBytes[$offsetAuth + 5] = [byte]0xFF
+                    $modified = $true
+                }
+
+                # 3. Force AuthType = CustomAuthenticationType.None (0xFF / 255) in CreateVoiceAuthenticationValues
+                if ($gaBytes[$offsetVoiceAuth] -eq 0xB0) {
+                    $gaBytes[$offsetVoiceAuth + 1] = [byte]0xFF
+                    $gaBytes[$offsetVoiceAuth + 4] = [byte]0xB0
+                    $gaBytes[$offsetVoiceAuth + 5] = [byte]0xFF
+                    $modified = $true
+                }
+
+                if ($modified) {
                     [System.IO.File]::WriteAllBytes($gameAssemblyPath, $gaBytes)
-                    Write-Host "  [SUCCESS] Patched GameAssembly.dll: ApplyAuthenticationTicketParameters -> ret (Enables anonymous Photon Fusion & Voice)" -ForegroundColor Green
+                    Write-Host "  [SUCCESS] Patched GameAssembly.dll: AuthType -> None (0xFF) & Ticket -> ret (Anonymous Photon Handshake)" -ForegroundColor Green
                 }
             }
         } catch {
