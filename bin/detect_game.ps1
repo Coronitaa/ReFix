@@ -224,6 +224,62 @@ $pluginsX86Dirs = Get-ChildItem -Path $target -Directory -Filter "x86" -Recurse 
 if ($steamApi32s.Count -gt 0 -and $steamApi64s.Count -eq 0) { $isX86 = $true }
 if ($pluginsX86Dirs.Count -gt 0)                              { $isX86 = $true }
 
+# 6. Architecture & Network Topology Detection (P2P Sockets vs Hybrid vs Photon Cloud)
+$isIl2Cpp = (Test-Path (Join-Path $target "GameAssembly.dll")) -or 
+            (Get-ChildItem -Path $target -Directory -Filter "il2cpp_data" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+$isIl2Cpp = [bool]$isIl2Cpp
+
+$nanosocketsFiles = Get-ChildItem -Path $target -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue
+$hasNanosockets = ($nanosocketsFiles.Count -gt 0)
+
+$photonFiles = Get-ChildItem -Path $target -Filter "*Photon*.dll" -Recurse -File -ErrorAction SilentlyContinue
+$fusionFiles = Get-ChildItem -Path $target -Filter "*Fusion*.dll" -Recurse -File -ErrorAction SilentlyContinue
+$hasPhoton = ($photonFiles.Count -gt 0 -or $fusionFiles.Count -gt 0)
+
+# Check if Unity assets contain Fusion signatures
+$hasFusion = $hasNanosockets -or ($fusionFiles.Count -gt 0)
+if (-not $hasFusion) {
+    $fusionAssets = Get-ChildItem -Path $target -Filter "*Fusion*" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object
+    if ($fusionAssets.Count -gt 0) { $hasFusion = $true }
+}
+
+# Strict DLL pattern matching for socket-based networking libraries (avoids false positives with media files)
+$socketLibPatterns = @(
+    "Mirror.dll", "kcp2k.dll", "LiteNetLib.dll", "Telepathy.dll",
+    "Unity.Netcode.Runtime.dll", "FishNet.Runtime.dll", "RiptideNetworking.dll",
+    "ENet-CSharp.dll", "Facepunch.Steamworks.Win64.dll", "FizzySteamworks.dll"
+)
+$socketFiles = Get-ChildItem -Path $target -Filter "*.dll" -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $socketLibPatterns -contains $_.Name }
+$hasSocketLibs = ($socketFiles.Count -gt 0)
+
+$networkTopology = "P2P_SOCKETS"
+$networkDetails = "Standard Winsock / Steam P2P Sockets"
+$recommendedPort = "7777"
+
+if ($hasNanosockets -or ($hasFusion -and $hasPhoton)) {
+    $networkTopology = "P2P_HYBRID"
+    $networkDetails = "Photon Fusion Transport (nanosockets UDP + Room Handshake)"
+    $recommendedPort = "27015"
+} elseif ($hasPhoton -and -not $hasNanosockets -and -not $hasSocketLibs) {
+    $networkTopology = "PHOTON_CLOUD"
+    $networkDetails = "Pure Photon Cloud Relay (PUN/PUN2 without local sockets)"
+    $recommendedPort = "0"
+} elseif ($hasSocketLibs) {
+    $networkTopology = "P2P_SOCKETS"
+    $matchedNames = ($socketFiles | Select-Object -ExpandProperty Name -Unique) -join ", "
+    $networkDetails = "Unity Sockets Transport ($matchedNames)"
+    $recommendedPort = "7777"
+} elseif ($engineType -eq "Unreal") {
+    $networkTopology = "P2P_SOCKETS"
+    $networkDetails = "Unreal Engine Native Winsock / SteamSockets"
+    $recommendedPort = "7777"
+} elseif ($engineType -eq "Godot") {
+    $networkTopology = "P2P_SOCKETS"
+    $networkDetails = "Godot ENet / SteamMultiplayerPeer"
+    $recommendedPort = "7777"
+}
+
 # Build candidate exe list for interactive picker (up to top 5)
 $candidateList = @()
 foreach ($item in ($sortedExes | Select-Object -First 5)) {
@@ -240,4 +296,11 @@ Write-Output "DETECTED_APPID=$detectedAppId"
 Write-Output "HAS_STEAM=$hasSteam"
 Write-Output "HAS_EOS=$hasEos"
 Write-Output "IS_X86=$isX86"
+Write-Output "IS_IL2CPP=$isIl2Cpp"
+Write-Output "NETWORK_TOPOLOGY=$networkTopology"
+Write-Output "NETWORK_DETAILS=$networkDetails"
+Write-Output "RECOMMENDED_PORT=$recommendedPort"
+Write-Output "HAS_NANOSOCKETS=$hasNanosockets"
+Write-Output "HAS_PHOTON=$hasPhoton"
+Write-Output "HAS_FUSION=$hasFusion"
 Write-Output "CANDIDATE_EXES=$candidateListStr"

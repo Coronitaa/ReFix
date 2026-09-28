@@ -14,7 +14,9 @@ param(
     [string]$DLCs = "",
     [string]$DLCMode = "all",
     [string]$ListenPort = "47584",
-    [string]$CustomBroadcasts = ""
+    [string]$CustomBroadcasts = "",
+    [string]$NetworkTopology = "",
+    [string]$RecommendedPort = ""
 )
 
 # Clean paths by trimming trailing quotes/slashes
@@ -23,9 +25,23 @@ if ($BinDir)    { $BinDir    = $BinDir.TrimEnd('\').Trim('"') }
 if ($ExeDir)    { $ExeDir    = $ExeDir.TrimEnd('\').Trim('"') }
 if (-not $ExeDir) { $ExeDir  = $TargetDir }
 
+if (-not $NetworkTopology) {
+    $hasNanosockets = (Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhoton = (Get-ChildItem -Path $TargetDir -Filter "*Photon*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasFusion = (Get-ChildItem -Path $TargetDir -Filter "*Fusion*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    if ($hasNanosockets -or ($hasFusion -and $hasPhoton)) {
+        $NetworkTopology = "P2P_HYBRID"
+    } elseif ($hasPhoton -and -not $hasNanosockets) {
+        $NetworkTopology = "PHOTON_CLOUD"
+    } else {
+        $NetworkTopology = "P2P_SOCKETS"
+    }
+}
+
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host " [ReFix Deploy Engine] Target: $TargetDir" -ForegroundColor Cyan
-Write-Host " [ReFix Deploy Engine] Mode:   $OnlineMode ($EngineType)" -ForegroundColor Cyan
+Write-Host " [ReFix Deploy Engine] Target:   $TargetDir" -ForegroundColor Cyan
+Write-Host " [ReFix Deploy Engine] Mode:     $OnlineMode ($EngineType)" -ForegroundColor Cyan
+Write-Host " [ReFix Deploy Engine] Topology: $NetworkTopology" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 # ------------------------------------------------------------
@@ -395,8 +411,7 @@ switch ($OnlineMode) {
         $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
         $bypassVal = if ($DLCMode -eq "none") { "false" } else { "true" }
         $maskVal = if ($MaskAppId) { $MaskAppId } else { "480" }
-        $isNanosocketsGame = (Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-        $p2pPortVal = if ($isNanosocketsGame) { "27015" } else { "7777" }
+        $p2pPortVal = if ($RecommendedPort) { $RecommendedPort } elseif ($isNanosocketsGame -or $NetworkTopology -eq "P2P_HYBRID") { "27015" } else { "7777" }
         $reFixIniContent = @"
 ; =============================================================================
 ; ReFix Universal Configuration File
@@ -441,6 +456,7 @@ SteamId=$finalSteamId
 Mode=valve
 
 [Network]
+Topology=$NetworkTopology
 GameFilter=$filterVal
 PublicIP=
 LocalIP=
@@ -450,9 +466,13 @@ EnableWAN=true
 P2PPort=$p2pPortVal
 AllowRelay=true
 ForcePublicIPInLobby=true
+
+[Photon]
+PhotonAppId=$PhotonAppId
+PhotonRegion=$PhotonRegion
 "@
         [System.IO.File]::WriteAllText($reFixIniPath, $reFixIniContent)
-        Write-Host "  [OK] Configured ReFix.ini in $ExeDir" -ForegroundColor Green
+        Write-Host "  [OK] Configured ReFix.ini in $ExeDir (Topology: $NetworkTopology, Port: $p2pPortVal)" -ForegroundColor Green
     }
 
     "photon" {
@@ -1235,8 +1255,8 @@ if ($EngineType -eq "Unity") {
         }
     }
 
-    # --- Photon mode: Deploy BepInEx + UniversalPhotonFix ---
-    if ($OnlineMode -eq "photon") {
+    # --- Photon mode / Photon Cloud Topology: Deploy BepInEx + UniversalPhotonFix ---
+    if ($OnlineMode -eq "photon" -or ($NetworkTopology -eq "PHOTON_CLOUD" -and $OnlineMode -ne "goldberg")) {
         if ($EngineType -ne "Unity") {
             Write-Host "  [ERROR] Photon mode is only supported for Unity games!" -ForegroundColor Red
             exit 1
