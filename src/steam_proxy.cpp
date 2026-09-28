@@ -1211,6 +1211,7 @@ static fn_GetLobbyData_t          g_pfn_GetLobbyData          = nullptr;
 
 // Currently tracked Steam lobby ID (for peer scanning)
 static uint64_t g_activeLobbyID = 0;
+static uint64_t g_hostedLobbyID = 0;
 static uint64_t g_capturedSteamID = 0;
 
 // Forward declaration (defined later in this file)
@@ -1366,44 +1367,93 @@ static void UntrackCallback(void* pCallback) {
     }
 }
 
-// Synthesize a LobbyEnter_t callback dispatch into all registered listeners
-static void SynthesizeLobbyEnterCallback(uint64_t lobbyID) {
+// Safe invocation helper protected by SEH (__try/__except)
+// Separated to prevent C2712 unwinding conflicts in caller functions with C++ objects
+static bool SafeCallRun(void* pCallback, void* pData) {
+    if (!pCallback) return false;
+    __try {
+        void** vtable = *(void***)pCallback;
+        if (!vtable) return false;
+
+        typedef void (*fn_Run0_t)(void* self, void* pvParam);
+        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
+        if (pRun0) {
+            pRun0(pCallback, pData);
+            return true;
+        }
+        return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        DWORD code = GetExceptionCode();
+        ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
+        return false;
+    }
+}
+
+// Thread-safe synthetic LobbyEnter_t dispatch queue
+// All callback dispatches MUST happen on the main engine thread inside SteamAPI_RunCallbacks()
+struct PendingLobbyEnterCallback {
+    uint64_t lobbyID;
+    uint32_t responseCode; // 1 = Success, 3 = NotAllowed, 5 = Error
+    DWORD fireTick;
+};
+
+static std::mutex g_pendingLobbyEnterMutex;
+static std::vector<PendingLobbyEnterCallback> g_pendingLobbyEnterCallbacks;
+
+static void QueueSyntheticLobbyEnter(uint64_t lobbyID, uint32_t responseCode, DWORD delayMs = 0) {
     if (!lobbyID) return;
+    std::lock_guard<std::mutex> lg(g_pendingLobbyEnterMutex);
+    g_pendingLobbyEnterCallbacks.push_back({ lobbyID, responseCode, GetTickCount() + delayMs });
+    ReFixLog("[Godot] Queued synthetic LobbyEnter_t for lobby %llu, response=%u, delay=%ums",
+             lobbyID, responseCode, delayMs);
+}
 
-    LobbyEnter_t evt;
-    memset(&evt, 0, sizeof(evt));
-    evt.m_ulSteamIDLobby         = lobbyID;
-    evt.m_rgfChatPermissions     = 0;
-    evt.m_bLocked                = false;
-    evt.m_EChatRoomEnterResponse = 1; // k_EChatRoomEnterResponseSuccess
-
-    ReFixLog("[Godot] SynthesizeLobbyEnterCallback: lobbyID=%llu, scanning registered callbacks", lobbyID);
-
-    std::vector<GodotCallbackEntry> snapshot;
+static void DispatchPendingLobbyEnterCallbacks() {
+    std::vector<PendingLobbyEnterCallback> toFire;
     {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
-        snapshot = g_registeredCallbacks;
+        std::lock_guard<std::mutex> lg(g_pendingLobbyEnterMutex);
+        if (g_pendingLobbyEnterCallbacks.empty()) return;
+        DWORD now = GetTickCount();
+        for (auto it = g_pendingLobbyEnterCallbacks.begin(); it != g_pendingLobbyEnterCallbacks.end(); ) {
+            if (now >= it->fireTick) {
+                toFire.push_back(*it);
+                it = g_pendingLobbyEnterCallbacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
-    int dispatched = 0;
-    for (auto& entry : snapshot) {
-        if (entry.iCallback != LobbyEnter_t::k_iCallback) continue;
-        if (!entry.pCallback) continue;
+    for (const auto& item : toFire) {
+        LobbyEnter_t evt;
+        memset(&evt, 0, sizeof(evt));
+        evt.m_ulSteamIDLobby         = item.lobbyID;
+        evt.m_rgfChatPermissions     = 0;
+        evt.m_bLocked                = false;
+        evt.m_EChatRoomEnterResponse = item.responseCode;
 
-        // The Steam callback object layout:
-        // [0] vtable ptr  -> Run(void* pvParam) is vt[0]
-        // Call Run(pvParam) via vtable slot 0
-        void** vt = *(void***)entry.pCallback;
-        if (!vt || !vt[0]) continue;
+        ReFixLog("[Godot] Dispatching synthetic LobbyEnter_t on main thread: lobbyID=%llu, response=%u",
+                 item.lobbyID, item.responseCode);
 
-        using fn_Run_t = void(__thiscall*)(void*, void*);
-        auto fn = (fn_Run_t)vt[0];
-        fn(entry.pCallback, &evt);
-        dispatched++;
-        ReFixLog("[Godot]   -> Dispatched LobbyEnter_t to callback %p", entry.pCallback);
+        std::vector<GodotCallbackEntry> snapshot;
+        {
+            std::lock_guard<std::mutex> lg(g_callbackMutex);
+            snapshot = g_registeredCallbacks;
+        }
+
+        int dispatched = 0;
+        for (auto& entry : snapshot) {
+            if (entry.iCallback != LobbyEnter_t::k_iCallback) continue;
+            if (!entry.pCallback) continue;
+
+            if (SafeCallRun(entry.pCallback, &evt)) {
+                dispatched++;
+                ReFixLog("[Godot]   -> Dispatched LobbyEnter_t to callback %p", entry.pCallback);
+            }
+        }
+
+        ReFixLog("[Godot] DispatchPendingLobbyEnterCallbacks: dispatched to %d listeners", dispatched);
     }
-
-    ReFixLog("[Godot] SynthesizeLobbyEnterCallback: dispatched to %d listeners", dispatched);
 }
 
 static void UpdateP2PPeers(uint64_t lobbyID) {
@@ -1544,6 +1594,10 @@ struct ReFixConfig {
     std::string playerName = "Player";
     std::string steamId = "";
     uint64_t steamIdNum = 0;
+
+    // [Invites]
+    bool sendSteamChatMessageOnInvite = true;
+    std::string inviteMessage = "";   // empty = use built-in default
 };
 
 static ReFixConfig g_config;
@@ -1732,6 +1786,14 @@ static void LoadConfig() {
     if (bufSid[0] != '\0') {
         g_config.steamIdNum = _strtoui64(bufSid, nullptr, 10);
     }
+
+    // [Invites]
+    g_config.sendSteamChatMessageOnInvite = ReadBool("Invites", "SendSteamChatMessage", true);
+    char bufInviteMsg[512] = { 0 };
+    ReadString("Invites", "Message",
+               "[ReFix] I invited you to play {game}. Join me:",
+               bufInviteMsg, sizeof(bufInviteMsg));
+    g_config.inviteMessage = bufInviteMsg;
 }
 
 void ReFixLog(const char* fmt, ...) {
@@ -2010,6 +2072,8 @@ typedef void(*fn_VTable_AddDistanceFilter_t)(void* self, int eLobbyDistanceFilte
 typedef uint64_t(*fn_VTable_CreateLobby_t)(void* self, int eLobbyType, int cMaxMembers);
 typedef uint64_t(*fn_VTable_JoinLobby_t)(void* self, uint64_t steamIDLobby);
 typedef bool(*fn_VTable_SetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
+typedef void(*fn_VTable_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
+typedef const char*(*fn_VTable_GetLobbyMemberData_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
 
 typedef void*(*fn_VTable_RequestInternetServerList_t)(void* self, uint32_t iApp, void** ppchFilters, uint32_t nFilters, void* pResponse);
 typedef void*(*fn_VTable_RequestLANServerList_t)(void* self, uint32_t iApp, void* pResponse);
@@ -2045,6 +2109,22 @@ static fn_VTable_AddDistanceFilter_t g_orig_VTable_AddDistanceFilter = nullptr;
 static fn_VTable_CreateLobby_t g_orig_VTable_CreateLobby = nullptr;
 static fn_VTable_JoinLobby_t g_orig_VTable_JoinLobby = nullptr;
 static fn_VTable_SetLobbyData_t g_orig_VTable_SetLobbyData = nullptr;
+static fn_VTable_LeaveLobby_t g_orig_VTable_LeaveLobby = nullptr;
+static fn_VTable_GetLobbyMemberData_t g_orig_VTable_GetLobbyMemberData = nullptr;
+
+typedef void(*fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
+static fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t g_pfn_LeaveLobby = nullptr;
+typedef bool(*fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee);
+static fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t g_pfn_InviteUserToLobby = nullptr;
+// Chat message functions used by the invite interceptor to send a text companion message.
+typedef bool(*fn_SteamAPI_ISteamFriends_ReplyToFriendMessage_t)(void* self, uint64_t steamIDFriend, const char* pchMsgToSend);
+static fn_SteamAPI_ISteamFriends_ReplyToFriendMessage_t g_pfn_ReplyToFriendMessage = nullptr;
+typedef bool(*fn_SteamAPI_ISteamFriends_SetListenForFriendsMessages_t)(void* self, bool bInterceptEnabled);
+static fn_SteamAPI_ISteamFriends_SetListenForFriendsMessages_t g_pfn_SetListenForFriendsMessages = nullptr;
+static bool g_chatListening = false;
+typedef const char*(*fn_SteamAPI_ISteamMatchmaking_GetLobbyMemberData_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyMemberData_t g_pfn_GetLobbyMemberData = nullptr;
+static fn_GetFriendPersonaName_t g_pfn_GetFriendPersonaName = nullptr;
 
 static fn_VTable_RequestInternetServerList_t g_orig_VTable_RequestInternetServerList = nullptr;
 static fn_VTable_RequestLANServerList_t g_orig_VTable_RequestLANServerList = nullptr;
@@ -2436,10 +2516,57 @@ static int Hooked_ISteamFriends_GetFriendPersonaState(void* self, uint64_t steam
 }
 
 static const char* Hooked_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
-    const char* n = g_orig_VTable_GetFriendPersonaName ? g_orig_VTable_GetFriendPersonaName(self, steamIDFriend) : nullptr;
+    uint64_t localId = (g_capturedSteamID != 0) ? g_capturedSteamID : g_config.steamIdNum;
+
+    // Check if querying the local user
+    if (steamIDFriend != 0 && (steamIDFriend == localId || steamIDFriend == g_config.steamIdNum)) {
+        if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
+            return g_config.playerName.c_str();
+        }
+        char envName[128] = { 0 };
+        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+            g_config.playerName = envName;
+            return g_config.playerName.c_str();
+        }
+    }
+
+    const char* n = nullptr;
+    if (g_orig_VTable_GetFriendPersonaName && self) {
+        __try {
+            n = g_orig_VTable_GetFriendPersonaName(self, steamIDFriend);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            n = nullptr;
+        }
+    } else if (g_pfn_GetFriendPersonaName && self) {
+        __try {
+            n = g_pfn_GetFriendPersonaName(self, steamIDFriend);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            n = nullptr;
+        }
+    }
+
+    if (!n || n[0] == '\0' || strcmp(n, "[unknown]") == 0 || strcmp(n, "Noob") == 0) {
+        if (steamIDFriend == 0 || steamIDFriend == localId || steamIDFriend == g_config.steamIdNum) {
+            if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
+                return g_config.playerName.c_str();
+            }
+            char envName[128] = { 0 };
+            if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
+                g_config.playerName = envName;
+                return g_config.playerName.c_str();
+            }
+            return "Valen";
+        }
+        return (n && n[0] != '\0') ? n : (g_config.playerName.empty() ? "Valen" : g_config.playerName.c_str());
+    }
+
     if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetFriendPersonaName(%llu) -> '%s'", steamIDFriend, n ? n : "<null>");
+        ReFixLog("[FRIENDS] GetFriendPersonaName(%llu) -> '%s'", steamIDFriend, n);
     return n;
+}
+
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
+    return Hooked_ISteamFriends_GetFriendPersonaName(self, steamIDFriend);
 }
 
 static int Hooked_ISteamFriends_GetFriendsGroupCount(void* self) {
@@ -2593,6 +2720,17 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
     ReFixLog("  g_orig_VTable_JoinLobby: %p", g_orig_VTable_JoinLobby);
     ReFixLog("  g_pfn_JoinLobby: %p", g_pfn_JoinLobby);
 
+    // CRITICAL: Prevent crash on self-join (trying to enter the room we are already hosting)
+    // In Steamworks / Godot, joining a room while hosting it requires leaving first.
+    // Joining one's own hosted room directly should trigger an in-game error without crashing.
+    if (steamIDLobby != 0 && (steamIDLobby == g_hostedLobbyID || (g_hostedLobbyID != 0 && steamIDLobby == g_activeLobbyID))) {
+        ReFixLog("  [WARNING] JoinLobby rejected: Player is already hosting lobby %llu (self-join prevented)", steamIDLobby);
+        if (g_godotIsEngine) {
+            QueueSyntheticLobbyEnter(steamIDLobby, 5 /* k_EChatRoomEnterResponseError */, 50);
+        }
+        return 0; // Return invalid call handle so engine knows join was rejected
+    }
+
     ReFix_NotifyLobbyID(steamIDLobby);
 
     const char* targetName = "None";
@@ -2629,39 +2767,80 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
     // before calling ISteamNetworkingSockets::ConnectP2P(). If the lobby ID is synthetic
     // (not a real Steam lobby) the real Steam backend won't fire LobbyEnter_t, causing
     // the "Failed to join. The connection timed out." error.
-    // We synthesize LobbyEnter_t so Godot can proceed with the P2P connection.
     if (g_godotIsEngine) {
-        // Detect synthetic lobby IDs: format is 0x0110000100000000 | lowBits
         bool isSyntheticOrUnknown = ((steamIDLobby >> 52) == 0x011) || (hCall == 0);
         if (isSyntheticOrUnknown) {
-            ReFixLog("[Godot] JoinLobby: lobby appears synthetic or join handle=0, scheduling LobbyEnter_t synthesis");
-            std::thread([steamIDLobby]() {
-                Sleep(300); // brief delay to let real callbacks fire first if any
-                SynthesizeLobbyEnterCallback(steamIDLobby);
-            }).detach();
-        } else {
-            // Real lobby — also synthesize as fallback in case real callback is lost
-            std::thread([steamIDLobby]() {
-                Sleep(1500); // wait for real LobbyEnter_t; if not fired, inject ours
-                // Only inject if still tracking this lobby (active lobby = this lobby)
-                if (g_activeLobbyID == steamIDLobby) {
-                    ReFixLog("[Godot] JoinLobby: fallback LobbyEnter_t synthesis after 1500ms for real lobby %llu", steamIDLobby);
-                    SynthesizeLobbyEnterCallback(steamIDLobby);
-                }
-            }).detach();
+            ReFixLog("[Godot] JoinLobby: lobby appears synthetic or join handle=0, scheduling LobbyEnter_t synthesis on main thread");
+            QueueSyntheticLobbyEnter(steamIDLobby, 1 /* k_EChatRoomEnterResponseSuccess */, 300);
         }
     }
 
     return hCall;
 }
 
+static void Hooked_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobby) {
+    ReFixLog("ISteamMatchmaking::LeaveLobby Hook called: LobbyID=%llu", steamIDLobby);
+    if (steamIDLobby == g_activeLobbyID) {
+        g_activeLobbyID = 0;
+    }
+    if (steamIDLobby == g_hostedLobbyID) {
+        g_hostedLobbyID = 0;
+    }
+    if (g_orig_VTable_LeaveLobby) {
+        g_orig_VTable_LeaveLobby(self, steamIDLobby);
+    } else if (g_pfn_LeaveLobby) {
+        g_pfn_LeaveLobby(self, steamIDLobby);
+    }
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobby) {
+    Hooked_ISteamMatchmaking_LeaveLobby(self, steamIDLobby);
+}
+
+static const char* Hooked_ISteamMatchmaking_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
+    const char* r = nullptr;
+    if (g_orig_VTable_GetLobbyMemberData && self) {
+        __try {
+            r = g_orig_VTable_GetLobbyMemberData(self, steamIDLobby, steamIDUser, pchKey);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            r = nullptr;
+        }
+    } else if (g_pfn_GetLobbyMemberData && self) {
+        __try {
+            r = g_pfn_GetLobbyMemberData(self, steamIDLobby, steamIDUser, pchKey);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            r = nullptr;
+        }
+    }
+
+    if (pchKey && (_stricmp(pchKey, "name") == 0 || _stricmp(pchKey, "persona_name") == 0 || _stricmp(pchKey, "display_name") == 0)) {
+        if (!r || r[0] == '\0') {
+            uint64_t localId = (g_capturedSteamID != 0) ? g_capturedSteamID : g_config.steamIdNum;
+            if (steamIDUser == 0 || steamIDUser == localId || steamIDUser == g_config.steamIdNum) {
+                if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
+                    return g_config.playerName.c_str();
+                }
+            }
+        }
+    }
+
+    return r ? r : "";
+}
+
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
+    return Hooked_ISteamMatchmaking_GetLobbyMemberData(self, steamIDLobby, steamIDUser, pchKey);
+}
+
 static bool Hooked_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
     ReFixLog("ISteamMatchmaking::SetLobbyData Hook: Lobby=%llu, Key='%s', Value='%s'",
              steamIDLobby, pchKey ? pchKey : "", pchValue ? pchValue : "");
 
-    // Immediately track real lobby ID whenever the game sets lobby metadata
-    if (steamIDLobby != 0 && g_activeLobbyID != steamIDLobby) {
-        ReFix_NotifyLobbyID(steamIDLobby);
+    // Setting lobby metadata implies this process is hosting/managing this lobby
+    if (steamIDLobby != 0) {
+        g_hostedLobbyID = steamIDLobby;
+        if (g_activeLobbyID != steamIDLobby) {
+            ReFix_NotifyLobbyID(steamIDLobby);
+        }
     }
 
     if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0' && self) {
@@ -3264,6 +3443,7 @@ static void EnsureUserInterfaceHooked(void* pUser, const char* pszVersion) {
 }
 
 static void EnsureFriendsInterfaceHooked(void* pFriends, const char* pszVersion);
+static void EnsureMatchmakingInterfaceHooked(void* pMM, const char* pszVersion);
 
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (!iface || !pszVersion) return;
@@ -3275,6 +3455,7 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (strstr(pszVersion, "SteamUser")) EnsureUserInterfaceHooked(iface, pszVersion);
     else if (strstr(pszVersion, "SteamUGC") || strstr(pszVersion, "STEAMUGC")) EnsureUGCInterfaceHooked(iface, pszVersion);
     else if (strstr(pszVersion, "SteamFriends")) EnsureFriendsInterfaceHooked(iface, pszVersion);
+    else if (strstr(pszVersion, "SteamMatchMaking") || strstr(pszVersion, "SteamMatchmaking")) EnsureMatchmakingInterfaceHooked(iface, pszVersion);
 }
 
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
@@ -3357,8 +3538,19 @@ extern "C" __declspec(dllexport) const char* SteamAPI_ISteamFriends_GetPersonaNa
 static void EnsureFriendsInterfaceHooked(void* pFriends, const char* pszVersion) {
     if (!pFriends) return;
     HookVTableMethod(pFriends, 0, (void*)Hooked_ISteamFriends_GetPersonaName, (void**)&g_orig_VTable_GetPersonaName);
-    ReFixLog("EnsureFriendsInterfaceHooked: Hooked GetPersonaName (slot 0) for %p (version='%s')",
+    HookVTableMethod(pFriends, 7, (void*)Hooked_ISteamFriends_GetFriendPersonaName, (void**)&g_orig_VTable_GetFriendPersonaName);
+    ReFixLog("EnsureFriendsInterfaceHooked: Hooked GetPersonaName (slot 0) and GetFriendPersonaName (slot 7) for %p (version='%s')",
              pFriends, pszVersion ? pszVersion : "unknown");
+}
+
+static void EnsureMatchmakingInterfaceHooked(void* pMM, const char* pszVersion) {
+    if (!pMM) return;
+    HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
+    HookVTableMethod(pMM, 15, (void*)Hooked_ISteamMatchmaking_LeaveLobby, (void**)&g_orig_VTable_LeaveLobby);
+    HookVTableMethod(pMM, 20, (void*)Hooked_ISteamMatchmaking_SetLobbyData, (void**)&g_orig_VTable_SetLobbyData);
+    HookVTableMethod(pMM, 24, (void*)Hooked_ISteamMatchmaking_GetLobbyMemberData, (void**)&g_orig_VTable_GetLobbyMemberData);
+    ReFixLog("EnsureMatchmakingInterfaceHooked: Hooked JoinLobby(14), LeaveLobby(15), SetLobbyData(20), GetLobbyMemberData(24) for %p (version='%s')",
+             pMM, pszVersion ? pszVersion : "unknown");
 }
 
 static bool g_vtableHooksInstalled = false;
@@ -3376,8 +3568,7 @@ static void InstallVTableHooks() {
     if (pfnMM) {
         void* pMM = pfnMM();
         if (pMM) {
-            HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
-            HookVTableMethod(pMM, 20, (void*)Hooked_ISteamMatchmaking_SetLobbyData, (void**)&g_orig_VTable_SetLobbyData);
+            EnsureMatchmakingInterfaceHooked(pMM, "InstallVTableHooks");
         }
     }
 
@@ -3513,26 +3704,6 @@ struct PendingAuthCallback {
 };
 static std::vector<PendingAuthCallback> g_pendingAuthCallbacks;
 static std::mutex g_pendingAuthMutex;
-
-static bool SafeCallRun(void* pCallback, void* pData) {
-    if (!pCallback) return false;
-    __try {
-        void** vtable = *(void***)pCallback;
-        if (!vtable) return false;
-
-        typedef void (*fn_Run0_t)(void* self, void* pvParam);
-        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
-        if (pRun0) {
-            pRun0(pCallback, pData);
-            return true;
-        }
-        return false;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        DWORD code = GetExceptionCode();
-        ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
-        return false;
-    }
-}
 
 static void DispatchSyntheticWebApiCallbacks() {
     std::vector<PendingSyntheticWebApiCallback> toFire;
@@ -3942,22 +4113,85 @@ static uint64_t Intercepted_RequestLobbyList(void* self) {
     return Hooked_ISteamMatchmaking_RequestLobbyList(self);
 }
 
+static void Intercepted_LeaveLobby(void* self, uint64_t steamIDLobby) {
+    Hooked_ISteamMatchmaking_LeaveLobby(self, steamIDLobby);
+}
+
+// Intercepts the flat-API InviteUserToLobby call so we can send an accompanying
+// chat text message alongside the Steam lobby invite notification. This works in
+// both the emulated EOS mode (steam_backend.cpp calls InviteUserToLobby) and in
+// passthrough EOS mode where the genuine EOS SDK calls it directly.
+static bool Intercepted_InviteUserToLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee) {
+    bool result = false;
+    if (g_pfn_InviteUserToLobby)
+        result = g_pfn_InviteUserToLobby(self, steamIDLobby, steamIDInvitee);
+
+    // Send the companion chat message if the config allows it.
+    if (steamIDInvitee && g_config.sendSteamChatMessageOnInvite) {
+        // Make sure Steam is willing to route outbound chat messages from us.
+        if (g_pfn_SetListenForFriendsMessages && g_pfn_SteamFriends && !g_chatListening) {
+            void* friends = g_pfn_SteamFriends();
+            if (friends)
+                g_chatListening = g_pfn_SetListenForFriendsMessages(friends, true);
+        }
+        if (g_pfn_ReplyToFriendMessage && g_pfn_SteamFriends) {
+            void* friends = g_pfn_SteamFriends();
+            if (friends) {
+                // Build invite message from config (same template as steam_backend.cpp).
+                std::string msg = g_config.inviteMessage;
+                if (msg.empty())
+                    msg = "[ReFix] I invited you to play {game}. Join me:";
+                // Substitute {game} with the configured game name.
+                const std::string game = g_config.gameName.empty() ? "my game" : g_config.gameName;
+                size_t pos = msg.find("{game}");
+                if (pos != std::string::npos) msg.replace(pos, 6, game);
+                // Strip trailing whitespace/colons left by missing {store}.
+                while (!msg.empty() && (msg.back() == ' ' || msg.back() == ':')) msg.pop_back();
+                bool sent = g_pfn_ReplyToFriendMessage(friends, steamIDInvitee, msg.c_str());
+                ReFixLog("[INVITE] Chat message to %llu -> %s (\"%s\")",
+                         (unsigned long long)steamIDInvitee,
+                         sent ? "sent" : "refused", msg.c_str());
+            }
+        }
+    }
+    return result;
+}
+
+static const char* Intercepted_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
+    return Hooked_ISteamMatchmaking_GetLobbyMemberData(self, steamIDLobby, steamIDUser, pchKey);
+}
+
+static const char* Intercepted_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
+    return Hooked_ISteamFriends_GetFriendPersonaName(self, steamIDFriend);
+}
 
 extern "C" __declspec(dllexport) bool SteamAPI_Init();
 
 static bool EnsureOriginal() {
     if (g_hOriginalDll) return true;
+    LoadConfig();
 
     std::string proxyDir = GetProxyDllDir();
     std::string exeDir = GetExeDir();
 
-    const char* candNames[] = {
-        "steam_api64_valve.dll",
-        "steam_api64_goldberg.dll",
-        "steam_api64_o.dll",
-        "steam_api64_original.dll",
-        "steam_api64.dll.valve"
-    };
+    std::vector<const char*> candNames;
+    if (g_isGoldbergMode) {
+        candNames = {
+            "steam_api64_goldberg.dll",
+            "steam_api64_valve.dll",
+            "steam_api64_o.dll",
+            "steam_api64_original.dll",
+            "steam_api64.dll.valve"
+        };
+    } else {
+        candNames = {
+            "steam_api64_valve.dll",
+            "steam_api64_original.dll",
+            "steam_api64_o.dll",
+            "steam_api64_goldberg.dll",
+            "steam_api64.dll.valve"
+        };
+    }
 
     std::vector<std::string> fullPaths;
     for (auto name : candNames) fullPaths.push_back(proxyDir + name);
@@ -4207,6 +4441,39 @@ static bool EnsureOriginal() {
     if (idxJoinLobby >= 0) {
         g_pfn_JoinLobby = (fn_SteamAPI_ISteamMatchmaking_JoinLobby_t)g_steamProcs[idxJoinLobby];
         g_steamProcs[idxJoinLobby] = (FARPROC)Intercepted_JoinLobby;
+    }
+
+    int idxLeaveLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_LeaveLobby");
+    if (idxLeaveLobby >= 0) {
+        g_pfn_LeaveLobby = (fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t)g_steamProcs[idxLeaveLobby];
+        g_steamProcs[idxLeaveLobby] = (FARPROC)Intercepted_LeaveLobby;
+    }
+
+    // Intercept InviteUserToLobby to inject the companion chat text message.
+    int idxInviteUserToLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_InviteUserToLobby");
+    if (idxInviteUserToLobby >= 0) {
+        g_pfn_InviteUserToLobby = (fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t)g_steamProcs[idxInviteUserToLobby];
+        g_steamProcs[idxInviteUserToLobby] = (FARPROC)Intercepted_InviteUserToLobby;
+    }
+    // Bind chat helpers used by Intercepted_InviteUserToLobby. These forward to
+    // the real Valve DLL via the already-populated g_steamProcs table.
+    {
+        int i = FindSteamExportIndex("SteamAPI_ISteamFriends_ReplyToFriendMessage");
+        if (i >= 0) g_pfn_ReplyToFriendMessage = (fn_SteamAPI_ISteamFriends_ReplyToFriendMessage_t)g_steamProcs[i];
+        i = FindSteamExportIndex("SteamAPI_ISteamFriends_SetListenForFriendsMessages");
+        if (i >= 0) g_pfn_SetListenForFriendsMessages = (fn_SteamAPI_ISteamFriends_SetListenForFriendsMessages_t)g_steamProcs[i];
+    }
+
+    int idxGetLobbyMemberData = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyMemberData");
+    if (idxGetLobbyMemberData >= 0) {
+        g_pfn_GetLobbyMemberData = (fn_SteamAPI_ISteamMatchmaking_GetLobbyMemberData_t)g_steamProcs[idxGetLobbyMemberData];
+        g_steamProcs[idxGetLobbyMemberData] = (FARPROC)Intercepted_GetLobbyMemberData;
+    }
+
+    int idxGetFriendPersonaName = FindSteamExportIndex("SteamAPI_ISteamFriends_GetFriendPersonaName");
+    if (idxGetFriendPersonaName >= 0) {
+        g_pfn_GetFriendPersonaName = (fn_GetFriendPersonaName_t)g_steamProcs[idxGetFriendPersonaName];
+        g_steamProcs[idxGetFriendPersonaName] = (FARPROC)Intercepted_GetFriendPersonaName;
     }
 
     int idxRegisterNotif = FindSteamExportIndex("SteamAPI_RegisterCallback");
@@ -4629,6 +4896,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     DispatchSyntheticWebApiCallbacks();
     DispatchRelayCallbacks();
     DispatchPendingAuthCallbacks();
+    DispatchPendingLobbyEnterCallbacks();
 }
 
 static int s_manualRunFrameLogged = 0;
@@ -4640,6 +4908,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
     if (g_pfn_ManualDispatch_RunFrame) g_pfn_ManualDispatch_RunFrame(hSteamPipe);
     DispatchSyntheticWebApiCallbacks();
     DispatchPendingAuthCallbacks();
+    DispatchPendingLobbyEnterCallbacks();
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(uint32_t hSteamPipe, void* pCallbackMsg) {

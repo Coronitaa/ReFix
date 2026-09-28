@@ -177,6 +177,47 @@ static void* GetOrigInterface(const char* name) {
     void* res = pfn();
     return IsValidInterfacePtr(res) ? res : nullptr;
 }
+class CDummySteamGameSearch {
+public:
+    virtual int AddGameSearchParams(const char* pchKeyToFind, const char* pchValuesToFind) { return 1; }
+    virtual int SearchForGameWithLobby(uint64_t steamIDLobby, int nPlayerMin, int nPlayerMax) { return 1; }
+    virtual int SearchForGameSolo(int nPlayerMin, int nPlayerMax) { return 1; }
+    virtual int AcceptGame() { return 1; }
+    virtual int DeclineGame() { return 1; }
+    virtual int RetrieveConnectionDetails(uint64_t steamIDHost, char* pchConnectionDetails, int cubConnectionDetails) { return 1; }
+    virtual int EndGameSearch() { return 1; }
+    virtual int SetGameHostParams(const char* pchKey, const char* pchValue) { return 1; }
+    virtual int SetConnectionDetails(const char* pchConnectionDetails, int cubConnectionDetails) { return 1; }
+    virtual int RequestPlayersForGame(int nPlayerMin, int nPlayerMax, int nPlayerMaxTeamMembers) { return 1; }
+    virtual int HostConfirmGameStart(uint64_t ullUniqueGameID) { return 1; }
+    virtual int CancelRequestPlayersForGame() { return 1; }
+    virtual int SubmitPlayerResult(uint64_t ullUniqueGameID, uint64_t steamIDPlayer, int EPlayerResult) { return 1; }
+    virtual int EndGame(uint64_t ullUniqueGameID) { return 1; }
+};
+static CDummySteamGameSearch s_dummyGameSearch;
+
+class CDummySteamTimeline {
+public:
+    virtual void SetTimelineTooltip(const char* pchDescription, float flTimeDelta) {}
+    virtual void ClearTimelineTooltip(float flTimeDelta) {}
+    virtual void SetTimelineGameMode(int eMode) {}
+    virtual uint64_t AddInstantaneousTimelineEvent(const char* pchTitle, const char* pchDescription, const char* pchIcon, uint32_t unPriority, float flStartOffsetSeconds, int ePossibleClip) { return 0; }
+    virtual uint64_t AddRangeTimelineEvent(const char* pchTitle, const char* pchDescription, const char* pchIcon, uint32_t unPriority, float flStartOffsetSeconds, float flDuration, int ePossibleClip) { return 0; }
+    virtual uint64_t StartRangeTimelineEvent(const char* pchTitle, const char* pchDescription, const char* pchIcon, uint32_t unPriority, float flStartOffsetSeconds, int ePossibleClip) { return 0; }
+    virtual void UpdateRangeTimelineEvent(uint64_t ulEventHandle, const char* pchTitle, const char* pchDescription, const char* pchIcon, uint32_t unPriority, float flStartOffsetSeconds, float flDuration, int ePossibleClip) {}
+    virtual void EndRangeTimelineEvent(uint64_t ulEventHandle, float flEndOffsetSeconds) {}
+    virtual void RemoveTimelineEvent(uint64_t ulEventHandle) {}
+    virtual uint64_t OpenOverlayToTimelineEvent(uint64_t ulEventHandle) { return 0; }
+    virtual uint64_t OpenOverlayToGamePhase(const char* pchPhaseID) { return 0; }
+    virtual void AddGamePhase(const char* pchPhaseID, int eFlags) {}
+    virtual void StartGamePhase(const char* pchPhaseID) {}
+    virtual void EndGamePhase() {}
+    virtual void SetGamePhaseID(const char* pchPhaseID) {}
+    virtual void SetGamePhaseAttribute(const char* pchAttributeGroup, const char* pchAttributeValue) {}
+    virtual void SetGamePhaseAttributeGroup(const char* pchAttributeGroup, const char* pchAttributeValue) {}
+    virtual void ClearGamePhaseAttributes() {}
+};
+static CDummySteamTimeline s_dummyTimeline;
 
 extern "C" {
 
@@ -361,6 +402,12 @@ __declspec(dllexport) void* __cdecl SteamInternal_CreateInterface(const char* ps
         void* p = GetOrigInterface("SteamMatchmaking");
         if (p) return p;
     }
+    if (strstr(pszVersion, "SteamMatchGameSearch") || strstr(pszVersion, "STEAMMATCHGAMESEARCH")) {
+        return &s_dummyGameSearch;
+    }
+    if (strstr(pszVersion, "SteamTimeline") || strstr(pszVersion, "STEAMTIMELINE")) {
+        return &s_dummyTimeline;
+    }
 
     typedef void* (__cdecl *fn_Create_t)(const char*);
     auto pfnOrig = (fn_Create_t)GetProcAddress(g_hOrig, "SteamInternal_CreateInterface");
@@ -382,6 +429,13 @@ __declspec(dllexport) void* __cdecl SteamInternal_FindOrCreateUserInterface(uint
     if (pfnOrig) {
         void* res = pfnOrig(hSteamUser, pszVersion);
         if (IsValidInterfacePtr(res)) return res;
+    }
+
+    if (strstr(pszVersion, "SteamMatchGameSearch") || strstr(pszVersion, "STEAMMATCHGAMESEARCH")) {
+        return &s_dummyGameSearch;
+    }
+    if (strstr(pszVersion, "SteamTimeline") || strstr(pszVersion, "STEAMTIMELINE")) {
+        return &s_dummyTimeline;
     }
 
     if (strstr(pszVersion, "SteamNetworkingUtils")) {
@@ -593,11 +647,25 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamScreenshots(v
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamGameSearch(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
-    // In legacy steam_api_o.dll, GetISteamGameSearch invoked ISteamClient vtable slot 0x4C.
-    // In modern Steam client, slot 0x4C is GetIPCCallCount() returning uint32 (e.g. 1).
-    // Returning 1 causes Unity/IL2CPP to dereference 0x00000001 and crash!
-    // Returning nullptr cleanly informs Unity that GameSearch is not present.
-    return nullptr;
+    EnsureOrigLoaded();
+    typedef void* (__cdecl *fn_t)(void*, uint32_t, uint32_t, const char*);
+    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamGameSearch");
+    if (pfn) {
+        void* r = pfn(self, hUser, hPipe, ver);
+        if (IsValidInterfacePtr(r)) return r;
+    }
+    return &s_dummyGameSearch;
+}
+
+__declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamTimeline(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
+    EnsureOrigLoaded();
+    typedef void* (__cdecl *fn_t)(void*, uint32_t, uint32_t, const char*);
+    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamClient_GetISteamTimeline");
+    if (pfn) {
+        void* r = pfn(self, hUser, hPipe, ver);
+        if (IsValidInterfacePtr(r)) return r;
+    }
+    return &s_dummyTimeline;
 }
 
 __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamController(void* self, uint32_t hUser, uint32_t hPipe, const char* ver) {
@@ -764,6 +832,46 @@ __declspec(dllexport) void* __cdecl SteamAPI_ISteamClient_GetISteamRemotePlay(vo
     void* p = GetOrigInterface("SteamRemotePlay");
     if (IsValidInterfacePtr(p)) return p;
     return nullptr;
+}
+
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamApps_BIsSubscribed(void* self) {
+    EnsureOrigLoaded();
+    typedef bool (__cdecl *fn_t)(void*);
+    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamApps_BIsSubscribed");
+    if (pfn) return pfn(self);
+    return true;
+}
+
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamApps_BIsSubscribedApp(void* self, uint32_t appID) {
+    EnsureOrigLoaded();
+    typedef bool (__cdecl *fn_t)(void*, uint32_t);
+    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamApps_BIsSubscribedApp");
+    if (pfn) return pfn(self, appID);
+    return true;
+}
+
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamApps_BIsDlcInstalled(void* self, uint32_t appID) {
+    EnsureOrigLoaded();
+    typedef bool (__cdecl *fn_t)(void*, uint32_t);
+    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamApps_BIsDlcInstalled");
+    if (pfn) return pfn(self, appID);
+    return true;
+}
+
+__declspec(dllexport) bool __cdecl SteamAPI_ISteamUser_BLoggedOn(void* self) {
+    EnsureOrigLoaded();
+    typedef bool (__cdecl *fn_t)(void*);
+    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamUser_BLoggedOn");
+    if (pfn) return pfn(self);
+    return true;
+}
+
+__declspec(dllexport) int __cdecl SteamAPI_ISteamUser_UserHasLicenseForApp(void* self, uint64_t steamID, uint32_t appID) {
+    EnsureOrigLoaded();
+    typedef int (__cdecl *fn_t)(void*, uint64_t, uint32_t);
+    auto pfn = (fn_t)GetProcAddress(g_hOrig, "SteamAPI_ISteamUser_UserHasLicenseForApp");
+    if (pfn) return pfn(self, steamID, appID);
+    return 0; // k_EUserHasLicenseResultHasLicense
 }
 
 } // extern "C"

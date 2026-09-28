@@ -832,7 +832,7 @@ static void Substitute(std::string& text, const std::string& token, const std::s
 std::string SteamBackend::InviteMessage() const {
     std::string text = Config::Get().GetString(
         "Invites", "Message",
-        "I'm inviting you to my room in {game}");
+        "[ReFix] I invited you to play {game}. Join me:");
     const std::string game  = InviteGameName();
     const std::string store = InviteStoreUrl();
     Substitute(text, "{game}",   game.empty() ? "my game" : game);
