@@ -2,6 +2,16 @@ LIBRARY steam_api64
 EXPORTS
     ReFix_NotifyLobbyID
     ReFix_NotifyLobbyMemberChange
+    ReFix_Steam_GetCapturedTicketData
+    ReFix_RegisterP2PPeer
+    ReFix_RegisterP2PPeerStr
+    ReFix_GetBoundGamePort
+    UNAE_Initialize
+    UNAE_GetTopology
+    UNAE_GetActiveTier
+    UNAE_IsDirectP2PAllowed
+    UNAE_SetSelectedRegion
+    UNAE_GetSelectedRegion
     GetHSteamPipe=GetHSteamPipe_proxy
     GetHSteamUser=GetHSteamUser_proxy
     SteamAPI_GetHSteamPipe=SteamAPI_GetHSteamPipe_proxy

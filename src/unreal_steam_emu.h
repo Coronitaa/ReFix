@@ -79,6 +79,7 @@ namespace UnrealSteamEmu {
     void* GetSteamInventory();
     void* GetSteamScreenshots();
     void* GetSteamTimeline();
+    void* GetSteamNetworkingMessages();
 
     // Aliases with ISteam prefix
     inline void* GetISteamClient() { return GetSteamClient(); }
@@ -92,11 +93,13 @@ namespace UnrealSteamEmu {
     inline void* GetISteamNetworking() { return GetSteamNetworking(); }
     inline void* GetISteamNetworkingSockets() { return GetSteamNetworkingSockets(); }
     inline void* GetISteamNetworkingUtils() { return GetSteamNetworkingUtils(); }
+    inline void* GetISteamNetworkingMessages() { return GetSteamNetworkingMessages(); }
     inline void* GetISteamRemoteStorage() { return GetSteamRemoteStorage(); }
     inline void* GetISteamUGC() { return GetSteamUGC(); }
     inline void* GetISteamGameServer() { return GetSteamGameServer(); }
     inline void* GetISteamGameServerStats() { return GetSteamGameServerStats(); }
     inline void* GetISteamGameServerNetworking() { return GetSteamGameServerNetworking(); }
+    inline void* GetISteamGameServerNetworkingMessages() { return GetSteamNetworkingMessages(); }
     inline void* GetISteamGameServerUtils() { return GetSteamUtils(); }
     inline void* GetISteamHTTP() { return GetSteamHTTP(); }
     inline void* GetISteamInput() { return GetSteamInput(); }
@@ -110,5 +113,10 @@ namespace UnrealSteamEmu {
 
     // Lobby sync notification with EOS
     void NotifyEOSLobby(uint64_t lobbyID);
+}
+
+extern "C" {
+    __declspec(dllexport) void* SteamAPI_SteamNetworkingMessages_SteamAPI_v002();
+    __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002();
 }
 

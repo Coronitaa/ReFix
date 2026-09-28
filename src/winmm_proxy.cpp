@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // ReFix - Forwarded winmm.dll Proxy (100% Crash-Proof Dynamic MASM Forwarding)
 // =============================================================================
 #define WIN32_LEAN_AND_MEAN
@@ -379,7 +379,19 @@ static void LoadAndApplyConfig() {
     size_t pos = iniPath.find_last_of("\\/");
     if (pos != std::string::npos) {
         baseDir = iniPath.substr(0, pos);
-        iniPath = baseDir + "\\ReFix.ini";
+    }
+    std::string candidates[] = {
+        baseDir + "\\ReFix.ini",
+        baseDir + "\\..\\ReFix.ini",
+        baseDir + "\\..\\..\\ReFix.ini",
+        baseDir + "\\..\\..\\..\\ReFix.ini",
+        baseDir + "\\..\\..\\..\\..\\ReFix.ini"
+    };
+    for (const auto& cand : candidates) {
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            iniPath = cand;
+            break;
+        }
     }
 
     char buf[1024];
@@ -452,8 +464,14 @@ static void LoadAndApplyConfig() {
 
     // --- User Config (Auto-Generate Unique SteamID per PC) ---
     char playerName[256] = "Player";
-    GetPrivateProfileStringA("User", "Name", "Player", playerName, sizeof(playerName), iniPath.c_str());
+    GetPrivateProfileStringA("User", "Name", "", playerName, sizeof(playerName), iniPath.c_str());
+    if (playerName[0] == '\0') {
+        GetPrivateProfileStringA("User", "PersonaName", "Player", playerName, sizeof(playerName), iniPath.c_str());
+    }
     SetEnvironmentVariableA("REFIX_USERNAME", playerName);
+    SetEnvironmentVariableA("REFIX_USER_NAME", playerName);
+    SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", playerName);
+    SetEnvironmentVariableA("SteamPersonaName", playerName);
 
     char autoSteamIdStr[64] = "true";
     GetPrivateProfileStringA("User", "AutoGenerateSteamId", "true", autoSteamIdStr, sizeof(autoSteamIdStr), iniPath.c_str());
@@ -470,6 +488,8 @@ static void LoadAndApplyConfig() {
         finalSteamId = sidStr;
     }
     SetEnvironmentVariableA("REFIX_STEAMID", finalSteamId.c_str());
+    SetEnvironmentVariableA("REFIX_STEAM_ID", finalSteamId.c_str());
+    SetEnvironmentVariableA("SteamID", finalSteamId.c_str());
 
     // --- Network / Lobby Config ---
     char listenPort[32] = "47584";

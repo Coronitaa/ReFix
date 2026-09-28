@@ -9,6 +9,8 @@
 // =============================================================================
 
 #include "upnp_firewall.h"
+#include "eos/eos_connect.h"
+#include "eos/eos_lobby.h"
 #include <windows.h>
 #include <cstring>
 #include <cstdint>
@@ -51,13 +53,12 @@ static void ReFix_NotifyLobbyMemberChange(uint64_t lobbyID) {
 typedef int32_t EOS_EResult;
 #define EOS_Success              0
 #define EOS_InvalidParameters    2
-#define EOS_NoConnection         3
+// #define EOS_NoConnection 3 (defined in eos_types.h)
 #define EOS_NotFound             14
 #define EOS_AlreadyConfigured    30
 #define EOS_LimitExceeded        31
 
 typedef void*    EOS_HPlatform;
-typedef void*    EOS_ProductUserId;
 typedef void*    EOS_EpicAccountId;
 typedef void*    EOS_ContinuanceToken;
 typedef uint64_t EOS_NotificationId;
@@ -168,13 +169,15 @@ static void LoadGameFilterConfig() {
         if (iniFilter[0] != '\0') {
             strncpy_s(g_gameFilter, sizeof(g_gameFilter), iniFilter, _TRUNCATE);
         } else if (realAppId[0] != '\0' && strcmp(realAppId, "0") != 0) {
-            sprintf_s(g_gameFilter, sizeof(g_gameFilter), "refix_game_%s", realAppId);
+            // Use AppID directly (not refix_game_ prefix) for interoperability
+            // with other emulators (OnlineFix, Goldberg) that use AppID as filter
+            strncpy_s(g_gameFilter, sizeof(g_gameFilter), realAppId, _TRUNCATE);
         } else {
             char appId[64] = "480";
             if (GetEnvironmentVariableA("SteamAppId", appId, sizeof(appId)) > 0 && appId[0] != '\0' && strcmp(appId, "0") != 0) {
-                sprintf_s(g_gameFilter, sizeof(g_gameFilter), "refix_game_%s", appId);
+                strncpy_s(g_gameFilter, sizeof(g_gameFilter), appId, _TRUNCATE);
             } else {
-                strcpy_s(g_gameFilter, "refix_game_default");
+                strcpy_s(g_gameFilter, "480");
             }
         }
     }
@@ -197,7 +200,10 @@ static void LoadEOSLogConfig() {
     if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
 
     char buf[64];
-    GetPrivateProfileStringA("Debug", "EnableLog", "false", buf, sizeof(buf), iniPath.c_str());
+    GetPrivateProfileStringA("EOS", "DebugLogging", "", buf, sizeof(buf), iniPath.c_str());
+    if (buf[0] == '\0') {
+        GetPrivateProfileStringA("Debug", "EnableLog", "true", buf, sizeof(buf), iniPath.c_str());
+    }
     g_enableEosLog = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
 }
 
@@ -451,15 +457,6 @@ static void* FindPuidPointer(const void* optionsStruct, size_t sizeBytes) {
 // =============================================================================
 // CONNECT STRUCTURES
 // =============================================================================
-struct EOS_Connect_ExternalAccountInfo {
-    int32_t ApiVersion;
-    EOS_ProductUserId ProductUserId;
-    const char* DisplayName;
-    const char* AccountId;
-    int32_t AccountIdType;
-    int64_t LastLoginTime;
-};
-
 static EOS_Connect_ExternalAccountInfo* CreateEpicExternalAccountInfo(void* puid) {
     auto* info = (EOS_Connect_ExternalAccountInfo*)malloc(sizeof(EOS_Connect_ExternalAccountInfo));
     if (!info) return nullptr;
@@ -859,6 +856,8 @@ static void* eos_Platform_Create(void* Options) {
 
 static void eos_Platform_Tick(void* Handle) {
     FlushCallbacks();
+    ReFixEOS::RoomManagerBridge::Get().Tick();
+    ReFixEOS::CallbackManager::Get().FlushCallbacks();
 }
 
 static void eos_Platform_Release(void* Handle) {
@@ -1021,12 +1020,12 @@ static void eos_IntegratedPlatformOptionsContainer_Release(void* H) { }
 
 // --- Auth Interface ---
 static EOS_NotificationId eos_Auth_AddNotifyLoginStatusChanged(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_AddNotifyLoginStatusChanged registered (id=%llu)", s_nextNotifId);
+    Log("EOS_Auth_AddNotifyLoginStatusChanged registered (id=%llu, Callback=%p)", s_nextNotifId, Callback);
     return s_nextNotifId++;
 }
 
 static EOS_EResult eos_Auth_CopyIdToken(void* Handle, void* Options, FakeIdToken** OutToken) {
-    Log("EOS_Auth_CopyIdToken called");
+    Log("EOS_Auth_CopyIdToken called (Handle=%p)", Handle);
     if (OutToken) {
         s_fakeIdToken.AccountId = FAKE_EPIC_ACCOUNT_ID;
         *OutToken = &s_fakeIdToken;
@@ -1035,7 +1034,7 @@ static EOS_EResult eos_Auth_CopyIdToken(void* Handle, void* Options, FakeIdToken
 }
 
 static EOS_EResult eos_Auth_CopyUserAuthToken(void* Handle, void* Options, void* AccountId, FakeAuthToken** OutToken) {
-    Log("EOS_Auth_CopyUserAuthToken called");
+    Log("EOS_Auth_CopyUserAuthToken called (Handle=%p, AccountId=%p)", Handle, AccountId);
     if (OutToken) {
         s_fakeAuthToken.AccountId = FAKE_EPIC_ACCOUNT_ID;
         *OutToken = &s_fakeAuthToken;
@@ -1044,7 +1043,7 @@ static EOS_EResult eos_Auth_CopyUserAuthToken(void* Handle, void* Options, void*
 }
 
 static void eos_Auth_DeletePersistentAuth(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_DeletePersistentAuth called");
+    Log("EOS_Auth_DeletePersistentAuth called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_DeletePersistentAuth info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1060,7 +1059,7 @@ static int32_t eos_Auth_GetLoggedInAccountsCount(void* Handle) {
 }
 
 static int32_t eos_Auth_GetLoginStatus(void* Handle, void* LocalUserId) {
-    Log("EOS_Auth_GetLoginStatus (LocalUserId=%p) -> EOS_LS_LoggedIn", LocalUserId);
+    Log("EOS_Auth_GetLoginStatus (Handle=%p, LocalUserId=%p) -> EOS_LS_LoggedIn", Handle, LocalUserId);
     return EOS_LS_LoggedIn;
 }
 
@@ -1075,7 +1074,7 @@ static EOS_EResult eos_Auth_GetSelectedAccountId(void* Handle, void* LocalUserId
 static void eos_Auth_IdToken_Release(void* Token) { }
 
 static void eos_Auth_LinkAccount(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_LinkAccount called");
+    Log("EOS_Auth_LinkAccount called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_LinkAccount info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1086,7 +1085,17 @@ static void eos_Auth_LinkAccount(void* Handle, void* Options, void* ClientData, 
 }
 
 static void eos_Auth_Login(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_Login called");
+    struct AuthCreds { int32_t ApiVer; const char* Id; const char* Token; int32_t Type; };
+    struct AuthOpts { int32_t ApiVer; const AuthCreds* Credentials; };
+    auto* opts = (AuthOpts*)Options;
+    const auto* creds = opts ? opts->Credentials : nullptr;
+    const char* token = creds ? creds->Token : nullptr;
+    size_t tokenLen = token ? strlen(token) : 0;
+    int credType = creds ? creds->Type : -1;
+
+    Log("EOS_Auth_Login called: Handle=%p, CredentialType=%d, TokenPresent=%s, TokenLength=%zu, Callback=%p",
+        Handle, credType, (token != nullptr ? "TRUE" : "FALSE"), tokenLen, Callback);
+
     CB_Auth_Login info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1098,7 +1107,7 @@ static void eos_Auth_Login(void* Handle, void* Options, void* ClientData, void* 
 }
 
 static void eos_Auth_Logout(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_Logout called");
+    Log("EOS_Auth_Logout called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_Logout info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1107,7 +1116,7 @@ static void eos_Auth_Logout(void* Handle, void* Options, void* ClientData, void*
 }
 
 static void eos_Auth_QueryIdToken(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_QueryIdToken called");
+    Log("EOS_Auth_QueryIdToken called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_QueryIdToken info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1119,7 +1128,7 @@ static void eos_Auth_RemoveNotifyLoginStatusChanged(void* Handle, EOS_Notificati
 static void eos_Auth_Token_Release(void* Token) { }
 
 static void eos_Auth_VerifyIdToken(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_VerifyIdToken called");
+    Log("EOS_Auth_VerifyIdToken called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_VerifyIdToken info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1127,7 +1136,7 @@ static void eos_Auth_VerifyIdToken(void* Handle, void* Options, void* ClientData
 }
 
 static void eos_Auth_VerifyUserAuth(void* Handle, void* Options, void* ClientData, void* Callback) {
-    Log("EOS_Auth_VerifyUserAuth called");
+    Log("EOS_Auth_VerifyUserAuth called (Handle=%p, Callback=%p)", Handle, Callback);
     CB_Auth_VerifyUserAuth info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = ClientData;
@@ -1232,17 +1241,9 @@ static void eos_Connect_LinkAccount(void* H, void* O, void* C, void* Cb) {
     QueueCallback(Cb, info);
 }
 
-struct EOS_Connect_Credentials {
-    int32_t ApiVersion;
-    const char* Token;
-    int32_t Type;
-};
+// EOS_Connect_Credentials defined in eos_connect.h
 
-struct EOS_Connect_LoginOptions {
-    int32_t ApiVersion;
-    const EOS_Connect_Credentials* Credentials;
-    void* UserLoginInfo;
-};
+// EOS_Connect_LoginOptions defined in eos_connect.h
 
 static void eos_Connect_Login(void* H, void* O, void* C, void* Cb) {
     // Re-check Steam persona name (guaranteed to be available by now)
@@ -1321,18 +1322,6 @@ static void eos_Connect_VerifyIdToken(void* H, void* O, void* C, void* Cb) {
     info.ClientData = C;
     QueueCallback(Cb, info);
 }
-
-struct EOS_Connect_CopyProductUserExternalAccountByAccountTypeOptions {
-    int32_t ApiVersion;
-    void* TargetUserId;
-    int32_t AccountIdType;
-};
-
-struct EOS_Connect_CopyProductUserExternalAccountByIndexOptions {
-    int32_t ApiVersion;
-    void* TargetUserId;
-    uint32_t ExternalAccountInfoIndex;
-};
 
 // Connect Copy functions
 static EOS_EResult eos_Connect_CopyProductUserExternalAccountByAccountId(void* H, void* O, EOS_Connect_ExternalAccountInfo** Out) {
@@ -1785,20 +1774,7 @@ struct CB_Lobby_CreateLobby {
     const char* LobbyId;
 };
 
-// Search Parameter Capturing & Dynamic Lying for Matchmaking
-union EOS_Lobby_AttributeValue {
-    int64_t AsInt64;
-    double AsDouble;
-    int32_t bAsBool;
-    const char* AsUtf8;
-};
-
-struct EOS_Lobby_AttributeData {
-    int32_t ApiVersion;
-    const char* Key;
-    EOS_Lobby_AttributeValue Value;
-    int32_t ValueType; // 0=Bool, 1=Int64, 2=Double, 3=String (EOS_AT_STRING)
-};
+// (EOS_Lobby_AttributeData defined in eos_lobby.h)
 
 static std::vector<EOS_Lobby_AttributeData> g_capturedSearchParameters;
 
@@ -1834,12 +1810,6 @@ static void CaptureSearchParameter(const EOS_Lobby_AttributeData* data) {
     }
     g_capturedSearchParameters.push_back(clone);
 }
-
-struct EOS_LobbySearch_SetParameterOptions {
-    int32_t ApiVersion;
-    const EOS_Lobby_AttributeData* Parameter;
-    int32_t ComparisonOp;
-};
 
 static EOS_EResult eos_LobbySearch_SetParameter(void* H, void* O) {
     Log("EOS_LobbySearch_SetParameter called");
@@ -2061,7 +2031,8 @@ struct CB_Lobby_UpdateLobby {
 };
 
 static void eos_Lobby_UpdateLobby(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Lobby_UpdateLobby called");
+    DWORD tid = GetCurrentThreadId();
+    Log("[EOS_RUNTIME] EOS_Lobby_UpdateLobby called (TID=0x%lx, Handle=%p, Options=%p, Delegate=%p)", tid, H, O, Cb);
     CB_Lobby_UpdateLobby info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = C;
@@ -2211,11 +2182,6 @@ static uint32_t eos_LobbySearch_GetSearchResultCount(void* H, void* O) {
     return (uint32_t)g_foundLobbies.size();
 }
 
-struct EOS_LobbySearch_CopySearchResultByIndexOptions {
-    int32_t ApiVersion;
-    uint32_t LobbyIndex;
-};
-
 static EOS_EResult eos_LobbySearch_CopySearchResultByIndex(void* H, void* O, void** OutLobbyDetailsHandle) {
     Log("EOS_LobbySearch_CopySearchResultByIndex called");
     if (!O || !OutLobbyDetailsHandle) return EOS_NotFound;
@@ -2278,7 +2244,7 @@ static void eos_Lobby_JoinLobby(void* H, void* O, void* C, void* Cb) {
 }
 
 static EOS_EResult eos_Lobby_CreateLobbySearch(void* H, void* O, void** OutLobbySearchHandle) {
-    Log("EOS_Lobby_CreateLobbySearch called");
+    Log("[EOS_RUNTIME] EOS_Lobby_CreateLobbySearch called");
     if (OutLobbySearchHandle) {
         *OutLobbySearchHandle = HANDLE_LOBBY_SEARCH;
     }
@@ -2368,24 +2334,6 @@ static EOS_EResult eos_Lobby_CopyLobbyDetailsHandleByUiEventId(void* H, void* O,
     }
     return EOS_Success;
 }
-struct EOS_LobbyDetails_Info {
-    int32_t ApiVersion;
-    const char* LobbyId;
-    void* LobbyOwnerUserId;
-    int32_t PermissionLevel;
-    uint32_t AvailableSlots;
-    uint32_t MaxMembers;
-    int32_t bAllowInvites;
-    const char* BucketId;
-    int32_t bAllowHostMigration;
-    int32_t bRTCRoomEnabled;
-    int32_t bAllowJoinById;
-    int32_t bRejoinAfterKickRequiresInvite;
-    int32_t bPresenceEnabled;
-    const uint32_t* AllowedPlatformIds;
-    uint32_t AllowedPlatformIdsCount;
-};
-
 static EOS_EResult eos_LobbyDetails_CopyInfo(void* H, void* O, EOS_LobbyDetails_Info** OutLobbyDetailsInfo) {
     Log("EOS_LobbyDetails_CopyInfo called for handle %p", H);
     if (!OutLobbyDetailsInfo) return EOS_LimitExceeded;
@@ -2411,13 +2359,12 @@ static EOS_EResult eos_LobbyDetails_CopyInfo(void* H, void* O, EOS_LobbyDetails_
     info->ApiVersion = 1;
     info->LobbyId = _strdup(lobbyId.c_str());
     info->LobbyOwnerUserId = lobbyOwner;
-    info->PermissionLevel = 0; // Public
+    info->PermissionLevel = EOS_LPL_PUBLICADVERTISED;
     info->AvailableSlots = 3;
     info->MaxMembers = 4;
     info->bAllowInvites = 1;
     info->BucketId = "refix_bucket";
     info->bAllowHostMigration = 0;
-    info->bRTCRoomEnabled = 0;
     info->bAllowJoinById = 1;
     info->bRejoinAfterKickRequiresInvite = 0;
     info->bPresenceEnabled = 1;
@@ -2447,21 +2394,10 @@ static uint32_t eos_LobbyDetails_GetAttributeCount(void* H, void* O) {
     return count;
 }
 
-struct EOS_LobbyDetails_CopyAttributeByIndexOptions {
-    int32_t ApiVersion;
-    uint32_t AttributeIndex;
-};
-
-struct EOS_Lobby_Attribute {
-    int32_t ApiVersion;
-    EOS_Lobby_AttributeData* Data;
-    int32_t Visibility;
-};
-
 static EOS_EResult eos_LobbyDetails_CopyAttributeByIndex(void* H, void* O, EOS_Lobby_Attribute** OutAttribute) {
     Log("EOS_LobbyDetails_CopyAttributeByIndex called");
     if (!O || !OutAttribute) return EOS_NotFound;
-    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttributeIndex;
+    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttrIndex;
 
     // Determine the IP/Port to return based on whether this is a real Steam lobby
     char lobbyIP[64] = "127.0.0.1";
@@ -2522,11 +2458,6 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByIndex(void* H, void* O, EOS_L
     return EOS_Success;
 }
 
-struct EOS_LobbyDetails_CopyAttributeByKeyOptions {
-    int32_t ApiVersion;
-    const char* AttrKey;
-};
-
 static EOS_EResult eos_LobbyDetails_CopyAttributeByKey(void* H, void* O, EOS_Lobby_Attribute** OutAttribute) {
     Log("EOS_LobbyDetails_CopyAttributeByKey called");
     if (!O || !OutAttribute || !((EOS_LobbyDetails_CopyAttributeByKeyOptions*)O)->AttrKey) return EOS_NotFound;
@@ -2557,7 +2488,7 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByKey(void* H, void* O, EOS_Lob
     if (index >= 0) {
         EOS_LobbyDetails_CopyAttributeByIndexOptions idxOpts = {};
         idxOpts.ApiVersion = 1;
-        idxOpts.AttributeIndex = (uint32_t)index;
+        idxOpts.AttrIndex = (uint32_t)index;
         return eos_LobbyDetails_CopyAttributeByIndex(H, &idxOpts, OutAttribute);
     }
 
@@ -2916,7 +2847,9 @@ struct CB_Sessions_UpdateSession {
 };
 
 static void eos_Sessions_UpdateSession(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Sessions_UpdateSession called for SessionName='%s'", g_activeSessionName.c_str());
+    DWORD tid = GetCurrentThreadId();
+    Log("[EOS_RUNTIME] EOS_Sessions_UpdateSession called (TID=0x%lx, Handle=%p, Options=%p, SessionName='%s', Delegate=%p)",
+        tid, H, O, g_activeSessionName.c_str(), Cb);
     g_hasActiveSession = true;
     CreateAndTagRealSteamLobbyAsync();
     
@@ -2933,14 +2866,17 @@ struct EOS_Sessions_CreateSessionModificationOptions {
 };
 
 static EOS_EResult eos_Sessions_CreateSessionModification(void* H, void* O, void** OutSessionModificationHandle) {
+    DWORD tid = GetCurrentThreadId();
     if (O) {
         auto* opts = (EOS_Sessions_CreateSessionModificationOptions*)O;
         if (opts->SessionName && opts->SessionName[0] != '\0') {
             g_activeSessionName = opts->SessionName;
-            Log("EOS_Sessions_CreateSessionModification for SessionName='%s'", g_activeSessionName.c_str());
+            Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification called (TID=0x%lx, Handle=%p, SessionName='%s')", tid, H, g_activeSessionName.c_str());
+        } else {
+            Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification called (TID=0x%lx, Handle=%p, SessionName=null)", tid, H);
         }
     } else {
-        Log("EOS_Sessions_CreateSessionModification called");
+        Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionModification called (TID=0x%lx, Handle=%p, Options=null)", tid, H);
     }
     if (OutSessionModificationHandle) *OutSessionModificationHandle = (void*)0x2000;
     return EOS_Success;
@@ -2953,7 +2889,8 @@ struct CB_Sessions_DestroySession {
 };
 
 static void eos_Sessions_DestroySession(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Sessions_DestroySession called");
+    DWORD tid = GetCurrentThreadId();
+    Log("[EOS_RUNTIME] EOS_Sessions_DestroySession called (TID=0x%lx, Handle=%p, Options=%p)", tid, H, O);
     g_hasActiveSession = false;
     CB_Sessions_DestroySession info = {};
     info.ResultCode = EOS_Success;
@@ -2962,7 +2899,7 @@ static void eos_Sessions_DestroySession(void* H, void* O, void* C, void* Cb) {
 }
 
 static EOS_EResult eos_Sessions_CreateSessionSearch(void* H, void* O, void** OutSessionSearchHandle) {
-    Log("EOS_Sessions_CreateSessionSearch called");
+    Log("[EOS_RUNTIME] EOS_Sessions_CreateSessionSearch called");
     if (OutSessionSearchHandle) *OutSessionSearchHandle = (void*)0x2001;
     return EOS_Success;
 }
@@ -2974,7 +2911,7 @@ struct CB_SessionSearch_Find {
 };
 
 static void eos_SessionSearch_Find(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_SessionSearch_Find called");
+    Log("[EOS_RUNTIME] EOS_SessionSearch_Find called");
     eos_LobbySearch_Find(H, O, C, Cb);
 }
 
@@ -3539,7 +3476,7 @@ static uint32_t eos_SessionDetails_GetSessionAttributeCount(void* H, void* O) {
 static EOS_EResult eos_SessionDetails_CopyAttributeByIndex(void* H, void* O, EOS_SessionDetails_Attribute** OutAttribute) {
     Log("EOS_SessionDetails_CopyAttributeByIndex called");
     if (!O || !OutAttribute) return EOS_NotFound;
-    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttributeIndex;
+    uint32_t index = ((EOS_LobbyDetails_CopyAttributeByIndexOptions*)O)->AttrIndex;
     if (index >= 10) return EOS_NotFound;
 
     auto* attr = (EOS_SessionDetails_Attribute*)malloc(sizeof(EOS_SessionDetails_Attribute));
@@ -3770,7 +3707,7 @@ struct CB_Sessions_StartSession {
 };
 
 static void eos_Sessions_StartSession(void* H, void* O, void* C, void* Cb) {
-    Log("EOS_Sessions_StartSession called");
+    Log("[EOS_RUNTIME] EOS_Sessions_StartSession called");
     CB_Sessions_StartSession info = {};
     info.ResultCode = EOS_Success;
     info.ClientData = C;
@@ -3938,6 +3875,7 @@ static void SetupEmulatedFunctions() {
     // Helpers
     Override("EOS_ByteArray_ToString",                (void*)eos_ByteArray_ToString);
     Override("EOS_ByteArray_FromString",              (void*)eos_ByteArray_FromString);
+
 
     // Connect
     Override("EOS_Connect_AddNotifyAuthExpiration",   (void*)eos_Connect_AddNotifyAuthExpiration);
@@ -4128,6 +4066,111 @@ static void SetupEmulatedFunctions() {
     Override("EOS_SessionSearch_SetSessionId",              (void*)eos_SessionSearch_SetSessionId);
     Override("EOS_SessionSearch_SetMaxResults",             (void*)eos_SessionSearch_SetMaxResults);
     Override("EOS_SessionSearch_Release",                   (void*)eos_SessionSearch_Release);
+
+    // =========================================================================
+    // Modular Online v2 Dynamic Overrides
+    // =========================================================================
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string iniPath(exePath);
+    size_t pos = iniPath.find_last_of("\\/");
+    if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
+    else iniPath = "ReFix.ini";
+
+    char backendMode[32] = { 0 };
+    GetPrivateProfileStringA("EOS", "Backend", "online-v2", backendMode, sizeof(backendMode), iniPath.c_str());
+    bool isOnlineV2 = (_stricmp(backendMode, "legacy") != 0);
+
+    if (isOnlineV2) {
+        Log("[EOS] Backend configured as online-v2: Routing Connect, Identity, and Lobby to modular ReFix EOS v2");
+        Override("EOS_Connect_Login",                     (void*)EOS_Connect_Login);
+        Override("EOS_Connect_CreateUser",                (void*)EOS_Connect_CreateUser);
+        Override("EOS_Connect_LinkAccount",               (void*)EOS_Connect_LinkAccount);
+        Override("EOS_Connect_CreateDeviceId",            (void*)EOS_Connect_CreateDeviceId);
+        Override("EOS_Connect_DeleteDeviceId",            (void*)EOS_Connect_DeleteDeviceId);
+        Override("EOS_Connect_Logout",                    (void*)EOS_Connect_Logout);
+        Override("EOS_Connect_QueryExternalAccountMappings", (void*)EOS_Connect_QueryExternalAccountMappings);
+        Override("EOS_Connect_GetExternalAccountMapping",  (void*)EOS_Connect_GetExternalAccountMapping);
+        Override("EOS_Connect_QueryProductUserIdMappings", (void*)EOS_Connect_QueryProductUserIdMappings);
+        Override("EOS_Connect_GetProductUserIdMapping",   (void*)EOS_Connect_GetProductUserIdMapping);
+        Override("EOS_Connect_GetProductUserExternalAccountCount", (void*)EOS_Connect_GetProductUserExternalAccountCount);
+        Override("EOS_Connect_CopyProductUserInfo",       (void*)EOS_Connect_CopyProductUserInfo);
+        Override("EOS_Connect_CopyProductUserExternalAccountByIndex", (void*)EOS_Connect_CopyProductUserExternalAccountByIndex);
+        Override("EOS_Connect_CopyProductUserExternalAccountByAccountType", (void*)EOS_Connect_CopyProductUserExternalAccountByAccountType);
+        Override("EOS_Connect_CopyProductUserExternalAccountByAccountId", (void*)EOS_Connect_CopyProductUserExternalAccountByAccountId);
+        Override("EOS_Connect_ExternalAccountInfo_Release", (void*)EOS_Connect_ExternalAccountInfo_Release);
+        Override("EOS_Connect_GetLoggedInUserByIndex",    (void*)EOS_Connect_GetLoggedInUserByIndex);
+        Override("EOS_Connect_GetLoggedInUsersCount",     (void*)EOS_Connect_GetLoggedInUsersCount);
+        Override("EOS_Connect_GetLoginStatus",            (void*)EOS_Connect_GetLoginStatus);
+        Override("EOS_Connect_AddNotifyLoginStatusChanged", (void*)EOS_Connect_AddNotifyLoginStatusChanged);
+        Override("EOS_Connect_RemoveNotifyLoginStatusChanged", (void*)EOS_Connect_RemoveNotifyLoginStatusChanged);
+        Override("EOS_Connect_AddNotifyAuthExpiration",    (void*)EOS_Connect_AddNotifyAuthExpiration);
+        Override("EOS_Connect_RemoveNotifyAuthExpiration", (void*)EOS_Connect_RemoveNotifyAuthExpiration);
+
+        Override("EOS_ProductUserId_IsValid",   (void*)EOS_ProductUserId_IsValid);
+        Override("EOS_EpicAccountId_IsValid",   (void*)EOS_EpicAccountId_IsValid);
+        Override("EOS_ProductUserId_ToString",  (void*)EOS_ProductUserId_ToString);
+        Override("EOS_EpicAccountId_ToString",  (void*)EOS_EpicAccountId_ToString);
+        Override("EOS_ProductUserId_FromString", (void*)EOS_ProductUserId_FromString);
+        Override("EOS_EpicAccountId_FromString", (void*)EOS_EpicAccountId_FromString);
+
+        // Lobby Lifecycle & Modification
+        Override("EOS_Lobby_CreateLobby",                         (void*)EOS_Lobby_CreateLobby);
+        Override("EOS_Lobby_UpdateLobby",                         (void*)EOS_Lobby_UpdateLobby);
+        Override("EOS_Lobby_DestroyLobby",                        (void*)EOS_Lobby_DestroyLobby);
+        Override("EOS_Lobby_JoinLobby",                           (void*)EOS_Lobby_JoinLobby);
+        Override("EOS_Lobby_LeaveLobby",                          (void*)EOS_Lobby_LeaveLobby);
+
+        Override("EOS_Lobby_CreateLobbyModification",              (void*)EOS_Lobby_CreateLobbyModification);
+        Override("EOS_Lobby_UpdateLobbyModification",              (void*)EOS_Lobby_UpdateLobbyModification);
+        Override("EOS_LobbyModification_SetPermissionLevel",       (void*)EOS_LobbyModification_SetPermissionLevel);
+        Override("EOS_LobbyModification_SetMaxMembers",           (void*)EOS_LobbyModification_SetMaxMembers);
+        Override("EOS_LobbyModification_SetBucketId",               (void*)EOS_LobbyModification_SetBucketId);
+        Override("EOS_LobbyModification_SetInvitesAllowed",       (void*)EOS_LobbyModification_SetInvitesAllowed);
+        Override("EOS_LobbyModification_AddAttribute",            (void*)EOS_LobbyModification_AddAttribute);
+        Override("EOS_LobbyModification_Release",                 (void*)EOS_LobbyModification_Release);
+        Override("EOS_Lobby_Attribute_Release",                    (void*)EOS_Lobby_Attribute_Release);
+
+        // Lobby Details
+        Override("EOS_Lobby_CopyLobbyDetailsHandle",              (void*)EOS_Lobby_CopyLobbyDetailsHandle);
+        Override("EOS_Lobby_CopyLobbyDetailsHandleByInviteId",    (void*)EOS_Lobby_CopyLobbyDetailsHandleByInviteId);
+        Override("EOS_Lobby_CopyLobbyDetailsHandleByUiEventId",   (void*)EOS_Lobby_CopyLobbyDetailsHandleByUiEventId);
+        Override("EOS_LobbyDetails_CopyInfo",                      (void*)EOS_LobbyDetails_CopyInfo);
+        Override("EOS_LobbyDetails_Info_Release",                  (void*)EOS_LobbyDetails_Info_Release);
+        Override("EOS_LobbyDetails_Release",                       (void*)EOS_LobbyDetails_Release);
+        Override("EOS_LobbyDetails_GetAttributeCount",             (void*)EOS_LobbyDetails_GetAttributeCount);
+        Override("EOS_LobbyDetails_CopyAttributeByIndex",          (void*)EOS_LobbyDetails_CopyAttributeByIndex);
+        Override("EOS_LobbyDetails_CopyAttributeByKey",            (void*)EOS_LobbyDetails_CopyAttributeByKey);
+        Override("EOS_LobbyDetails_GetMemberCount",                (void*)EOS_LobbyDetails_GetMemberCount);
+        Override("EOS_LobbyDetails_GetMemberByIndex",              (void*)EOS_LobbyDetails_GetMemberByIndex);
+        Override("EOS_LobbyDetails_GetLobbyOwner",                 (void*)EOS_LobbyDetails_GetLobbyOwner);
+
+        // Lobby Search
+        Override("EOS_Lobby_CreateLobbySearch",                   (void*)EOS_Lobby_CreateLobbySearch);
+        Override("EOS_LobbySearch_SetParameter",                  (void*)EOS_LobbySearch_SetParameter);
+        Override("EOS_LobbySearch_Find",                          (void*)EOS_LobbySearch_Find);
+        Override("EOS_LobbySearch_GetSearchResultCount",          (void*)EOS_LobbySearch_GetSearchResultCount);
+        Override("EOS_LobbySearch_CopySearchResultByIndex",       (void*)EOS_LobbySearch_CopySearchResultByIndex);
+        Override("EOS_LobbySearch_Release",                       (void*)EOS_LobbySearch_Release);
+
+        // Lobby Notifications
+        Override("EOS_Lobby_AddNotifyLobbyUpdateReceived",        (void*)EOS_Lobby_AddNotifyLobbyUpdateReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyUpdateReceived",     (void*)EOS_Lobby_RemoveNotifyLobbyUpdateReceived);
+        Override("EOS_Lobby_AddNotifyLobbyMemberUpdateReceived",  (void*)EOS_Lobby_AddNotifyLobbyMemberUpdateReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived",(void*)EOS_Lobby_RemoveNotifyLobbyMemberUpdateReceived);
+        Override("EOS_Lobby_AddNotifyLobbyMemberStatusReceived",  (void*)EOS_Lobby_AddNotifyLobbyMemberStatusReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived",(void*)EOS_Lobby_RemoveNotifyLobbyMemberStatusReceived);
+        Override("EOS_Lobby_AddNotifyJoinLobbyAccepted",          (void*)EOS_Lobby_AddNotifyJoinLobbyAccepted);
+        Override("EOS_Lobby_RemoveNotifyJoinLobbyAccepted",       (void*)EOS_Lobby_RemoveNotifyJoinLobbyAccepted);
+        Override("EOS_Lobby_AddNotifyLeaveLobbyRequested",        (void*)EOS_Lobby_AddNotifyLeaveLobbyRequested);
+        Override("EOS_Lobby_RemoveNotifyLeaveLobbyRequested",     (void*)EOS_Lobby_RemoveNotifyLeaveLobbyRequested);
+        Override("EOS_Lobby_AddNotifyLobbyInviteReceived",        (void*)EOS_Lobby_AddNotifyLobbyInviteReceived);
+        Override("EOS_Lobby_RemoveNotifyLobbyInviteReceived",     (void*)EOS_Lobby_RemoveNotifyLobbyInviteReceived);
+        Override("EOS_Lobby_AddNotifyLobbyInviteAccepted",        (void*)EOS_Lobby_AddNotifyLobbyInviteAccepted);
+        Override("EOS_Lobby_RemoveNotifyLobbyInviteAccepted",     (void*)EOS_Lobby_RemoveNotifyLobbyInviteAccepted);
+        Override("EOS_Lobby_AddNotifyLobbyInviteRejected",        (void*)EOS_Lobby_AddNotifyLobbyInviteRejected);
+        Override("EOS_Lobby_RemoveNotifyLobbyInviteRejected",     (void*)EOS_Lobby_RemoveNotifyLobbyInviteRejected);
+    }
 }
 
 // =============================================================================

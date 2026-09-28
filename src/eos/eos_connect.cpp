@@ -1,0 +1,424 @@
+// =============================================================================
+// ReFix EOS Online v2 - EOS Connect & Authentication Implementation
+// =============================================================================
+#include "eos_connect.h"
+#include "../identity/online_identity_provider.h"
+#include "../crypto_hash.h"
+#include <windows.h>
+#include <cstdio>
+#include <cstdarg>
+#include <cstring>
+#include <string>
+#include <sstream>
+
+namespace ReFixEOS {
+
+constexpr uint32_t CTOK_HANDLE_MAGIC = 0x43544F4B; // 'CTOK'
+
+bool IsDebugLoggingEnabled() {
+    static int s_cached = -1;
+    if (s_cached == -1) {
+        char exePath[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string iniPath(exePath);
+        size_t pos = iniPath.find_last_of("\\/");
+        if (pos != std::string::npos) iniPath = iniPath.substr(0, pos + 1) + "ReFix.ini";
+        else iniPath = "ReFix.ini";
+
+        char buf[32] = { 0 };
+        GetPrivateProfileStringA("EOS", "DebugLogging", "true", buf, sizeof(buf), iniPath.c_str());
+        s_cached = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0) ? 1 : 0;
+    }
+    return (s_cached == 1);
+}
+
+void LogDiagnostic(const char* format, ...) {
+    if (!IsDebugLoggingEnabled()) return;
+    char buffer[1024];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char finalMsg[1200];
+    sprintf_s(finalMsg, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [TID:0x%04X] [EOS:CONNECT] %s\n",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, GetCurrentThreadId(), buffer);
+
+    OutputDebugStringA(finalMsg);
+    printf("%s", finalMsg);
+
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string logPath(exePath);
+    size_t pos = logPath.find_last_of("\\/");
+    if (pos != std::string::npos) {
+        logPath = logPath.substr(0, pos + 1) + "ReFix.log";
+    } else {
+        logPath = "ReFix.log";
+    }
+
+    FILE* f = nullptr;
+    fopen_s(&f, logPath.c_str(), "a");
+    if (f) {
+        fprintf(f, "%s", finalMsg);
+        fclose(f);
+    }
+}
+
+static std::string RedactToken(const char* token) {
+    if (!token) return "[NULL]";
+    size_t len = strlen(token);
+    char buf[64];
+    sprintf_s(buf, "[REDACTED:len=%zu]", len);
+    return std::string(buf);
+}
+
+} // namespace ReFixEOS
+
+extern "C" {
+
+void EOS_Connect_Login(EOS_HConnect Handle, const EOS_Connect_LoginOptions* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) {
+        ReFixEOS::LogDiagnostic("EOS_Connect_Login: CompletionDelegate is NULL, aborting");
+        return;
+    }
+
+    auto provider = ReFixIdentity::GetActiveIdentityProvider();
+    auto& idMgr = ReFixEOS::IdentityManager::Get();
+    idMgr.RefreshFromEnvironment();
+
+    // 1. Validation of Options & Credentials
+    if (!Options || Options->ApiVersion <= 0 || !Options->Credentials) {
+        ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Invalid parameters (Options=%p) -> ResultCode=EOS_InvalidParameters", Options);
+        EOS_Connect_LoginCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_InvalidParameters;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = nullptr;
+        cbInfo.ContinuanceToken = nullptr;
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+        return;
+    }
+
+    const auto* creds = Options->Credentials;
+    const char* token = creds ? creds->Token : nullptr;
+    size_t tokenLen = token ? strlen(token) : 0;
+    int credType = creds ? (int)creds->Type : -1;
+
+    std::string tokenHexSha = token ? ReFixCrypto::ComputeSHA256Hex(token, tokenLen) : "NONE";
+    std::vector<uint8_t> tokenBytes = token ? ReFixCrypto::HexToBytes(token) : std::vector<uint8_t>();
+    std::string tokenBinarySha = !tokenBytes.empty() ? ReFixCrypto::ComputeSHA256Hex(tokenBytes.data(), tokenBytes.size()) : "NONE";
+
+    std::vector<uint8_t> capturedTicket = provider->GetCapturedTicketBytes();
+    std::string capturedTicketSha = !capturedTicket.empty() ?
+        ReFixCrypto::ComputeSHA256Hex(capturedTicket.data(), capturedTicket.size()) : "NONE";
+
+    bool tokenMatchesCaptured = (!tokenBytes.empty() && tokenBinarySha == capturedTicketSha && capturedTicketSha != "NONE");
+
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login ENTER: Handle=%p, CredentialType=%d, TokenLength=%zu, TokenHex_SHA256=%s, TokenBinary_SHA256=%s, Captured_SHA256=%s, TokenMatchesCaptured=%s, Delegate=%p",
+        Handle, credType, tokenLen, tokenHexSha.c_str(), tokenBinarySha.c_str(), capturedTicketSha.c_str(),
+        (tokenMatchesCaptured ? "TRUE" : "FALSE"), CompletionDelegate);
+
+    if (creds->ApiVersion <= 0 || !token) {
+        ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Invalid credentials struct (Token=NULL) -> ResultCode=EOS_InvalidParameters");
+        EOS_Connect_LoginCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_InvalidParameters;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = nullptr;
+        cbInfo.ContinuanceToken = nullptr;
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+        return;
+    }
+
+    // 2. Validate Credential via Unified Identity Provider
+    bool isValid = provider->ValidateCredential(credType, token);
+    if (!isValid) {
+        ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Credential validation FAILED for CredentialType=%d, TokenLength=%zu, TokenBinary_SHA256=%s -> ResultCode=EOS_InvalidAuth (4)",
+            credType, tokenLen, tokenBinarySha.c_str());
+        EOS_Connect_LoginCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_InvalidAuth;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = nullptr;
+        cbInfo.ContinuanceToken = nullptr;
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+        return;
+    }
+
+    // 3. Resolve Stable ProductUserId
+    EOS_ProductUserId localPuid = idMgr.GetLocalProductUserId();
+    std::string puidStr = idMgr.GetLocalProductUserIdString();
+
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_Login: Credential validation SUCCEEDED (Local ReFix Provider Validated) -> PUID=%s, Mode=%s, ResultCode=EOS_Success (0), Delegate=%p",
+        puidStr.c_str(), (provider->GetMode() == ReFixIdentity::IdentityMode::Valve ? "valve" : "goldberg"), CompletionDelegate);
+
+    EOS_Connect_LoginCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    cbInfo.LocalUserId = localPuid;
+    cbInfo.ContinuanceToken = nullptr;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+
+    // 4. Dispatch Login Status Notification
+    EOS_Connect_LoginStatusChangedCallbackInfo notif = {};
+    notif.ClientData = nullptr;
+    notif.LocalUserId = localPuid;
+    notif.PreviousStatus = EOS_LS_NotLoggedIn;
+    notif.CurrentStatus = EOS_LS_LoggedIn;
+    ReFixEOS::CallbackManager::Get().DispatchNotification(1, notif);
+}
+
+void EOS_Connect_CreateUser(EOS_HConnect Handle, const EOS_Connect_CreateUserOptions* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    if (!Options || !Options->ContinuanceToken) {
+        ReFixEOS::LogDiagnostic("EOS_Connect_CreateUser: Invalid parameters or null ContinuanceToken");
+        EOS_Connect_CreateUserCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_InvalidParameters;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = nullptr;
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+        return;
+    }
+
+    auto* ctok = (ReFixEOS::OpaqueContinuanceToken*)Options->ContinuanceToken;
+    if (ctok->magic != ReFixEOS::CTOK_HANDLE_MAGIC) {
+        ReFixEOS::LogDiagnostic("EOS_Connect_CreateUser: Invalid ContinuanceToken handle magic");
+        EOS_Connect_CreateUserCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_InvalidAuth;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = nullptr;
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+        return;
+    }
+
+    delete ctok;
+
+    EOS_ProductUserId localPuid = ReFixEOS::IdentityManager::Get().GetLocalProductUserId();
+    ReFixEOS::LogDiagnostic("EOS_Connect_CreateUser: User created -> PUID=%s",
+        ReFixEOS::IdentityManager::Get().GetLocalProductUserIdString().c_str());
+
+    EOS_Connect_CreateUserCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    cbInfo.LocalUserId = localPuid;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+}
+
+void EOS_Connect_LinkAccount(EOS_HConnect Handle, const EOS_Connect_LinkAccountOptions* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    if (!Options || !Options->ContinuanceToken || !Options->LocalUserId) {
+        EOS_Connect_LinkAccountCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_InvalidParameters;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = nullptr;
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+        return;
+    }
+
+    auto* ctok = (ReFixEOS::OpaqueContinuanceToken*)Options->ContinuanceToken;
+    if (ctok->magic == ReFixEOS::CTOK_HANDLE_MAGIC) {
+        delete ctok;
+    }
+
+    EOS_Connect_LinkAccountCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    cbInfo.LocalUserId = Options->LocalUserId;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+}
+
+void EOS_Connect_CreateDeviceId(EOS_HConnect Handle, const EOS_Connect_CreateDeviceIdOptions* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    ReFixEOS::LogDiagnostic("EOS_Connect_CreateDeviceId: Created virtual DeviceId");
+    EOS_Connect_CreateDeviceIdCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+}
+
+void EOS_Connect_DeleteDeviceId(EOS_HConnect Handle, void* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    EOS_Connect_DeleteDeviceIdCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+}
+
+void EOS_Connect_Logout(EOS_HConnect Handle, void* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    ReFixEOS::LogDiagnostic("EOS_Connect_Logout: Logged out");
+    EOS_Connect_LoginCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    cbInfo.LocalUserId = ReFixEOS::IdentityManager::Get().GetLocalProductUserId();
+    cbInfo.ContinuanceToken = nullptr;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+}
+
+void EOS_Connect_QueryExternalAccountMappings(EOS_HConnect Handle, const EOS_Connect_QueryExternalAccountMappingsOptions* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    if (!Options || !Options->LocalUserId) {
+        EOS_Connect_QueryExternalAccountMappingsCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_InvalidParameters;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = nullptr;
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+        return;
+    }
+
+    EOS_Connect_QueryExternalAccountMappingsCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    cbInfo.LocalUserId = Options->LocalUserId;
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+}
+
+EOS_ProductUserId EOS_Connect_GetExternalAccountMapping(EOS_HConnect Handle, const EOS_Connect_GetExternalAccountMappingsOptions* Options) {
+    if (!Options || !Options->TargetExternalAccountId) {
+        return nullptr;
+    }
+    return ReFixEOS::IdentityManager::Get().GetOrCreateProductUserIdFromExternal(
+        Options->AccountIdType, Options->TargetExternalAccountId);
+}
+
+void EOS_Connect_QueryProductUserIdMappings(EOS_HConnect Handle, const EOS_Connect_QueryProductUserIdMappingsOptions* Options, void* ClientData, void* CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    EOS_Connect_QueryProductUserIdMappingsCallbackInfo cbInfo = {};
+    cbInfo.ResultCode = EOS_Success;
+    cbInfo.ClientData = ClientData;
+    cbInfo.LocalUserId = Options ? Options->LocalUserId : ReFixEOS::IdentityManager::Get().GetLocalProductUserId();
+    ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+}
+
+EOS_EResult EOS_Connect_GetProductUserIdMapping(EOS_HConnect Handle, const EOS_Connect_GetProductUserIdMappingOptions* Options, char* OutBuffer, int32_t* InOutBufferLength) {
+    if (!InOutBufferLength) return EOS_InvalidParameters;
+    auto puid = Options ? Options->TargetProductUserId : ReFixEOS::IdentityManager::Get().GetLocalProductUserId();
+    if (!ReFixEOS::IdentityManager::Get().IsValidProductUserId(puid)) return EOS_InvalidUser;
+
+    std::string str = ReFixEOS::IdentityManager::Get().ProductUserIdToString(puid);
+    if (str.empty()) return EOS_InvalidUser;
+
+    int32_t needed = (int32_t)str.length() + 1;
+    if (!OutBuffer || *InOutBufferLength < needed) {
+        *InOutBufferLength = needed;
+        return EOS_LimitExceeded;
+    }
+    strcpy_s(OutBuffer, *InOutBufferLength, str.c_str());
+    *InOutBufferLength = needed - 1;
+    return EOS_Success;
+}
+
+uint32_t EOS_Connect_GetProductUserExternalAccountCount(EOS_HConnect Handle, void* Options) {
+    return 2; // Epic + Steam
+}
+
+EOS_EResult EOS_Connect_CopyProductUserInfo(EOS_HConnect Handle, const EOS_Connect_CopyProductUserInfoOptions* Options, EOS_Connect_ExternalAccountInfo** OutExternalAccountInfo) {
+    if (!OutExternalAccountInfo || !Options) return EOS_InvalidParameters;
+    if (!ReFixEOS::IdentityManager::Get().IsValidProductUserId(Options->TargetUserId)) return EOS_InvalidUser;
+
+    void* info = ReFixEOS::IdentityManager::Get().AllocateExternalAccountInfo(Options->TargetUserId, 0, EOS_EAT_STEAM);
+    if (!info) return EOS_NotFound;
+
+    *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserInfo: TargetUserId=%p -> ResultCode=EOS_Success", Options->TargetUserId);
+    return EOS_Success;
+}
+
+EOS_EResult EOS_Connect_CopyProductUserExternalAccountByIndex(EOS_HConnect Handle, const EOS_Connect_CopyProductUserExternalAccountByIndexOptions* Options, EOS_Connect_ExternalAccountInfo** OutExternalAccountInfo) {
+    if (!OutExternalAccountInfo || !Options) return EOS_InvalidParameters;
+    if (!ReFixEOS::IdentityManager::Get().IsValidProductUserId(Options->TargetUserId)) return EOS_InvalidUser;
+
+    void* info = ReFixEOS::IdentityManager::Get().AllocateExternalAccountInfo(Options->TargetUserId, Options->ExternalAccountInfoIndex, -1);
+    if (!info) return EOS_NotFound;
+
+    *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserExternalAccountByIndex: Index=%d -> ResultCode=EOS_Success", Options->ExternalAccountInfoIndex);
+    return EOS_Success;
+}
+
+EOS_EResult EOS_Connect_CopyProductUserExternalAccountByAccountType(EOS_HConnect Handle, const EOS_Connect_CopyProductUserExternalAccountByAccountTypeOptions* Options, EOS_Connect_ExternalAccountInfo** OutExternalAccountInfo) {
+    if (!OutExternalAccountInfo || !Options) return EOS_InvalidParameters;
+    if (!ReFixEOS::IdentityManager::Get().IsValidProductUserId(Options->TargetUserId)) return EOS_InvalidUser;
+
+    void* info = ReFixEOS::IdentityManager::Get().AllocateExternalAccountInfo(Options->TargetUserId, -1, Options->AccountIdType);
+    if (!info) return EOS_NotFound;
+
+    *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserExternalAccountByAccountType: Type=%d -> ResultCode=EOS_Success", Options->AccountIdType);
+    return EOS_Success;
+}
+
+EOS_EResult EOS_Connect_CopyProductUserExternalAccountByAccountId(EOS_HConnect Handle, const EOS_Connect_CopyProductUserExternalAccountByAccountIdOptions* Options, EOS_Connect_ExternalAccountInfo** OutExternalAccountInfo) {
+    if (!OutExternalAccountInfo || !Options || !Options->AccountId) return EOS_InvalidParameters;
+    if (!ReFixEOS::IdentityManager::Get().IsValidProductUserId(Options->TargetUserId)) return EOS_InvalidUser;
+
+    auto puid = ReFixEOS::IdentityManager::Get().GetOrCreateProductUserIdFromExternal(EOS_EAT_STEAM, Options->AccountId);
+    void* info = ReFixEOS::IdentityManager::Get().AllocateExternalAccountInfo(puid, -1, EOS_EAT_STEAM);
+    if (!info) return EOS_NotFound;
+
+    *OutExternalAccountInfo = (EOS_Connect_ExternalAccountInfo*)info;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_CopyProductUserExternalAccountByAccountId: AccountId='%s' -> ResultCode=EOS_Success", Options->AccountId);
+    return EOS_Success;
+}
+
+void EOS_Connect_ExternalAccountInfo_Release(EOS_Connect_ExternalAccountInfo* ExternalAccountInfo) {
+    ReFixEOS::IdentityManager::Get().FreeExternalAccountInfo(ExternalAccountInfo);
+}
+
+EOS_ProductUserId EOS_Connect_GetLoggedInUserByIndex(EOS_HConnect Handle, int32_t Index) {
+    auto puid = (Index == 0) ? ReFixEOS::IdentityManager::Get().GetLocalProductUserId() : nullptr;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_GetLoggedInUserByIndex(Index=%d) -> LocalUserId=%p", Index, puid);
+    return puid;
+}
+
+int32_t EOS_Connect_GetLoggedInUsersCount(EOS_HConnect Handle) {
+    return 1;
+}
+
+EOS_ELoginStatus EOS_Connect_GetLoginStatus(EOS_HConnect Handle, EOS_ProductUserId LocalUserId) {
+    if (!LocalUserId) return EOS_LS_NotLoggedIn;
+    EOS_ELoginStatus status = ReFixEOS::IdentityManager::Get().IsValidProductUserId(LocalUserId) ? EOS_LS_LoggedIn : EOS_LS_NotLoggedIn;
+    ReFixEOS::LogDiagnostic("[AUTH-CORR] [EOS:CONNECT] EOS_Connect_GetLoginStatus(LocalUserId=%p) -> Status=%d (%s)",
+        LocalUserId, (int)status, (status == EOS_LS_LoggedIn ? "LoggedIn" : "NotLoggedIn"));
+    return status;
+}
+
+EOS_NotificationId EOS_Connect_AddNotifyLoginStatusChanged(EOS_HConnect Handle, void* Options, void* ClientData, void* NotificationFn) {
+    return ReFixEOS::CallbackManager::Get().AddNotification(1, ClientData, NotificationFn);
+}
+
+void EOS_Connect_RemoveNotifyLoginStatusChanged(EOS_HConnect Handle, EOS_NotificationId InId) {
+    ReFixEOS::CallbackManager::Get().RemoveNotification(InId);
+}
+
+EOS_NotificationId EOS_Connect_AddNotifyAuthExpiration(EOS_HConnect Handle, void* Options, void* ClientData, void* NotificationFn) {
+    return ReFixEOS::CallbackManager::Get().AddNotification(2, ClientData, NotificationFn);
+}
+
+void EOS_Connect_RemoveNotifyAuthExpiration(EOS_HConnect Handle, EOS_NotificationId InId) {
+    ReFixEOS::CallbackManager::Get().RemoveNotification(InId);
+}
+
+EOS_EResult EOS_Connect_VerifyIdToken(EOS_HConnect Handle, void* Options, void* ClientData, void* CompletionDelegate) {
+    if (CompletionDelegate) {
+        EOS_Connect_LoginCallbackInfo cbInfo = {};
+        cbInfo.ResultCode = EOS_Success;
+        cbInfo.ClientData = ClientData;
+        cbInfo.LocalUserId = ReFixEOS::IdentityManager::Get().GetLocalProductUserId();
+        ReFixEOS::CallbackManager::Get().QueueCallback(CompletionDelegate, cbInfo);
+    }
+    return EOS_Success;
+}
+
+EOS_EResult EOS_Connect_CopyIdToken(EOS_HConnect Handle, void* Options, void** OutIdToken) {
+    return EOS_NotFound;
+}
+
+} // extern "C"

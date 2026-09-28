@@ -14,7 +14,7 @@ deploy/
 disasm.txt
 *exports_raw.txt
 *system_exports.txt
-tests/
+build/tests/
 scratch/
 
 # Vendor clone directories
