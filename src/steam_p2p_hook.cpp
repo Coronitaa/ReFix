@@ -691,6 +691,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         }
 
         // If no peer is known yet, but it's a Game or Voice port, buffer in Pre-Lobby Hold Buffer (V-02)
+        // for P2P correlation while continuing raw Winsock transmission.
         if (service != SocketServiceType::Unknown || IsGamePort(destPort)) {
             std::lock_guard<std::mutex> lg(g_holdBufferMutex);
             if (g_holdBuffer.size() < k_maxHoldBufferSize) {
@@ -704,12 +705,11 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
                 hpkt.service = (service != SocketServiceType::Unknown) ? service : SocketServiceType::Game;
                 hpkt.timestampMs = GetTickCount();
                 g_holdBuffer.push_back(std::move(hpkt));
-                return len; // Prevent nanosockets / Fusion from timing out before lobby establishes
             }
         }
     }
 
-    // Fall through to real Winsock for all other traffic
+    // Fall through to real Winsock for raw packets
     return g_orig_sendto(s, buf, len, flags, to, tolen);
 }
 

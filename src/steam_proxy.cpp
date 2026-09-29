@@ -2240,17 +2240,16 @@ static int __fastcall Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus(
     if (g_orig_VTable_GetRelayNetworkStatus)
         g_orig_VTable_GetRelayNetworkStatus(self, pDetails);
     
-    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
-    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
+    int avail = k_eRelayAvail_Current;
 
     if (pDetails) {
         auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
         d->m_eAvail = avail;
-        d->m_bPingMeasurementInProgress = (avail == 3) ? 1 : 0;
+        d->m_bPingMeasurementInProgress = 0;
         d->m_eAvailNetworkConfig = avail;
         d->m_eAvailAnyRelay = avail;
         if (d->m_debugMsg[0] == '\0')
-            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == 100) ? "OK (ReFix)" : "Connecting (ReFix)", _TRUNCATE);
+            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), "OK (ReFix)", _TRUNCATE);
     }
     return avail;
 }
@@ -2975,14 +2974,9 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
     LoadConfig();
-    uint32_t targetApp = 0;
-    if (!g_isGoldbergMode) {
-        targetApp = (g_config.maskAppIdNum != 0) ? g_config.maskAppIdNum : g_config.realAppIdNum;
-    } else {
-        targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-    }
-    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Mode=%s)",
-             targetApp, g_isGoldbergMode ? "Goldberg" : "Valve");
+    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    if (targetApp == 0) targetApp = 480;
+    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u", targetApp);
     return targetApp;
 }
 
@@ -3054,14 +3048,9 @@ static void* Hooked_ISteamMatchmakingServers_RequestInternetServerList(
 
 static uint32_t Hooked_ISteamUtils_GetAppID(void* self) {
     LoadConfig();
-    uint32_t targetApp = 0;
-    if (!g_isGoldbergMode) {
-        targetApp = (g_config.maskAppIdNum != 0) ? g_config.maskAppIdNum : g_config.realAppIdNum;
-    } else {
-        targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-    }
-    ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u (Mode=%s)",
-             targetApp, g_isGoldbergMode ? "Goldberg" : "Valve");
+    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    if (targetApp == 0) targetApp = 480;
+    ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u", targetApp);
     return targetApp;
 }
 
@@ -3897,17 +3886,16 @@ static int Intercepted_SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus(void
     if (g_pfn_Flat_GetRelayNetworkStatus) {
         g_pfn_Flat_GetRelayNetworkStatus(self, pDetails);
     }
-    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
-    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
+    int avail = k_eRelayAvail_Current;
 
     if (pDetails) {
         auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
         d->m_eAvail = avail;
-        d->m_bPingMeasurementInProgress = (avail == 3) ? 1 : 0;
+        d->m_bPingMeasurementInProgress = 0;
         d->m_eAvailNetworkConfig = avail;
         d->m_eAvailAnyRelay = avail;
         if (d->m_debugMsg[0] == '\0')
-            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == 100) ? "OK (ReFix)" : "Connecting (ReFix)", _TRUNCATE);
+            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), "OK (ReFix)", _TRUNCATE);
     }
     return avail;
 }
@@ -4061,13 +4049,7 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
     if (iCallback == 1281) {
         ReFixLog("  -> Intercepted SteamRelayNetworkStatus_t (1281) callback registration for %p", pCallback);
         TrackRelayCallback(pCallback, iCallback);
-        ReFix_SteamRelayNetworkStatus_t data = {};
-        data.m_eAvail = k_eRelayAvail_Current;
-        data.m_bPingMeasurementInProgress = 0;
-        data.m_eAvailNetworkConfig = k_eRelayAvail_Current;
-        data.m_eAvailAnyRelay = k_eRelayAvail_Current;
-        strncpy_s(data.m_debugMsg, sizeof(data.m_debugMsg), "OK (ReFix)", _TRUNCATE);
-        SafeCallRun(pCallback, &data);
+        TriggerSyntheticRelayCallback();
     }
 
     if (iCallback == 333) ReFixLog("  -> Intercepted GameLobbyJoinRequested_t (333)");

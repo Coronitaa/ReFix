@@ -1459,7 +1459,7 @@ if ($EngineType -eq "Unity") {
                 $ctxType = $asmDef.MainModule.Types | Where-Object { $_.FullName -eq "Steamworks.CSteamAPIContext" }
                 $cbType = $asmDef.MainModule.Types | Where-Object { $_.FullName -eq "Steamworks.CallbackDispatcher" }
 
-                if ($nativeType -and $apiType) {
+                if ($nativeType -and $apiType -and $OnlineMode -eq "goldberg") {
                     $initNative = $nativeType.Methods | Where-Object { $_.Name -eq "SteamInternal_SteamAPI_Init" }
                     $apiInit = $apiType.Methods | Where-Object { $_.Name -eq "Init" }
                     if ($initNative -and $apiInit) {
