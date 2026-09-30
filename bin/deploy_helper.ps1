@@ -142,10 +142,10 @@ function Detect-UNAE-Topology {
         } catch {}
     }
 
-    # Topologia B: Multiplexado Hibrido (Fusion + nanosockets, Mirror + EOS WebRTC)
-    # Se prioriza sobre Topologia C para evitar que juegos hibridos con voz auxiliar
-    # (como Dumb Ways to Build) sean erróneamente clasificados como Cloud Relay estricto.
-    if ($hasPhotonFusion -or $il2cppFusion -or $hasNanosockets -or $hasMirror -or $hasKcp -or $hasEOS) {
+    $hasP2PTransport = ($hasPhotonFusion -or $il2cppFusion -or $hasNanosockets -or $hasMirror -or $hasKcp -or $hasEOS)
+    $isPUN2 = ($hasPhotonRealtime -or $hasPhoton3Unity -or $il2cppPUN)
+
+    if ($hasP2PTransport) {
         $port = if ($hasNanosockets -or $hasPhotonFusion -or $il2cppFusion) { "27015" } else { "7777" }
         return @{
             Topology = "TopologyB"
@@ -155,13 +155,22 @@ function Detect-UNAE-Topology {
             DirectP2PAllowed = $true
             P2PPort = $port
         }
-    } elseif ($hasPhotonRealtime -or $hasPhoton3Unity -or $il2cppPUN -or $hasPhotonVoice) {
+    } elseif ($isPUN2) {
         return @{
             Topology = "TopologyC"
-            Name = "Topologia C: Cloud-Relay Estricto (PUN 2 / Photon Voice)"
+            Name = "Topologia C: Cloud-Relay Estricto (PUN 2)"
             Transport = "Tier 4 Photon Cloud Relay (DRPI Preservacion Dinamica)"
             Color = "Yellow"
             DirectP2PAllowed = $false
+            P2PPort = "7777"
+        }
+    } elseif ($hasPhotonVoice) {
+        return @{
+            Topology = "TopologyB"
+            Name = "Topologia B: Voz Auxiliar desacoplada sobre Sockets P2P"
+            Transport = "WAN: Steam SDR P2P (AppID 480) / Voz en puerto 5058"
+            Color = "Cyan"
+            DirectP2PAllowed = $true
             P2PPort = "7777"
         }
     } else {
@@ -1439,6 +1448,18 @@ if ($EngineType -eq "Unity") {
     }
 
     foreach ($mFolder in $managedFolders) {
+        # When deploying in Valve mode, restore any previously patched assemblies (.orig)
+        # to ensure Goldberg-specific IL modifications (such as SteamInternal_SteamAPI_Init rewriting)
+        # are reverted to pristine Valve Steamworks signatures.
+        if ($OnlineMode -eq "valve") {
+            $origDlls = Get-ChildItem -Path $mFolder.FullName -Filter "*.orig" -ErrorAction SilentlyContinue
+            foreach ($origItem in $origDlls) {
+                $targetDllPath = $origItem.FullName.Substring(0, $origItem.FullName.Length - 5)
+                Copy-Item -Path $origItem.FullName -Destination $targetDllPath -Force
+                Write-Host "  [OK] Restored pristine assembly for Valve mode: $([System.IO.Path]::GetFileName($targetDllPath))" -ForegroundColor Green
+            }
+        }
+
         $candidateDlls = Get-ChildItem -Path $mFolder.FullName -Filter "*.dll" -ErrorAction SilentlyContinue | 
             Where-Object { $_.Name -match "(?i)(steamworks|assembly-csharp|com\.rlabrecque|utilities)" }
 

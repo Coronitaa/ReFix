@@ -250,18 +250,25 @@ void CapabilityDetector::ScanPhase4_IL2CPPMetadata() {
 // Classifier & Main Scan Entry
 // -----------------------------------------------------------------------------
 NetworkTopology CapabilityDetector::ClassifyTopology() {
-    // Topología B: Multiplexado Híbrido (Fusion + nanosockets, Mirror + EOS WebRTC)
-    // Se prioriza sobre Topología C para evitar que juegos híbridos con soporte auxiliar de voz
-    // (como Dumb Ways to Build) sean erróneamente forzados a Cloud Relay estricto.
-    if (m_caps.hasPhotonFusion || m_caps.il2cppHasFusion || m_caps.hasNanosockets ||
-        m_caps.hasMirror || m_caps.il2cppHasMirror || m_caps.hasEOS || m_caps.hasKcp) {
+    bool hasP2PTransport = (m_caps.hasPhotonFusion || m_caps.il2cppHasFusion || m_caps.hasNanosockets ||
+                            m_caps.hasMirror || m_caps.il2cppHasMirror || m_caps.hasEOS || m_caps.hasKcp);
+    bool isPUN2 = (m_caps.hasPhotonRealtime || m_caps.hasPhoton3Unity || m_caps.il2cppHasPhotonPUN);
+
+    // 1. Si posee un motor de transporte P2P dedicado (Fusion, Mirror, EOS, KCP, nanosockets),
+    // es Topología B (incluso si cuenta con PhotonVoice o soporte secundario).
+    if (hasP2PTransport) {
         m_caps.topology = NetworkTopology::TopologyB_HybridMultiplex;
     }
-    // Topología C: PUN 2 / Photon Voice requiere servidor relay obligatorio
-    else if (m_caps.hasPhotonRealtime || m_caps.hasPhoton3Unity || m_caps.il2cppHasPhotonPUN || m_caps.hasPhotonVoice) {
+    // 2. Si es PUN 2 estricto (con o sin Photon Voice, como Phasmophobia / R.E.P.O.),
+    // REQUIERE Cloud Relay obligatorio para proteger el Vector V-05 (evitar desincronización de Actor Numbers).
+    else if (isPUN2) {
         m_caps.topology = NetworkTopology::TopologyC_CloudRelayStrict;
     }
-    // Topología A: Sockets Directos (P2P Puro / LAN / Valve Steam SDR)
+    // 3. Si no tiene PUN 2 pero posee Photon Voice como voz auxiliar sobre sockets directos / Steam P2P:
+    else if (m_caps.hasPhotonVoice) {
+        m_caps.topology = NetworkTopology::TopologyB_HybridMultiplex;
+    }
+    // 4. Topología A: Sockets Directos (P2P Puro / LAN / Valve Steam SDR)
     else {
         m_caps.topology = NetworkTopology::TopologyA_DirectP2P;
     }
