@@ -1182,6 +1182,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks();
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t hSteamPipe);
 extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(uint32_t hSteamPipe, void* pCallbackMsg);
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(uint32_t hSteamPipe);
+extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(uint32_t hSteamPipe, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity);
 
@@ -1192,6 +1193,17 @@ extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyData(vo
 extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobby);
 extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_InviteUserToLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee);
 extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void* self, int nSlotsAvailable);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void* self, int eLobbyDistanceFilter);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void* self, int cMaxResults);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(void* self, uint64_t steamIDLobby);
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyByIndex(void* self, int iLobby);
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey);
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t steamIDLobby);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize);
 
 typedef uint64_t(*fn_SteamAPI_ISteamMatchmaking_JoinLobby_t)(void* self, uint64_t steamIDLobby);
 static fn_SteamAPI_ISteamMatchmaking_JoinLobby_t g_pfn_JoinLobby = nullptr;
@@ -1199,6 +1211,25 @@ static fn_SteamAPI_ISteamMatchmaking_SetLobbyData_t g_pfn_SetLobbyData = nullptr
 static fn_SteamAPI_ISteamMatchmaking_RequestLobbyList_t g_pfn_RequestLobbyList = nullptr;
 static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t g_pfn_AddRequestLobbyListStringFilter = nullptr;
 static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter_t g_pfn_AddRequestLobbyListDistanceFilter = nullptr;
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter_t)(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter_t)(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable_t)(void* self, int nSlotsAvailable);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter_t)(void* self, int cMaxResults);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter_t)(void* self, uint64_t steamIDLobby);
+typedef uint64_t(*fn_SteamAPI_ISteamMatchmaking_GetLobbyByIndex_t)(void* self, int iLobby);
+typedef const char*(*fn_SteamAPI_ISteamMatchmaking_GetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey);
+typedef int(*fn_SteamAPI_ISteamMatchmaking_GetLobbyDataCount_t)(void* self, uint64_t steamIDLobby);
+typedef bool(*fn_SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex_t)(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize);
+
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter_t g_pfn_AddRequestLobbyListNumericalFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter_t g_pfn_AddRequestLobbyListNearValueFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable_t g_pfn_AddRequestLobbyListFilterSlotsAvailable = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter_t g_pfn_AddRequestLobbyListResultCountFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter_t g_pfn_AddRequestLobbyListCompatibleMembersFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyByIndex_t g_pfn_GetLobbyByIndex = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyData_t g_pfn_GetLobbyDataFlat = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyDataCount_t g_pfn_GetLobbyDataCountFlat = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex_t g_pfn_GetLobbyDataByIndexFlat = nullptr;
 
 typedef void(*fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
 static fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t g_pfn_LeaveLobby = nullptr;
@@ -1534,6 +1565,7 @@ struct ReFixConfig {
     bool enableLobbyFilter = false;
     char lobbyFilterKey[64] = "game_filter";
     char lobbyFilterValue[128] = "";
+    bool overrideDistanceFilter = false;
     std::string lobbyDistanceFilterStr = "worldwide";
     uint32_t lobbyDistanceFilterEnum = 3;
     uint32_t maxLobbyResults = 50;
@@ -1651,6 +1683,7 @@ static void LoadConfig() {
     strcpy_s(g_gameFilterSP, sizeof(g_gameFilterSP), g_config.lobbyFilterValue);
     SetEnvironmentVariableA("REFIX_GAME_FILTER", g_gameFilterSP);
 
+    g_config.overrideDistanceFilter = ReadBool("Matchmaking", "OverrideDistanceFilter", false);
     char bufDist[64];
     ReadString("Matchmaking", "LobbyDistanceFilter", "worldwide", bufDist, sizeof(bufDist));
     g_config.lobbyDistanceFilterStr = bufDist;
@@ -1873,12 +1906,21 @@ static void ApplySteamEnv() {
 
 typedef uint64_t(*fn_VTable_RequestLobbyList_t)(void* self);
 typedef void(*fn_VTable_AddStringFilter_t)(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType);
+typedef void(*fn_VTable_AddNumericalFilter_t)(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType);
+typedef void(*fn_VTable_AddNearValueFilter_t)(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo);
+typedef void(*fn_VTable_AddFilterSlotsAvailable_t)(void* self, int nSlotsAvailable);
 typedef void(*fn_VTable_AddDistanceFilter_t)(void* self, int eLobbyDistanceFilter);
+typedef void(*fn_VTable_AddResultCountFilter_t)(void* self, int cMaxResults);
+typedef void(*fn_VTable_AddCompatibleMembersFilter_t)(void* self, uint64_t steamIDLobby);
+typedef uint64_t(*fn_VTable_GetLobbyByIndex_t)(void* self, int iLobby);
 typedef uint64_t(*fn_VTable_CreateLobby_t)(void* self, int eLobbyType, int cMaxMembers);
 typedef uint64_t(*fn_VTable_JoinLobby_t)(void* self, uint64_t steamIDLobby);
 typedef bool(*fn_VTable_SetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
 typedef void(*fn_VTable_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
 typedef bool(*fn_VTable_InviteUserToLobby_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee);
+typedef const char*(*fn_VTable_GetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey);
+typedef int(*fn_VTable_GetLobbyDataCount_t)(void* self, uint64_t steamIDLobby);
+typedef bool(*fn_VTable_GetLobbyDataByIndex_t)(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize);
 typedef const char*(*fn_VTable_GetLobbyMemberData_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
 
 typedef void*(*fn_VTable_RequestInternetServerList_t)(void* self, uint32_t iApp, void** ppchFilters, uint32_t nFilters, void* pResponse);
@@ -1896,12 +1938,21 @@ typedef bool(*fn_VTable_SetRichPresence_t)(void* self, const char* pchKey, const
 
 static fn_VTable_RequestLobbyList_t g_orig_VTable_RequestLobbyList = nullptr;
 static fn_VTable_AddStringFilter_t g_orig_VTable_AddStringFilter = nullptr;
+static fn_VTable_AddNumericalFilter_t g_orig_VTable_AddNumericalFilter = nullptr;
+static fn_VTable_AddNearValueFilter_t g_orig_VTable_AddNearValueFilter = nullptr;
+static fn_VTable_AddFilterSlotsAvailable_t g_orig_VTable_AddFilterSlotsAvailable = nullptr;
 static fn_VTable_AddDistanceFilter_t g_orig_VTable_AddDistanceFilter = nullptr;
+static fn_VTable_AddResultCountFilter_t g_orig_VTable_AddResultCountFilter = nullptr;
+static fn_VTable_AddCompatibleMembersFilter_t g_orig_VTable_AddCompatibleMembersFilter = nullptr;
+static fn_VTable_GetLobbyByIndex_t g_orig_VTable_GetLobbyByIndex = nullptr;
 static fn_VTable_CreateLobby_t g_orig_VTable_CreateLobby = nullptr;
 static fn_VTable_JoinLobby_t g_orig_VTable_JoinLobby = nullptr;
 static fn_VTable_SetLobbyData_t g_orig_VTable_SetLobbyData = nullptr;
 static fn_VTable_LeaveLobby_t g_orig_VTable_LeaveLobby = nullptr;
 static fn_VTable_InviteUserToLobby_t g_orig_VTable_InviteUserToLobby = nullptr;
+static fn_VTable_GetLobbyData_t g_orig_VTable_GetLobbyData = nullptr;
+static fn_VTable_GetLobbyDataCount_t g_orig_VTable_GetLobbyDataCount = nullptr;
+static fn_VTable_GetLobbyDataByIndex_t g_orig_VTable_GetLobbyDataByIndex = nullptr;
 static fn_VTable_GetLobbyMemberData_t g_orig_VTable_GetLobbyMemberData = nullptr;
 
 static fn_VTable_RequestInternetServerList_t g_orig_VTable_RequestInternetServerList = nullptr;
@@ -2232,14 +2283,165 @@ static bool Intercepted_SteamAPI_ISteamFriends_GetFriendGamePlayed(void* self, u
     return res;
 }
 
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListStringFilter Hook: key='%s', value='%s', comparison=%d (self=%p)",
+             pchKeyToMatch ? pchKeyToMatch : "(null)", pchValueToMatch ? pchValueToMatch : "(null)", eComparisonType, self);
+    if (g_orig_VTable_AddStringFilter && self) {
+        g_orig_VTable_AddStringFilter(self, pchKeyToMatch, pchValueToMatch, eComparisonType);
+    } else if (g_pfn_AddRequestLobbyListStringFilter && self) {
+        g_pfn_AddRequestLobbyListStringFilter(self, pchKeyToMatch, pchValueToMatch, eComparisonType);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter(self, pchKeyToMatch, pchValueToMatch, eComparisonType);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListNumericalFilter Hook: key='%s', value=%d, comparison=%d (self=%p)",
+             pchKeyToMatch ? pchKeyToMatch : "(null)", nValueToMatch, eComparisonType, self);
+    if (g_orig_VTable_AddNumericalFilter && self) {
+        g_orig_VTable_AddNumericalFilter(self, pchKeyToMatch, nValueToMatch, eComparisonType);
+    } else if (g_pfn_AddRequestLobbyListNumericalFilter && self) {
+        g_pfn_AddRequestLobbyListNumericalFilter(self, pchKeyToMatch, nValueToMatch, eComparisonType);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(self, pchKeyToMatch, nValueToMatch, eComparisonType);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListNearValueFilter Hook: key='%s', nearValue=%d (self=%p)",
+             pchKeyToMatch ? pchKeyToMatch : "(null)", nValueToBeCloseTo, self);
+    if (g_orig_VTable_AddNearValueFilter && self) {
+        g_orig_VTable_AddNearValueFilter(self, pchKeyToMatch, nValueToBeCloseTo);
+    } else if (g_pfn_AddRequestLobbyListNearValueFilter && self) {
+        g_pfn_AddRequestLobbyListNearValueFilter(self, pchKeyToMatch, nValueToBeCloseTo);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(self, pchKeyToMatch, nValueToBeCloseTo);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void* self, int nSlotsAvailable) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListFilterSlotsAvailable Hook: slots=%d (self=%p)",
+             nSlotsAvailable, self);
+    if (g_orig_VTable_AddFilterSlotsAvailable && self) {
+        g_orig_VTable_AddFilterSlotsAvailable(self, nSlotsAvailable);
+    } else if (g_pfn_AddRequestLobbyListFilterSlotsAvailable && self) {
+        g_pfn_AddRequestLobbyListFilterSlotsAvailable(self, nSlotsAvailable);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void* self, int nSlotsAvailable) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(self, nSlotsAvailable);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void* self, int eLobbyDistanceFilter) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListDistanceFilter Hook: filter=%d (self=%p)",
+             eLobbyDistanceFilter, self);
+    if (g_orig_VTable_AddDistanceFilter && self) {
+        g_orig_VTable_AddDistanceFilter(self, eLobbyDistanceFilter);
+    } else if (g_pfn_AddRequestLobbyListDistanceFilter && self) {
+        g_pfn_AddRequestLobbyListDistanceFilter(self, eLobbyDistanceFilter);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void* self, int eLobbyDistanceFilter) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(self, eLobbyDistanceFilter);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void* self, int cMaxResults) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListResultCountFilter Hook: maxResults=%d (self=%p)",
+             cMaxResults, self);
+    if (g_orig_VTable_AddResultCountFilter && self) {
+        g_orig_VTable_AddResultCountFilter(self, cMaxResults);
+    } else if (g_pfn_AddRequestLobbyListResultCountFilter && self) {
+        g_pfn_AddRequestLobbyListResultCountFilter(self, cMaxResults);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void* self, int cMaxResults) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(self, cMaxResults);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(void* self, uint64_t steamIDLobby) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListCompatibleMembersFilter Hook: lobbyID=%llu (self=%p)",
+             steamIDLobby, self);
+    if (g_orig_VTable_AddCompatibleMembersFilter && self) {
+        g_orig_VTable_AddCompatibleMembersFilter(self, steamIDLobby);
+    } else if (g_pfn_AddRequestLobbyListCompatibleMembersFilter && self) {
+        g_pfn_AddRequestLobbyListCompatibleMembersFilter(self, steamIDLobby);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(void* self, uint64_t steamIDLobby) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(self, steamIDLobby);
+}
+
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyByIndex(void* self, int iLobby) {
+    uint64_t lobbyID = 0;
+    if (g_pfn_GetLobbyByIndex && self) {
+        lobbyID = g_pfn_GetLobbyByIndex(self, iLobby);
+    }
+    ReFixLog("SteamAPI_ISteamMatchmaking_GetLobbyByIndex: iLobby=%d -> LobbyID=%llu (self=%p)",
+             iLobby, lobbyID, self);
+    return lobbyID;
+}
+
+static const char* Hooked_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
+    const char* val = "";
+    if (g_orig_VTable_GetLobbyData && self) {
+        val = g_orig_VTable_GetLobbyData(self, steamIDLobby, pchKey);
+    } else if (g_pfn_GetLobbyDataFlat && self) {
+        val = g_pfn_GetLobbyDataFlat(self, steamIDLobby, pchKey);
+    }
+    ReFixLog("ISteamMatchmaking::GetLobbyData Hook: lobbyID=%llu, key='%s' -> '%s' (self=%p)",
+             steamIDLobby, pchKey ? pchKey : "(null)", val ? val : "(null)", self);
+    return val ? val : "";
+}
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
+    return Hooked_ISteamMatchmaking_GetLobbyData(self, steamIDLobby, pchKey);
+}
+
+static int Hooked_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t steamIDLobby) {
+    int count = 0;
+    if (g_orig_VTable_GetLobbyDataCount && self) {
+        count = g_orig_VTable_GetLobbyDataCount(self, steamIDLobby);
+    } else if (g_pfn_GetLobbyDataCountFlat && self) {
+        count = g_pfn_GetLobbyDataCountFlat(self, steamIDLobby);
+    }
+    ReFixLog("ISteamMatchmaking::GetLobbyDataCount Hook: lobbyID=%llu -> count=%d (self=%p)",
+             steamIDLobby, count, self);
+    return count;
+}
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t steamIDLobby) {
+    return Hooked_ISteamMatchmaking_GetLobbyDataCount(self, steamIDLobby);
+}
+
+static bool Hooked_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize) {
+    bool res = false;
+    if (g_orig_VTable_GetLobbyDataByIndex && self) {
+        res = g_orig_VTable_GetLobbyDataByIndex(self, steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+    } else if (g_pfn_GetLobbyDataByIndexFlat && self) {
+        res = g_pfn_GetLobbyDataByIndexFlat(self, steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+    }
+    ReFixLog("ISteamMatchmaking::GetLobbyDataByIndex Hook: lobbyID=%llu, index=%d -> res=%d, key='%s', val='%s' (self=%p)",
+             steamIDLobby, iLobbyData, res ? 1 : 0, (res && pchKey) ? pchKey : "", (res && pchValue) ? pchValue : "", self);
+    return res;
+}
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize) {
+    return Hooked_ISteamMatchmaking_GetLobbyDataByIndex(self, steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+}
+
 static uint64_t Hooked_ISteamMatchmaking_RequestLobbyList(void* self) {
     ReFixLog("ISteamMatchmaking::RequestLobbyList Hook called (self=%p)", self);
     if (self) {
-        if (g_orig_VTable_AddDistanceFilter) {
-            g_orig_VTable_AddDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
-            ReFixLog("  -> Applied DistanceFilter=%d (%s)", g_config.lobbyDistanceFilterEnum, g_config.lobbyDistanceFilterStr.c_str());
-        } else if (g_pfn_AddRequestLobbyListDistanceFilter) {
-            g_pfn_AddRequestLobbyListDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
+        if (g_config.overrideDistanceFilter) {
+            if (g_orig_VTable_AddDistanceFilter) {
+                g_orig_VTable_AddDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
+                ReFixLog("  -> Applied DistanceFilter=%d (%s)", g_config.lobbyDistanceFilterEnum, g_config.lobbyDistanceFilterStr.c_str());
+            } else if (g_pfn_AddRequestLobbyListDistanceFilter) {
+                g_pfn_AddRequestLobbyListDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
+                ReFixLog("  -> Applied DistanceFilter (flat)=%d (%s)", g_config.lobbyDistanceFilterEnum, g_config.lobbyDistanceFilterStr.c_str());
+            }
+        } else {
+            ReFixLog("  -> DistanceFilter override disabled (preserving game filter preferences)");
         }
 
         if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0') {
@@ -2248,6 +2450,7 @@ static uint64_t Hooked_ISteamMatchmaking_RequestLobbyList(void* self) {
                 ReFixLog("  -> Applied StringFilter '%s'='%s'", g_config.lobbyFilterKey, g_config.lobbyFilterValue);
             } else if (g_pfn_AddRequestLobbyListStringFilter) {
                 g_pfn_AddRequestLobbyListStringFilter(self, g_config.lobbyFilterKey, g_config.lobbyFilterValue, 0);
+                ReFixLog("  -> Applied StringFilter (flat) '%s'='%s'", g_config.lobbyFilterKey, g_config.lobbyFilterValue);
             }
         }
     }
@@ -2747,17 +2950,35 @@ static void EnsureMatchmakingInterfaceHooked(void* pMM, const char* pszVersion) 
     if (!pMM) return;
     void** vt = *(void***)pMM;
     if (vt) {
-        if (!g_orig_VTable_AddDistanceFilter) g_orig_VTable_AddDistanceFilter = (fn_VTable_AddDistanceFilter_t)vt[9];
         if (!g_orig_VTable_AddStringFilter) g_orig_VTable_AddStringFilter = (fn_VTable_AddStringFilter_t)vt[5];
+        if (!g_orig_VTable_AddNumericalFilter) g_orig_VTable_AddNumericalFilter = (fn_VTable_AddNumericalFilter_t)vt[6];
+        if (!g_orig_VTable_AddNearValueFilter) g_orig_VTable_AddNearValueFilter = (fn_VTable_AddNearValueFilter_t)vt[7];
+        if (!g_orig_VTable_AddFilterSlotsAvailable) g_orig_VTable_AddFilterSlotsAvailable = (fn_VTable_AddFilterSlotsAvailable_t)vt[8];
+        if (!g_orig_VTable_AddDistanceFilter) g_orig_VTable_AddDistanceFilter = (fn_VTable_AddDistanceFilter_t)vt[9];
+        if (!g_orig_VTable_AddResultCountFilter) g_orig_VTable_AddResultCountFilter = (fn_VTable_AddResultCountFilter_t)vt[10];
+        if (!g_orig_VTable_AddCompatibleMembersFilter) g_orig_VTable_AddCompatibleMembersFilter = (fn_VTable_AddCompatibleMembersFilter_t)vt[11];
+        if (!g_orig_VTable_GetLobbyData) g_orig_VTable_GetLobbyData = (fn_VTable_GetLobbyData_t)vt[19];
+        if (!g_orig_VTable_GetLobbyDataCount) g_orig_VTable_GetLobbyDataCount = (fn_VTable_GetLobbyDataCount_t)vt[21];
+        if (!g_orig_VTable_GetLobbyDataByIndex) g_orig_VTable_GetLobbyDataByIndex = (fn_VTable_GetLobbyDataByIndex_t)vt[22];
     }
     HookVTableMethod(pMM, 4, (void*)Hooked_ISteamMatchmaking_RequestLobbyList, (void**)&g_orig_VTable_RequestLobbyList);
+    HookVTableMethod(pMM, 5, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter, (void**)&g_orig_VTable_AddStringFilter);
+    HookVTableMethod(pMM, 6, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter, (void**)&g_orig_VTable_AddNumericalFilter);
+    HookVTableMethod(pMM, 7, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter, (void**)&g_orig_VTable_AddNearValueFilter);
+    HookVTableMethod(pMM, 8, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable, (void**)&g_orig_VTable_AddFilterSlotsAvailable);
+    HookVTableMethod(pMM, 9, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter, (void**)&g_orig_VTable_AddDistanceFilter);
+    HookVTableMethod(pMM, 10, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter, (void**)&g_orig_VTable_AddResultCountFilter);
+    HookVTableMethod(pMM, 11, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter, (void**)&g_orig_VTable_AddCompatibleMembersFilter);
     HookVTableMethod(pMM, 13, (void*)Hooked_ISteamMatchmaking_CreateLobby, (void**)&g_orig_VTable_CreateLobby);
     HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
     HookVTableMethod(pMM, 15, (void*)Hooked_ISteamMatchmaking_LeaveLobby, (void**)&g_orig_VTable_LeaveLobby);
     HookVTableMethod(pMM, 16, (void*)Hooked_ISteamMatchmaking_InviteUserToLobby, (void**)&g_orig_VTable_InviteUserToLobby);
+    HookVTableMethod(pMM, 19, (void*)Hooked_ISteamMatchmaking_GetLobbyData, (void**)&g_orig_VTable_GetLobbyData);
     HookVTableMethod(pMM, 20, (void*)Hooked_ISteamMatchmaking_SetLobbyData, (void**)&g_orig_VTable_SetLobbyData);
+    HookVTableMethod(pMM, 21, (void*)Hooked_ISteamMatchmaking_GetLobbyDataCount, (void**)&g_orig_VTable_GetLobbyDataCount);
+    HookVTableMethod(pMM, 22, (void*)Hooked_ISteamMatchmaking_GetLobbyDataByIndex, (void**)&g_orig_VTable_GetLobbyDataByIndex);
     HookVTableMethod(pMM, 24, (void*)Hooked_ISteamMatchmaking_GetLobbyMemberData, (void**)&g_orig_VTable_GetLobbyMemberData);
-    ReFixLog("EnsureMatchmakingInterfaceHooked: Hooked RequestLobbyList(4), CreateLobby(13), JoinLobby(14), LeaveLobby(15), InviteUserToLobby(16), SetLobbyData(20), GetLobbyMemberData(24) for %p (version='%s')",
+    ReFixLog("EnsureMatchmakingInterfaceHooked: Installed VTable hooks (slots 4-16, 19-22, 24) for %p (version='%s')",
              pMM, pszVersion ? pszVersion : "unknown");
 }
 
@@ -2914,6 +3135,9 @@ static fn_SteamAPI_ManualDispatch_RunFrame_t g_pfn_ManualDispatch_RunFrame = nul
 typedef bool (*fn_SteamAPI_ManualDispatch_GetNextCallback_t)(uint32_t hSteamPipe, void* pCallbackMsg);
 static fn_SteamAPI_ManualDispatch_GetNextCallback_t g_pfn_ManualDispatch_GetNextCallback = nullptr;
 
+typedef bool (*fn_SteamAPI_ManualDispatch_GetAPICallResult_t)(uint32_t hSteamPipe, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
+static fn_SteamAPI_ManualDispatch_GetAPICallResult_t g_pfn_ManualDispatch_GetAPICallResult = nullptr;
+
 typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
 static fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t g_pfn_GetAuthSessionTicket = nullptr;
 
@@ -2966,6 +3190,18 @@ struct ReFix_CallbackMsg_t {
     uint8_t* m_pubParam;
     int32_t  m_cubParam;
 };
+
+#pragma pack(push, 8)
+struct ReFix_SteamAPICallCompleted_t {
+    uint64_t m_hAsyncCall;
+    int32_t  m_iCallback;
+    uint32_t m_cubParam;
+};
+
+struct ReFix_LobbyMatchList_t {
+    uint32_t m_nLobbiesMatching;
+};
+#pragma pack(pop)
 
 static std::atomic<bool> g_syntheticRelayPending{ false };
 static ReFix_SteamRelayNetworkStatus_t g_syntheticRelayData = {};
@@ -3575,9 +3811,6 @@ static bool EnsureOriginal() {
     int idxGetLobbyOwner = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     if (idxGetLobbyOwner >= 0) g_pfn_GetLobbyOwner = (fn_GetLobbyOwner_t)g_steamProcs[idxGetLobbyOwner];
 
-    int idxGetLobbyData = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyData");
-    if (idxGetLobbyData >= 0) g_pfn_GetLobbyData = (fn_GetLobbyData_t)g_steamProcs[idxGetLobbyData];
-
     int idxSetRichPresence = FindSteamExportIndex("SteamAPI_ISteamFriends_SetRichPresence");
     if (idxSetRichPresence >= 0) {
         g_pfn_SetRichPresence = (fn_SteamAPI_ISteamFriends_SetRichPresence_t)g_steamProcs[idxSetRichPresence];
@@ -3592,10 +3825,71 @@ static bool EnsureOriginal() {
     }
 
     int idxAddStringFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
-    if (idxAddStringFilter >= 0) g_pfn_AddRequestLobbyListStringFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t)g_steamProcs[idxAddStringFilter];
+    if (idxAddStringFilter >= 0) {
+        g_pfn_AddRequestLobbyListStringFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t)g_steamProcs[idxAddStringFilter];
+        g_steamProcs[idxAddStringFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter;
+    }
+
+    int idxAddNumericalFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter");
+    if (idxAddNumericalFilter >= 0) {
+        g_pfn_AddRequestLobbyListNumericalFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter_t)g_steamProcs[idxAddNumericalFilter];
+        g_steamProcs[idxAddNumericalFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter;
+    }
+
+    int idxAddNearValueFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter");
+    if (idxAddNearValueFilter >= 0) {
+        g_pfn_AddRequestLobbyListNearValueFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter_t)g_steamProcs[idxAddNearValueFilter];
+        g_steamProcs[idxAddNearValueFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter;
+    }
+
+    int idxAddFilterSlots = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable");
+    if (idxAddFilterSlots >= 0) {
+        g_pfn_AddRequestLobbyListFilterSlotsAvailable = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable_t)g_steamProcs[idxAddFilterSlots];
+        g_steamProcs[idxAddFilterSlots] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable;
+    }
 
     int idxDistanceFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter");
-    if (idxDistanceFilter >= 0) g_pfn_AddRequestLobbyListDistanceFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter_t)g_steamProcs[idxDistanceFilter];
+    if (idxDistanceFilter >= 0) {
+        g_pfn_AddRequestLobbyListDistanceFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter_t)g_steamProcs[idxDistanceFilter];
+        g_steamProcs[idxDistanceFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter;
+    }
+
+    int idxResultCountFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter");
+    if (idxResultCountFilter >= 0) {
+        g_pfn_AddRequestLobbyListResultCountFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter_t)g_steamProcs[idxResultCountFilter];
+        g_steamProcs[idxResultCountFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter;
+    }
+
+    int idxCompatibleMembersFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter");
+    if (idxCompatibleMembersFilter >= 0) {
+        g_pfn_AddRequestLobbyListCompatibleMembersFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter_t)g_steamProcs[idxCompatibleMembersFilter];
+        g_steamProcs[idxCompatibleMembersFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter;
+    }
+
+    int idxGetLobbyByIndex = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyByIndex");
+    if (idxGetLobbyByIndex >= 0) {
+        g_pfn_GetLobbyByIndex = (fn_SteamAPI_ISteamMatchmaking_GetLobbyByIndex_t)g_steamProcs[idxGetLobbyByIndex];
+        g_steamProcs[idxGetLobbyByIndex] = (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyByIndex;
+    }
+
+    int idxGetLobbyData = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyData");
+    if (idxGetLobbyData >= 0) {
+        g_pfn_GetLobbyData = (fn_GetLobbyData_t)g_steamProcs[idxGetLobbyData];
+        g_pfn_GetLobbyDataFlat = (fn_SteamAPI_ISteamMatchmaking_GetLobbyData_t)g_steamProcs[idxGetLobbyData];
+        g_steamProcs[idxGetLobbyData] = (FARPROC)Hooked_ISteamMatchmaking_GetLobbyData;
+    }
+
+    int idxGetLobbyDataCount = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyDataCount");
+    if (idxGetLobbyDataCount >= 0) {
+        g_pfn_GetLobbyDataCountFlat = (fn_SteamAPI_ISteamMatchmaking_GetLobbyDataCount_t)g_steamProcs[idxGetLobbyDataCount];
+        g_steamProcs[idxGetLobbyDataCount] = (FARPROC)Hooked_ISteamMatchmaking_GetLobbyDataCount;
+    }
+
+    int idxGetLobbyDataByIndex = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex");
+    if (idxGetLobbyDataByIndex >= 0) {
+        g_pfn_GetLobbyDataByIndexFlat = (fn_SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex_t)g_steamProcs[idxGetLobbyDataByIndex];
+        g_steamProcs[idxGetLobbyDataByIndex] = (FARPROC)Hooked_ISteamMatchmaking_GetLobbyDataByIndex;
+    }
 
     int idxCreateLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_CreateLobby");
     if (idxCreateLobby >= 0) {
@@ -3700,6 +3994,12 @@ static bool EnsureOriginal() {
     if (idxManualFree >= 0) {
         g_pfn_ManualDispatch_FreeLastCallback = (fn_SteamAPI_ManualDispatch_FreeLastCallback_t)g_steamProcs[idxManualFree];
         g_steamProcs[idxManualFree] = (FARPROC)SteamAPI_ManualDispatch_FreeLastCallback;
+    }
+
+    int idxManualGetResult = FindSteamExportIndex("SteamAPI_ManualDispatch_GetAPICallResult");
+    if (idxManualGetResult >= 0) {
+        g_pfn_ManualDispatch_GetAPICallResult = (fn_SteamAPI_ManualDispatch_GetAPICallResult_t)g_steamProcs[idxManualGetResult];
+        g_steamProcs[idxManualGetResult] = (FARPROC)SteamAPI_ManualDispatch_GetAPICallResult;
     }
 
     int idxLeaveLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_LeaveLobby");
@@ -4010,9 +4310,20 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                         ReFixLog("ManualDispatch_GetNextCallback: Overrode Callback 1281 to Current (100)");
                     }
                 } else if (msg->m_iCallback == 510) {
-                    ReFixLog("ManualDispatch_GetNextCallback: Callback 510 (LobbyMatchList_t)");
+                    if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_LobbyMatchList_t)) {
+                        auto* pList = (ReFix_LobbyMatchList_t*)msg->m_pubParam;
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 510 (LobbyMatchList_t) -> m_nLobbiesMatching=%u", pList->m_nLobbiesMatching);
+                    } else {
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 510 (LobbyMatchList_t)");
+                    }
                 } else if (msg->m_iCallback == 703) {
-                    ReFixLog("ManualDispatch_GetNextCallback: Callback 703 (SteamAPICallCompleted_t)");
+                    if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamAPICallCompleted_t)) {
+                        auto* pCallComp = (ReFix_SteamAPICallCompleted_t*)msg->m_pubParam;
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 703 (SteamAPICallCompleted_t) -> hAsyncCall=%llu, iCallback=%d, cubParam=%u",
+                                 pCallComp->m_hAsyncCall, pCallComp->m_iCallback, pCallComp->m_cubParam);
+                    } else {
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 703 (SteamAPICallCompleted_t)");
+                    }
                 } else if (msg->m_iCallback == 333) {
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 333 (GameLobbyJoinRequested_t)");
                 } else if (msg->m_iCallback == 504) {
@@ -4048,6 +4359,33 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(u
     if (g_pfn_ManualDispatch_FreeLastCallback) {
         g_pfn_ManualDispatch_FreeLastCallback(hSteamPipe);
     }
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(
+    uint32_t hSteamPipe,
+    uint64_t hSteamAPICall,
+    void* pCallback,
+    int cubCallback,
+    int iCallbackExpected,
+    bool* pbFailed
+) {
+    bool res = false;
+    if (g_pfn_ManualDispatch_GetAPICallResult) {
+        res = g_pfn_ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
+    }
+    bool bFailedVal = pbFailed ? *pbFailed : false;
+    if (iCallbackExpected == 510) { // LobbyMatchList_t
+        uint32_t nLobbies = 0;
+        if (res && pCallback && cubCallback >= (int)sizeof(uint32_t)) {
+            nLobbies = *(uint32_t*)pCallback;
+        }
+        ReFixLog("ManualDispatch_GetAPICallResult: hCall=%llu, expected=510 (LobbyMatchList_t), res=%d, bFailed=%d -> m_nLobbiesMatching=%u",
+                 hSteamAPICall, res ? 1 : 0, bFailedVal ? 1 : 0, nLobbies);
+    } else {
+        ReFixLog("ManualDispatch_GetAPICallResult: hCall=%llu, expected=%d, cubCallback=%d, res=%d, bFailed=%d",
+                 hSteamAPICall, iCallbackExpected, cubCallback, res ? 1 : 0, bFailedVal ? 1 : 0);
+    }
+    return res;
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {

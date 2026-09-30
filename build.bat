@@ -68,6 +68,9 @@ if "%BUILD_TESTS%"=="1" (
     echo [*] Building tests\test_two_instance_lobby.exe...
     cl /nologo /O2 /EHsc /std:c++17 /Isrc\eossdk tests\test_two_instance_lobby.cpp /Febuild\test_two_instance_lobby.exe user32.lib kernel32.lib
     if !ERRORLEVEL! neq 0 ( echo [!] Error compiling test_two_instance_lobby.exe & exit /b 1 )
+    echo [*] Building tests\test_steamworks_matchmaking.exe...
+    cl /nologo /O2 /EHsc /std:c++17 tests\test_steamworks_matchmaking.cpp /Febuild\test_steamworks_matchmaking.exe user32.lib kernel32.lib
+    if !ERRORLEVEL! neq 0 ( echo [!] Error compiling test_steamworks_matchmaking.exe & exit /b 1 )
 )
 
 echo.
