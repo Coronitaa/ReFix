@@ -1915,6 +1915,8 @@ static fn_VTable_GetNumSubscribedItems_t g_orig_VTable_GetNumSubscribedItems = n
 static fn_VTable_GetSubscribedItems_t g_orig_VTable_GetSubscribedItems = nullptr;
 static fn_VTable_GetItemInstallInfo_t g_orig_VTable_GetItemInstallInfo = nullptr;
 static fn_VTable_ActivateGameOverlayInviteDialog_t g_orig_VTable_ActivateGameOverlayInviteDialog = nullptr;
+typedef bool(*fn_VTable_InviteUserToGame_t)(void* self, uint64_t steamIDFriend, const char* pchConnectString);
+static fn_VTable_InviteUserToGame_t g_orig_VTable_InviteUserToGame = nullptr;
 static fn_VTable_SetRichPresence_t g_orig_VTable_SetRichPresence = nullptr;
 
 struct ReFix_FriendGameInfo_t {
@@ -2077,10 +2079,33 @@ static uint32_t Hooked_ISteamUGC_GetNumSubscribedItems(void* self) {
 }
 
 static void Hooked_ISteamFriends_ActivateGameOverlayInviteDialog(void* self, uint64_t steamIDLobby) {
-    ReFixLog("ISteamFriends::ActivateGameOverlayInviteDialog Hook called for lobby=%llu", steamIDLobby);
-    if (g_orig_VTable_ActivateGameOverlayInviteDialog) {
-        g_orig_VTable_ActivateGameOverlayInviteDialog(self, steamIDLobby);
+    uint64_t target = steamIDLobby;
+    if (g_activeLobbyID != 0 && steamIDLobby != g_activeLobbyID) {
+        ReFixLog("ISteamFriends::ActivateGameOverlayInviteDialog Hook: retargeting %llu -> Steam lobby %llu",
+                 steamIDLobby, g_activeLobbyID);
+        target = g_activeLobbyID;
+    } else {
+        ReFixLog("ISteamFriends::ActivateGameOverlayInviteDialog Hook called for lobby=%llu", steamIDLobby);
     }
+    if (g_orig_VTable_ActivateGameOverlayInviteDialog) {
+        g_orig_VTable_ActivateGameOverlayInviteDialog(self, target);
+    }
+}
+
+static bool Hooked_ISteamFriends_InviteUserToGame(void* self, uint64_t steamIDFriend, const char* pchConnectString) {
+    char rebuilt[128] = {0};
+    const char* connect = pchConnectString;
+    if ((!connect || !*connect) && g_activeLobbyID != 0) {
+        _snprintf_s(rebuilt, sizeof(rebuilt), _TRUNCATE, "+connect_lobby %llu", g_activeLobbyID);
+        connect = rebuilt;
+    }
+    ReFixLog("ISteamFriends::InviteUserToGame Hook: friend=%llu connect='%s'%s",
+             steamIDFriend, connect ? connect : "",
+             (connect != pchConnectString) ? " (supplied by ReFix)" : "");
+    if (g_orig_VTable_InviteUserToGame) {
+        return g_orig_VTable_InviteUserToGame(self, steamIDFriend, connect);
+    }
+    return false;
 }
 
 static bool Hooked_ISteamFriends_SetRichPresence(void* self, const char* pchKey, const char* pchValue) {
@@ -2754,6 +2779,7 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     else if (strstr(pszVersion, "SteamFriends")) {
         HookVTableMethod(iface, 8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed);
         HookVTableMethod(iface, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
+        HookVTableMethod(iface, 16, (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame);
         HookVTableMethod(iface, 43, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
     }
 }
@@ -2828,6 +2854,7 @@ static void InstallVTableHooks() {
         if (pFriends) {
             HookVTableMethod(pFriends, 8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed);
             HookVTableMethod(pFriends, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
+            HookVTableMethod(pFriends, 16, (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame);
             HookVTableMethod(pFriends, 43, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
         }
     }
