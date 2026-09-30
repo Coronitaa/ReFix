@@ -86,27 +86,15 @@ static inline bool IsVoicePort(uint16_t port) {
 }
 
 static inline bool IsGamePort(uint16_t port) {
-    static uint16_t s_iniPort = 0;
-    if (s_iniPort == 0) {
-        char buf[MAX_PATH] = { 0 };
-        GetModuleFileNameA(NULL, buf, MAX_PATH);
-        std::string p(buf);
-        size_t pos = p.find_last_of("\\/");
-        std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
-        s_iniPort = (uint16_t)GetPrivateProfileIntA("P2P", "P2PPort", 7777, ini.c_str());
-    }
-    if (port == s_iniPort) return true;
-    if (port >= 7770 && port <= 7799) return true;
-    if (port >= 27015 && port <= 27035) return true;
-    if (port == 5055 || port == 5056) return true;
-    return false;
+    if (IsVoicePort(port)) return false;
+    return true;
 }
 
 static inline SocketServiceType ClassifyPort(uint16_t port) {
     if (IsVoicePort(port)) return SocketServiceType::Voice;
-    if (IsGamePort(port)) return SocketServiceType::Game;
-    return SocketServiceType::Unknown;
+    return SocketServiceType::Game;
 }
+
 
 // =============================================================================
 // Wire Protocol & Channels
@@ -173,7 +161,7 @@ struct BufferedHoldPacket {
 
 static std::mutex g_holdBufferMutex;
 static std::vector<BufferedHoldPacket> g_holdBuffer;
-static const DWORD k_holdBufferTtlMs = 3000;   // 3000 ms TTL
+static const DWORD k_holdBufferTtlMs = 5000;   // 5000 ms TTL per NETWORK_ARCHITECTURE.md
 static const size_t k_maxHoldBufferSize = 512; // cap buffered datagrams
 
 // =============================================================================
@@ -398,42 +386,48 @@ static void RouteIncomingPacket(RecvPacket pkt) {
         // Game service
         // 1. Exact match on localPort == destPort or virtualPort == destPort
         for (auto& kv : g_socketContexts) {
-            if (kv.second.serviceType == SocketServiceType::Game) {
-                if ((kv.second.localPort && kv.second.localPort == pkt.destPort) ||
-                    (kv.second.virtualPort && kv.second.virtualPort == pkt.destPort)) {
-                    targetSocket = kv.first;
-                    break;
-                }
+            if ((kv.second.localPort && kv.second.localPort == pkt.destPort) ||
+                (kv.second.virtualPort && kv.second.virtualPort == pkt.destPort)) {
+                kv.second.serviceType = SocketServiceType::Game;
+                targetSocket = kv.first;
+                break;
             }
         }
         // 2. Match on lastRemotePort == fromPort
         if (targetSocket == INVALID_SOCKET) {
             for (auto& kv : g_socketContexts) {
-                if (kv.second.serviceType == SocketServiceType::Game && kv.second.lastRemotePort == pkt.fromPort) {
-                    targetSocket = kv.first;
-                    break;
-                }
-            }
-        }
-        // 3. Any game socket
-        if (targetSocket == INVALID_SOCKET) {
-            for (auto& kv : g_socketContexts) {
-                if (kv.second.serviceType == SocketServiceType::Game) {
-                    targetSocket = kv.first;
-                    break;
-                }
-            }
-        }
-        // 4. Any socket whose type is unknown but has bound to a game port
-        if (targetSocket == INVALID_SOCKET) {
-            for (auto& kv : g_socketContexts) {
-                if (kv.second.serviceType == SocketServiceType::Unknown && IsGamePort(kv.second.localPort)) {
+                if (kv.second.lastRemotePort == pkt.fromPort && kv.second.serviceType != SocketServiceType::Voice) {
                     kv.second.serviceType = SocketServiceType::Game;
                     targetSocket = kv.first;
                     break;
                 }
             }
         }
+        // 3. Single active game socket fallback (deterministic!)
+        if (targetSocket == INVALID_SOCKET) {
+            SOCKET singleCandidate = INVALID_SOCKET;
+            int gameCount = 0;
+            for (auto& kv : g_socketContexts) {
+                if (kv.second.serviceType != SocketServiceType::Voice) {
+                    singleCandidate = kv.first;
+                    gameCount++;
+                }
+            }
+            if (gameCount == 1) {
+                targetSocket = singleCandidate;
+                g_socketContexts[targetSocket].serviceType = SocketServiceType::Game;
+            } else if (gameCount > 1) {
+                // If multiple sockets, route to the most recently active socket
+                DWORD maxActivity = 0;
+                for (auto& kv : g_socketContexts) {
+                    if (kv.second.serviceType != SocketServiceType::Voice && kv.second.lastActivity >= maxActivity) {
+                        maxActivity = kv.second.lastActivity;
+                        targetSocket = kv.first;
+                    }
+                }
+            }
+        }
+
         if (targetSocket != INVALID_SOCKET) {
             auto& ctx = g_socketContexts[targetSocket];
             if (ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
@@ -444,6 +438,33 @@ static void RouteIncomingPacket(RecvPacket pkt) {
         // No game socket ready yet -> queue in pending game
         if (g_pendingGamePackets.size() < 1024) {
             g_pendingGamePackets.push_back(std::move(pkt));
+        }
+    }
+}
+
+// Drain pending packets matching the socket's bound/virtual port
+static void DrainPendingPackets(SocketContext& ctx) {
+    if (ctx.serviceType == SocketServiceType::Voice) {
+        while (!g_pendingVoicePackets.empty() && ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
+            ctx.recvQueue.push_back(std::move(g_pendingVoicePackets.front()));
+            g_pendingVoicePackets.pop_front();
+        }
+    } else {
+        auto it = g_pendingGamePackets.begin();
+        while (it != g_pendingGamePackets.end() && ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
+            bool matches = false;
+            if (it->destPort == 0 ||
+                it->destPort == ctx.localPort ||
+                (ctx.virtualPort != 0 && it->destPort == ctx.virtualPort)) {
+                matches = true;
+            }
+
+            if (matches) {
+                ctx.recvQueue.push_back(std::move(*it));
+                it = g_pendingGamePackets.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 }
@@ -515,8 +536,8 @@ void SteamP2PHook::FlushHoldBuffer() {
             auto itPeer = g_ipToSteamID.find(it->destIP);
             if (itPeer != g_ipToSteamID.end()) {
                 targetSteamID = itPeer->second;
-            } else if (g_ipToSteamID.size() == 1) {
-                targetSteamID = g_ipToSteamID.begin()->second;
+            } else if (g_steamIDToIP.size() == 1) {
+                targetSteamID = g_steamIDToIP.begin()->first;
             }
         }
 
@@ -525,13 +546,9 @@ void SteamP2PHook::FlushHoldBuffer() {
             SteamP2PHook::Log("[HoldBuffer] Dispatched held packet (%zu bytes) to SteamID=%llu", it->data.size(), targetSteamID);
             it = g_holdBuffer.erase(it);
         } else if (now - it->timestampMs >= k_holdBufferTtlMs) {
-            // TTL expired (3000 ms) -> fallback to raw Winsock so offline/LAN connections continue
-            SteamP2PHook::Log("[HoldBuffer] TTL expired (%u ms) for packet destined to port %u -> releasing to raw Winsock",
+            // TTL expired (5000 ms) -> drop packet cleanly without leaking to raw Winsock on WAN
+            SteamP2PHook::Log("[HoldBuffer] TTL expired (%u ms) for packet destined to port %u -> dropped",
                 k_holdBufferTtlMs, it->destPort);
-            if (g_orig_sendto && it->s != INVALID_SOCKET) {
-                g_orig_sendto(it->s, (const char*)it->data.data(), (int)it->data.size(), it->flags,
-                    (const sockaddr*)&it->destAddr, sizeof(it->destAddr));
-            }
             it = g_holdBuffer.erase(it);
         } else {
             ++it;
@@ -574,7 +591,7 @@ static bool P2PPumpStep() {
                     {
                         std::lock_guard<std::mutex> lg(g_peerMutex);
                         if (g_steamIDToIP.find(fromID) == g_steamIDToIP.end()) {
-                            uint32_t syntheticIP = 0x7F000001u | (uint32_t)(fromID & 0x00FFFFFFu);
+                            uint32_t syntheticIP = 0x0A000001u | (uint32_t)(fromID & 0x00FFFFFFu);
                             g_steamIDToIP[fromID]   = syntheticIP;
                             g_ipToSteamID[syntheticIP] = fromID;
                         }
@@ -676,9 +693,9 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
             } else if ((IsGamePort(destPort) || IsVoicePort(destPort) ||
                         (destIP & 0xFF000000u) == 0x7F000000u || destIP == 0 ||
                         (destIP & 0xFFFF0000u) == 0xC0A80000u || (destIP & 0xFF000000u) == 0x0A000000u) &&
-                       g_ipToSteamID.size() == 1) {
+                       g_steamIDToIP.size() == 1) {
                 // If connecting to game/voice port or loopback/private subnet and 1 peer known
-                steamID = g_ipToSteamID.begin()->second;
+                steamID = g_steamIDToIP.begin()->first;
                 g_steamIDToPort[steamID] = destPort;
             }
         }
@@ -691,21 +708,25 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         }
 
         // If no peer is known yet, but it's a Game or Voice port, buffer in Pre-Lobby Hold Buffer (V-02)
-        // for P2P correlation while continuing raw Winsock transmission.
+        // for P2P correlation. Return len to simulate transmission while awaiting peer mapping,
+        // preventing packets from leaking to raw Winsock or aborting the socket on WAN.
         if (service != SocketServiceType::Unknown || IsGamePort(destPort)) {
             std::lock_guard<std::mutex> lg(g_holdBufferMutex);
-            if (g_holdBuffer.size() < k_maxHoldBufferSize) {
-                BufferedHoldPacket hpkt;
-                hpkt.s = s;
-                hpkt.data.assign((const uint8_t*)buf, (const uint8_t*)buf + len);
-                hpkt.flags = flags;
-                hpkt.destAddr = *sin;
-                hpkt.destIP = destIP;
-                hpkt.destPort = destPort;
-                hpkt.service = (service != SocketServiceType::Unknown) ? service : SocketServiceType::Game;
-                hpkt.timestampMs = GetTickCount();
-                g_holdBuffer.push_back(std::move(hpkt));
+            if (g_holdBuffer.size() >= k_maxHoldBufferSize) {
+                // Circular buffer: drop oldest datagram to protect from saturation without leaking to raw Winsock
+                g_holdBuffer.erase(g_holdBuffer.begin());
             }
+            BufferedHoldPacket hpkt;
+            hpkt.s = s;
+            hpkt.data.assign((const uint8_t*)buf, (const uint8_t*)buf + len);
+            hpkt.flags = flags;
+            hpkt.destAddr = *sin;
+            hpkt.destIP = destIP;
+            hpkt.destPort = destPort;
+            hpkt.service = (service != SocketServiceType::Unknown) ? service : SocketServiceType::Game;
+            hpkt.timestampMs = GetTickCount();
+            g_holdBuffer.push_back(std::move(hpkt));
+            return len; // Prevent raw Winsock leak before peer resolution
         }
     }
 
@@ -736,46 +757,13 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
             ctx.serviceType = ClassifyPort(lport);
             ctx.lastActivity = GetTickCount();
 
-            // Drain any pending packets for this service type
-            if (ctx.serviceType == SocketServiceType::Game) {
-                while (!g_pendingGamePackets.empty() && ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
-                    ctx.recvQueue.push_back(std::move(g_pendingGamePackets.front()));
-                    g_pendingGamePackets.pop_front();
-                }
-            } else if (ctx.serviceType == SocketServiceType::Voice) {
-                while (!g_pendingVoicePackets.empty() && ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
-                    ctx.recvQueue.push_back(std::move(g_pendingVoicePackets.front()));
-                    g_pendingVoicePackets.pop_front();
-                }
-            } else if (lport == 0) {
-                // Ephemeral client socket: if pending game packets exist and no other game socket, treat as game
-                bool otherGameSock = false;
-                for (const auto& other : g_socketContexts) {
-                    if (other.first != s && other.second.serviceType == SocketServiceType::Game) {
-                        otherGameSock = true; break;
-                    }
-                }
-                if (!otherGameSock && !g_pendingGamePackets.empty()) {
-                    ctx.serviceType = SocketServiceType::Game;
-                    while (!g_pendingGamePackets.empty() && ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
-                        ctx.recvQueue.push_back(std::move(g_pendingGamePackets.front()));
-                        g_pendingGamePackets.pop_front();
-                    }
-                }
-            }
+            // Drain any pending packets matching this socket
+            DrainPendingPackets(ctx);
             it = g_socketContexts.find(s);
         } else {
             auto& ctx = it->second;
-            if (ctx.serviceType == SocketServiceType::Game && !g_pendingGamePackets.empty()) {
-                while (!g_pendingGamePackets.empty() && ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
-                    ctx.recvQueue.push_back(std::move(g_pendingGamePackets.front()));
-                    g_pendingGamePackets.pop_front();
-                }
-            } else if (ctx.serviceType == SocketServiceType::Voice && !g_pendingVoicePackets.empty()) {
-                while (!g_pendingVoicePackets.empty() && ctx.recvQueue.size() < SocketContext::kMaxQueueSize) {
-                    ctx.recvQueue.push_back(std::move(g_pendingVoicePackets.front()));
-                    g_pendingVoicePackets.pop_front();
-                }
+            if (ctx.recvQueue.empty()) {
+                DrainPendingPackets(ctx);
             }
         }
 
@@ -797,13 +785,16 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
             sin->sin_family = AF_INET;
 
             uint16_t srcPort = pkt.fromPort ? pkt.fromPort : (pkt.service == SocketServiceType::Voice ? 5058 : 7777);
-            uint32_t srcIP = 0x7F000001u;
+            uint32_t srcIP = 0;
             {
                 std::lock_guard<std::mutex> lgPeer(g_peerMutex);
                 auto it = g_steamIDToIP.find(pkt.fromSteamID);
                 if (it != g_steamIDToIP.end()) {
                     srcIP = it->second;
                 }
+            }
+            if (srcIP == 0) {
+                srcIP = 0x0A000001u | (uint32_t)(pkt.fromSteamID & 0x00FFFFFFu);
             }
             sin->sin_port = htons(srcPort);
             sin->sin_addr.s_addr = htonl(srcIP);
@@ -872,14 +863,15 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
             if (it != g_socketContexts.end() && !it->second.recvQueue.empty()) {
                 FD_SET(s, &readySet);
                 p2pReadyCount++;
-            } else if (!g_pendingGamePackets.empty() || !g_pendingVoicePackets.empty()) {
-                if (it != g_socketContexts.end()) {
-                    if ((it->second.serviceType == SocketServiceType::Game && !g_pendingGamePackets.empty()) ||
-                        (it->second.serviceType == SocketServiceType::Voice && !g_pendingVoicePackets.empty())) {
-                        FD_SET(s, &readySet);
-                        p2pReadyCount++;
-                    }
+            } else if (!g_pendingGamePackets.empty()) {
+                // If pending game packets exist and socket is not explicitly voice, signal readable
+                if (it == g_socketContexts.end() || it->second.serviceType != SocketServiceType::Voice) {
+                    FD_SET(s, &readySet);
+                    p2pReadyCount++;
                 }
+            } else if (!g_pendingVoicePackets.empty() && it != g_socketContexts.end() && it->second.serviceType == SocketServiceType::Voice) {
+                FD_SET(s, &readySet);
+                p2pReadyCount++;
             }
         }
     }
@@ -929,9 +921,11 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
                         auto& ctx = g_socketContexts[s];
                         ctx.socket = s;
                         ctx.localPort = newPort;
-                        ctx.virtualPort = newPort;
+                        ctx.virtualPort = requestedPort;
                         ctx.serviceType = SocketServiceType::Game;
                         ctx.lastActivity = GetTickCount();
+
+                        DrainPendingPackets(ctx);
                         return 0; // Success!
                     }
                 }
@@ -941,17 +935,29 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
         }
 
         // Successful normal bind
+        uint16_t actualPort = requestedPort;
+        if (actualPort == 0) {
+            sockaddr_in boundAddr{};
+            int boundLen = sizeof(boundAddr);
+            if (getsockname(s, (sockaddr*)&boundAddr, &boundLen) == 0) {
+                actualPort = ntohs(boundAddr.sin_port);
+            }
+        }
+
         {
             std::lock_guard<std::mutex> lg(g_socketMutex);
             auto& ctx = g_socketContexts[s];
             ctx.socket = s;
-            ctx.localPort = requestedPort;
-            ctx.serviceType = (service != SocketServiceType::Unknown) ? service : ClassifyPort(requestedPort);
+            ctx.localPort = actualPort;
+            ctx.serviceType = (service != SocketServiceType::Unknown) ? service : ClassifyPort(actualPort);
             ctx.lastActivity = GetTickCount();
+
+            // Drain any pending packets that arrived before bind completed
+            DrainPendingPackets(ctx);
         }
         if (service == SocketServiceType::Game || service == SocketServiceType::Voice) {
             SteamP2PHook::Log("Hook_bind: Socket %llu bound to port %u (Service: %s)",
-                (uint64_t)s, requestedPort, (service == SocketServiceType::Voice) ? "Voice" : "Game");
+                (uint64_t)s, actualPort, (service == SocketServiceType::Voice) ? "Voice" : "Game");
         }
         return 0;
     }
@@ -964,6 +970,16 @@ static int WSAAPI Hook_closesocket(SOCKET s)
     {
         std::lock_guard<std::mutex> lg(g_socketMutex);
         g_socketContexts.erase(s);
+    }
+    {
+        std::lock_guard<std::mutex> lgHold(g_holdBufferMutex);
+        for (auto it = g_holdBuffer.begin(); it != g_holdBuffer.end(); ) {
+            if (it->s == s) {
+                it = g_holdBuffer.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     if (g_orig_closesocket) {
         return g_orig_closesocket(s);
@@ -1102,8 +1118,17 @@ void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     {
         std::lock_guard<std::mutex> lg(g_peerMutex);
         auto itOld = g_steamIDToIP.find(steamID);
-        if (itOld != g_steamIDToIP.end()) {
-            g_ipToSteamID.erase(itOld->second);
+        if (itOld != g_steamIDToIP.end() && itOld->second != ipv4_host) {
+            // Only preserve previous synthetic IP (10.x.x.x) as an alias so games caching earlier synthetic IP still route.
+            // Do NOT preserve physical server IPs as aliases, preventing host migration from clobbering the new host!
+            if ((itOld->second & 0xFF000000u) == 0x0A000000u) {
+                g_ipToSteamID[itOld->second] = steamID;
+            } else {
+                auto itCur = g_ipToSteamID.find(itOld->second);
+                if (itCur != g_ipToSteamID.end() && itCur->second == steamID) {
+                    g_ipToSteamID.erase(itCur);
+                }
+            }
         }
 
         g_steamIDToIP[steamID]  = ipv4_host;
@@ -1128,16 +1153,16 @@ void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
 
 void UnregisterPeer(uint64_t steamID) {
     std::lock_guard<std::mutex> lg(g_peerMutex);
-    auto it = g_steamIDToIP.find(steamID);
-    if (it != g_steamIDToIP.end()) {
-        g_ipToSteamID.erase(it->second);
-        g_steamIDToIP.erase(it);
-        auto itPort = g_steamIDToPort.find(steamID);
-        if (itPort != g_steamIDToPort.end()) {
-            g_steamIDToPort.erase(itPort);
+    g_steamIDToIP.erase(steamID);
+    g_steamIDToPort.erase(steamID);
+    for (auto it = g_ipToSteamID.begin(); it != g_ipToSteamID.end(); ) {
+        if (it->second == steamID) {
+            it = g_ipToSteamID.erase(it);
+        } else {
+            ++it;
         }
-        Log("UnregisterPeer: SteamID=%llu removed", steamID);
     }
+    Log("UnregisterPeer: SteamID=%llu removed", steamID);
 }
 
 } // namespace SteamP2PHook
@@ -1177,3 +1202,122 @@ __declspec(dllexport) uint16_t ReFix_GetBoundGamePort() {
     return SteamP2PHook::GetBoundGamePort();
 }
 }
+
+#ifdef REFIX_TESTING
+namespace SteamP2PHookTest {
+    void ResetState() {
+        std::lock_guard<std::mutex> lgS(g_socketMutex);
+        std::lock_guard<std::mutex> lgP(g_peerMutex);
+        std::lock_guard<std::mutex> lgH(g_holdBufferMutex);
+        g_socketContexts.clear();
+        g_pendingGamePackets.clear();
+        g_pendingVoicePackets.clear();
+        g_holdBuffer.clear();
+        g_ipToSteamID.clear();
+        g_steamIDToIP.clear();
+        g_steamIDToPort.clear();
+        g_virtualizedGamePort.store(0);
+    }
+
+    void SetMockSteamNetworking(void* mock) {
+        g_pSteamNetworking = mock;
+    }
+
+    void SetOrigWinsock(fn_sendto_t s, fn_recvfrom_t r, fn_select_t sel, fn_bind_t b, fn_closesocket_t c) {
+        g_orig_sendto = s;
+        g_orig_recvfrom = r;
+        g_orig_select = sel;
+        g_orig_bind = b;
+        g_orig_closesocket = c;
+    }
+
+    int TestHook_sendto(SOCKET s, const char* buf, int len, int flags, const struct sockaddr* to, int tolen) {
+        return Hook_sendto(s, buf, len, flags, to, tolen);
+    }
+
+    int TestHook_recvfrom(SOCKET s, char* buf, int len, int flags, struct sockaddr* from, int* fromlen) {
+        return Hook_recvfrom(s, buf, len, flags, from, fromlen);
+    }
+
+    int TestHook_select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, const struct timeval* timeout) {
+        return Hook_select(nfds, readfds, writefds, exceptfds, timeout);
+    }
+
+    int TestHook_bind(SOCKET s, const struct sockaddr* name, int namelen) {
+        return Hook_bind(s, name, namelen);
+    }
+
+    int TestHook_closesocket(SOCKET s) {
+        return Hook_closesocket(s);
+    }
+
+    void TestRouteIncomingPacket(const uint8_t* data, size_t len, uint64_t fromSteamID, uint16_t fromPort, uint16_t destPort, int service) {
+        RecvPacket pkt;
+        if (data && len > 0) pkt.data.assign(data, data + len);
+        pkt.fromSteamID = fromSteamID;
+        pkt.fromPort = fromPort;
+        pkt.destPort = destPort;
+        pkt.service = (service == 2) ? SocketServiceType::Voice : SocketServiceType::Game;
+        RouteIncomingPacket(std::move(pkt));
+    }
+
+    void TestRouteIncomingRawPacket(const uint8_t* rawPkt, size_t len, uint64_t fromSteamID, int channel) {
+        if (!rawPkt || len == 0) return;
+        RecvPacket pkt;
+        pkt.fromSteamID = fromSteamID;
+        if (len >= sizeof(ReFixP2PHeader) && *(const uint32_t*)rawPkt == k_refixP2PMagic) {
+            const ReFixP2PHeader* hdr = reinterpret_cast<const ReFixP2PHeader*>(rawPkt);
+            uint16_t payloadLen = hdr->payloadLen;
+            if (sizeof(ReFixP2PHeader) + payloadLen <= len) {
+                pkt.data.assign(rawPkt + sizeof(ReFixP2PHeader), rawPkt + sizeof(ReFixP2PHeader) + payloadLen);
+            } else {
+                pkt.data.assign(rawPkt + sizeof(ReFixP2PHeader), rawPkt + len);
+            }
+            pkt.fromPort = hdr->srcPort;
+            pkt.destPort = hdr->dstPort;
+            pkt.service = (hdr->service == 2) ? SocketServiceType::Voice : SocketServiceType::Game;
+        } else {
+            pkt.data.assign(rawPkt, rawPkt + len);
+            pkt.service = (channel == k_nChannelVoice) ? SocketServiceType::Voice : SocketServiceType::Game;
+            pkt.destPort = (pkt.service == SocketServiceType::Voice) ? 5058 : 7777;
+            pkt.fromPort = pkt.destPort;
+        }
+        RouteIncomingPacket(std::move(pkt));
+    }
+
+    size_t GetHoldBufferSize() {
+        std::lock_guard<std::mutex> lg(g_holdBufferMutex);
+        return g_holdBuffer.size();
+    }
+
+    size_t GetPendingGamePacketsCount() {
+        std::lock_guard<std::mutex> lg(g_socketMutex);
+        return g_pendingGamePackets.size();
+    }
+
+    size_t GetPendingVoicePacketsCount() {
+        std::lock_guard<std::mutex> lg(g_socketMutex);
+        return g_pendingVoicePackets.size();
+    }
+
+    size_t GetSocketQueueCount(SOCKET s) {
+        std::lock_guard<std::mutex> lg(g_socketMutex);
+        auto it = g_socketContexts.find(s);
+        if (it != g_socketContexts.end()) return it->second.recvQueue.size();
+        return 0;
+    }
+
+    uint32_t GetPeerIP(uint64_t steamID) {
+        std::lock_guard<std::mutex> lg(g_peerMutex);
+        auto it = g_steamIDToIP.find(steamID);
+        return (it != g_steamIDToIP.end()) ? it->second : 0;
+    }
+
+    uint64_t GetPeerSteamID(uint32_t ip) {
+        std::lock_guard<std::mutex> lg(g_peerMutex);
+        auto it = g_ipToSteamID.find(ip);
+        return (it != g_ipToSteamID.end()) ? it->second : 0;
+    }
+}
+#endif
+

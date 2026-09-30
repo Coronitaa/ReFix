@@ -1506,11 +1506,12 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
     }
 
     // Also register the lobby owner (Host) if it's a remote host
+    uint64_t ownerID = 0;
     typedef uint64_t (*fn_GetLobbyOwner_t)(void*, uint64_t);
     auto pfnGetOwner = (fn_GetLobbyOwner_t)GetProcAddress((HMODULE)g_hOriginalDll,
         "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     if (pfnGetOwner) {
-        uint64_t ownerID = pfnGetOwner(matchmaking, lobbyID);
+        ownerID = pfnGetOwner(matchmaking, lobbyID);
         if (ownerID != 0 && (mySteamID == 0 || ownerID != mySteamID)) {
             uint32_t ownerIP = 0;
             if (serverIP && serverIP[0] != '\0') {
@@ -1536,10 +1537,10 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
         uint64_t memberID = g_pfn_GetLobbyMemberByIndex(matchmaking, lobbyID, i);
         if (!memberID || (mySteamID != 0 && memberID == mySteamID)) continue;
 
-        // Resolve IP: use SERVER_IP from lobby data for the host; for other members
-        // we derive a synthetic IP from their SteamID so sendto can find them.
+        // Resolve IP: use SERVER_IP from lobby data exclusively for the host (ownerID);
+        // for other members we derive a unique synthetic IP from their SteamID so sendto can route to them.
         uint32_t ip4 = 0;
-        if (serverIP && serverIP[0] != '\0') {
+        if (memberID == ownerID && serverIP && serverIP[0] != '\0') {
             // Parse the host IP
             struct in_addr addr;
             if (inet_pton(AF_INET, serverIP, &addr) == 1) {
