@@ -23,6 +23,7 @@
 #include <mutex>
 #include "upnp_firewall.h"
 #include "steam_p2p_hook.h"
+#include "unreal_detect.h"
 #include "minhook/MinHook.h"
 
 #define STEAM_FORWARD_COUNT 1057
@@ -1591,6 +1592,15 @@ static void LoadConfig() {
     g_config.engineType = bufEngine;
     g_godotIsEngine = (_stricmp(g_config.engineType.c_str(), "Godot") == 0);
     g_unrealIsEngine = (_stricmp(g_config.engineType.c_str(), "Unreal") == 0);
+
+    // Auto-detect Unreal only if EngineType is "Auto" or empty (NEVER override "Unity" or "Godot")
+    if (!g_unrealIsEngine && !g_godotIsEngine && (_stricmp(g_config.engineType.c_str(), "Auto") == 0 || g_config.engineType.empty())) {
+        if (UnrealDetect_IsUnrealProcess()) {
+            g_unrealIsEngine = true;
+            g_config.engineType = "Unreal";
+            ReFixLog("EngineType auto-detected as Unreal Engine (Winsock P2P hooks will be installed)");
+        }
+    }
 
     // [Steam]
     char bufMask[64], bufReal[64], bufLang[64];
