@@ -43,8 +43,45 @@ namespace SteamP2PHook {
 
 } // namespace SteamP2PHook
 
+#ifdef REFIX_TESTING
+#include <winsock2.h>
+#include <cstddef>
+
+namespace SteamP2PHookTest {
+    typedef int (WSAAPI* fn_sendto_t)(SOCKET s, const char* buf, int len, int flags,
+        const struct sockaddr* to, int tolen);
+    typedef int (WSAAPI* fn_recvfrom_t)(SOCKET s, char* buf, int len, int flags,
+        struct sockaddr* from, int* fromlen);
+    typedef int (WSAAPI* fn_select_t)(int nfds, fd_set* readfds, fd_set* writefds,
+        fd_set* exceptfds, const struct timeval* timeout);
+    typedef int (WSAAPI* fn_bind_t)(SOCKET s, const struct sockaddr* name, int namelen);
+    typedef int (WSAAPI* fn_closesocket_t)(SOCKET s);
+
+    void ResetState();
+    void SetMockSteamNetworking(void* mock);
+    void SetOrigWinsock(fn_sendto_t s, fn_recvfrom_t r, fn_select_t sel, fn_bind_t b, fn_closesocket_t c);
+
+    int TestHook_sendto(SOCKET s, const char* buf, int len, int flags, const struct sockaddr* to, int tolen);
+    int TestHook_recvfrom(SOCKET s, char* buf, int len, int flags, struct sockaddr* from, int* fromlen);
+    int TestHook_select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, const struct timeval* timeout);
+    int TestHook_bind(SOCKET s, const struct sockaddr* name, int namelen);
+    int TestHook_closesocket(SOCKET s);
+
+    void TestRouteIncomingPacket(const uint8_t* data, size_t len, uint64_t fromSteamID, uint16_t fromPort, uint16_t destPort, int service);
+    void TestRouteIncomingRawPacket(const uint8_t* rawPkt, size_t len, uint64_t fromSteamID, int channel);
+
+    size_t GetHoldBufferSize();
+    size_t GetPendingGamePacketsCount();
+    size_t GetPendingVoicePacketsCount();
+    size_t GetSocketQueueCount(SOCKET s);
+    uint32_t GetPeerIP(uint64_t steamID);
+    uint64_t GetPeerSteamID(uint32_t ip);
+}
+#endif
+
 extern "C" {
     __declspec(dllexport) void ReFix_RegisterP2PPeer(uint64_t steamID, uint32_t ipv4_host);
     __declspec(dllexport) void ReFix_RegisterP2PPeerStr(uint64_t steamID, const char* ipStr);
     __declspec(dllexport) uint16_t ReFix_GetBoundGamePort();
 }
+
