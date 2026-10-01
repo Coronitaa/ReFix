@@ -3578,6 +3578,23 @@ extern "C" void ReFix_NotifyLobbyMemberChange(uint64_t lobbyID) {
     }
 }
 
+extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort) {
+    uint64_t targetLobby = g_activeLobbyID;
+    if (targetLobby != 0) {
+        void* matchmaking = nullptr;
+        typedef void* (*fn_SteamMatchmaking_t)();
+        auto pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
+        if (!pfnMM) pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmaking");
+        if (pfnMM) matchmaking = pfnMM();
+        if (matchmaking) {
+            char portStr[16];
+            sprintf_s(portStr, sizeof(portStr), "%u", newPort);
+            Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, targetLobby, "refix_p2p_port", portStr);
+            ReFixLog("[PortVirtualization] Dynamically updated Steam Lobby %llu refix_p2p_port -> %u", targetLobby, newPort);
+        }
+    }
+}
+
 static bool Intercepted_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
     return Hooked_ISteamMatchmaking_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
 }
