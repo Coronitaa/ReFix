@@ -1,5 +1,5 @@
 ====================================================================
-               ReFix Deployment Suite v1.23 (Standalone)
+               ReFix Deployment Suite v1.3.2 (Standalone)
 ====================================================================
 
 INCLUDED TOOLS:
@@ -10,7 +10,8 @@ INCLUDED TOOLS:
 - Available modes:
   [1] ReFix Online via Steam (Spacewar 480 / official Steam infrastructure).
   [2] Re:Goldberg LAN without Steam (100% offline emulation, local subnet broadcast).
-- Automatic engine detection (Unity, Unreal Engine 4/5, Godot 3/4, Native C/C++).
+- Automatic engine detection (Unity Mono/IL2CPP, Unreal Engine 4/5, Godot 3/4, Native C/C++).
+- Modular Epic Online Services (EOS v3 / RedboneEOS) support for Unreal and EOS titles.
 - Smart executable scoring (filters dedicated/server/nullrenderer exes) and GUI file picker.
 - Generates portable 'Configure_LAN_Firewall.bat' helper for USB / flash drives.
 - Integrated Steam shortcuts.vdf installer for Non-Steam Game library integration.
