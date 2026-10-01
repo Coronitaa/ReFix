@@ -21,19 +21,10 @@
 #include <vector>
 #include <thread>
 #include <mutex>
-#include <unordered_map>
-#include <set>
-#include <map>
-#include <cctype>
 #include "upnp_firewall.h"
 #include "steam_p2p_hook.h"
-#include "minhook/MinHook.h"
-#include "identity/online_identity_provider.h"
-#include "crypto_hash.h"
 #include "unreal_detect.h"
-#include "unae/unae.h"
-
-static std::atomic<uint32_t> g_authCorrelationCounter{ 0 };
+#include "minhook/MinHook.h"
 
 #define STEAM_FORWARD_COUNT 1057
 
@@ -1191,15 +1182,73 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks();
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t hSteamPipe);
 extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(uint32_t hSteamPipe, void* pCallbackMsg);
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(uint32_t hSteamPipe);
+extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(uint32_t hSteamPipe, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity);
-extern "C" __declspec(dllexport) void SteamAPI_ISteamUser_CancelAuthTicket(void* self, uint32_t hAuthTicket);
+
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_RequestLobbyList(void* self);
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType, int cMaxMembers);
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDLobby);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobby);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_InviteUserToLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee);
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void* self, int nSlotsAvailable);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void* self, int eLobbyDistanceFilter);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void* self, int cMaxResults);
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(void* self, uint64_t steamIDLobby);
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyByIndex(void* self, int iLobby);
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey);
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t steamIDLobby);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize);
+
 typedef uint64_t(*fn_SteamAPI_ISteamMatchmaking_JoinLobby_t)(void* self, uint64_t steamIDLobby);
 static fn_SteamAPI_ISteamMatchmaking_JoinLobby_t g_pfn_JoinLobby = nullptr;
 static fn_SteamAPI_ISteamMatchmaking_SetLobbyData_t g_pfn_SetLobbyData = nullptr;
 static fn_SteamAPI_ISteamMatchmaking_RequestLobbyList_t g_pfn_RequestLobbyList = nullptr;
 static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t g_pfn_AddRequestLobbyListStringFilter = nullptr;
 static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter_t g_pfn_AddRequestLobbyListDistanceFilter = nullptr;
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter_t)(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter_t)(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable_t)(void* self, int nSlotsAvailable);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter_t)(void* self, int cMaxResults);
+typedef void(*fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter_t)(void* self, uint64_t steamIDLobby);
+typedef uint64_t(*fn_SteamAPI_ISteamMatchmaking_GetLobbyByIndex_t)(void* self, int iLobby);
+typedef const char*(*fn_SteamAPI_ISteamMatchmaking_GetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey);
+typedef int(*fn_SteamAPI_ISteamMatchmaking_GetLobbyDataCount_t)(void* self, uint64_t steamIDLobby);
+typedef bool(*fn_SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex_t)(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize);
+
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter_t g_pfn_AddRequestLobbyListNumericalFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter_t g_pfn_AddRequestLobbyListNearValueFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable_t g_pfn_AddRequestLobbyListFilterSlotsAvailable = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter_t g_pfn_AddRequestLobbyListResultCountFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter_t g_pfn_AddRequestLobbyListCompatibleMembersFilter = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyByIndex_t g_pfn_GetLobbyByIndex = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyData_t g_pfn_GetLobbyDataFlat = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyDataCount_t g_pfn_GetLobbyDataCountFlat = nullptr;
+static fn_SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex_t g_pfn_GetLobbyDataByIndexFlat = nullptr;
+
+typedef void(*fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
+static fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t g_pfn_LeaveLobby = nullptr;
+
+typedef bool(*fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee);
+static fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t g_pfn_InviteUserToLobby = nullptr;
+
+typedef const char*(*fn_GetLobbyMemberData_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
+static fn_GetLobbyMemberData_t g_pfn_GetLobbyMemberData = nullptr;
+
+typedef void(*fn_SteamAPI_ManualDispatch_FreeLastCallback_t)(uint32_t hSteamPipe);
+static fn_SteamAPI_ManualDispatch_FreeLastCallback_t g_pfn_ManualDispatch_FreeLastCallback = nullptr;
+
+typedef void* (*fn_SteamInternal_FindOrCreateUserInterface_t)(uint32_t hSteamUser, const char* pszVersion);
+static fn_SteamInternal_FindOrCreateUserInterface_t g_pfn_FindOrCreateUserInterface = nullptr;
+
+typedef void* (*fn_SteamInternal_CreateInterface_t)(const char* pszVersion);
+static fn_SteamInternal_CreateInterface_t g_pfn_SteamInternal_CreateInterface = nullptr;
+
 typedef void(*fn_SteamAPI_RegisterCallResult_t)(void* pCallback, uint64_t hAPICall);
 static fn_SteamAPI_RegisterCallback_t g_pfn_RegisterCallback = nullptr;
 static fn_SteamAPI_RegisterCallResult_t g_pfn_RegisterCallResult = nullptr;
@@ -1368,93 +1417,44 @@ static void UntrackCallback(void* pCallback) {
     }
 }
 
-// Safe invocation helper protected by SEH (__try/__except)
-// Separated to prevent C2712 unwinding conflicts in caller functions with C++ objects
-static bool SafeCallRun(void* pCallback, void* pData) {
-    if (!pCallback) return false;
-    __try {
-        void** vtable = *(void***)pCallback;
-        if (!vtable) return false;
-
-        typedef void (*fn_Run0_t)(void* self, void* pvParam);
-        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
-        if (pRun0) {
-            pRun0(pCallback, pData);
-            return true;
-        }
-        return false;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        DWORD code = GetExceptionCode();
-        ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
-        return false;
-    }
-}
-
-// Thread-safe synthetic LobbyEnter_t dispatch queue
-// All callback dispatches MUST happen on the main engine thread inside SteamAPI_RunCallbacks()
-struct PendingLobbyEnterCallback {
-    uint64_t lobbyID;
-    uint32_t responseCode; // 1 = Success, 3 = NotAllowed, 5 = Error
-    DWORD fireTick;
-};
-
-static std::mutex g_pendingLobbyEnterMutex;
-static std::vector<PendingLobbyEnterCallback> g_pendingLobbyEnterCallbacks;
-
-static void QueueSyntheticLobbyEnter(uint64_t lobbyID, uint32_t responseCode, DWORD delayMs = 0) {
+// Synthesize a LobbyEnter_t callback dispatch into all registered listeners
+static void SynthesizeLobbyEnterCallback(uint64_t lobbyID) {
     if (!lobbyID) return;
-    std::lock_guard<std::mutex> lg(g_pendingLobbyEnterMutex);
-    g_pendingLobbyEnterCallbacks.push_back({ lobbyID, responseCode, GetTickCount() + delayMs });
-    ReFixLog("[Godot] Queued synthetic LobbyEnter_t for lobby %llu, response=%u, delay=%ums",
-             lobbyID, responseCode, delayMs);
-}
 
-static void DispatchPendingLobbyEnterCallbacks() {
-    std::vector<PendingLobbyEnterCallback> toFire;
+    LobbyEnter_t evt;
+    memset(&evt, 0, sizeof(evt));
+    evt.m_ulSteamIDLobby         = lobbyID;
+    evt.m_rgfChatPermissions     = 0;
+    evt.m_bLocked                = false;
+    evt.m_EChatRoomEnterResponse = 1; // k_EChatRoomEnterResponseSuccess
+
+    ReFixLog("[Godot] SynthesizeLobbyEnterCallback: lobbyID=%llu, scanning registered callbacks", lobbyID);
+
+    std::vector<GodotCallbackEntry> snapshot;
     {
-        std::lock_guard<std::mutex> lg(g_pendingLobbyEnterMutex);
-        if (g_pendingLobbyEnterCallbacks.empty()) return;
-        DWORD now = GetTickCount();
-        for (auto it = g_pendingLobbyEnterCallbacks.begin(); it != g_pendingLobbyEnterCallbacks.end(); ) {
-            if (now >= it->fireTick) {
-                toFire.push_back(*it);
-                it = g_pendingLobbyEnterCallbacks.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        std::lock_guard<std::mutex> lg(g_callbackMutex);
+        snapshot = g_registeredCallbacks;
     }
 
-    for (const auto& item : toFire) {
-        LobbyEnter_t evt;
-        memset(&evt, 0, sizeof(evt));
-        evt.m_ulSteamIDLobby         = item.lobbyID;
-        evt.m_rgfChatPermissions     = 0;
-        evt.m_bLocked                = false;
-        evt.m_EChatRoomEnterResponse = item.responseCode;
+    int dispatched = 0;
+    for (auto& entry : snapshot) {
+        if (entry.iCallback != LobbyEnter_t::k_iCallback) continue;
+        if (!entry.pCallback) continue;
 
-        ReFixLog("[Godot] Dispatching synthetic LobbyEnter_t on main thread: lobbyID=%llu, response=%u",
-                 item.lobbyID, item.responseCode);
+        // The Steam callback object layout:
+        // [0] vtable ptr  -> Run(void* pvParam) is vt[0]
+        // Call Run(pvParam) via vtable slot 0
+        void** vt = *(void***)entry.pCallback;
+        if (!vt || !vt[0]) continue;
 
-        std::vector<GodotCallbackEntry> snapshot;
-        {
-            std::lock_guard<std::mutex> lg(g_callbackMutex);
-            snapshot = g_registeredCallbacks;
-        }
-
-        int dispatched = 0;
-        for (auto& entry : snapshot) {
-            if (entry.iCallback != LobbyEnter_t::k_iCallback) continue;
-            if (!entry.pCallback) continue;
-
-            if (SafeCallRun(entry.pCallback, &evt)) {
-                dispatched++;
-                ReFixLog("[Godot]   -> Dispatched LobbyEnter_t to callback %p", entry.pCallback);
-            }
-        }
-
-        ReFixLog("[Godot] DispatchPendingLobbyEnterCallbacks: dispatched to %d listeners", dispatched);
+        using fn_Run_t = void(__thiscall*)(void*, void*);
+        auto fn = (fn_Run_t)vt[0];
+        fn(entry.pCallback, &evt);
+        dispatched++;
+        ReFixLog("[Godot]   -> Dispatched LobbyEnter_t to callback %p", entry.pCallback);
     }
+
+    ReFixLog("[Godot] SynthesizeLobbyEnterCallback: dispatched to %d listeners", dispatched);
 }
 
 static void UpdateP2PPeers(uint64_t lobbyID) {
@@ -1475,43 +1475,15 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
         serverIP = g_pfn_GetLobbyData(matchmaking, lobbyID, "SERVER_IP");
         if (!serverIP || serverIP[0] == '\0')
             serverIP = g_pfn_GetLobbyData(matchmaking, lobbyID, "connect");
-        if (!serverIP || serverIP[0] == '\0')
-            serverIP = g_pfn_GetLobbyData(matchmaking, lobbyID, "refix_p2p_ip");
     }
 
-    uint16_t lobbyPort = 7777;
-    if (g_pfn_GetLobbyData) {
-        const char* pPort = g_pfn_GetLobbyData(matchmaking, lobbyID, "refix_p2p_port");
-        if (!pPort || pPort[0] == '\0') pPort = g_pfn_GetLobbyData(matchmaking, lobbyID, "port");
-        if (pPort && pPort[0] != '\0') {
-            int p = atoi(pPort);
-            if (p > 0 && p <= 65535) lobbyPort = (uint16_t)p;
-        }
-    }
-
-    uint64_t mySteamID = g_capturedSteamID;
-    if (mySteamID == 0) {
-        typedef void* (*fn_SteamUser_t)();
-        auto pfnUser = (fn_SteamUser_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUser_v021");
-        if (!pfnUser) pfnUser = (fn_SteamUser_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUser");
-        if (pfnUser) {
-            void* pUser = pfnUser();
-            if (pUser) {
-                typedef uint64_t (__thiscall* fn_GetSteamID_t)(void*);
-                void** vt = *(void***)pUser;
-                auto fnGetID = (fn_GetSteamID_t)vt[2];
-                mySteamID = fnGetID(pUser);
-            }
-        }
-    }
-
-    // Also register the lobby owner (Host) if it's a remote host
+    // Also register the lobby owner (Host)
     typedef uint64_t (*fn_GetLobbyOwner_t)(void*, uint64_t);
     auto pfnGetOwner = (fn_GetLobbyOwner_t)GetProcAddress((HMODULE)g_hOriginalDll,
         "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     if (pfnGetOwner) {
         uint64_t ownerID = pfnGetOwner(matchmaking, lobbyID);
-        if (ownerID != 0 && (mySteamID == 0 || ownerID != mySteamID)) {
+        if (ownerID != 0) {
             uint32_t ownerIP = 0;
             if (serverIP && serverIP[0] != '\0') {
                 struct in_addr addr;
@@ -1523,18 +1495,18 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
                 ownerIP = 0x0A000001u | (uint32_t)(ownerID & 0x00FFFFFFu);
             }
             if (!g_godotIsEngine) {
-                SteamP2PHook::RegisterPeer(ownerID, ownerIP, lobbyPort);
+                SteamP2PHook::RegisterPeer(ownerID, ownerIP);
             }
         }
     }
 
     if (!g_pfn_GetNumLobbyMembers || !g_pfn_GetLobbyMemberByIndex) return;
     int count = g_pfn_GetNumLobbyMembers(matchmaking, lobbyID);
-    ReFixLog("UpdateP2PPeers: lobby=%llu members=%d (serverIP='%s', port=%u)", lobbyID, count, serverIP ? serverIP : "", lobbyPort);
+    ReFixLog("UpdateP2PPeers: lobby=%llu members=%d (serverIP='%s')", lobbyID, count, serverIP ? serverIP : "");
 
     for (int i = 0; i < count; i++) {
         uint64_t memberID = g_pfn_GetLobbyMemberByIndex(matchmaking, lobbyID, i);
-        if (!memberID || (mySteamID != 0 && memberID == mySteamID)) continue;
+        if (!memberID) continue;
 
         // Resolve IP: use SERVER_IP from lobby data for the host; for other members
         // we derive a synthetic IP from their SteamID so sendto can find them.
@@ -1553,7 +1525,7 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
 
         // Skip Winsock peer registration for Godot — it uses ISteamNetworkingSockets, not raw UDP
         if (!g_godotIsEngine) {
-            SteamP2PHook::RegisterPeer(memberID, ip4, lobbyPort);
+            SteamP2PHook::RegisterPeer(memberID, ip4);
         }
     }
 }
@@ -1587,11 +1559,13 @@ struct ReFixConfig {
     std::string realAppId = "";
     uint32_t realAppIdNum = 0;
     std::string language = "english";
+    std::string getAppIdMode = "auto";
     bool bypassLicenseCheck = true;
 
     bool enableLobbyFilter = false;
     char lobbyFilterKey[64] = "game_filter";
     char lobbyFilterValue[128] = "";
+    bool overrideDistanceFilter = false;
     std::string lobbyDistanceFilterStr = "worldwide";
     uint32_t lobbyDistanceFilterEnum = 3;
     uint32_t maxLobbyResults = 50;
@@ -1605,34 +1579,14 @@ struct ReFixConfig {
     std::string workshopAppId = "";
     uint32_t workshopAppIdNum = 0;
     bool autoCreateSteamAppIdFile = true;
-    // Which subscribed Workshop items belong to this game. Everything is
-    // subscribed through Spacewar's Workshop, so the item's own contents are
-    // what tells one game's mods from another's.
-    std::string workshopRequirePattern = "";
-    std::string workshopIncludeItems = "";
-    std::string workshopExcludeItems = "";
 
-    bool enableLog = true;
-    bool enableConsole = false;
-    bool enableServerBrowser = true;
-    // Traces every ISteamFriends enumeration call the title makes. Off by
-    // default: a title with a large friends list makes thousands of these.
-    bool logFriendsApi = false;
-
-    // [User]
     std::string playerName = "Player";
     std::string steamId = "";
     uint64_t steamIdNum = 0;
 
-    // [Invites]
-    bool sendSteamChatMessageOnInvite = true;
-    std::string inviteMessage = "";   // empty = use built-in default
-
-    // [P2P]
-    bool enableWAN = true;
-    uint16_t p2pPort = 7777;
-    bool allowRelay = true;
-    bool forcePublicIPInLobby = true;
+    bool enableLog = true;
+    bool enableConsole = false;
+    bool enableServerBrowser = true;
 };
 
 static ReFixConfig g_config;
@@ -1641,23 +1595,10 @@ static void LoadConfig() {
     if (g_configLoaded) return;
     g_configLoaded = true;
 
-    std::vector<std::string> iniCandidates = {
-        GetExeDir() + "ReFix.ini",
-        GetExeDir() + "..\\ReFix.ini",
-        GetExeDir() + "..\\..\\ReFix.ini",
-        GetExeDir() + "..\\..\\..\\ReFix.ini",
-        GetExeDir() + "..\\..\\..\\..\\ReFix.ini",
-        GetProxyDllDir() + "ReFix.ini",
-        GetProxyDllDir() + "..\\ReFix.ini",
-        GetProxyDllDir() + "..\\..\\ReFix.ini",
-        GetProxyDllDir() + "..\\..\\..\\ReFix.ini"
-    };
     std::string ini = GetExeDir() + "ReFix.ini";
-    for (const auto& cand : iniCandidates) {
-        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            ini = cand;
-            break;
-        }
+    DWORD attrib = GetFileAttributesA(ini.c_str());
+    if (attrib == INVALID_FILE_ATTRIBUTES) {
+        ini = GetProxyDllDir() + "ReFix.ini";
     }
 
     auto ReadBool = [&](const char* section, const char* key, bool defaultVal) -> bool {
@@ -1678,12 +1619,14 @@ static void LoadConfig() {
     // [Game]
     char bufGameName[128], bufEngine[64];
     ReadString("Game", "GameName", "Shift At Midnight", bufGameName, sizeof(bufGameName));
-    ReadString("Game", "EngineType", "Auto", bufEngine, sizeof(bufEngine));
+    ReadString("Game", "EngineType", "Unity", bufEngine, sizeof(bufEngine));
     g_config.gameName = bufGameName;
     g_config.engineType = bufEngine;
     g_godotIsEngine = (_stricmp(g_config.engineType.c_str(), "Godot") == 0);
     g_unrealIsEngine = (_stricmp(g_config.engineType.c_str(), "Unreal") == 0);
-    if (!g_unrealIsEngine && (_stricmp(g_config.engineType.c_str(), "Auto") == 0 || g_config.engineType.empty() || _stricmp(g_config.engineType.c_str(), "Unity") == 0)) {
+
+    // Auto-detect Unreal only if EngineType is "Auto" or empty (NEVER override "Unity" or "Godot")
+    if (!g_unrealIsEngine && !g_godotIsEngine && (_stricmp(g_config.engineType.c_str(), "Auto") == 0 || g_config.engineType.empty())) {
         if (UnrealDetect_IsUnrealProcess()) {
             g_unrealIsEngine = true;
             g_config.engineType = "Unreal";
@@ -1706,6 +1649,10 @@ static void LoadConfig() {
 
     g_config.language = bufLang;
     g_config.bypassLicenseCheck = ReadBool("Steam", "BypassLicenseCheck", true);
+
+    char bufAppIdMode[32] = "";
+    ReadString("Steam", "GetAppIdMode", "auto", bufAppIdMode, sizeof(bufAppIdMode));
+    g_config.getAppIdMode = bufAppIdMode;
 
     // Sync legacy globals for full compatibility
     strcpy_s(g_maskAppId, sizeof(g_maskAppId), g_config.maskAppId.c_str());
@@ -1736,6 +1683,7 @@ static void LoadConfig() {
     strcpy_s(g_gameFilterSP, sizeof(g_gameFilterSP), g_config.lobbyFilterValue);
     SetEnvironmentVariableA("REFIX_GAME_FILTER", g_gameFilterSP);
 
+    g_config.overrideDistanceFilter = ReadBool("Matchmaking", "OverrideDistanceFilter", false);
     char bufDist[64];
     ReadString("Matchmaking", "LobbyDistanceFilter", "worldwide", bufDist, sizeof(bufDist));
     g_config.lobbyDistanceFilterStr = bufDist;
@@ -1768,85 +1716,32 @@ static void LoadConfig() {
     g_config.workshopAppIdNum = (uint32_t)atoi(bufWorkshopAppId);
     if (g_config.workshopAppIdNum == 0) g_config.workshopAppIdNum = (g_config.realAppIdNum != 0 ? g_config.realAppIdNum : g_config.maskAppIdNum);
     g_config.autoCreateSteamAppIdFile = ReadBool("Workshop", "AutoCreateSteamAppIdFile", true);
-    char bufWsPattern[512], bufWsInclude[512], bufWsExclude[512];
-    ReadString("Workshop", "RequireFilePattern", "", bufWsPattern, sizeof(bufWsPattern));
-    ReadString("Workshop", "IncludeItems",       "", bufWsInclude, sizeof(bufWsInclude));
-    ReadString("Workshop", "ExcludeItems",       "", bufWsExclude, sizeof(bufWsExclude));
-    g_config.workshopRequirePattern = bufWsPattern;
-    g_config.workshopIncludeItems   = bufWsInclude;
-    g_config.workshopExcludeItems   = bufWsExclude;
+
+    // [User]
+    char bufUser[128] = "";
+    ReadString("User", "Name", "Player", bufUser, sizeof(bufUser));
+    g_config.playerName = bufUser;
+
+    char bufSteamId[64] = "";
+    ReadString("User", "SteamId", "", bufSteamId, sizeof(bufSteamId));
+    g_config.steamId = bufSteamId;
+    if (bufSteamId[0] != '\0') {
+        g_config.steamIdNum = _strtoui64(bufSteamId, nullptr, 10);
+    }
 
     // [Debug]
     g_config.enableLog = ReadBool("Debug", "EnableLog", true);
     g_enableLogAllowed = g_config.enableLog;
     g_config.enableConsole = ReadBool("Debug", "EnableConsole", false);
     g_config.enableServerBrowser = ReadBool("Debug", "EnableServerBrowser", true);
-    g_config.logFriendsApi = ReadBool("Debug", "LogFriendsApi", false);
-
-    // [User]
-    char bufUser[256] = { 0 };
-    ReadString("User", "Name", "", bufUser, sizeof(bufUser));
-    if (bufUser[0] == '\0') {
-        ReadString("User", "PersonaName", "", bufUser, sizeof(bufUser));
-    }
-    if (bufUser[0] == '\0') {
-        char envName[128] = { 0 };
-        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            strcpy_s(bufUser, sizeof(bufUser), envName);
-        } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            strcpy_s(bufUser, sizeof(bufUser), envName);
-        } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            strcpy_s(bufUser, sizeof(bufUser), envName);
-        } else if (GetEnvironmentVariableA("SteamPersonaName", envName, sizeof(envName)) > 0 && envName[0]) {
-            strcpy_s(bufUser, sizeof(bufUser), envName);
-        } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            strcpy_s(bufUser, sizeof(bufUser), envName);
-        } else {
-            strcpy_s(bufUser, sizeof(bufUser), "Player");
-        }
-    }
-    g_config.playerName = bufUser;
-
-    char bufSid[64] = { 0 };
-    ReadString("User", "SteamId", "", bufSid, sizeof(bufSid));
-    if (bufSid[0] == '\0') {
-        char envSid[64] = { 0 };
-        if (GetEnvironmentVariableA("REFIX_STEAM_ID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-            strcpy_s(bufSid, sizeof(bufSid), envSid);
-        } else if (GetEnvironmentVariableA("REFIX_STEAMID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-            strcpy_s(bufSid, sizeof(bufSid), envSid);
-        }
-    }
-    g_config.steamId = bufSid;
-    if (bufSid[0] != '\0') {
-        g_config.steamIdNum = _strtoui64(bufSid, nullptr, 10);
-    }
-
-    // [Invites]
-    g_config.sendSteamChatMessageOnInvite = ReadBool("Invites", "SendSteamChatMessage", true);
-    char bufInviteMsg[512] = { 0 };
-    ReadString("Invites", "Message",
-               "[ReFix] I invited you to play {game}. Join me:",
-               bufInviteMsg, sizeof(bufInviteMsg));
-    g_config.inviteMessage = bufInviteMsg;
-
-    // [P2P]
-    g_config.enableWAN = ReadBool("P2P", "EnableWAN", true);
-    g_config.p2pPort = (uint16_t)GetPrivateProfileIntA("P2P", "P2PPort", 7777, ini.c_str());
-    g_config.allowRelay = ReadBool("P2P", "AllowRelay", true);
-    g_config.forcePublicIPInLobby = ReadBool("P2P", "ForcePublicIPInLobby", true);
 }
 
 void ReFixLog(const char* fmt, ...) {
     LoadConfig();
     va_list args;
     va_start(args, fmt);
-    // _TRUNCATE, not vsprintf_s: vsprintf_s calls the invalid-parameter handler
-    // and terminates the process when the message does not fit, so a single
-    // long value - a lobby metadata blob, say - would kill the game outright
-    // instead of producing a clipped log line.
-    char buf[4096];
-    _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, args);
+    char buf[1024];
+    vsprintf_s(buf, sizeof(buf), fmt, args);
     va_end(args);
 
     HWND hCons = GetConsoleWindow();
@@ -1976,94 +1871,9 @@ static void EnsureSteamAppIdFile(const char* appIdStr) {
     }
 }
 
-static void WriteTextFileIfChanged(const std::string& filePath, const std::string& content) {
-    HANDLE hFile = CreateFileA(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile != INVALID_HANDLE_VALUE) {
-        DWORD size = GetFileSize(hFile, NULL);
-        if (size == content.size()) {
-            std::string existing(size, '\0');
-            DWORD read = 0;
-            ReadFile(hFile, &existing[0], size, &read, NULL);
-            CloseHandle(hFile);
-            if (existing == content) return;
-        } else {
-            CloseHandle(hFile);
-        }
-    }
-    HANDLE hWrite = CreateFileA(filePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hWrite != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        WriteFile(hWrite, content.c_str(), (DWORD)content.size(), &written, NULL);
-        CloseHandle(hWrite);
-    }
-}
-
-static void SyncGoldbergSettings() {
-    std::string exeDir = GetExeDir();
-    std::string proxyDir = GetProxyDllDir();
-
-    std::vector<std::string> targetDirs;
-    targetDirs.push_back(exeDir);
-    if (proxyDir != exeDir) targetDirs.push_back(proxyDir);
-
-    std::string finalAppId = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
-    if (finalAppId.empty() || finalAppId == "0") finalAppId = "480";
-
-    std::string finalName = g_config.playerName;
-    if (finalName.empty() || finalName == "Player" || finalName == "Noob") {
-        char envName[128] = { 0 };
-        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            finalName = envName;
-        } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            finalName = envName;
-        } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            finalName = envName;
-        } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            finalName = envName;
-        } else {
-            finalName = "Player";
-        }
-        g_config.playerName = finalName;
-    }
-
-    std::string finalSteamId = g_config.steamId;
-    if (finalSteamId.empty()) {
-        char envId[64] = { 0 };
-        if (GetEnvironmentVariableA("REFIX_STEAM_ID", envId, sizeof(envId)) > 0 && envId[0]) {
-            finalSteamId = envId;
-        } else {
-            finalSteamId = "76561198511814903";
-        }
-        g_config.steamId = finalSteamId;
-    }
-
-    std::string lang = g_config.language.empty() ? "english" : g_config.language;
-
-    for (const auto& dir : targetDirs) {
-        std::string settingsDir = dir + "steam_settings";
-        CreateDirectoryA(settingsDir.c_str(), NULL);
-
-        WriteTextFileIfChanged(settingsDir + "\\force_account_name.txt", finalName);
-        WriteTextFileIfChanged(settingsDir + "\\force_steamid.txt", finalSteamId);
-        WriteTextFileIfChanged(settingsDir + "\\force_language.txt", lang);
-        WriteTextFileIfChanged(settingsDir + "\\steam_appid.txt", finalAppId);
-
-        DeleteFileA((settingsDir + "\\offline.txt").c_str());
-        DeleteFileA((settingsDir + "\\disable_lan_only.txt").c_str());
-
-        std::string userIni = "[user::general]\naccount_name=" + finalName + "\naccount_steamid=" + finalSteamId + "\nlanguage=" + lang + "\n";
-        WriteTextFileIfChanged(settingsDir + "\\configs.user.ini", userIni);
-
-        std::string appIni = "[app::general]\nappid=" + finalAppId + "\n";
-        WriteTextFileIfChanged(settingsDir + "\\configs.app.ini", appIni);
-    }
-    ReFixLog("SyncGoldbergSettings: name='%s', steamId='%s', appId='%s'", finalName.c_str(), finalSteamId.c_str(), finalAppId.c_str());
-}
-
 static void ApplySteamEnv() {
     LoadConfig();
     if (g_isGoldbergMode) {
-        SyncGoldbergSettings();
         std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
         if (targetApp.empty() || targetApp == "0") targetApp = "480";
         SetEnvironmentVariableA("SteamAppId", targetApp.c_str());
@@ -2085,19 +1895,6 @@ static void ApplySteamEnv() {
         SetEnvironmentVariableA("SteamLanguage", g_config.language.c_str());
     }
 
-    if (!g_config.playerName.empty()) {
-        SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", g_config.playerName.c_str());
-        SetEnvironmentVariableA("REFIX_USER_NAME", g_config.playerName.c_str());
-        SetEnvironmentVariableA("REFIX_USERNAME", g_config.playerName.c_str());
-        SetEnvironmentVariableA("SteamPersonaName", g_config.playerName.c_str());
-    }
-    if (!g_config.steamId.empty()) {
-        SetEnvironmentVariableA("REFIX_STEAM_ID", g_config.steamId.c_str());
-        SetEnvironmentVariableA("REFIX_STEAMID", g_config.steamId.c_str());
-        SetEnvironmentVariableA("SteamID", g_config.steamId.c_str());
-        SetEnvironmentVariableA("SteamId", g_config.steamId.c_str());
-    }
-
     if (g_config.enableOverlay && !g_isGoldbergMode) {
         InjectSteamOverlay();
     }
@@ -2109,11 +1906,21 @@ static void ApplySteamEnv() {
 
 typedef uint64_t(*fn_VTable_RequestLobbyList_t)(void* self);
 typedef void(*fn_VTable_AddStringFilter_t)(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType);
+typedef void(*fn_VTable_AddNumericalFilter_t)(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType);
+typedef void(*fn_VTable_AddNearValueFilter_t)(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo);
+typedef void(*fn_VTable_AddFilterSlotsAvailable_t)(void* self, int nSlotsAvailable);
 typedef void(*fn_VTable_AddDistanceFilter_t)(void* self, int eLobbyDistanceFilter);
+typedef void(*fn_VTable_AddResultCountFilter_t)(void* self, int cMaxResults);
+typedef void(*fn_VTable_AddCompatibleMembersFilter_t)(void* self, uint64_t steamIDLobby);
+typedef uint64_t(*fn_VTable_GetLobbyByIndex_t)(void* self, int iLobby);
 typedef uint64_t(*fn_VTable_CreateLobby_t)(void* self, int eLobbyType, int cMaxMembers);
 typedef uint64_t(*fn_VTable_JoinLobby_t)(void* self, uint64_t steamIDLobby);
 typedef bool(*fn_VTable_SetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
 typedef void(*fn_VTable_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
+typedef bool(*fn_VTable_InviteUserToLobby_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee);
+typedef const char*(*fn_VTable_GetLobbyData_t)(void* self, uint64_t steamIDLobby, const char* pchKey);
+typedef int(*fn_VTable_GetLobbyDataCount_t)(void* self, uint64_t steamIDLobby);
+typedef bool(*fn_VTable_GetLobbyDataByIndex_t)(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize);
 typedef const char*(*fn_VTable_GetLobbyMemberData_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
 
 typedef void*(*fn_VTable_RequestInternetServerList_t)(void* self, uint32_t iApp, void** ppchFilters, uint32_t nFilters, void* pResponse);
@@ -2129,43 +1936,24 @@ typedef bool(*fn_VTable_GetItemInstallInfo_t)(void* self, uint64_t nPublishedFil
 typedef void(*fn_VTable_ActivateGameOverlayInviteDialog_t)(void* self, uint64_t steamIDLobby);
 typedef bool(*fn_VTable_SetRichPresence_t)(void* self, const char* pchKey, const char* pchValue);
 
-// ISteamFriends enumeration, as the title's own friends UI walks it. These are
-// pass-through hooks: they exist so the log shows exactly what the title asked
-// for and exactly what Steam answered, which is the only way to tell a missing
-// name from a row the title invented itself.
-typedef int         (*fn_VTable_GetFriendCount_t)(void* self, int iFriendFlags);
-typedef int         (*fn_VTable_GetFriendRelationship_t)(void* self, uint64_t steamIDFriend);
-typedef int         (*fn_VTable_GetFriendPersonaState_t)(void* self, uint64_t steamIDFriend);
-typedef const char* (*fn_VTable_GetFriendPersonaName_t)(void* self, uint64_t steamIDFriend);
-typedef int         (*fn_VTable_GetFriendsGroupCount_t)(void* self);
-typedef int         (*fn_VTable_GetFriendsGroupMembersCount_t)(void* self, int16_t friendsGroupID);
-typedef bool        (*fn_VTable_HasFriend_t)(void* self, uint64_t steamIDFriend, int iFriendFlags);
-typedef bool        (*fn_VTable_RequestUserInformation_t)(void* self, uint64_t steamIDUser, bool bRequireNameOnly);
-typedef bool        (*fn_VTable_InviteUserToGame_t)(void* self, uint64_t steamIDFriend, const char* pchConnectString);
-typedef int         (*fn_VTable_GetCoplayFriendCount_t)(void* self);
-
 static fn_VTable_RequestLobbyList_t g_orig_VTable_RequestLobbyList = nullptr;
 static fn_VTable_AddStringFilter_t g_orig_VTable_AddStringFilter = nullptr;
+static fn_VTable_AddNumericalFilter_t g_orig_VTable_AddNumericalFilter = nullptr;
+static fn_VTable_AddNearValueFilter_t g_orig_VTable_AddNearValueFilter = nullptr;
+static fn_VTable_AddFilterSlotsAvailable_t g_orig_VTable_AddFilterSlotsAvailable = nullptr;
 static fn_VTable_AddDistanceFilter_t g_orig_VTable_AddDistanceFilter = nullptr;
+static fn_VTable_AddResultCountFilter_t g_orig_VTable_AddResultCountFilter = nullptr;
+static fn_VTable_AddCompatibleMembersFilter_t g_orig_VTable_AddCompatibleMembersFilter = nullptr;
+static fn_VTable_GetLobbyByIndex_t g_orig_VTable_GetLobbyByIndex = nullptr;
 static fn_VTable_CreateLobby_t g_orig_VTable_CreateLobby = nullptr;
 static fn_VTable_JoinLobby_t g_orig_VTable_JoinLobby = nullptr;
 static fn_VTable_SetLobbyData_t g_orig_VTable_SetLobbyData = nullptr;
 static fn_VTable_LeaveLobby_t g_orig_VTable_LeaveLobby = nullptr;
+static fn_VTable_InviteUserToLobby_t g_orig_VTable_InviteUserToLobby = nullptr;
+static fn_VTable_GetLobbyData_t g_orig_VTable_GetLobbyData = nullptr;
+static fn_VTable_GetLobbyDataCount_t g_orig_VTable_GetLobbyDataCount = nullptr;
+static fn_VTable_GetLobbyDataByIndex_t g_orig_VTable_GetLobbyDataByIndex = nullptr;
 static fn_VTable_GetLobbyMemberData_t g_orig_VTable_GetLobbyMemberData = nullptr;
-
-typedef void(*fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t)(void* self, uint64_t steamIDLobby);
-static fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t g_pfn_LeaveLobby = nullptr;
-typedef bool(*fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee);
-static fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t g_pfn_InviteUserToLobby = nullptr;
-// Chat message functions used by the invite interceptor to send a text companion message.
-typedef bool(*fn_SteamAPI_ISteamFriends_ReplyToFriendMessage_t)(void* self, uint64_t steamIDFriend, const char* pchMsgToSend);
-static fn_SteamAPI_ISteamFriends_ReplyToFriendMessage_t g_pfn_ReplyToFriendMessage = nullptr;
-typedef bool(*fn_SteamAPI_ISteamFriends_SetListenForFriendsMessages_t)(void* self, bool bInterceptEnabled);
-static fn_SteamAPI_ISteamFriends_SetListenForFriendsMessages_t g_pfn_SetListenForFriendsMessages = nullptr;
-static bool g_chatListening = false;
-typedef const char*(*fn_SteamAPI_ISteamMatchmaking_GetLobbyMemberData_t)(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
-static fn_SteamAPI_ISteamMatchmaking_GetLobbyMemberData_t g_pfn_GetLobbyMemberData = nullptr;
-static fn_GetFriendPersonaName_t g_pfn_GetFriendPersonaName = nullptr;
 
 static fn_VTable_RequestInternetServerList_t g_orig_VTable_RequestInternetServerList = nullptr;
 static fn_VTable_RequestLANServerList_t g_orig_VTable_RequestLANServerList = nullptr;
@@ -2176,19 +1964,11 @@ static fn_VTable_BIsDlcInstalled_t g_orig_VTable_BIsDlcInstalled = nullptr;
 
 static fn_VTable_GetNumSubscribedItems_t g_orig_VTable_GetNumSubscribedItems = nullptr;
 static fn_VTable_GetSubscribedItems_t g_orig_VTable_GetSubscribedItems = nullptr;
+static fn_VTable_GetItemInstallInfo_t g_orig_VTable_GetItemInstallInfo = nullptr;
 static fn_VTable_ActivateGameOverlayInviteDialog_t g_orig_VTable_ActivateGameOverlayInviteDialog = nullptr;
+typedef bool(*fn_VTable_InviteUserToGame_t)(void* self, uint64_t steamIDFriend, const char* pchConnectString);
+static fn_VTable_InviteUserToGame_t g_orig_VTable_InviteUserToGame = nullptr;
 static fn_VTable_SetRichPresence_t g_orig_VTable_SetRichPresence = nullptr;
-
-static fn_VTable_GetFriendCount_t              g_orig_VTable_GetFriendCount = nullptr;
-static fn_VTable_GetFriendRelationship_t       g_orig_VTable_GetFriendRelationship = nullptr;
-static fn_VTable_GetFriendPersonaState_t       g_orig_VTable_GetFriendPersonaState = nullptr;
-static fn_VTable_GetFriendPersonaName_t        g_orig_VTable_GetFriendPersonaName = nullptr;
-static fn_VTable_GetFriendsGroupCount_t        g_orig_VTable_GetFriendsGroupCount = nullptr;
-static fn_VTable_GetFriendsGroupMembersCount_t g_orig_VTable_GetFriendsGroupMembersCount = nullptr;
-static fn_VTable_HasFriend_t                   g_orig_VTable_HasFriend = nullptr;
-static fn_VTable_RequestUserInformation_t      g_orig_VTable_RequestUserInformation = nullptr;
-static fn_VTable_InviteUserToGame_t            g_orig_VTable_InviteUserToGame = nullptr;
-static fn_VTable_GetCoplayFriendCount_t        g_orig_VTable_GetCoplayFriendCount = nullptr;
 
 struct ReFix_FriendGameInfo_t {
     uint64_t m_gameID;
@@ -2240,16 +2020,17 @@ static int __fastcall Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus(
     if (g_orig_VTable_GetRelayNetworkStatus)
         g_orig_VTable_GetRelayNetworkStatus(self, pDetails);
     
-    int avail = k_eRelayAvail_Current;
+    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
+    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
 
     if (pDetails) {
         auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
         d->m_eAvail = avail;
-        d->m_bPingMeasurementInProgress = 0;
+        d->m_bPingMeasurementInProgress = (avail == 3) ? 1 : 0;
         d->m_eAvailNetworkConfig = avail;
         d->m_eAvailAnyRelay = avail;
         if (d->m_debugMsg[0] == '\0')
-            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), "OK (ReFix)", _TRUNCATE);
+            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == 100) ? "OK (ReFix)" : "Connecting (ReFix)", _TRUNCATE);
     }
     return avail;
 }
@@ -2259,11 +2040,11 @@ static bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, v
     void** vtable = *(void***)pInterface;
     if (!vtable || !vtable[vtableIndex]) return false;
 
-    void* pOriginal = vtable[vtableIndex];
-    if (pOriginal == pHookFn) return true; // Already hooked
+    void* pTarget = vtable[vtableIndex];
+    if (pTarget == pHookFn) return true; // Already hooked
 
-    if (ppOriginalFn && !*ppOriginalFn) {
-        *ppOriginalFn = pOriginal;
+    if (ppOriginalFn && *ppOriginalFn == nullptr) {
+        *ppOriginalFn = pTarget;
     }
 
     DWORD oldProtect = 0;
@@ -2271,154 +2052,47 @@ static bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, v
         vtable[vtableIndex] = pHookFn;
         VirtualProtect(&vtable[vtableIndex], sizeof(void*), oldProtect, &oldProtect);
         ReFixLog("VTable Hook Installed: Interface %p index %d (Original %p -> Hook %p)",
-                 pInterface, vtableIndex, pOriginal, pHookFn);
+                 pInterface, vtableIndex, pTarget, pHookFn);
         return true;
     }
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Workshop: telling this game's subscribed items from everyone else's
-//
-// Every emulated title subscribes through Spacewar's Workshop, so a player's
-// subscription list is a mix of items for whatever games they play this way.
-// Steam itself cannot separate them - as far as it is concerned all of them
-// belong to AppID 480 - so the item's own contents are the only honest signal,
-// and a title handed someone else's mods will at best ignore them and at worst
-// fail to start. Three rules decide, cheapest and most explicit first: an id
-// the player listed by hand, a marker file naming an AppID, and finally a
-// filename pattern that identifies this title's mod kit.
-// ---------------------------------------------------------------------------
-
-// Case-insensitive '*' and '?' matching. Small enough to keep here rather than
-// take a dependency on shlwapi for one call.
-static bool WildcardMatchI(const char* text, const char* pattern) {
-    const char* star = nullptr;
-    const char* mark = nullptr;
-    while (*text) {
-        char t = (char)tolower((unsigned char)*text);
-        char p = (char)tolower((unsigned char)*pattern);
-        if (p == '?' || p == t) { ++text; ++pattern; continue; }
-        if (p == '*') { star = pattern++; mark = text; continue; }
-        if (star) { pattern = star + 1; text = ++mark; continue; }
-        return false;
-    }
-    while (*pattern == '*') ++pattern;
-    return *pattern == '\0';
-}
-
-static std::vector<std::string> SplitConfigList(const std::string& value) {
-    std::vector<std::string> out;
-    std::string current;
-    for (char c : value) {
-        if (c == ';' || c == ',') {
-            while (!current.empty() && current.front() == ' ') current.erase(current.begin());
-            while (!current.empty() && current.back() == ' ') current.pop_back();
-            if (!current.empty()) out.push_back(current);
-            current.clear();
-        } else {
-            current += c;
-        }
-    }
-    while (!current.empty() && current.front() == ' ') current.erase(current.begin());
-    while (!current.empty() && current.back() == ' ') current.pop_back();
-    if (!current.empty()) out.push_back(current);
-    return out;
-}
-
-static bool FolderHasMatchingFile(const std::string& dir, const std::vector<std::string>& patterns, int depth) {
-    if (depth > 4) return false;
-    WIN32_FIND_DATAA fd = {};
-    HANDLE h = FindFirstFileA((dir + "*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    bool found = false;
-    do {
-        std::string name = fd.cFileName;
-        if (name == "." || name == "..") continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (FolderHasMatchingFile(dir + name + "\\", patterns, depth + 1)) { found = true; break; }
-            continue;
-        }
-        for (const std::string& pattern : patterns) {
-            if (WildcardMatchI(name.c_str(), pattern.c_str())) { found = true; break; }
-        }
-        if (found) break;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    return found;
-}
-
-// One decision per item per session; the answer cannot change while the game
-// runs and the title asks for the whole list on every menu refresh.
-static std::map<uint64_t, bool> g_workshopVerdicts;
-static std::mutex g_workshopVerdictMutex;
-
-// GetItemInstallInfo lives at a different slot in every interface version, and
-// a title can hold more than one of them at once, so the pointer is kept per
-// vtable rather than in one global that the last hook would win.
-static std::map<void*, fn_VTable_GetItemInstallInfo_t> g_ugcInstallInfo;
-
-static fn_VTable_GetItemInstallInfo_t InstallInfoFor(void* pUGC) {
-    if (!pUGC) return nullptr;
-    void** vtable = *(void***)pUGC;
-    auto it = g_ugcInstallInfo.find((void*)vtable);
-    return it == g_ugcInstallInfo.end() ? nullptr : it->second;
-}
-
 static bool IsWorkshopItemCompatible(void* pUGC, uint64_t nPublishedFileID) {
-    {
-        std::lock_guard<std::mutex> lg(g_workshopVerdictMutex);
-        auto it = g_workshopVerdicts.find(nPublishedFileID);
-        if (it != g_workshopVerdicts.end()) return it->second;
-    }
-
-    auto remember = [&](bool verdict, const char* why) {
-        {
-            std::lock_guard<std::mutex> lg(g_workshopVerdictMutex);
-            g_workshopVerdicts[nPublishedFileID] = verdict;
-        }
-        ReFixLog("Workshop item %llu: %s (%s)", nPublishedFileID, verdict ? "kept" : "hidden", why);
-        return verdict;
-    };
-
-    const std::string id = std::to_string(nPublishedFileID);
-    for (const std::string& allowed : SplitConfigList(g_config.workshopIncludeItems))
-        if (allowed == id) return remember(true, "listed in IncludeItems");
-    for (const std::string& blocked : SplitConfigList(g_config.workshopExcludeItems))
-        if (blocked == id) return remember(false, "listed in ExcludeItems");
-
-    // Without the install folder there is nothing to inspect. An item that is
-    // still downloading is not evidence of anything, so it stays visible.
-    fn_VTable_GetItemInstallInfo_t installInfo = InstallInfoFor(pUGC);
-    if (!installInfo) return true;
+    if (!pUGC || !g_orig_VTable_GetItemInstallInfo) return true;
     uint64_t sizeOnDisk = 0;
     char folder[MAX_PATH] = { 0 };
     uint32_t timestamp = 0;
-    if (!installInfo(pUGC, nPublishedFileID, &sizeOnDisk, folder, sizeof(folder), &timestamp))
+    if (!g_orig_VTable_GetItemInstallInfo(pUGC, nPublishedFileID, &sizeOnDisk, folder, sizeof(folder), &timestamp)) {
         return true;
+    }
     if (folder[0] == '\0') return true;
 
     std::string folderStr(folder);
     if (folderStr.back() != '\\' && folderStr.back() != '/') folderStr += "\\";
 
-    // A packager who states which game the item is for is believed outright.
     char appidBuf[64] = { 0 };
+    std::string refixAppIdFile = folderStr + "refix_appid.txt";
     FILE* f = nullptr;
-    fopen_s(&f, (folderStr + "refix_appid.txt").c_str(), "r");
-    if (!f) fopen_s(&f, (folderStr + "steam_appid.txt").c_str(), "r");
+    fopen_s(&f, refixAppIdFile.c_str(), "r");
+    if (!f) {
+        std::string steamAppIdFile = folderStr + "steam_appid.txt";
+        fopen_s(&f, steamAppIdFile.c_str(), "r");
+    }
     if (f) {
-        const bool read = fgets(appidBuf, sizeof(appidBuf), f) != nullptr;
-        fclose(f);
-        if (read) {
+        if (fgets(appidBuf, sizeof(appidBuf), f)) {
             uint32_t fileAppId = (uint32_t)atoi(appidBuf);
-            if (fileAppId != 0 && g_config.realAppIdNum != 0)
-                return remember(fileAppId == g_config.realAppIdNum, "declared AppID in the item folder");
+            fclose(f);
+            if (fileAppId != 0 && g_config.realAppIdNum != 0 && fileAppId != g_config.realAppIdNum) {
+                ReFixLog("IsWorkshopItemCompatible: Item %llu belongs to AppID %u, skipping (realAppId=%u)",
+                         nPublishedFileID, fileAppId, g_config.realAppIdNum);
+                return false;
+            }
+        } else {
+            fclose(f);
         }
     }
-
-    std::vector<std::string> patterns = SplitConfigList(g_config.workshopRequirePattern);
-    if (patterns.empty()) return true;   // no way to tell, and guessing would hide real mods
-    return remember(FolderHasMatchingFile(folderStr, patterns, 0), "RequireFilePattern");
+    return true;
 }
 
 static uint32_t Hooked_ISteamUGC_GetSubscribedItems(void* self, uint64_t* pvecPublishedFileID, uint32_t cMaxEntries) {
@@ -2432,7 +2106,7 @@ static uint32_t Hooked_ISteamUGC_GetSubscribedItems(void* self, uint64_t* pvecPu
             pvecPublishedFileID[validCount++] = pvecPublishedFileID[i];
         }
     }
-    ReFixLog("ISteamUGC::GetSubscribedItems Hook: total=%u, for this game=%u", count, validCount);
+    ReFixLog("ISteamUGC::GetSubscribedItems Hook: total=%u, compatible=%u", count, validCount);
     return validCount;
 }
 
@@ -2451,53 +2125,8 @@ static uint32_t Hooked_ISteamUGC_GetNumSubscribedItems(void* self) {
             validCount++;
         }
     }
-    ReFixLog("ISteamUGC::GetNumSubscribedItems Hook: total=%u, for this game=%u", total, validCount);
+    ReFixLog("ISteamUGC::GetNumSubscribedItems Hook: total=%u, compatible=%u", total, validCount);
     return validCount;
-}
-
-// ISteamUGC gained methods with every interface revision, so the slot a given
-// call sits in depends on the version the title asked for. Reading the wrong
-// slot does not fail loudly - it calls a different function with the wrong
-// arguments - so the version is resolved before anything is hooked.
-struct UGCVTableLayout {
-    int Version;
-    int NumSubscribedItems;
-    int SubscribedItems;
-    int ItemInstallInfo;
-};
-static const UGCVTableLayout kUGCVTableLayouts[] = {
-    { 16, 67, 68, 70 },
-    { 17, 70, 71, 73 },
-    { 18, 70, 71, 73 },
-    { 19, 71, 72, 74 },
-    { 20, 74, 75, 77 },
-};
-
-static std::set<void*> s_hookedUgcVtables;
-
-static void EnsureUGCInterfaceHooked(void* pUGC, const char* pszVersion) {
-    if (!pUGC || !pszVersion) return;
-    int version = 0;
-    for (const char* p = pszVersion; *p; ++p) {
-        if (*p >= '0' && *p <= '9') { version = atoi(p); break; }
-    }
-    const UGCVTableLayout* layout = nullptr;
-    for (const auto& candidate : kUGCVTableLayouts)
-        if (candidate.Version == version) { layout = &candidate; break; }
-    if (!layout) {
-        ReFixLog("EnsureUGCInterfaceHooked: unknown ISteamUGC version '%s'; subscribed items are passed through untouched", pszVersion);
-        return;
-    }
-
-    void** vtable = *(void***)pUGC;
-    if (!vtable) return;
-    if (!s_hookedUgcVtables.insert((void*)vtable).second) return;
-
-    g_ugcInstallInfo[(void*)vtable] = (fn_VTable_GetItemInstallInfo_t)vtable[layout->ItemInstallInfo];
-    HookVTableMethod(pUGC, layout->NumSubscribedItems, (void*)Hooked_ISteamUGC_GetNumSubscribedItems, (void**)&g_orig_VTable_GetNumSubscribedItems);
-    HookVTableMethod(pUGC, layout->SubscribedItems,    (void*)Hooked_ISteamUGC_GetSubscribedItems,    (void**)&g_orig_VTable_GetSubscribedItems);
-    ReFixLog("EnsureUGCInterfaceHooked: Hooked UGC interface %p (vtable=%p, version='%s', idx %d,%d, install info %d)",
-             pUGC, vtable, pszVersion, layout->NumSubscribedItems, layout->SubscribedItems, layout->ItemInstallInfo);
 }
 
 static void Hooked_ISteamFriends_ActivateGameOverlayInviteDialog(void* self, uint64_t steamIDLobby) {
@@ -2514,10 +2143,6 @@ static void Hooked_ISteamFriends_ActivateGameOverlayInviteDialog(void* self, uin
     }
 }
 
-// The same substitution for the direct invite path. An empty connect string is
-// filled in with the one the friends list already advertises, so an invite sent
-// from inside the game lands the friend in the same lobby as one sent from the
-// Steam overlay.
 static bool Hooked_ISteamFriends_InviteUserToGame(void* self, uint64_t steamIDFriend, const char* pchConnectString) {
     char rebuilt[128] = {0};
     const char* connect = pchConnectString;
@@ -2534,118 +2159,6 @@ static bool Hooked_ISteamFriends_InviteUserToGame(void* self, uint64_t steamIDFr
     return false;
 }
 
-// --- friends enumeration trace ---------------------------------------------
-static int Hooked_ISteamFriends_GetFriendCount(void* self, int iFriendFlags) {
-    int n = g_orig_VTable_GetFriendCount ? g_orig_VTable_GetFriendCount(self, iFriendFlags) : 0;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetFriendCount(flags=0x%X) -> %d", (unsigned)iFriendFlags, n);
-    return n;
-}
-
-static int Hooked_ISteamFriends_GetFriendRelationship(void* self, uint64_t steamIDFriend) {
-    int r = g_orig_VTable_GetFriendRelationship ? g_orig_VTable_GetFriendRelationship(self, steamIDFriend) : 0;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetFriendRelationship(%llu) -> %d", steamIDFriend, r);
-    return r;
-}
-
-static int Hooked_ISteamFriends_GetFriendPersonaState(void* self, uint64_t steamIDFriend) {
-    int r = g_orig_VTable_GetFriendPersonaState ? g_orig_VTable_GetFriendPersonaState(self, steamIDFriend) : 0;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetFriendPersonaState(%llu) -> %d", steamIDFriend, r);
-    return r;
-}
-
-static const char* Hooked_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
-    uint64_t localId = (g_capturedSteamID != 0) ? g_capturedSteamID : g_config.steamIdNum;
-
-    // Check if querying the local user
-    if (steamIDFriend != 0 && (steamIDFriend == localId || steamIDFriend == g_config.steamIdNum)) {
-        if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
-            return g_config.playerName.c_str();
-        }
-        char envName[128] = { 0 };
-        if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-            g_config.playerName = envName;
-            return g_config.playerName.c_str();
-        }
-    }
-
-    const char* n = nullptr;
-    if (g_orig_VTable_GetFriendPersonaName && self) {
-        __try {
-            n = g_orig_VTable_GetFriendPersonaName(self, steamIDFriend);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            n = nullptr;
-        }
-    } else if (g_pfn_GetFriendPersonaName && self) {
-        __try {
-            n = g_pfn_GetFriendPersonaName(self, steamIDFriend);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            n = nullptr;
-        }
-    }
-
-    if (!n || n[0] == '\0' || strcmp(n, "[unknown]") == 0 || strcmp(n, "Noob") == 0) {
-        if (steamIDFriend == 0 || steamIDFriend == localId || steamIDFriend == g_config.steamIdNum) {
-            if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
-                return g_config.playerName.c_str();
-            }
-            char envName[128] = { 0 };
-            if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-                g_config.playerName = envName;
-                return g_config.playerName.c_str();
-            }
-            return "Valen";
-        }
-        return (n && n[0] != '\0') ? n : (g_config.playerName.empty() ? "Valen" : g_config.playerName.c_str());
-    }
-
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetFriendPersonaName(%llu) -> '%s'", steamIDFriend, n);
-    return n;
-}
-
-extern "C" __declspec(dllexport) const char* SteamAPI_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
-    return Hooked_ISteamFriends_GetFriendPersonaName(self, steamIDFriend);
-}
-
-static int Hooked_ISteamFriends_GetFriendsGroupCount(void* self) {
-    int n = g_orig_VTable_GetFriendsGroupCount ? g_orig_VTable_GetFriendsGroupCount(self) : 0;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetFriendsGroupCount() -> %d", n);
-    return n;
-}
-
-static int Hooked_ISteamFriends_GetFriendsGroupMembersCount(void* self, int16_t friendsGroupID) {
-    int n = g_orig_VTable_GetFriendsGroupMembersCount ? g_orig_VTable_GetFriendsGroupMembersCount(self, friendsGroupID) : 0;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetFriendsGroupMembersCount(%d) -> %d", (int)friendsGroupID, n);
-    return n;
-}
-
-static bool Hooked_ISteamFriends_HasFriend(void* self, uint64_t steamIDFriend, int iFriendFlags) {
-    bool r = g_orig_VTable_HasFriend ? g_orig_VTable_HasFriend(self, steamIDFriend, iFriendFlags) : false;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] HasFriend(%llu, 0x%X) -> %d", steamIDFriend, (unsigned)iFriendFlags, (int)r);
-    return r;
-}
-
-static bool Hooked_ISteamFriends_RequestUserInformation(void* self, uint64_t steamIDUser, bool bRequireNameOnly) {
-    bool r = g_orig_VTable_RequestUserInformation ? g_orig_VTable_RequestUserInformation(self, steamIDUser, bRequireNameOnly) : false;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] RequestUserInformation(%llu, nameOnly=%d) -> %d (0 = already cached)",
-                 steamIDUser, (int)bRequireNameOnly, (int)r);
-    return r;
-}
-
-static int Hooked_ISteamFriends_GetCoplayFriendCount(void* self) {
-    int n = g_orig_VTable_GetCoplayFriendCount ? g_orig_VTable_GetCoplayFriendCount(self) : 0;
-    if (g_config.logFriendsApi)
-        ReFixLog("[FRIENDS] GetCoplayFriendCount() -> %d", n);
-    return n;
-}
-
 static bool Hooked_ISteamFriends_SetRichPresence(void* self, const char* pchKey, const char* pchValue) {
     ReFixLog("ISteamFriends::SetRichPresence Hook: Key='%s', Value='%s'",
              pchKey ? pchKey : "", pchValue ? pchValue : "");
@@ -2655,13 +2168,55 @@ static bool Hooked_ISteamFriends_SetRichPresence(void* self, const char* pchKey,
     return true;
 }
 
+static bool DetectHeathenAsset() {
+    if (g_config.realAppIdNum == 4001890 || g_config.realAppIdNum == 3070070) return true;
+    std::string exeDir = GetExeDir();
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA((exeDir + "*_Data\\Managed\\*Heathen*.dll").c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        FindClose(hFind);
+        return true;
+    }
+    return false;
+}
+
+static uint32_t GetResolvedAppID() {
+    LoadConfig();
+    uint32_t targetApp = 0;
+    if (_stricmp(g_config.getAppIdMode.c_str(), "mask") == 0) {
+        targetApp = (g_config.maskAppIdNum != 0) ? g_config.maskAppIdNum : g_config.realAppIdNum;
+    } else if (_stricmp(g_config.getAppIdMode.c_str(), "real") == 0) {
+        targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+    } else { // "auto"
+        if (!g_isGoldbergMode) {
+            // In Valve Online mode (Spacewar 480):
+            // Steam client, invites, lobbies, and presence run under MaskAppId (480).
+            // Engines (Unreal, Unity Steamworks.NET, Godot) require GetAppID() to return
+            // MaskAppId so that incoming friend invites (GameLobbyJoinRequested_t) and
+            // lobby/server browser queries match the active Steam session.
+            // Exception: Heathen Steamworks Foundation (How to Fish, TCG Card Shop Simulator)
+            // strictly asserts GetAppID() == RealAppId and throws NullReferenceException otherwise.
+            if (DetectHeathenAsset() && g_config.realAppIdNum != 0) {
+                targetApp = g_config.realAppIdNum;
+            } else {
+                targetApp = (g_config.maskAppIdNum != 0) ? g_config.maskAppIdNum : 480;
+            }
+        } else {
+            // In Goldberg LAN/emulator mode, always return RealAppId
+            targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+        }
+    }
+    if (targetApp == 0) targetApp = 480;
+    return targetApp;
+}
+
 static void NormalizeFriendGameInfo(void* pFriendGameInfo, uint64_t steamIDFriend) {
     if (!pFriendGameInfo) return;
     auto* info = (ReFix_FriendGameInfo_t*)pFriendGameInfo;
     uint32_t fid = (uint32_t)(info->m_gameID & 0x00FFFFFF);
     if (fid != 0) {
-        if (fid == 480 || fid == g_config.maskAppIdNum || fid == g_config.realAppIdNum) {
-            uint32_t myAppId = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
+        uint32_t myAppId = GetResolvedAppID();
+        if (fid == 480 || fid == g_config.maskAppIdNum || fid == g_config.realAppIdNum || fid == myAppId) {
             info->m_gameID = (info->m_gameID & 0xFFFFFFFFFF000000ULL) | (uint64_t)myAppId;
 
             // Check if m_steamIDLobby is invalid or 0.
@@ -2728,14 +2283,165 @@ static bool Intercepted_SteamAPI_ISteamFriends_GetFriendGamePlayed(void* self, u
     return res;
 }
 
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListStringFilter Hook: key='%s', value='%s', comparison=%d (self=%p)",
+             pchKeyToMatch ? pchKeyToMatch : "(null)", pchValueToMatch ? pchValueToMatch : "(null)", eComparisonType, self);
+    if (g_orig_VTable_AddStringFilter && self) {
+        g_orig_VTable_AddStringFilter(self, pchKeyToMatch, pchValueToMatch, eComparisonType);
+    } else if (g_pfn_AddRequestLobbyListStringFilter && self) {
+        g_pfn_AddRequestLobbyListStringFilter(self, pchKeyToMatch, pchValueToMatch, eComparisonType);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter(self, pchKeyToMatch, pchValueToMatch, eComparisonType);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListNumericalFilter Hook: key='%s', value=%d, comparison=%d (self=%p)",
+             pchKeyToMatch ? pchKeyToMatch : "(null)", nValueToMatch, eComparisonType, self);
+    if (g_orig_VTable_AddNumericalFilter && self) {
+        g_orig_VTable_AddNumericalFilter(self, pchKeyToMatch, nValueToMatch, eComparisonType);
+    } else if (g_pfn_AddRequestLobbyListNumericalFilter && self) {
+        g_pfn_AddRequestLobbyListNumericalFilter(self, pchKeyToMatch, nValueToMatch, eComparisonType);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(self, pchKeyToMatch, nValueToMatch, eComparisonType);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListNearValueFilter Hook: key='%s', nearValue=%d (self=%p)",
+             pchKeyToMatch ? pchKeyToMatch : "(null)", nValueToBeCloseTo, self);
+    if (g_orig_VTable_AddNearValueFilter && self) {
+        g_orig_VTable_AddNearValueFilter(self, pchKeyToMatch, nValueToBeCloseTo);
+    } else if (g_pfn_AddRequestLobbyListNearValueFilter && self) {
+        g_pfn_AddRequestLobbyListNearValueFilter(self, pchKeyToMatch, nValueToBeCloseTo);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(self, pchKeyToMatch, nValueToBeCloseTo);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void* self, int nSlotsAvailable) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListFilterSlotsAvailable Hook: slots=%d (self=%p)",
+             nSlotsAvailable, self);
+    if (g_orig_VTable_AddFilterSlotsAvailable && self) {
+        g_orig_VTable_AddFilterSlotsAvailable(self, nSlotsAvailable);
+    } else if (g_pfn_AddRequestLobbyListFilterSlotsAvailable && self) {
+        g_pfn_AddRequestLobbyListFilterSlotsAvailable(self, nSlotsAvailable);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void* self, int nSlotsAvailable) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(self, nSlotsAvailable);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void* self, int eLobbyDistanceFilter) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListDistanceFilter Hook: filter=%d (self=%p)",
+             eLobbyDistanceFilter, self);
+    if (g_orig_VTable_AddDistanceFilter && self) {
+        g_orig_VTable_AddDistanceFilter(self, eLobbyDistanceFilter);
+    } else if (g_pfn_AddRequestLobbyListDistanceFilter && self) {
+        g_pfn_AddRequestLobbyListDistanceFilter(self, eLobbyDistanceFilter);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void* self, int eLobbyDistanceFilter) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(self, eLobbyDistanceFilter);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void* self, int cMaxResults) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListResultCountFilter Hook: maxResults=%d (self=%p)",
+             cMaxResults, self);
+    if (g_orig_VTable_AddResultCountFilter && self) {
+        g_orig_VTable_AddResultCountFilter(self, cMaxResults);
+    } else if (g_pfn_AddRequestLobbyListResultCountFilter && self) {
+        g_pfn_AddRequestLobbyListResultCountFilter(self, cMaxResults);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void* self, int cMaxResults) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(self, cMaxResults);
+}
+
+static void Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(void* self, uint64_t steamIDLobby) {
+    ReFixLog("ISteamMatchmaking::AddRequestLobbyListCompatibleMembersFilter Hook: lobbyID=%llu (self=%p)",
+             steamIDLobby, self);
+    if (g_orig_VTable_AddCompatibleMembersFilter && self) {
+        g_orig_VTable_AddCompatibleMembersFilter(self, steamIDLobby);
+    } else if (g_pfn_AddRequestLobbyListCompatibleMembersFilter && self) {
+        g_pfn_AddRequestLobbyListCompatibleMembersFilter(self, steamIDLobby);
+    }
+}
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(void* self, uint64_t steamIDLobby) {
+    Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(self, steamIDLobby);
+}
+
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyByIndex(void* self, int iLobby) {
+    uint64_t lobbyID = 0;
+    if (g_pfn_GetLobbyByIndex && self) {
+        lobbyID = g_pfn_GetLobbyByIndex(self, iLobby);
+    }
+    ReFixLog("SteamAPI_ISteamMatchmaking_GetLobbyByIndex: iLobby=%d -> LobbyID=%llu (self=%p)",
+             iLobby, lobbyID, self);
+    return lobbyID;
+}
+
+static const char* Hooked_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
+    const char* val = "";
+    if (g_orig_VTable_GetLobbyData && self) {
+        val = g_orig_VTable_GetLobbyData(self, steamIDLobby, pchKey);
+    } else if (g_pfn_GetLobbyDataFlat && self) {
+        val = g_pfn_GetLobbyDataFlat(self, steamIDLobby, pchKey);
+    }
+    ReFixLog("ISteamMatchmaking::GetLobbyData Hook: lobbyID=%llu, key='%s' -> '%s' (self=%p)",
+             steamIDLobby, pchKey ? pchKey : "(null)", val ? val : "(null)", self);
+    return val ? val : "";
+}
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
+    return Hooked_ISteamMatchmaking_GetLobbyData(self, steamIDLobby, pchKey);
+}
+
+static int Hooked_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t steamIDLobby) {
+    int count = 0;
+    if (g_orig_VTable_GetLobbyDataCount && self) {
+        count = g_orig_VTable_GetLobbyDataCount(self, steamIDLobby);
+    } else if (g_pfn_GetLobbyDataCountFlat && self) {
+        count = g_pfn_GetLobbyDataCountFlat(self, steamIDLobby);
+    }
+    ReFixLog("ISteamMatchmaking::GetLobbyDataCount Hook: lobbyID=%llu -> count=%d (self=%p)",
+             steamIDLobby, count, self);
+    return count;
+}
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t steamIDLobby) {
+    return Hooked_ISteamMatchmaking_GetLobbyDataCount(self, steamIDLobby);
+}
+
+static bool Hooked_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize) {
+    bool res = false;
+    if (g_orig_VTable_GetLobbyDataByIndex && self) {
+        res = g_orig_VTable_GetLobbyDataByIndex(self, steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+    } else if (g_pfn_GetLobbyDataByIndexFlat && self) {
+        res = g_pfn_GetLobbyDataByIndexFlat(self, steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+    }
+    ReFixLog("ISteamMatchmaking::GetLobbyDataByIndex Hook: lobbyID=%llu, index=%d -> res=%d, key='%s', val='%s' (self=%p)",
+             steamIDLobby, iLobbyData, res ? 1 : 0, (res && pchKey) ? pchKey : "", (res && pchValue) ? pchValue : "", self);
+    return res;
+}
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize) {
+    return Hooked_ISteamMatchmaking_GetLobbyDataByIndex(self, steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+}
+
 static uint64_t Hooked_ISteamMatchmaking_RequestLobbyList(void* self) {
     ReFixLog("ISteamMatchmaking::RequestLobbyList Hook called (self=%p)", self);
     if (self) {
-        if (g_orig_VTable_AddDistanceFilter) {
-            g_orig_VTable_AddDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
-            ReFixLog("  -> Applied DistanceFilter=%d (%s)", g_config.lobbyDistanceFilterEnum, g_config.lobbyDistanceFilterStr.c_str());
-        } else if (g_pfn_AddRequestLobbyListDistanceFilter) {
-            g_pfn_AddRequestLobbyListDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
+        if (g_config.overrideDistanceFilter) {
+            if (g_orig_VTable_AddDistanceFilter) {
+                g_orig_VTable_AddDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
+                ReFixLog("  -> Applied DistanceFilter=%d (%s)", g_config.lobbyDistanceFilterEnum, g_config.lobbyDistanceFilterStr.c_str());
+            } else if (g_pfn_AddRequestLobbyListDistanceFilter) {
+                g_pfn_AddRequestLobbyListDistanceFilter(self, g_config.lobbyDistanceFilterEnum);
+                ReFixLog("  -> Applied DistanceFilter (flat)=%d (%s)", g_config.lobbyDistanceFilterEnum, g_config.lobbyDistanceFilterStr.c_str());
+            }
+        } else {
+            ReFixLog("  -> DistanceFilter override disabled (preserving game filter preferences)");
         }
 
         if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0') {
@@ -2744,6 +2450,7 @@ static uint64_t Hooked_ISteamMatchmaking_RequestLobbyList(void* self) {
                 ReFixLog("  -> Applied StringFilter '%s'='%s'", g_config.lobbyFilterKey, g_config.lobbyFilterValue);
             } else if (g_pfn_AddRequestLobbyListStringFilter) {
                 g_pfn_AddRequestLobbyListStringFilter(self, g_config.lobbyFilterKey, g_config.lobbyFilterValue, 0);
+                ReFixLog("  -> Applied StringFilter (flat) '%s'='%s'", g_config.lobbyFilterKey, g_config.lobbyFilterValue);
             }
         }
     }
@@ -2809,17 +2516,6 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
                  steamIDLobby, realApp, maskApp, self);
     }
 
-    // CRITICAL: Prevent crash on self-join (trying to enter the room we are already hosting)
-    if (steamIDLobby != 0 && (steamIDLobby == g_hostedLobbyID || (g_hostedLobbyID != 0 && steamIDLobby == g_activeLobbyID))) {
-        ReFixLog("  [WARNING] JoinLobby rejected: Player is already hosting lobby %llu (self-join prevented)", steamIDLobby);
-        if (g_godotIsEngine) {
-            QueueSyntheticLobbyEnter(steamIDLobby, 5 /* k_EChatRoomEnterResponseError */, 50);
-        }
-        return 0; // Return invalid call handle so engine knows join was rejected
-    }
-
-    ReFix_NotifyLobbyID(steamIDLobby);
-
     uint64_t hCall = 0;
     if (g_orig_VTable_JoinLobby) {
         hCall = g_orig_VTable_JoinLobby(self, steamIDLobby);
@@ -2835,15 +2531,49 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
         ReFixLog("  Target Selected: VTable (%p), APICall handle: %llu", (void*)g_orig_VTable_JoinLobby, hCall);
     }
 
-    if (g_godotIsEngine) {
-        bool isSyntheticOrUnknown = ((steamIDLobby >> 52) == 0x011) || (hCall == 0);
-        if (isSyntheticOrUnknown) {
-            ReFixLog("[Godot] JoinLobby: lobby appears synthetic or join handle=0, scheduling LobbyEnter_t synthesis on main thread");
-            QueueSyntheticLobbyEnter(steamIDLobby, 1 /* k_EChatRoomEnterResponseSuccess */, 300);
+    // ONLY for Godot: steam-multiplayer-peer requires a synthetic LobbyEnter_t if the backend returned 0
+    if (g_godotIsEngine && isRealLobby && (hCall == 0 || (steamIDLobby >> 52) == 0x011)) {
+        static std::atomic<uint64_t> s_lastSyntheticLobby{0};
+        static std::atomic<DWORD> s_lastSyntheticTick{0};
+        if (s_lastSyntheticLobby.exchange(steamIDLobby) != steamIDLobby || (now - s_lastSyntheticTick.load()) > 2000) {
+            s_lastSyntheticTick.store(now);
+            ReFixLog("[Godot] JoinLobby: Scheduling synthetic LobbyEnter_t for LobbyID=%llu", steamIDLobby);
+            std::thread([steamIDLobby]() {
+                Sleep(200);
+                SynthesizeLobbyEnterCallback(steamIDLobby);
+            }).detach();
         }
     }
 
     return hCall;
+}
+
+static bool Hooked_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
+    ReFixLog("ISteamMatchmaking::SetLobbyData Hook: Lobby=%llu, Key='%s', Value='%s'",
+             steamIDLobby, pchKey ? pchKey : "", pchValue ? pchValue : "");
+
+    // Setting lobby metadata implies this process is hosting/managing this lobby
+    if (steamIDLobby != 0) {
+        g_hostedLobbyID = steamIDLobby;
+        if (g_activeLobbyID != steamIDLobby) {
+            ReFix_NotifyLobbyID(steamIDLobby);
+        }
+    }
+
+    if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0' && self) {
+        if (g_orig_VTable_SetLobbyData) {
+            g_orig_VTable_SetLobbyData(self, steamIDLobby, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
+        } else if (g_pfn_SetLobbyData) {
+            g_pfn_SetLobbyData(self, steamIDLobby, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
+        }
+        ReFixLog("  -> Injected metadata '%s'='%s' into Lobby %llu", g_config.lobbyFilterKey, g_config.lobbyFilterValue, steamIDLobby);
+    }
+    if (g_orig_VTable_SetLobbyData) {
+        return g_orig_VTable_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
+    } else if (g_pfn_SetLobbyData) {
+        return g_pfn_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
+    }
+    return false;
 }
 
 static void Hooked_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobby) {
@@ -2860,9 +2590,22 @@ static void Hooked_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobb
         g_pfn_LeaveLobby(self, steamIDLobby);
     }
 }
-
 extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobby) {
     Hooked_ISteamMatchmaking_LeaveLobby(self, steamIDLobby);
+}
+
+static bool Hooked_ISteamMatchmaking_InviteUserToLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee) {
+    bool result = false;
+    if (g_orig_VTable_InviteUserToLobby && self)
+        result = g_orig_VTable_InviteUserToLobby(self, steamIDLobby, steamIDInvitee);
+    else if (g_pfn_InviteUserToLobby)
+        result = g_pfn_InviteUserToLobby(self, steamIDLobby, steamIDInvitee);
+    ReFixLog("ISteamMatchmaking::InviteUserToLobby Hook: Lobby=%llu, Invitee=%llu -> %s",
+             steamIDLobby, steamIDInvitee, result ? "success" : "failed");
+    return result;
+}
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_InviteUserToLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee) {
+    return Hooked_ISteamMatchmaking_InviteUserToLobby(self, steamIDLobby, steamIDInvitee);
 }
 
 static const char* Hooked_ISteamMatchmaking_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
@@ -2894,37 +2637,21 @@ static const char* Hooked_ISteamMatchmaking_GetLobbyMemberData(void* self, uint6
 
     return r ? r : "";
 }
-
 extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
     return Hooked_ISteamMatchmaking_GetLobbyMemberData(self, steamIDLobby, steamIDUser, pchKey);
 }
 
-static bool Hooked_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
-    ReFixLog("ISteamMatchmaking::SetLobbyData Hook: Lobby=%llu, Key='%s', Value='%s'",
-             steamIDLobby, pchKey ? pchKey : "", pchValue ? pchValue : "");
-
-    // Setting lobby metadata implies this process is hosting/managing this lobby
-    if (steamIDLobby != 0) {
-        g_hostedLobbyID = steamIDLobby;
-        if (g_activeLobbyID != steamIDLobby) {
-            ReFix_NotifyLobbyID(steamIDLobby);
-        }
-    }
-
-    if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0' && self) {
-        if (g_orig_VTable_SetLobbyData) {
-            g_orig_VTable_SetLobbyData(self, steamIDLobby, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
-        } else if (g_pfn_SetLobbyData) {
-            g_pfn_SetLobbyData(self, steamIDLobby, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
-        }
-        ReFixLog("  -> Injected metadata '%s'='%s' into Lobby %llu", g_config.lobbyFilterKey, g_config.lobbyFilterValue, steamIDLobby);
-    }
-    if (g_orig_VTable_SetLobbyData) {
-        return g_orig_VTable_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
-    } else if (g_pfn_SetLobbyData) {
-        return g_pfn_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
-    }
-    return false;
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_RequestLobbyList(void* self) {
+    return Hooked_ISteamMatchmaking_RequestLobbyList(self);
+}
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType, int cMaxMembers) {
+    return Hooked_ISteamMatchmaking_CreateLobby(self, eLobbyType, cMaxMembers);
+}
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDLobby) {
+    return Hooked_ISteamMatchmaking_JoinLobby(self, steamIDLobby);
+}
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
+    return Hooked_ISteamMatchmaking_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
 }
 
 static void* Intercept_RequestServerList4(
@@ -2973,10 +2700,9 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
-    LoadConfig();
-    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-    if (targetApp == 0) targetApp = 480;
-    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u", targetApp);
+    uint32_t targetApp = GetResolvedAppID();
+    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
+             targetApp, g_config.engineType.c_str(), g_isGoldbergMode ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -3046,11 +2772,23 @@ static void* Hooked_ISteamMatchmakingServers_RequestInternetServerList(
     return nullptr;
 }
 
+static void* Hooked_ISteamMatchmakingServers_RequestLANServerList(
+    void* self, uint32_t iApp, void* pResponse)
+{
+    uint32_t targetApp = g_config.overrideServerListAppId ? g_config.serverListAppIdNum : g_config.maskAppIdNum;
+    ReFixLog("ISteamMatchmakingServers::RequestLANServerList Hook: AppID %u -> %u", iApp, targetApp);
+    if (g_orig_VTable_RequestLANServerList) {
+        return g_orig_VTable_RequestLANServerList(self, targetApp, pResponse);
+    } else if (g_pfn_RequestLANServerList) {
+        return g_pfn_RequestLANServerList(self, targetApp, pResponse);
+    }
+    return nullptr;
+}
+
 static uint32_t Hooked_ISteamUtils_GetAppID(void* self) {
-    LoadConfig();
-    uint32_t targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
-    if (targetApp == 0) targetApp = 480;
-    ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u", targetApp);
+    uint32_t targetApp = GetResolvedAppID();
+    ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u (Engine=%s, Mode=%s)",
+             targetApp, g_config.engineType.c_str(), g_isGoldbergMode ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -3127,7 +2865,7 @@ static std::vector<uint8_t> GenerateDummyAuthTicket() {
     uint64_t steam_id = GetMachineUniqueSteamID();
     uint64_t token = GetMachineUniqueToken();
     uint32_t date = (uint32_t)time(nullptr);
-    uint32_t gc_len = 20;
+    uint32_t gc_len = 24;
 
     std::vector<uint8_t> ticket(72, 0);
     memcpy(ticket.data(), &gc_len, 4);
@@ -3148,372 +2886,123 @@ static std::vector<uint8_t> GenerateDummyAuthTicket() {
     return ticket;
 }
 
-typedef uint32_t (*fn_VTable_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket, const void* pSteamNetworkingIdentity);
+typedef bool (*fn_BLoggedOn_t)(void* self);
+static fn_BLoggedOn_t g_orig_VTable_BLoggedOn = nullptr;
+
+static bool Hooked_ISteamUser_BLoggedOn(void* self) {
+    ReFixLog("ISteamUser::BLoggedOn Hook -> returning true");
+    return true;
+}
+
+typedef uint32_t (*fn_VTable_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
 static fn_VTable_GetAuthSessionTicket_t g_orig_VTable_GetAuthSessionTicket = nullptr;
+
+static void DispatchAuthCallbacksImmediately(int targetCallback);
+
+static uint32_t Hooked_VTable_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
+    uint32_t handle = 1;
+    if (g_orig_VTable_GetAuthSessionTicket) {
+        handle = g_orig_VTable_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
+    }
+    ReFixLog("ISteamUser::GetAuthSessionTicket (VTable index 13) -> handle=%u, cbTicket=%u", handle, (pcbTicket ? *pcbTicket : 0));
+    if (handle != 0) {
+        g_lastAuthTicketHandle = handle;
+    }
+    if (pTicket && pcbTicket && *pcbTicket > 0) {
+        g_lastAuthTicketData.assign((uint8_t*)pTicket, (uint8_t*)pTicket + *pcbTicket);
+    }
+    DispatchAuthCallbacksImmediately(163);
+    DispatchAuthCallbacksImmediately(168);
+    return handle;
+}
 
 typedef uint32_t (*fn_VTable_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
 static fn_VTable_GetAuthTicketForWebApi_t g_orig_VTable_GetAuthTicketForWebApi = nullptr;
 
-typedef void (*fn_VTable_CancelAuthTicket_t)(void* self, uint32_t hAuthTicket);
-static fn_VTable_CancelAuthTicket_t g_orig_VTable_CancelAuthTicket = nullptr;
-
-typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket, const void* pSteamNetworkingIdentity);
-static fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t g_pfn_GetAuthSessionTicket = nullptr;
-
-typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
-static fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t g_pfn_GetAuthTicketForWebApi = nullptr;
-
-typedef void (*fn_SteamAPI_ISteamUser_CancelAuthTicket_t)(void* self, uint32_t hAuthTicket);
-static fn_SteamAPI_ISteamUser_CancelAuthTicket_t g_pfn_CancelAuthTicket = nullptr;
-
-static void EnsureAuthCallbackRegistered();
-
-static void SyncTicketToEnvironment(const uint8_t* data, size_t size, uint32_t handle) {
-    if (!data || size == 0) return;
-    std::string hexStr = ReFixIdentity::BytesToHex(data, size);
-    SetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", hexStr.c_str());
-    SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", std::to_string(handle).c_str());
-}
-
-#pragma pack(push, 8)
-struct Steam_GetAuthSessionTicketResponse_t {
-    enum { k_iCallback = 163 };
-    uint32_t m_hAuthTicket;
-    int32_t  m_eResult;
-};
-
-struct Steam_GetTicketForWebApiResponse_t {
-    enum { k_iCallback = 168 };
-    uint32_t m_hAuthTicket;
-    int32_t  m_eResult;
-    int32_t  m_cubTicket;
-    uint8_t  m_rgubTicket[2560];
-};
-#pragma pack(pop)
-
-// Pending Synthetic Callback 168 data structure
-struct PendingSyntheticWebApiCallback {
-    uint32_t hAuthTicket;
-    int32_t  eResult;
-    int32_t  cubTicket;
-    uint32_t corrId;
-    uint8_t  rgubTicket[2560];
-    int      framesRemaining;
-};
-
-static std::vector<PendingSyntheticWebApiCallback> g_pendingSynthetic168;
-static std::mutex g_synthetic168Mutex;
-
-static std::atomic<bool> g_manualDispatch168Pending{ false };
-static Steam_GetTicketForWebApiResponse_t g_manualDispatch168Data = {};
-
-static void DispatchSyntheticWebApiCallbacks();
-
-static void QueueSyntheticWebApiCallback168(uint32_t handle, const uint8_t* pTicket, uint32_t ticketSize, uint32_t corrId = 0) {
-    if (!pTicket || ticketSize == 0 || ticketSize > 2560) return;
-    std::string sha = ReFixCrypto::ComputeSHA256Hex(pTicket, ticketSize);
-
-    PendingSyntheticWebApiCallback cb = {};
-    cb.hAuthTicket = handle;
-    cb.eResult = 1; // k_EResultOK
-    cb.cubTicket = (int32_t)ticketSize;
-    cb.corrId = corrId;
-    memset(cb.rgubTicket, 0, sizeof(cb.rgubTicket));
-    memcpy(cb.rgubTicket, pTicket, ticketSize);
-    cb.framesRemaining = 0; // Ready on next RunCallbacks
-
-    {
-        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
-        g_pendingSynthetic168.push_back(cb);
+static uint32_t Hooked_VTable_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
+    uint32_t handle = 1;
+    if (g_orig_VTable_GetAuthTicketForWebApi) {
+        handle = g_orig_VTable_GetAuthTicketForWebApi(self, pchIdentity);
     }
-
-    // ManualDispatch data cache
-    g_manualDispatch168Data.m_hAuthTicket = handle;
-    g_manualDispatch168Data.m_eResult = 1; // k_EResultOK
-    g_manualDispatch168Data.m_cubTicket = (int32_t)ticketSize;
-    memset(g_manualDispatch168Data.m_rgubTicket, 0, sizeof(g_manualDispatch168Data.m_rgubTicket));
-    memcpy(g_manualDispatch168Data.m_rgubTicket, pTicket, ticketSize);
-    g_manualDispatch168Pending.store(true, std::memory_order_relaxed);
-
-    ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] QueueSyntheticWebApiCallback168: Enqueued Callback 168 (Handle=%u, Size=%u bytes, Ticket_SHA256=%s)",
-             corrId, handle, ticketSize, sha.c_str());
-}
-
-typedef void (*fn_CallbackRun_t)(void* self, void* pvParam);
-typedef void (*fn_CallbackRun2_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hSteamAPICall);
-
-static std::unordered_map<void*, fn_CallbackRun_t> g_origCallbackRun;
-static std::unordered_map<void*, fn_CallbackRun2_t> g_origCallbackRun2;
-static std::mutex g_callbackHookMutex;
-
-static void Hooked_Callback_Run_168(void* self, void* pvParam) {
-    if (pvParam) {
-        auto* resp = (Steam_GetTicketForWebApiResponse_t*)pvParam;
-        std::string sha = (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) ?
-            ReFixCrypto::ComputeSHA256Hex(resp->m_rgubTicket, (size_t)resp->m_cubTicket) : "NONE";
-        ReFixLog("[STEAM:AUTH] Intercepted live Callback 168 (WebApi Ticket): Handle=%u, Result=%d, Size=%d bytes, Ticket_SHA256=%s",
-                 resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket, sha.c_str());
-        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
-            std::lock_guard<std::mutex> lg(g_callbackMutex);
-            g_lastAuthTicketHandle = resp->m_hAuthTicket;
-            g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
-            ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-                resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
-            SyncTicketToEnvironment(resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
-        }
-    }
-    fn_CallbackRun_t orig = nullptr;
-    {
-        std::lock_guard<std::mutex> lg(g_callbackHookMutex);
-        auto it = g_origCallbackRun.find(self);
-        if (it != g_origCallbackRun.end()) orig = it->second;
-    }
-    if (orig && orig != (fn_CallbackRun_t)Hooked_Callback_Run_168) {
-        orig(self, pvParam);
-    }
-}
-
-static void Hooked_Callback_Run2_168(void* self, void* pvParam, bool bIOFailure, uint64_t hSteamAPICall) {
-    if (pvParam) {
-        auto* resp = (Steam_GetTicketForWebApiResponse_t*)pvParam;
-        std::string sha = (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) ?
-            ReFixCrypto::ComputeSHA256Hex(resp->m_rgubTicket, (size_t)resp->m_cubTicket) : "NONE";
-        ReFixLog("[STEAM:AUTH] Intercepted live Callback 168 Run2 (WebApi Ticket): Handle=%u, Result=%d, Size=%d bytes, Ticket_SHA256=%s",
-                 resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket, sha.c_str());
-        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
-            std::lock_guard<std::mutex> lg(g_callbackMutex);
-            g_lastAuthTicketHandle = resp->m_hAuthTicket;
-            g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
-            ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-                resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
-            SyncTicketToEnvironment(resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
-        }
-    }
-    fn_CallbackRun2_t orig = nullptr;
-    {
-        std::lock_guard<std::mutex> lg(g_callbackHookMutex);
-        auto it = g_origCallbackRun2.find(self);
-        if (it != g_origCallbackRun2.end()) orig = it->second;
-    }
-    if (orig && orig != (fn_CallbackRun2_t)Hooked_Callback_Run2_168) {
-        orig(self, pvParam, bIOFailure, hSteamAPICall);
-    }
-}
-
-static uint32_t Hooked_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
-    EnsureAuthCallbackRegistered();
-    uint32_t handle = 0;
-    if (g_orig_VTable_GetAuthSessionTicket) {
-        handle = g_orig_VTable_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket, nullptr);
-    } else if (g_pfn_GetAuthSessionTicket) {
-        handle = g_pfn_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket, nullptr);
-    }
-    uint32_t ticketSize = (pcbTicket ? *pcbTicket : 0);
-    ReFixLog("Hooked_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u, mode=%s",
-             handle, ticketSize, (g_isGoldbergMode ? "goldberg" : "valve"));
-
-    if (handle != 0 && pTicket && ticketSize > 0) {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
+    ReFixLog("ISteamUser::GetAuthTicketForWebApi (VTable index 14) -> handle=%u, pchIdentity='%s'", handle, pchIdentity ? pchIdentity : "");
+    if (handle != 0) {
         g_lastAuthTicketHandle = handle;
-        g_lastAuthTicketData.assign((const uint8_t*)pTicket, (const uint8_t*)pTicket + ticketSize);
-        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-            (const uint8_t*)pTicket, ticketSize, handle);
-        SyncTicketToEnvironment((const uint8_t*)pTicket, ticketSize, handle);
     }
+    if (g_lastAuthTicketData.empty()) {
+        g_lastAuthTicketData = GenerateDummyAuthTicket();
+    }
+    DispatchAuthCallbacksImmediately(168);
+    DispatchAuthCallbacksImmediately(163);
     return handle;
 }
 
-static void Hooked_ISteamUser_CancelAuthTicket(void* self, uint32_t hAuthTicket) {
-    ReFixLog("Hooked_ISteamUser_CancelAuthTicket: Canceling handle=%u", hAuthTicket);
-    {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
-        if (hAuthTicket == g_lastAuthTicketHandle || hAuthTicket == 0) {
-            g_lastAuthTicketHandle = 0;
-            g_lastAuthTicketData.clear();
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
-        for (auto it = g_pendingSynthetic168.begin(); it != g_pendingSynthetic168.end(); ) {
-            if (it->hAuthTicket == hAuthTicket || hAuthTicket == 0) {
-                it = g_pendingSynthetic168.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-    ReFixIdentity::GetActiveIdentityProvider()->InvalidateCapturedTicket(hAuthTicket);
-    if (g_orig_VTable_CancelAuthTicket) {
-        g_orig_VTable_CancelAuthTicket(self, hAuthTicket);
-    } else if (g_pfn_CancelAuthTicket) {
-        g_pfn_CancelAuthTicket(self, hAuthTicket);
-    }
+static bool g_vtableHooksInstalled = false;
+
+static void EnsureMatchmakingServersInterfaceHooked(void* pMMS, const char* pszVersion) {
+    if (!pMMS) return;
+    HookVTableMethod(pMMS, 0, (void*)Hooked_ISteamMatchmakingServers_RequestInternetServerList, (void**)&g_orig_VTable_RequestInternetServerList);
+    HookVTableMethod(pMMS, 1, (void*)Hooked_ISteamMatchmakingServers_RequestLANServerList, (void**)&g_orig_VTable_RequestLANServerList);
+    ReFixLog("EnsureMatchmakingServersInterfaceHooked: Hooked RequestInternetServerList(0), RequestLANServerList(1) for %p (version='%s')",
+             pMMS, pszVersion ? pszVersion : "unknown");
 }
 
-static uint32_t SafeGetAuthSessionTicket(fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t pfn, void* pUser, uint8_t* pTicket, int cbMax, uint32_t* pcbOut) {
-    __try {
-        if (pfn && pUser) {
-            return pfn(pUser, pTicket, cbMax, pcbOut, nullptr);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
+static void EnsureMatchmakingInterfaceHooked(void* pMM, const char* pszVersion) {
+    if (!pMM) return;
+    void** vt = *(void***)pMM;
+    if (vt) {
+        if (!g_orig_VTable_AddStringFilter) g_orig_VTable_AddStringFilter = (fn_VTable_AddStringFilter_t)vt[5];
+        if (!g_orig_VTable_AddNumericalFilter) g_orig_VTable_AddNumericalFilter = (fn_VTable_AddNumericalFilter_t)vt[6];
+        if (!g_orig_VTable_AddNearValueFilter) g_orig_VTable_AddNearValueFilter = (fn_VTable_AddNearValueFilter_t)vt[7];
+        if (!g_orig_VTable_AddFilterSlotsAvailable) g_orig_VTable_AddFilterSlotsAvailable = (fn_VTable_AddFilterSlotsAvailable_t)vt[8];
+        if (!g_orig_VTable_AddDistanceFilter) g_orig_VTable_AddDistanceFilter = (fn_VTable_AddDistanceFilter_t)vt[9];
+        if (!g_orig_VTable_AddResultCountFilter) g_orig_VTable_AddResultCountFilter = (fn_VTable_AddResultCountFilter_t)vt[10];
+        if (!g_orig_VTable_AddCompatibleMembersFilter) g_orig_VTable_AddCompatibleMembersFilter = (fn_VTable_AddCompatibleMembersFilter_t)vt[11];
+        if (!g_orig_VTable_GetLobbyData) g_orig_VTable_GetLobbyData = (fn_VTable_GetLobbyData_t)vt[19];
+        if (!g_orig_VTable_GetLobbyDataCount) g_orig_VTable_GetLobbyDataCount = (fn_VTable_GetLobbyDataCount_t)vt[21];
+        if (!g_orig_VTable_GetLobbyDataByIndex) g_orig_VTable_GetLobbyDataByIndex = (fn_VTable_GetLobbyDataByIndex_t)vt[22];
     }
-    return 0;
+    HookVTableMethod(pMM, 4, (void*)Hooked_ISteamMatchmaking_RequestLobbyList, (void**)&g_orig_VTable_RequestLobbyList);
+    HookVTableMethod(pMM, 5, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter, (void**)&g_orig_VTable_AddStringFilter);
+    HookVTableMethod(pMM, 6, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter, (void**)&g_orig_VTable_AddNumericalFilter);
+    HookVTableMethod(pMM, 7, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter, (void**)&g_orig_VTable_AddNearValueFilter);
+    HookVTableMethod(pMM, 8, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable, (void**)&g_orig_VTable_AddFilterSlotsAvailable);
+    HookVTableMethod(pMM, 9, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter, (void**)&g_orig_VTable_AddDistanceFilter);
+    HookVTableMethod(pMM, 10, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter, (void**)&g_orig_VTable_AddResultCountFilter);
+    HookVTableMethod(pMM, 11, (void*)Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter, (void**)&g_orig_VTable_AddCompatibleMembersFilter);
+    HookVTableMethod(pMM, 13, (void*)Hooked_ISteamMatchmaking_CreateLobby, (void**)&g_orig_VTable_CreateLobby);
+    HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
+    HookVTableMethod(pMM, 15, (void*)Hooked_ISteamMatchmaking_LeaveLobby, (void**)&g_orig_VTable_LeaveLobby);
+    HookVTableMethod(pMM, 16, (void*)Hooked_ISteamMatchmaking_InviteUserToLobby, (void**)&g_orig_VTable_InviteUserToLobby);
+    HookVTableMethod(pMM, 19, (void*)Hooked_ISteamMatchmaking_GetLobbyData, (void**)&g_orig_VTable_GetLobbyData);
+    HookVTableMethod(pMM, 20, (void*)Hooked_ISteamMatchmaking_SetLobbyData, (void**)&g_orig_VTable_SetLobbyData);
+    HookVTableMethod(pMM, 21, (void*)Hooked_ISteamMatchmaking_GetLobbyDataCount, (void**)&g_orig_VTable_GetLobbyDataCount);
+    HookVTableMethod(pMM, 22, (void*)Hooked_ISteamMatchmaking_GetLobbyDataByIndex, (void**)&g_orig_VTable_GetLobbyDataByIndex);
+    HookVTableMethod(pMM, 24, (void*)Hooked_ISteamMatchmaking_GetLobbyMemberData, (void**)&g_orig_VTable_GetLobbyMemberData);
+    ReFixLog("EnsureMatchmakingInterfaceHooked: Installed VTable hooks (slots 4-16, 19-22, 24) for %p (version='%s')",
+             pMM, pszVersion ? pszVersion : "unknown");
 }
-
-static uint32_t Internal_GetAuthTicketForWebApi(void* self, const char* pchIdentity, bool fromVTable) {
-    EnsureAuthCallbackRegistered();
-
-    uint32_t corrId = ++g_authCorrelationCounter;
-    uint64_t currentSteamId = g_capturedSteamID;
-    uint32_t currentAppId = g_config.realAppIdNum ? g_config.realAppIdNum : g_config.maskAppIdNum;
-    DWORD tid = GetCurrentThreadId();
-
-    ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] GetAuthTicketForWebApi ENTER: TID=0x%04X, SteamID=%llu, AppID=%u, Identity='%s', FromVTable=%s",
-             corrId, tid, currentSteamId, currentAppId, (pchIdentity ? pchIdentity : ""), (fromVTable ? "TRUE" : "FALSE"));
-
-    uint32_t nativeHandle = 0;
-    if (fromVTable && g_orig_VTable_GetAuthTicketForWebApi) {
-        nativeHandle = g_orig_VTable_GetAuthTicketForWebApi(self, pchIdentity);
-    } else if (g_pfn_GetAuthTicketForWebApi) {
-        nativeHandle = g_pfn_GetAuthTicketForWebApi(self, pchIdentity);
-    }
-
-    ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] Native GetAuthTicketForWebApi called (NativeHandle=%u). Triggering Synthetic Callback 168 backed by genuine Steam Session Ticket...",
-             corrId, nativeHandle);
-
-    uint8_t sessionTicket[2560] = { 0 };
-    uint32_t sessionTicketSize = 0;
-    uint32_t sessionTicketHandle = 0;
-
-    void* pNativeUser = nullptr;
-    if (g_pfn_SteamUser) {
-        pNativeUser = g_pfn_SteamUser();
-    }
-    if (!pNativeUser) {
-        pNativeUser = self;
-    }
-
-    ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] Requesting genuine Session Ticket: self=%p, pNativeUser=%p, g_pfn=%p",
-             corrId, self, pNativeUser, (void*)g_pfn_GetAuthSessionTicket);
-
-    if (g_pfn_GetAuthSessionTicket && pNativeUser) {
-        sessionTicketHandle = SafeGetAuthSessionTicket(g_pfn_GetAuthSessionTicket, pNativeUser, sessionTicket, (int)sizeof(sessionTicket), &sessionTicketSize);
-    } else if (fromVTable && g_orig_VTable_GetAuthSessionTicket && pNativeUser) {
-        sessionTicketHandle = SafeGetAuthSessionTicket(g_orig_VTable_GetAuthSessionTicket, pNativeUser, sessionTicket, (int)sizeof(sessionTicket), &sessionTicketSize);
-    }
-
-    ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] Session Ticket call finished: Handle=%u, Size=%u",
-             corrId, sessionTicketHandle, sessionTicketSize);
-
-    if (sessionTicketHandle == 0 || sessionTicketSize == 0) {
-        std::vector<uint8_t> dummyTicket = GenerateDummyAuthTicket();
-        sessionTicketHandle = 1;
-        sessionTicketSize = (uint32_t)dummyTicket.size();
-        if (sessionTicketSize > sizeof(sessionTicket)) sessionTicketSize = sizeof(sessionTicket);
-        memcpy(sessionTicket, dummyTicket.data(), sessionTicketSize);
-        ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] Steam Session Ticket fallback active: generated synthetic ticket (%u bytes)", corrId, sessionTicketSize);
-    }
-
-    std::string ticketSha256 = ReFixCrypto::ComputeSHA256Hex(sessionTicket, sessionTicketSize);
-
-    ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] GetAuthSessionTicket returned: Handle=%u, Size=%u bytes, Ticket_SHA256=%s",
-             corrId, sessionTicketHandle, sessionTicketSize, ticketSha256.c_str());
-
-    if (sessionTicketHandle != 0 && sessionTicketSize > 0 && sessionTicketSize <= sizeof(sessionTicket)) {
-        {
-            std::lock_guard<std::mutex> lg(g_callbackMutex);
-            g_lastAuthTicketHandle = sessionTicketHandle;
-            g_lastAuthTicketData.assign(sessionTicket, sessionTicket + sessionTicketSize);
-            ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-                sessionTicket, (size_t)sessionTicketSize, sessionTicketHandle);
-            SyncTicketToEnvironment(sessionTicket, (size_t)sessionTicketSize, sessionTicketHandle);
-        }
-
-        QueueSyntheticWebApiCallback168(sessionTicketHandle, sessionTicket, sessionTicketSize, corrId);
-        return sessionTicketHandle;
-    }
-
-    ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] Fallback FAILED: Could not obtain genuine Session Ticket from Steam client", corrId);
-    return 0;
-}
-
-static uint32_t Hooked_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
-    return Internal_GetAuthTicketForWebApi(self, pchIdentity, true);
-}
-
-extern "C" __declspec(dllexport) void SteamAPI_ISteamUser_CancelAuthTicket(void* self, uint32_t hAuthTicket) {
-    Hooked_ISteamUser_CancelAuthTicket(self, hAuthTicket);
-}
-
-typedef void* (*fn_SteamInternal_FindOrCreateUserInterface_t)(uint32_t hSteamUser, const char* pszVersion);
-static fn_SteamInternal_FindOrCreateUserInterface_t g_pfn_FindOrCreateUserInterface = nullptr;
-
-typedef void* (*fn_SteamInternal_CreateInterface_t)(const char* pszVersion);
-static fn_SteamInternal_CreateInterface_t g_pfn_SteamInternal_CreateInterface = nullptr;
-
-typedef void* (*fn_SteamAPI_ISteamClient_GetISteamUser_t)(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion);
-static fn_SteamAPI_ISteamClient_GetISteamUser_t g_pfn_ISteamClient_GetISteamUser = nullptr;
-
-static std::set<void*> s_hookedUserVtables;
-
-static void EnsureUserInterfaceHooked(void* pUser, const char* pszVersion) {
-    if (!pUser) return;
-    void** vtable = *(void***)pUser;
-    if (!vtable) return;
-    if (s_hookedUserVtables.find((void*)vtable) != s_hookedUserVtables.end()) {
-        return;
-    }
-    s_hookedUserVtables.insert((void*)vtable);
-
-    int verNum = 0;
-    if (pszVersion) {
-        const char* p = pszVersion;
-        while (*p) {
-            if (isdigit((unsigned char)*p)) {
-                verNum = atoi(p);
-                break;
-            }
-            p++;
-        }
-    }
-
-    if (verNum >= 23 || verNum == 0) {
-        // ISteamUser023 layout (Steamworks 1.57+):
-        // Slot 13: GetAuthSessionTicket
-        // Slot 14: GetAuthTicketForWebApi
-        // Slot 17: CancelAuthTicket
-        HookVTableMethod(pUser, 13, (void*)Hooked_ISteamUser_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
-        HookVTableMethod(pUser, 14, (void*)Hooked_ISteamUser_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi);
-        HookVTableMethod(pUser, 17, (void*)Hooked_ISteamUser_CancelAuthTicket, (void**)&g_orig_VTable_CancelAuthTicket);
-        ReFixLog("EnsureUserInterfaceHooked: Hooked user interface %p (vtable=%p, version='%s', verNum=%d, idx 13,14,17)",
-                 pUser, vtable, pszVersion ? pszVersion : "unknown", verNum);
-    } else {
-        // ISteamUser021 and earlier layout:
-        // Slot 13: GetAuthSessionTicket
-        // Slot 14: BeginAuthSession (DO NOT hook as WebApi!)
-        // Slot 16: CancelAuthTicket (Slot 17 is UserHasLicenseForApp)
-        HookVTableMethod(pUser, 13, (void*)Hooked_ISteamUser_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
-        HookVTableMethod(pUser, 16, (void*)Hooked_ISteamUser_CancelAuthTicket, (void**)&g_orig_VTable_CancelAuthTicket);
-        ReFixLog("EnsureUserInterfaceHooked: Hooked user interface %p (vtable=%p, version='%s', verNum=%d, idx 13,16 - legacy layout)",
-                 pUser, vtable, pszVersion ? pszVersion : "unknown", verNum);
-    }
-}
-
-static void EnsureFriendsInterfaceHooked(void* pFriends, const char* pszVersion);
-static void EnsureMatchmakingInterfaceHooked(void* pMM, const char* pszVersion);
 
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (!iface || !pszVersion) return;
-    // The ISteamUser condition is deliberately the one it has always been.
-    // EnsureUserInterfaceHooked patches slots 13, 14 and 17, which is the
-    // ISteamUser023 layout; widening the match would hand that layout to older
-    // interface versions where those slots hold different functions, and slots
-    // 13 and 14 are the ticket calls the whole sign-in rests on.
-    if (strstr(pszVersion, "SteamUser")) EnsureUserInterfaceHooked(iface, pszVersion);
-    else if (strstr(pszVersion, "SteamUGC") || strstr(pszVersion, "STEAMUGC")) EnsureUGCInterfaceHooked(iface, pszVersion);
-    else if (strstr(pszVersion, "SteamFriends")) EnsureFriendsInterfaceHooked(iface, pszVersion);
-    else if (strstr(pszVersion, "SteamMatchMaking") || strstr(pszVersion, "SteamMatchmaking")) EnsureMatchmakingInterfaceHooked(iface, pszVersion);
+    if (strstr(pszVersion, "SteamMatchMakingServers") || strstr(pszVersion, "SteamMatchmakingServers")) {
+        EnsureMatchmakingServersInterfaceHooked(iface, pszVersion);
+    }
+    else if (strstr(pszVersion, "SteamMatchMaking") || strstr(pszVersion, "SteamMatchmaking")) {
+        EnsureMatchmakingInterfaceHooked(iface, pszVersion);
+    }
+    else if (strstr(pszVersion, "SteamUtils")) {
+        HookVTableMethod(iface, 9, (void*)Hooked_ISteamUtils_GetAppID, (void**)&g_orig_VTable_GetAppID);
+    }
+    else if (strstr(pszVersion, "SteamApps")) {
+        HookVTableMethod(iface, 6, (void*)Hooked_ISteamApps_BIsSubscribedApp, (void**)&g_orig_VTable_BIsSubscribedApp);
+        HookVTableMethod(iface, 7, (void*)Hooked_ISteamApps_BIsDlcInstalled, (void**)&g_orig_VTable_BIsDlcInstalled);
+    }
+    else if (strstr(pszVersion, "SteamFriends")) {
+        HookVTableMethod(iface, 8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed);
+        HookVTableMethod(iface, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
+        HookVTableMethod(iface, 16, (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame);
+        HookVTableMethod(iface, 43, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
+    }
 }
 
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
@@ -3527,91 +3016,6 @@ static void* Intercepted_SteamInternal_CreateInterface(const char* pszVersion) {
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
-
-static void* Intercepted_SteamAPI_ISteamClient_GetISteamUser(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion) {
-    void* iface = g_pfn_ISteamClient_GetISteamUser ? g_pfn_ISteamClient_GetISteamUser(self, hSteamUser, hSteamPipe, pchVersion) : nullptr;
-    if (iface && pchVersion && strstr(pchVersion, "SteamUser")) {
-        EnsureUserInterfaceHooked(iface, pchVersion);
-    }
-    return iface;
-}
-
-typedef void* (*fn_SteamAPI_ISteamClient_GetISteamFriends_t)(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion);
-static fn_SteamAPI_ISteamClient_GetISteamFriends_t g_pfn_ISteamClient_GetISteamFriends = nullptr;
-
-static void* Intercepted_SteamAPI_ISteamClient_GetISteamFriends(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion) {
-    void* iface = g_pfn_ISteamClient_GetISteamFriends ? g_pfn_ISteamClient_GetISteamFriends(self, hSteamUser, hSteamPipe, pchVersion) : nullptr;
-    if (iface) {
-        EnsureFriendsInterfaceHooked(iface, pchVersion);
-    }
-    return iface;
-}
-
-typedef const char* (*fn_VTable_GetPersonaName_t)(void* self);
-static fn_VTable_GetPersonaName_t g_orig_VTable_GetPersonaName = nullptr;
-
-static const char* Hooked_ISteamFriends_GetPersonaName(void* self) {
-    const char* n = nullptr;
-    if (g_orig_VTable_GetPersonaName && self) {
-        __try {
-            n = g_orig_VTable_GetPersonaName(self);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            n = nullptr;
-        }
-    } else if (g_pfn_GetPersonaName && self) {
-        __try {
-            n = g_pfn_GetPersonaName(self);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            n = nullptr;
-        }
-    }
-    if (n && n[0] != '\0' && strcmp(n, "Noob") != 0) {
-        return n;
-    }
-    if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
-        return g_config.playerName.c_str();
-    }
-    char envName[128] = { 0 };
-    if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-        g_config.playerName = envName;
-        return g_config.playerName.c_str();
-    } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-        g_config.playerName = envName;
-        return g_config.playerName.c_str();
-    } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-        g_config.playerName = envName;
-        return g_config.playerName.c_str();
-    } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-        g_config.playerName = envName;
-        return g_config.playerName.c_str();
-    }
-    if (n && n[0] != '\0') return n;
-    return "Player";
-}
-
-extern "C" __declspec(dllexport) const char* SteamAPI_ISteamFriends_GetPersonaName(void* self) {
-    return Hooked_ISteamFriends_GetPersonaName(self);
-}
-
-static void EnsureFriendsInterfaceHooked(void* pFriends, const char* pszVersion) {
-    if (!pFriends) return;
-    HookVTableMethod(pFriends, 0, (void*)Hooked_ISteamFriends_GetPersonaName, (void**)&g_orig_VTable_GetPersonaName);
-    HookVTableMethod(pFriends, 7, (void*)Hooked_ISteamFriends_GetFriendPersonaName, (void**)&g_orig_VTable_GetFriendPersonaName);
-    ReFixLog("EnsureFriendsInterfaceHooked: Hooked GetPersonaName (slot 0) and GetFriendPersonaName (slot 7) for %p (version='%s')",
-             pFriends, pszVersion ? pszVersion : "unknown");
-}
-
-static void EnsureMatchmakingInterfaceHooked(void* pMM, const char* pszVersion) {
-    if (!pMM) return;
-    HookVTableMethod(pMM, 14, (void*)Hooked_ISteamMatchmaking_JoinLobby, (void**)&g_orig_VTable_JoinLobby);
-    HookVTableMethod(pMM, 15, (void*)Hooked_ISteamMatchmaking_LeaveLobby, (void**)&g_orig_VTable_LeaveLobby);
-    HookVTableMethod(pMM, 20, (void*)Hooked_ISteamMatchmaking_SetLobbyData, (void**)&g_orig_VTable_SetLobbyData);
-    HookVTableMethod(pMM, 24, (void*)Hooked_ISteamMatchmaking_GetLobbyMemberData, (void**)&g_orig_VTable_GetLobbyMemberData);
-    ReFixLog("EnsureMatchmakingInterfaceHooked: Hooked JoinLobby(14), LeaveLobby(15), SetLobbyData(20), GetLobbyMemberData(24) for %p (version='%s')",
-             pMM, pszVersion ? pszVersion : "unknown");
-}
-
-static bool g_vtableHooksInstalled = false;
 
 static void InstallVTableHooks() {
     if (g_vtableHooksInstalled) return;
@@ -3630,6 +3034,16 @@ static void InstallVTableHooks() {
         }
     }
 
+    // 1b. ISteamMatchmakingServers
+    fn_GetInterface_t pfnMMS = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmakingServers_v002");
+    if (!pfnMMS) pfnMMS = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmakingServers");
+    if (pfnMMS) {
+        void* pMMS = pfnMMS();
+        if (pMMS) {
+            EnsureMatchmakingServersInterfaceHooked(pMMS, "InstallVTableHooks");
+        }
+    }
+
     // 2. ISteamUtils
     fn_GetInterface_t pfnUtils = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUtils_v010");
     if (!pfnUtils) pfnUtils = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUtils");
@@ -3640,7 +3054,9 @@ static void InstallVTableHooks() {
         }
     }
 
-    // 3. ISteamApps
+    // 3. ISteamUser - No VTable hooks needed; exported wrappers handle user auth cleanly.
+
+    // 4. ISteamApps
     fn_GetInterface_t pfnApps = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamApps_v008");
     if (!pfnApps) pfnApps = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamApps");
     if (pfnApps) {
@@ -3651,38 +3067,31 @@ static void InstallVTableHooks() {
         }
     }
 
-    // 5. ISteamFriends (Slot 0 is GetPersonaName across ALL SteamFriends versions v001-v018)
-    const char* friendsAccessors[] = {
-        "SteamAPI_SteamFriends_v018",
-        "SteamAPI_SteamFriends_v017",
-        "SteamAPI_SteamFriends_v016",
-        "SteamAPI_SteamFriends_v015",
-        "SteamFriends_v018",
-        "SteamFriends_v017",
-        "SteamFriends"
-    };
-    for (const char* acc : friendsAccessors) {
-        fn_GetInterface_t pfnFriends = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, acc);
-        if (pfnFriends) {
-            void* pFriends = pfnFriends();
-            if (pFriends) {
-                EnsureFriendsInterfaceHooked(pFriends, acc);
-            }
+    // 5. ISteamFriends
+    fn_GetInterface_t pfnFriends = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamFriends_v017");
+    if (!pfnFriends) pfnFriends = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamFriends");
+    if (pfnFriends) {
+        void* pFriends = pfnFriends();
+        if (pFriends) {
+            HookVTableMethod(pFriends, 8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed);
+            HookVTableMethod(pFriends, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
+            HookVTableMethod(pFriends, 16, (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame);
+            HookVTableMethod(pFriends, 43, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
         }
     }
 
-    // 6. ISteamUGC is hooked where the title asks for it, not here: the slot a
-    // call sits in moves with the interface version, and only the version
-    // string the title passes says which layout its vtable has. Hooking the
-    // accessor for one hardcoded version patched an interface the title never
-    // used, at slots that belonged to entirely different functions.
-    {
-        for (const auto& layout : kUGCVTableLayouts) {
-            char accessor[64];
-            _snprintf_s(accessor, sizeof(accessor), _TRUNCATE, "SteamAPI_SteamUGC_v%03d", layout.Version);
-            auto pfn = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, accessor);
-            if (!pfn) continue;
-            if (void* pUGC = pfn()) EnsureUGCInterfaceHooked(pUGC, accessor);
+    // 6. ISteamUGC
+    fn_GetInterface_t pfnUGC = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUGC_v016");
+    if (!pfnUGC) pfnUGC = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUGC");
+    if (pfnUGC) {
+        void* pUGC = pfnUGC();
+        if (pUGC) {
+            void** vtable = *(void***)pUGC;
+            if (vtable && vtable[30]) {
+                g_orig_VTable_GetItemInstallInfo = (fn_VTable_GetItemInstallInfo_t)vtable[30];
+            }
+            HookVTableMethod(pUGC, 27, (void*)Hooked_ISteamUGC_GetNumSubscribedItems, (void**)&g_orig_VTable_GetNumSubscribedItems);
+            HookVTableMethod(pUGC, 28, (void*)Hooked_ISteamUGC_GetSubscribedItems, (void**)&g_orig_VTable_GetSubscribedItems);
         }
     }
 
@@ -3713,29 +3122,6 @@ static void InstallVTableHooks() {
             ReFixLog("InstallVTableHooks: SteamNetworkingUtils accessor not in valve DLL");
         }
     }
-
-    // 8. ISteamUser
-    {
-        const char* userAccessors[] = {
-            "SteamAPI_SteamUser_v023",
-            "SteamAPI_SteamUser_v022",
-            "SteamAPI_SteamUser_v021",
-            "SteamAPI_SteamUser_v020",
-            "SteamUser_v023",
-            "SteamUser_v022",
-            "SteamUser_v021",
-            "SteamUser"
-        };
-        for (const char* acc : userAccessors) {
-            fn_GetInterface_t pfnUser = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, acc);
-            if (pfnUser) {
-                void* pUser = pfnUser();
-                if (pUser) {
-                    EnsureUserInterfaceHooked(pUser, acc);
-                }
-            }
-        }
-    }
     g_vtableHooksInstalled = true;
     ReFixLog("InstallVTableHooks: All VTable hooks initialized successfully.");
 }
@@ -3749,8 +3135,14 @@ static fn_SteamAPI_ManualDispatch_RunFrame_t g_pfn_ManualDispatch_RunFrame = nul
 typedef bool (*fn_SteamAPI_ManualDispatch_GetNextCallback_t)(uint32_t hSteamPipe, void* pCallbackMsg);
 static fn_SteamAPI_ManualDispatch_GetNextCallback_t g_pfn_ManualDispatch_GetNextCallback = nullptr;
 
-typedef void (*fn_SteamAPI_ManualDispatch_FreeLastCallback_t)(uint32_t hSteamPipe);
-static fn_SteamAPI_ManualDispatch_FreeLastCallback_t g_pfn_ManualDispatch_FreeLastCallback = nullptr;
+typedef bool (*fn_SteamAPI_ManualDispatch_GetAPICallResult_t)(uint32_t hSteamPipe, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
+static fn_SteamAPI_ManualDispatch_GetAPICallResult_t g_pfn_ManualDispatch_GetAPICallResult = nullptr;
+
+typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t)(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket);
+static fn_SteamAPI_ISteamUser_GetAuthSessionTicket_t g_pfn_GetAuthSessionTicket = nullptr;
+
+typedef uint32_t (*fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t)(void* self, const char* pchIdentity);
+static fn_SteamAPI_ISteamUser_GetAuthTicketForWebApi_t g_pfn_GetAuthTicketForWebApi = nullptr;
 
 static int s_runCallbacksLogged = 0;
 
@@ -3763,55 +3155,30 @@ struct PendingAuthCallback {
 static std::vector<PendingAuthCallback> g_pendingAuthCallbacks;
 static std::mutex g_pendingAuthMutex;
 
-static void DispatchSyntheticWebApiCallbacks() {
-    std::vector<PendingSyntheticWebApiCallback> toFire;
-    {
-        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
-        for (auto it = g_pendingSynthetic168.begin(); it != g_pendingSynthetic168.end(); ) {
-            if (--it->framesRemaining <= 0) {
-                toFire.push_back(*it);
-                it = g_pendingSynthetic168.erase(it);
-            } else {
-                ++it;
-            }
+static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 1) {
+    if (!pCallback) return false;
+    __try {
+        void** vtable = *(void***)pCallback;
+        if (!vtable) return false;
+
+        typedef void (*fn_Run0_t)(void* self, void* pvParam);
+        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
+        if (pRun0) {
+            pRun0(pCallback, pData);
         }
-    }
 
-    if (toFire.empty()) return;
-
-    // Snapshot registered Callback 168 receivers under g_callbackMutex,
-    // then release lock before invoking user callbacks to prevent deadlocks on reentrancy.
-    std::vector<GodotCallbackEntry> listeners;
-    {
-        std::lock_guard<std::mutex> lg(g_callbackMutex);
-        for (const auto& entry : g_registeredCallbacks) {
-            if (entry.iCallback == 168 && entry.pCallback != nullptr) {
-                listeners.push_back(entry);
-            }
+        typedef void (*fn_Run1_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hAPICall);
+        fn_Run1_t pRun1 = (fn_Run1_t)vtable[1];
+        if (pRun1) {
+            pRun1(pCallback, pData, false, hAPICall);
         }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        DWORD code = GetExceptionCode();
+        ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
+        return false;
     }
-
-    for (const auto& item : toFire) {
-        Steam_GetTicketForWebApiResponse_t resp = {};
-        resp.m_hAuthTicket = item.hAuthTicket;
-        resp.m_eResult = item.eResult;
-        resp.m_cubTicket = item.cubTicket;
-        memcpy(resp.m_rgubTicket, item.rgubTicket, sizeof(resp.m_rgubTicket));
-        std::string sha = ReFixCrypto::ComputeSHA256Hex(item.rgubTicket, (size_t)item.cubTicket);
-
-        ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH] DispatchSyntheticWebApiCallbacks: Delivering Callback 168 (Handle=%u, Result=%d, Size=%d bytes, Ticket_SHA256=%s) to %zu registered listener(s)",
-                 item.corrId, resp.m_hAuthTicket, (int)resp.m_eResult, resp.m_cubTicket, sha.c_str(), listeners.size());
-
-        for (const auto& listener : listeners) {
-            ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH]   -> Invoking Receiver=%p, iCallback=%d",
-                     item.corrId, listener.pCallback, listener.iCallback);
-            if (SafeCallRun(listener.pCallback, &resp)) {
-                ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH]   -> SafeCallRun SUCCEEDED for Receiver=%p", item.corrId, listener.pCallback);
-            } else {
-                ReFixLog("[AUTH-CORR-%04u] [STEAM:AUTH]   -> SafeCallRun FAILED for Receiver=%p", item.corrId, listener.pCallback);
-            }
-        }
-    }
+    return false;
 }
 
 // =============================================================================
@@ -3823,6 +3190,18 @@ struct ReFix_CallbackMsg_t {
     uint8_t* m_pubParam;
     int32_t  m_cubParam;
 };
+
+#pragma pack(push, 8)
+struct ReFix_SteamAPICallCompleted_t {
+    uint64_t m_hAsyncCall;
+    int32_t  m_iCallback;
+    uint32_t m_cubParam;
+};
+
+struct ReFix_LobbyMatchList_t {
+    uint32_t m_nLobbiesMatching;
+};
+#pragma pack(pop)
 
 static std::atomic<bool> g_syntheticRelayPending{ false };
 static ReFix_SteamRelayNetworkStatus_t g_syntheticRelayData = {};
@@ -3886,16 +3265,17 @@ static int Intercepted_SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus(void
     if (g_pfn_Flat_GetRelayNetworkStatus) {
         g_pfn_Flat_GetRelayNetworkStatus(self, pDetails);
     }
-    int avail = k_eRelayAvail_Current;
+    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
+    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
 
     if (pDetails) {
         auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
         d->m_eAvail = avail;
-        d->m_bPingMeasurementInProgress = 0;
+        d->m_bPingMeasurementInProgress = (avail == 3) ? 1 : 0;
         d->m_eAvailNetworkConfig = avail;
         d->m_eAvailAnyRelay = avail;
         if (d->m_debugMsg[0] == '\0')
-            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), "OK (ReFix)", _TRUNCATE);
+            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == 100) ? "OK (ReFix)" : "Connecting (ReFix)", _TRUNCATE);
     }
     return avail;
 }
@@ -3911,51 +3291,55 @@ static void Intercepted_SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(vo
     DispatchRelayCallbacks();
 }
 
-class ReFixSteamAuthCallbackReceiver {
-public:
-    ReFixSteamAuthCallbackReceiver() {
-        m_nCallbackFlags = 0;
-        m_iCallback = 168; // Steam_GetTicketForWebApiResponse_t
+
+
+static void DispatchAuthCallbacksImmediately(int targetCallback) {
+    if (g_lastAuthTicketData.empty()) {
+        g_lastAuthTicketData = GenerateDummyAuthTicket();
     }
-    virtual void Run(void* pvParam) {
-        if (!pvParam) return;
-        auto* resp = (Steam_GetTicketForWebApiResponse_t*)pvParam;
-        ReFixLog("[STEAM] Callback 168 (GetTicketForWebApiResponse) received: handle=%u, result=%d, cubTicket=%d",
-                 resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket);
-        if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
-            g_lastAuthTicketHandle = resp->m_hAuthTicket;
-            g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
-            ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-                resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
+    uint32_t handle = g_lastAuthTicketHandle ? g_lastAuthTicketHandle : 1;
+    
+    std::vector<void*> targets;
+    {
+        std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
+        for (const auto& item : g_pendingAuthCallbacks) {
+            if (item.iCallback == targetCallback && item.pCallback) {
+                targets.push_back(item.pCallback);
+            }
         }
     }
-    virtual void Run(void* pvParam, bool bIOFailure, uint64_t hSteamAPICall) {
-        (void)bIOFailure;
-        (void)hSteamAPICall;
-        Run(pvParam);
-    }
-    virtual int GetCallbackSizeBytes() {
-        return sizeof(Steam_GetTicketForWebApiResponse_t);
-    }
-    int m_nCallbackFlags;
-    int m_iCallback;
-};
-
-static ReFixSteamAuthCallbackReceiver g_reFixWebAuthReceiver;
-static bool g_webAuthReceiverRegistered = false;
-
-static void EnsureAuthCallbackRegistered() {
-    if (g_webAuthReceiverRegistered) return;
-    if (g_pfn_RegisterCallback && !g_isGoldbergMode) {
-        g_pfn_RegisterCallback(&g_reFixWebAuthReceiver, 168);
-        g_webAuthReceiverRegistered = true;
-        ReFixLog("[STEAM] Registered internal WebApi Auth Ticket listener for Callback 168");
+    for (void* pCb : targets) {
+        if (targetCallback == 168) {
+            struct {
+                uint32_t m_hAuthTicket;
+                int32_t  m_eResult;
+                int32_t  m_cubTicket;
+                uint8_t  m_rgubTicket[1024];
+            } data = {};
+            data.m_hAuthTicket = handle;
+            data.m_eResult = 1; // k_EResultOK
+            data.m_cubTicket = (int32_t)g_lastAuthTicketData.size();
+            if (data.m_cubTicket > 0 && data.m_cubTicket <= sizeof(data.m_rgubTicket)) {
+                memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
+            }
+            if (SafeCallRun(pCb, &data)) {
+                ReFixLog("DispatchAuthCallbacksImmediately: Dispatched 168 (handle=%u) to %p", handle, pCb);
+            }
+        } else if (targetCallback == 163) {
+            struct {
+                uint32_t m_hAuthTicket;
+                int32_t  m_eResult;
+            } data = {};
+            data.m_hAuthTicket = handle;
+            data.m_eResult = 1; // k_EResultOK
+            if (SafeCallRun(pCb, &data)) {
+                ReFixLog("DispatchAuthCallbacksImmediately: Dispatched 163 (handle=%u) to %p", handle, pCb);
+            }
+        }
     }
 }
 
 static void DispatchPendingAuthCallbacks() {
-    if (!g_isGoldbergMode) return;
-
     std::vector<PendingAuthCallback> toFire;
     {
         std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
@@ -3982,7 +3366,7 @@ static void DispatchPendingAuthCallbacks() {
                 enum { k_iCallback = 101 };
             } data = {};
             if (SafeCallRun(item.pCallback, &data)) {
-                ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched SteamServersConnected_t (101) to %p", item.pCallback);
+                ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched SteamServersConnected_t (101) to %p (count=%d)", item.pCallback, item.dispatchCount);
             }
         } else if (item.iCallback == 154) {
             struct {
@@ -3997,28 +3381,54 @@ static void DispatchPendingAuthCallbacks() {
             if (g_lastAuthTicketData.empty()) {
                 g_lastAuthTicketData = GenerateDummyAuthTicket();
             }
-            Steam_GetTicketForWebApiResponse_t data = {};
+            struct {
+                uint32_t m_hAuthTicket;
+                int32_t  m_eResult;
+                int32_t  m_cubTicket;
+                uint8_t  m_rgubTicket[1024];
+            } data = {};
             data.m_hAuthTicket = handle;
             data.m_eResult = 1; // k_EResultOK
             data.m_cubTicket = (int32_t)g_lastAuthTicketData.size();
-            if (data.m_cubTicket > 0 && data.m_cubTicket <= (int32_t)sizeof(data.m_rgubTicket)) {
+            if (data.m_cubTicket > 0 && data.m_cubTicket <= sizeof(data.m_rgubTicket)) {
                 memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
             }
 
-            if (SafeCallRun(item.pCallback, &data)) {
+            if (SafeCallRun(item.pCallback, &data, handle)) {
                 ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched GetTicketForWebApiResponse_t (168, handle=%u) to %p", handle, item.pCallback);
             }
         } else if (item.iCallback == 163) {
             uint32_t handle = g_lastAuthTicketHandle ? g_lastAuthTicketHandle : 1;
-            Steam_GetAuthSessionTicketResponse_t data = {};
+            struct {
+                uint32_t m_hAuthTicket;
+                int32_t  m_eResult;
+            } data = {};
             data.m_hAuthTicket = handle;
             data.m_eResult = 1; // k_EResultOK
 
-            if (SafeCallRun(item.pCallback, &data)) {
+            if (SafeCallRun(item.pCallback, &data, handle)) {
                 ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched GetAuthSessionTicketResponse_t (163, handle=%u) to %p", handle, item.pCallback);
             }
         }
     }
+}
+
+static std::thread g_authDispatchThread;
+static std::atomic<bool> g_authDispatchRunning{ true };
+static std::once_flag g_authDispatchOnce;
+
+static void AuthDispatchWorker() {
+    while (g_authDispatchRunning) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        DispatchPendingAuthCallbacks();
+    }
+}
+
+static void StartAuthDispatchWorker() {
+    std::call_once(g_authDispatchOnce, []() {
+        g_authDispatchThread = std::thread(AuthDispatchWorker);
+        g_authDispatchThread.detach();
+    });
 }
 
 typedef void (*fn_SteamAPI_UnregisterCallback_t)(void* pCallback);
@@ -4026,7 +3436,9 @@ static fn_SteamAPI_UnregisterCallback_t g_pfn_UnregisterCallback = nullptr;
 
 static void Intercepted_SteamAPI_UnregisterCallback(void* pCallback) {
     UntrackRelayCallback(pCallback);
-    UntrackCallback(pCallback);
+    if (g_godotIsEngine) {
+        UntrackCallback(pCallback);
+    }
     {
         std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
         for (auto it = g_pendingAuthCallbacks.begin(); it != g_pendingAuthCallbacks.end(); ) {
@@ -4049,42 +3461,57 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
     if (iCallback == 1281) {
         ReFixLog("  -> Intercepted SteamRelayNetworkStatus_t (1281) callback registration for %p", pCallback);
         TrackRelayCallback(pCallback, iCallback);
-        TriggerSyntheticRelayCallback();
+        ReFix_SteamRelayNetworkStatus_t data = {};
+        data.m_eAvail = k_eRelayAvail_Current;
+        data.m_bPingMeasurementInProgress = 0;
+        data.m_eAvailNetworkConfig = k_eRelayAvail_Current;
+        data.m_eAvailAnyRelay = k_eRelayAvail_Current;
+        strncpy_s(data.m_debugMsg, sizeof(data.m_debugMsg), "OK (ReFix)", _TRUNCATE);
+        SafeCallRun(pCallback, &data);
     }
 
     if (iCallback == 333) ReFixLog("  -> Intercepted GameLobbyJoinRequested_t (333)");
     else if (iCallback == 337) ReFixLog("  -> Intercepted GameRichPresenceJoinRequested_t (337)");
 
-    // Track callbacks for Godot LobbyEnter_t synthesis & Synthetic Callback 168 delivery
-    if (iCallback == 168 || iCallback == LobbyEnter_t::k_iCallback || iCallback == 333 || iCallback == 337) {
+    // Track callbacks for Godot LobbyEnter_t synthesis
+    if (g_godotIsEngine && (iCallback == LobbyEnter_t::k_iCallback || iCallback == 333 || iCallback == 337)) {
         TrackCallback(pCallback, iCallback);
-    }
-
-    if (iCallback == 168 && pCallback) {
-        void** vtable = *(void***)pCallback;
-        if (vtable && vtable[0] != (void*)Hooked_Callback_Run_168) {
-            std::lock_guard<std::mutex> lg(g_callbackHookMutex);
-            if (g_origCallbackRun.find(pCallback) == g_origCallbackRun.end()) {
-                g_origCallbackRun[pCallback] = (fn_CallbackRun_t)vtable[0];
-                g_origCallbackRun2[pCallback] = (fn_CallbackRun2_t)vtable[1];
-                DWORD oldProtect = 0;
-                if (VirtualProtect(&vtable[0], sizeof(void*) * 2, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-                    vtable[0] = (void*)Hooked_Callback_Run_168;
-                    vtable[1] = (void*)Hooked_Callback_Run2_168;
-                    VirtualProtect(&vtable[0], sizeof(void*) * 2, oldProtect, &oldProtect);
-                    ReFixLog("  -> Hooked Callback 168 receiver %p virtual dispatch methods", pCallback);
-                }
-            }
-        }
     }
 
     if (g_pfn_RegisterCallback) g_pfn_RegisterCallback(pCallback, iCallback);
 
     if (g_isGoldbergMode) {
-        if (iCallback == 101 || iCallback == 154 || iCallback == 163 || iCallback == 168) {
+        if (iCallback == 101 || iCallback == 154 || iCallback == 163) {
             std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
             g_pendingAuthCallbacks.push_back({ pCallback, iCallback, 0, 0 });
-            ReFixLog("  -> Queued auth callback %d for %p (Goldberg Mode)", iCallback, pCallback);
+            ReFixLog("  -> Queued auth callback %d for %p", iCallback, pCallback);
+        } else if (iCallback == 168) {
+            if (s_runCallbacksLogged > 0) {
+                // Runtime auth ticket request (e.g. RedpointEOS FSteamCredentialObtainer)
+                uint32_t handle = g_lastAuthTicketHandle ? g_lastAuthTicketHandle : 1;
+                if (g_lastAuthTicketData.empty()) {
+                    g_lastAuthTicketData = GenerateDummyAuthTicket();
+                }
+                struct {
+                    uint32_t m_hAuthTicket;
+                    int32_t  m_eResult;
+                    int32_t  m_cubTicket;
+                    uint8_t  m_rgubTicket[1024];
+                } data = {};
+                data.m_hAuthTicket = handle;
+                data.m_eResult = 1; // k_EResultOK
+                data.m_cubTicket = (int32_t)g_lastAuthTicketData.size();
+                if (data.m_cubTicket > 0 && data.m_cubTicket <= sizeof(data.m_rgubTicket)) {
+                    memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
+                }
+                if (SafeCallRun(pCallback, &data, handle)) {
+                    ReFixLog("  -> Runtime: Immediately dispatched GetTicketForWebApiResponse_t (168, handle=%u) to %p", handle, pCallback);
+                }
+            } else {
+                std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
+                g_pendingAuthCallbacks.push_back({ pCallback, iCallback, 0, 0 });
+                ReFixLog("  -> Startup: Queued auth callback 168 for %p", pCallback);
+            }
         }
     }
 }
@@ -4121,23 +3548,6 @@ extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {
         g_activeLobbyID = lobbyID;
         ReFixLog("ReFix_NotifyLobbyID: tracking lobby=%llu", lobbyID);
 
-        // Inject game_filter and P2P port into the Steam Lobby
-        void* matchmaking = nullptr;
-        typedef void* (*fn_SteamMatchmaking_t)();
-        auto pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
-        if (!pfnMM) pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmaking");
-        if (pfnMM) matchmaking = pfnMM();
-        if (matchmaking) {
-            if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0') {
-                Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, lobbyID, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
-                ReFixLog("  -> Injected '%s'='%s' into Steam Lobby %llu", g_config.lobbyFilterKey, g_config.lobbyFilterValue, lobbyID);
-            }
-            char portStr[16];
-            uint16_t effectivePort = SteamP2PHook::GetBoundGamePort();
-            if (effectivePort == 0) effectivePort = g_config.p2pPort ? g_config.p2pPort : 7777;
-            sprintf_s(portStr, sizeof(portStr), "%u", effectivePort);
-            Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, lobbyID, "refix_p2p_port", portStr);
-        }
         UpdateP2PPeers(lobbyID);
 
         // Notify EOS proxy if loaded
@@ -4160,23 +3570,6 @@ extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {
     }
 }
 
-extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort) {
-    uint64_t targetLobby = g_hostedLobbyID != 0 ? g_hostedLobbyID : g_activeLobbyID;
-    if (targetLobby != 0) {
-        void* matchmaking = nullptr;
-        typedef void* (*fn_SteamMatchmaking_t)();
-        auto pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
-        if (!pfnMM) pfnMM = (fn_SteamMatchmaking_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamMatchmaking");
-        if (pfnMM) matchmaking = pfnMM();
-        if (matchmaking) {
-            char portStr[16];
-            sprintf_s(portStr, sizeof(portStr), "%u", newPort);
-            Hooked_ISteamMatchmaking_SetLobbyData(matchmaking, targetLobby, "refix_p2p_port", portStr);
-            ReFixLog("[PortVirtualization] Dynamically updated Steam Lobby %llu refix_p2p_port -> %u", targetLobby, newPort);
-        }
-    }
-}
-
 // Called from eos_proxy.cpp when lobby member list changes (LobbyChatUpdate_t)
 extern "C" void ReFix_NotifyLobbyMemberChange(uint64_t lobbyID) {
     if (lobbyID) {
@@ -4193,85 +3586,22 @@ static uint64_t Intercepted_RequestLobbyList(void* self) {
     return Hooked_ISteamMatchmaking_RequestLobbyList(self);
 }
 
-static void Intercepted_LeaveLobby(void* self, uint64_t steamIDLobby) {
-    Hooked_ISteamMatchmaking_LeaveLobby(self, steamIDLobby);
-}
-
-// Intercepts the flat-API InviteUserToLobby call so we can send an accompanying
-// chat text message alongside the Steam lobby invite notification. This works in
-// both the emulated EOS mode (steam_backend.cpp calls InviteUserToLobby) and in
-// passthrough EOS mode where the genuine EOS SDK calls it directly.
-static bool Intercepted_InviteUserToLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee) {
-    bool result = false;
-    if (g_pfn_InviteUserToLobby)
-        result = g_pfn_InviteUserToLobby(self, steamIDLobby, steamIDInvitee);
-
-    // Send the companion chat message if the config allows it.
-    if (steamIDInvitee && g_config.sendSteamChatMessageOnInvite) {
-        // Make sure Steam is willing to route outbound chat messages from us.
-        if (g_pfn_SetListenForFriendsMessages && g_pfn_SteamFriends && !g_chatListening) {
-            void* friends = g_pfn_SteamFriends();
-            if (friends)
-                g_chatListening = g_pfn_SetListenForFriendsMessages(friends, true);
-        }
-        if (g_pfn_ReplyToFriendMessage && g_pfn_SteamFriends) {
-            void* friends = g_pfn_SteamFriends();
-            if (friends) {
-                // Build invite message from config (same template as steam_backend.cpp).
-                std::string msg = g_config.inviteMessage;
-                if (msg.empty())
-                    msg = "[ReFix] I invited you to play {game}. Join me:";
-                // Substitute {game} with the configured game name.
-                const std::string game = g_config.gameName.empty() ? "my game" : g_config.gameName;
-                size_t pos = msg.find("{game}");
-                if (pos != std::string::npos) msg.replace(pos, 6, game);
-                // Strip trailing whitespace/colons left by missing {store}.
-                while (!msg.empty() && (msg.back() == ' ' || msg.back() == ':')) msg.pop_back();
-                bool sent = g_pfn_ReplyToFriendMessage(friends, steamIDInvitee, msg.c_str());
-                ReFixLog("[INVITE] Chat message to %llu -> %s (\"%s\")",
-                         (unsigned long long)steamIDInvitee,
-                         sent ? "sent" : "refused", msg.c_str());
-            }
-        }
-    }
-    return result;
-}
-
-static const char* Intercepted_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
-    return Hooked_ISteamMatchmaking_GetLobbyMemberData(self, steamIDLobby, steamIDUser, pchKey);
-}
-
-static const char* Intercepted_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
-    return Hooked_ISteamFriends_GetFriendPersonaName(self, steamIDFriend);
-}
 
 extern "C" __declspec(dllexport) bool SteamAPI_Init();
 
 static bool EnsureOriginal() {
     if (g_hOriginalDll) return true;
-    LoadConfig();
 
     std::string proxyDir = GetProxyDllDir();
     std::string exeDir = GetExeDir();
 
-    std::vector<const char*> candNames;
-    if (g_isGoldbergMode) {
-        candNames = {
-            "steam_api64_goldberg.dll",
-            "steam_api64_valve.dll",
-            "steam_api64_o.dll",
-            "steam_api64_original.dll",
-            "steam_api64.dll.valve"
-        };
-    } else {
-        candNames = {
-            "steam_api64_valve.dll",
-            "steam_api64_original.dll",
-            "steam_api64_o.dll",
-            "steam_api64_goldberg.dll",
-            "steam_api64.dll.valve"
-        };
-    }
+    const char* candNames[] = {
+        "steam_api64_valve.dll",
+        "steam_api64_goldberg.dll",
+        "steam_api64_o.dll",
+        "steam_api64_original.dll",
+        "steam_api64.dll.valve"
+    };
 
     std::vector<std::string> fullPaths;
     for (auto name : candNames) fullPaths.push_back(proxyDir + name);
@@ -4481,9 +3811,6 @@ static bool EnsureOriginal() {
     int idxGetLobbyOwner = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     if (idxGetLobbyOwner >= 0) g_pfn_GetLobbyOwner = (fn_GetLobbyOwner_t)g_steamProcs[idxGetLobbyOwner];
 
-    int idxGetLobbyData = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyData");
-    if (idxGetLobbyData >= 0) g_pfn_GetLobbyData = (fn_GetLobbyData_t)g_steamProcs[idxGetLobbyData];
-
     int idxSetRichPresence = FindSteamExportIndex("SteamAPI_ISteamFriends_SetRichPresence");
     if (idxSetRichPresence >= 0) {
         g_pfn_SetRichPresence = (fn_SteamAPI_ISteamFriends_SetRichPresence_t)g_steamProcs[idxSetRichPresence];
@@ -4497,22 +3824,72 @@ static bool EnsureOriginal() {
         ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamFriends_GetFriendGamePlayed");
     }
 
-    int idxGetFriends = FindSteamExportIndex("SteamAPI_ISteamClient_GetISteamFriends");
-    if (idxGetFriends >= 0) {
-        g_pfn_ISteamClient_GetISteamFriends = (fn_SteamAPI_ISteamClient_GetISteamFriends_t)g_steamProcs[idxGetFriends];
-        g_steamProcs[idxGetFriends] = (FARPROC)Intercepted_SteamAPI_ISteamClient_GetISteamFriends;
-    }
-
-    int idxGetPersonaName = FindSteamExportIndex("SteamAPI_ISteamFriends_GetPersonaName");
-    if (idxGetPersonaName >= 0) {
-        g_steamProcs[idxGetPersonaName] = (FARPROC)SteamAPI_ISteamFriends_GetPersonaName;
-    }
-
     int idxAddStringFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter");
-    if (idxAddStringFilter >= 0) g_pfn_AddRequestLobbyListStringFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t)g_steamProcs[idxAddStringFilter];
+    if (idxAddStringFilter >= 0) {
+        g_pfn_AddRequestLobbyListStringFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter_t)g_steamProcs[idxAddStringFilter];
+        g_steamProcs[idxAddStringFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter;
+    }
+
+    int idxAddNumericalFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter");
+    if (idxAddNumericalFilter >= 0) {
+        g_pfn_AddRequestLobbyListNumericalFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter_t)g_steamProcs[idxAddNumericalFilter];
+        g_steamProcs[idxAddNumericalFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter;
+    }
+
+    int idxAddNearValueFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter");
+    if (idxAddNearValueFilter >= 0) {
+        g_pfn_AddRequestLobbyListNearValueFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter_t)g_steamProcs[idxAddNearValueFilter];
+        g_steamProcs[idxAddNearValueFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter;
+    }
+
+    int idxAddFilterSlots = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable");
+    if (idxAddFilterSlots >= 0) {
+        g_pfn_AddRequestLobbyListFilterSlotsAvailable = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable_t)g_steamProcs[idxAddFilterSlots];
+        g_steamProcs[idxAddFilterSlots] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable;
+    }
 
     int idxDistanceFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter");
-    if (idxDistanceFilter >= 0) g_pfn_AddRequestLobbyListDistanceFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter_t)g_steamProcs[idxDistanceFilter];
+    if (idxDistanceFilter >= 0) {
+        g_pfn_AddRequestLobbyListDistanceFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter_t)g_steamProcs[idxDistanceFilter];
+        g_steamProcs[idxDistanceFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter;
+    }
+
+    int idxResultCountFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter");
+    if (idxResultCountFilter >= 0) {
+        g_pfn_AddRequestLobbyListResultCountFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter_t)g_steamProcs[idxResultCountFilter];
+        g_steamProcs[idxResultCountFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter;
+    }
+
+    int idxCompatibleMembersFilter = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter");
+    if (idxCompatibleMembersFilter >= 0) {
+        g_pfn_AddRequestLobbyListCompatibleMembersFilter = (fn_SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter_t)g_steamProcs[idxCompatibleMembersFilter];
+        g_steamProcs[idxCompatibleMembersFilter] = (FARPROC)Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter;
+    }
+
+    int idxGetLobbyByIndex = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyByIndex");
+    if (idxGetLobbyByIndex >= 0) {
+        g_pfn_GetLobbyByIndex = (fn_SteamAPI_ISteamMatchmaking_GetLobbyByIndex_t)g_steamProcs[idxGetLobbyByIndex];
+        g_steamProcs[idxGetLobbyByIndex] = (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyByIndex;
+    }
+
+    int idxGetLobbyData = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyData");
+    if (idxGetLobbyData >= 0) {
+        g_pfn_GetLobbyData = (fn_GetLobbyData_t)g_steamProcs[idxGetLobbyData];
+        g_pfn_GetLobbyDataFlat = (fn_SteamAPI_ISteamMatchmaking_GetLobbyData_t)g_steamProcs[idxGetLobbyData];
+        g_steamProcs[idxGetLobbyData] = (FARPROC)Hooked_ISteamMatchmaking_GetLobbyData;
+    }
+
+    int idxGetLobbyDataCount = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyDataCount");
+    if (idxGetLobbyDataCount >= 0) {
+        g_pfn_GetLobbyDataCountFlat = (fn_SteamAPI_ISteamMatchmaking_GetLobbyDataCount_t)g_steamProcs[idxGetLobbyDataCount];
+        g_steamProcs[idxGetLobbyDataCount] = (FARPROC)Hooked_ISteamMatchmaking_GetLobbyDataCount;
+    }
+
+    int idxGetLobbyDataByIndex = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex");
+    if (idxGetLobbyDataByIndex >= 0) {
+        g_pfn_GetLobbyDataByIndexFlat = (fn_SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex_t)g_steamProcs[idxGetLobbyDataByIndex];
+        g_steamProcs[idxGetLobbyDataByIndex] = (FARPROC)Hooked_ISteamMatchmaking_GetLobbyDataByIndex;
+    }
 
     int idxCreateLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_CreateLobby");
     if (idxCreateLobby >= 0) {
@@ -4536,39 +3913,6 @@ static bool EnsureOriginal() {
     if (idxJoinLobby >= 0) {
         g_pfn_JoinLobby = (fn_SteamAPI_ISteamMatchmaking_JoinLobby_t)g_steamProcs[idxJoinLobby];
         g_steamProcs[idxJoinLobby] = (FARPROC)Intercepted_JoinLobby;
-    }
-
-    int idxLeaveLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_LeaveLobby");
-    if (idxLeaveLobby >= 0) {
-        g_pfn_LeaveLobby = (fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t)g_steamProcs[idxLeaveLobby];
-        g_steamProcs[idxLeaveLobby] = (FARPROC)Intercepted_LeaveLobby;
-    }
-
-    // Intercept InviteUserToLobby to inject the companion chat text message.
-    int idxInviteUserToLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_InviteUserToLobby");
-    if (idxInviteUserToLobby >= 0) {
-        g_pfn_InviteUserToLobby = (fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t)g_steamProcs[idxInviteUserToLobby];
-        g_steamProcs[idxInviteUserToLobby] = (FARPROC)Intercepted_InviteUserToLobby;
-    }
-    // Bind chat helpers used by Intercepted_InviteUserToLobby. These forward to
-    // the real Valve DLL via the already-populated g_steamProcs table.
-    {
-        int i = FindSteamExportIndex("SteamAPI_ISteamFriends_ReplyToFriendMessage");
-        if (i >= 0) g_pfn_ReplyToFriendMessage = (fn_SteamAPI_ISteamFriends_ReplyToFriendMessage_t)g_steamProcs[i];
-        i = FindSteamExportIndex("SteamAPI_ISteamFriends_SetListenForFriendsMessages");
-        if (i >= 0) g_pfn_SetListenForFriendsMessages = (fn_SteamAPI_ISteamFriends_SetListenForFriendsMessages_t)g_steamProcs[i];
-    }
-
-    int idxGetLobbyMemberData = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyMemberData");
-    if (idxGetLobbyMemberData >= 0) {
-        g_pfn_GetLobbyMemberData = (fn_SteamAPI_ISteamMatchmaking_GetLobbyMemberData_t)g_steamProcs[idxGetLobbyMemberData];
-        g_steamProcs[idxGetLobbyMemberData] = (FARPROC)Intercepted_GetLobbyMemberData;
-    }
-
-    int idxGetFriendPersonaName = FindSteamExportIndex("SteamAPI_ISteamFriends_GetFriendPersonaName");
-    if (idxGetFriendPersonaName >= 0) {
-        g_pfn_GetFriendPersonaName = (fn_GetFriendPersonaName_t)g_steamProcs[idxGetFriendPersonaName];
-        g_steamProcs[idxGetFriendPersonaName] = (FARPROC)Intercepted_GetFriendPersonaName;
     }
 
     int idxRegisterNotif = FindSteamExportIndex("SteamAPI_RegisterCallback");
@@ -4605,11 +3949,6 @@ static bool EnsureOriginal() {
         g_steamProcs[idxGetAuthTicketForWebApi] = (FARPROC)SteamAPI_ISteamUser_GetAuthTicketForWebApi;
     }
 
-    g_pfn_CancelAuthTicket = (fn_SteamAPI_ISteamUser_CancelAuthTicket_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamUser_CancelAuthTicket");
-    int idxCancelAuthTicket = FindSteamExportIndex("SteamAPI_ISteamUser_CancelAuthTicket");
-    if (idxCancelAuthTicket >= 0) {
-        g_steamProcs[idxCancelAuthTicket] = (FARPROC)SteamAPI_ISteamUser_CancelAuthTicket;
-    }
     
     int idxGetRelayStatus = FindSteamExportIndex("SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus");
     if (idxGetRelayStatus >= 0) {
@@ -4625,6 +3964,7 @@ static bool EnsureOriginal() {
         ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
     }
 
+    
     int idxShutdown = FindSteamExportIndex("SteamAPI_Shutdown");
     if (idxShutdown >= 0) {
         g_pfn_Shutdown = (fn_SteamAPI_Shutdown_t)g_steamProcs[idxShutdown];
@@ -4650,10 +3990,34 @@ static bool EnsureOriginal() {
         g_steamProcs[idxManualGetNext] = (FARPROC)SteamAPI_ManualDispatch_GetNextCallback;
     }
 
-    g_pfn_ManualDispatch_FreeLastCallback = (fn_SteamAPI_ManualDispatch_FreeLastCallback_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ManualDispatch_FreeLastCallback");
     int idxManualFree = FindSteamExportIndex("SteamAPI_ManualDispatch_FreeLastCallback");
     if (idxManualFree >= 0) {
+        g_pfn_ManualDispatch_FreeLastCallback = (fn_SteamAPI_ManualDispatch_FreeLastCallback_t)g_steamProcs[idxManualFree];
         g_steamProcs[idxManualFree] = (FARPROC)SteamAPI_ManualDispatch_FreeLastCallback;
+    }
+
+    int idxManualGetResult = FindSteamExportIndex("SteamAPI_ManualDispatch_GetAPICallResult");
+    if (idxManualGetResult >= 0) {
+        g_pfn_ManualDispatch_GetAPICallResult = (fn_SteamAPI_ManualDispatch_GetAPICallResult_t)g_steamProcs[idxManualGetResult];
+        g_steamProcs[idxManualGetResult] = (FARPROC)SteamAPI_ManualDispatch_GetAPICallResult;
+    }
+
+    int idxLeaveLobby = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_LeaveLobby");
+    if (idxLeaveLobby >= 0) {
+        g_pfn_LeaveLobby = (fn_SteamAPI_ISteamMatchmaking_LeaveLobby_t)g_steamProcs[idxLeaveLobby];
+        g_steamProcs[idxLeaveLobby] = (FARPROC)SteamAPI_ISteamMatchmaking_LeaveLobby;
+    }
+
+    int idxInviteUser = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_InviteUserToLobby");
+    if (idxInviteUser >= 0) {
+        g_pfn_InviteUserToLobby = (fn_SteamAPI_ISteamMatchmaking_InviteUserToLobby_t)g_steamProcs[idxInviteUser];
+        g_steamProcs[idxInviteUser] = (FARPROC)SteamAPI_ISteamMatchmaking_InviteUserToLobby;
+    }
+
+    int idxGetLobbyMemberData = FindSteamExportIndex("SteamAPI_ISteamMatchmaking_GetLobbyMemberData");
+    if (idxGetLobbyMemberData >= 0) {
+        g_pfn_GetLobbyMemberData = (fn_GetLobbyMemberData_t)g_steamProcs[idxGetLobbyMemberData];
+        g_steamProcs[idxGetLobbyMemberData] = (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyMemberData;
     }
 
     int idxFindOrCreateUser = FindSteamExportIndex("SteamInternal_FindOrCreateUserInterface");
@@ -4668,13 +4032,6 @@ static bool EnsureOriginal() {
         g_pfn_SteamInternal_CreateInterface = (fn_SteamInternal_CreateInterface_t)g_steamProcs[idxCreateInterface];
         g_steamProcs[idxCreateInterface] = (FARPROC)Intercepted_SteamInternal_CreateInterface;
         ReFixLog("EnsureOriginal: Intercepted SteamInternal_CreateInterface");
-    }
-
-    int idxGetISteamUser = FindSteamExportIndex("SteamAPI_ISteamClient_GetISteamUser");
-    if (idxGetISteamUser >= 0) {
-        g_pfn_ISteamClient_GetISteamUser = (fn_SteamAPI_ISteamClient_GetISteamUser_t)g_steamProcs[idxGetISteamUser];
-        g_steamProcs[idxGetISteamUser] = (FARPROC)Intercepted_SteamAPI_ISteamClient_GetISteamUser;
-        ReFixLog("EnsureOriginal: Intercepted SteamAPI_ISteamClient_GetISteamUser");
     }
 
     // SteamInternal_SteamAPI_Init is handled via C++ __declspec(dllexport) below
@@ -4692,93 +4049,26 @@ static bool EnsureOriginal() {
 }
 
 static void CapturePersonaName() {
-    const char* name = nullptr;
-    if (g_pfn_GetPersonaName && g_pfn_SteamFriends) {
-        void* friends = g_pfn_SteamFriends();
-        if (friends) name = g_pfn_GetPersonaName(friends);
-    } else if (g_pfn_SteamFriends) {
-        void* friends = g_pfn_SteamFriends();
-        if (friends) {
-            void** vtable = *(void***)friends;
-            if (vtable && vtable[0]) {
-                typedef const char* (*fn_vtable_GetPersonaName)(void*);
-                name = ((fn_vtable_GetPersonaName)vtable[0])(friends);
-            }
-        }
-    }
-
-    if (!name || name[0] == '\0' || strcmp(name, "Noob") == 0) {
-        if (!g_config.playerName.empty() && g_config.playerName != "Player" && g_config.playerName != "Noob") {
-            name = g_config.playerName.c_str();
-        } else {
-            char envName[128] = { 0 };
-            if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-                g_config.playerName = envName;
-                name = g_config.playerName.c_str();
-            } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
-                g_config.playerName = envName;
-                name = g_config.playerName.c_str();
-            } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-                g_config.playerName = envName;
-                name = g_config.playerName.c_str();
-            } else if (GetEnvironmentVariableA("USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
-                g_config.playerName = envName;
-                name = g_config.playerName.c_str();
-            }
-        }
-    }
-
+    if (!g_pfn_GetPersonaName || !g_pfn_SteamFriends) return;
+    void* friends = g_pfn_SteamFriends();
+    if (!friends) return;
+    const char* name = g_pfn_GetPersonaName(friends);
     if (name && name[0] != '\0') {
         SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", name);
-        SetEnvironmentVariableA("REFIX_USER_NAME", name);
-        SetEnvironmentVariableA("REFIX_USERNAME", name);
-        SetEnvironmentVariableA("SteamPersonaName", name);
         ReFixLog("CapturePersonaName: %s", name);
-        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedDisplayName(name);
     }
-
-    uint64_t steamId = 0;
     if (g_pfn_GetSteamID && g_pfn_SteamUser) {
         void* user = g_pfn_SteamUser();
-        if (user) steamId = g_pfn_GetSteamID(user);
-    } else if (g_pfn_SteamUser) {
-        void* user = g_pfn_SteamUser();
         if (user) {
-            void** vtable = *(void***)user;
-            if (vtable && vtable[2]) {
-                typedef uint64_t (*fn_vtable_GetSteamID64)(void*);
-                steamId = ((fn_vtable_GetSteamID64)vtable[2])(user);
+            uint64_t steamId = g_pfn_GetSteamID(user);
+            if (steamId != 0) {
+                g_capturedSteamID = steamId;
+                char idStr[32];
+                sprintf_s(idStr, sizeof(idStr), "%llu", steamId);
+                SetEnvironmentVariableA("REFIX_STEAM_ID", idStr);
+                ReFixLog("CaptureSteamID: %s", idStr);
             }
         }
-    }
-
-    if (steamId == 0) {
-        if (g_config.steamIdNum != 0) {
-            steamId = g_config.steamIdNum;
-        } else {
-            char envSid[64] = { 0 };
-            if (GetEnvironmentVariableA("REFIX_STEAM_ID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-                steamId = _strtoui64(envSid, nullptr, 10);
-            } else if (GetEnvironmentVariableA("REFIX_STEAMID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-                steamId = _strtoui64(envSid, nullptr, 10);
-            } else if (GetEnvironmentVariableA("SteamID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-                steamId = _strtoui64(envSid, nullptr, 10);
-            } else if (GetEnvironmentVariableA("SteamId", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-                steamId = _strtoui64(envSid, nullptr, 10);
-            }
-        }
-    }
-
-    if (steamId != 0) {
-        g_capturedSteamID = steamId;
-        char idStr[32];
-        sprintf_s(idStr, sizeof(idStr), "%llu", steamId);
-        SetEnvironmentVariableA("REFIX_STEAM_ID", idStr);
-        SetEnvironmentVariableA("REFIX_STEAMID", idStr);
-        SetEnvironmentVariableA("SteamID", idStr);
-        SetEnvironmentVariableA("SteamId", idStr);
-        ReFixLog("CaptureSteamID: %s", idStr);
-        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamId(steamId);
     }
 }
 
@@ -4813,20 +4103,15 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-
-        // 1. Initialize UNAE Engine (Runtime capability scan, topology classifier, cascade arbiter, DRPI)
-        UNAE::Initialize();
-
-        // 2. Install Winsock -> Steam P2P redirect hooks
-        if (!g_godotIsEngine && !g_isGoldbergMode && UNAE::IsDirectP2PAllowed()) {
+        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
+        if (g_unrealIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
             ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
             // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         } else {
-            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d, unaeDirectP2PAllowed=%d)",
-                g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode, UNAE::IsDirectP2PAllowed());
+            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
         }
         InstallVTableHooks();
     }
@@ -4879,14 +4164,10 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
     ReFixLog("SteamAPI_InitFlat: result=%d, msg='%s'", result, targetErr);
     if (result == 0) {
         CapturePersonaName();
-        UNAE::Initialize();
-        if (!g_godotIsEngine && !g_isGoldbergMode && UNAE::IsDirectP2PAllowed()) {
+        if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
-        } else {
-            ReFixLog("SteamAPI_InitFlat: Winsock P2P hook skipped (godot=%d, goldberg=%d, unaeDirectP2PAllowed=%d)",
-                g_godotIsEngine, g_isGoldbergMode, UNAE::IsDirectP2PAllowed());
         }
         InstallVTableHooks();
     }
@@ -4950,18 +4231,13 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // 1. Initialize UNAE Engine (Runtime capability scan, topology classifier, cascade arbiter, DRPI)
-        UNAE::Initialize();
-
-        // 2. Install Winsock -> Steam P2P redirect hooks (All engines except Godot in Valve Online mode)
-        if (!g_godotIsEngine && !g_isGoldbergMode && UNAE::IsDirectP2PAllowed()) {
+        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
+        if (g_unrealIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
-            ReFixLog("SteamInternal_SteamAPI_Init: Steam P2P Winsock hooks installed");
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         } else {
-            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d, unaeDirectP2PAllowed=%d)",
-                g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode, UNAE::IsDirectP2PAllowed());
+            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
         }
         InstallVTableHooks();
     }
@@ -4997,81 +4273,68 @@ extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_AddFavoriteGame(
 }
 
 extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
-    EnsureAuthCallbackRegistered();
     if (s_runCallbacksLogged++ < 3) {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
     if (g_pfn_RunCallbacks) g_pfn_RunCallbacks();
-    DispatchSyntheticWebApiCallbacks();
     DispatchRelayCallbacks();
     DispatchPendingAuthCallbacks();
-    DispatchPendingLobbyEnterCallbacks();
 }
 
 static int s_manualRunFrameLogged = 0;
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t hSteamPipe) {
-    EnsureAuthCallbackRegistered();
     if (s_manualRunFrameLogged++ < 3) {
         ReFixLog("SteamAPI_ManualDispatch_RunFrame called (pipe=%u, frame=%d)", hSteamPipe, s_manualRunFrameLogged);
     }
     if (g_pfn_ManualDispatch_RunFrame) g_pfn_ManualDispatch_RunFrame(hSteamPipe);
-    DispatchSyntheticWebApiCallbacks();
     DispatchPendingAuthCallbacks();
-    DispatchPendingLobbyEnterCallbacks();
 }
+
+static std::atomic<bool> s_lastManualCallbackWasSynthetic{ false };
 
 extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(uint32_t hSteamPipe, void* pCallbackMsg) {
     if (g_pfn_ManualDispatch_GetNextCallback) {
         bool res = g_pfn_ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
-        if (res && pCallbackMsg) {
-            auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
-            if (msg->m_iCallback == 168) {
-                if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(Steam_GetTicketForWebApiResponse_t)) {
-                    auto* resp = (Steam_GetTicketForWebApiResponse_t*)msg->m_pubParam;
-                    ReFixLog("[STEAM] ManualDispatch captured Callback 168 (WebApi Ticket): handle=%u, result=%d, cubTicket=%d",
-                             resp->m_hAuthTicket, (int)resp->m_eResult, resp->m_cubTicket);
-                    if (resp->m_cubTicket > 0 && resp->m_cubTicket <= 2560) {
-                        std::lock_guard<std::mutex> lg(g_callbackMutex);
-                        g_lastAuthTicketHandle = resp->m_hAuthTicket;
-                        g_lastAuthTicketData.assign(resp->m_rgubTicket, resp->m_rgubTicket + resp->m_cubTicket);
-                        ReFixIdentity::GetActiveIdentityProvider()->SetCapturedSteamTicket(
-                            resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
-                        SyncTicketToEnvironment(resp->m_rgubTicket, (size_t)resp->m_cubTicket, resp->m_hAuthTicket);
+        if (res) {
+            s_lastManualCallbackWasSynthetic.store(false);
+            if (pCallbackMsg) {
+                auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+                if (msg->m_iCallback == 1281) { // k_iSteamRelayNetworkStatusChanged
+                    if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamRelayNetworkStatus_t)) {
+                        auto* d = (ReFix_SteamRelayNetworkStatus_t*)msg->m_pubParam;
+                        d->m_eAvail = k_eRelayAvail_Current; // 100
+                        d->m_bPingMeasurementInProgress = 0;
+                        d->m_eAvailNetworkConfig = k_eRelayAvail_Current; // 100
+                        d->m_eAvailAnyRelay = k_eRelayAvail_Current; // 100
+                        strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), "OK (ReFix)", _TRUNCATE);
+                        ReFixLog("ManualDispatch_GetNextCallback: Overrode Callback 1281 to Current (100)");
                     }
-                }
-            } else if (msg->m_iCallback == 163) {
-                if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(Steam_GetAuthSessionTicketResponse_t)) {
-                    auto* resp = (Steam_GetAuthSessionTicketResponse_t*)msg->m_pubParam;
-                    ReFixLog("[STEAM] ManualDispatch captured Callback 163 (AuthSessionTicket): handle=%u, result=%d",
-                             resp->m_hAuthTicket, (int)resp->m_eResult);
-                }
-            } else if (msg->m_iCallback == 1281) { // k_iSteamRelayNetworkStatusChanged
-                if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamRelayNetworkStatus_t)) {
-                    auto* d = (ReFix_SteamRelayNetworkStatus_t*)msg->m_pubParam;
-                    d->m_eAvail = k_eRelayAvail_Current; // 100
-                    d->m_bPingMeasurementInProgress = 0;
-                    d->m_eAvailNetworkConfig = k_eRelayAvail_Current; // 100
-                    d->m_eAvailAnyRelay = k_eRelayAvail_Current; // 100
-                    strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), "OK (ReFix)", _TRUNCATE);
-                    ReFixLog("ManualDispatch_GetNextCallback: Overrode Callback 1281 to Current (100)");
+                } else if (msg->m_iCallback == 510) {
+                    if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_LobbyMatchList_t)) {
+                        auto* pList = (ReFix_LobbyMatchList_t*)msg->m_pubParam;
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 510 (LobbyMatchList_t) -> m_nLobbiesMatching=%u", pList->m_nLobbiesMatching);
+                    } else {
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 510 (LobbyMatchList_t)");
+                    }
+                } else if (msg->m_iCallback == 703) {
+                    if (msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamAPICallCompleted_t)) {
+                        auto* pCallComp = (ReFix_SteamAPICallCompleted_t*)msg->m_pubParam;
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 703 (SteamAPICallCompleted_t) -> hAsyncCall=%llu, iCallback=%d, cubParam=%u",
+                                 pCallComp->m_hAsyncCall, pCallComp->m_iCallback, pCallComp->m_cubParam);
+                    } else {
+                        ReFixLog("ManualDispatch_GetNextCallback: Callback 703 (SteamAPICallCompleted_t)");
+                    }
+                } else if (msg->m_iCallback == 333) {
+                    ReFixLog("ManualDispatch_GetNextCallback: Callback 333 (GameLobbyJoinRequested_t)");
+                } else if (msg->m_iCallback == 504) {
+                    ReFixLog("ManualDispatch_GetNextCallback: Callback 504 (LobbyEnter_t)");
                 }
             }
             return true;
         }
     }
-
-    if (g_manualDispatch168Pending.exchange(false) && pCallbackMsg) {
-        auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
-        msg->m_hSteamUser = 0;
-        msg->m_iCallback = 168; // Steam_GetTicketForWebApiResponse_t
-        msg->m_pubParam = (uint8_t*)&g_manualDispatch168Data;
-        msg->m_cubParam = (int32_t)sizeof(Steam_GetTicketForWebApiResponse_t);
-        ReFixLog("ManualDispatch_GetNextCallback: Delivered Synthetic Callback 168 (handle=%u, size=%d)",
-                 g_manualDispatch168Data.m_hAuthTicket, g_manualDispatch168Data.m_cubTicket);
-        return true;
-    }
-
     if (g_syntheticRelayPending.exchange(false) && pCallbackMsg) {
+        s_lastManualCallbackWasSynthetic.store(true);
         g_syntheticRelayData.m_eAvail = k_eRelayAvail_Current; // 100
         g_syntheticRelayData.m_bPingMeasurementInProgress = 0;
         g_syntheticRelayData.m_eAvailNetworkConfig = k_eRelayAvail_Current; // 100
@@ -5090,32 +4353,66 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
 }
 
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(uint32_t hSteamPipe) {
+    if (s_lastManualCallbackWasSynthetic.exchange(false)) {
+        return;
+    }
     if (g_pfn_ManualDispatch_FreeLastCallback) {
         g_pfn_ManualDispatch_FreeLastCallback(hSteamPipe);
     }
 }
 
-extern "C" __declspec(dllexport) bool ReFix_Steam_GetCapturedTicketData(uint8_t* outBuf, size_t maxLen, size_t* outLen, uint32_t* outHandle) {
-    std::lock_guard<std::mutex> lg(g_callbackMutex);
-    if (g_lastAuthTicketData.empty()) return false;
-    if (outBuf && maxLen > 0) {
-        size_t copyLen = (g_lastAuthTicketData.size() < maxLen) ? g_lastAuthTicketData.size() : maxLen;
-        memcpy(outBuf, g_lastAuthTicketData.data(), copyLen);
-        if (outLen) *outLen = copyLen;
-    } else {
-        if (outLen) *outLen = g_lastAuthTicketData.size();
+extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(
+    uint32_t hSteamPipe,
+    uint64_t hSteamAPICall,
+    void* pCallback,
+    int cubCallback,
+    int iCallbackExpected,
+    bool* pbFailed
+) {
+    bool res = false;
+    if (g_pfn_ManualDispatch_GetAPICallResult) {
+        res = g_pfn_ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
     }
-    if (outHandle) *outHandle = g_lastAuthTicketHandle;
-    return true;
+    bool bFailedVal = pbFailed ? *pbFailed : false;
+    if (iCallbackExpected == 510) { // LobbyMatchList_t
+        uint32_t nLobbies = 0;
+        if (res && pCallback && cubCallback >= (int)sizeof(uint32_t)) {
+            nLobbies = *(uint32_t*)pCallback;
+        }
+        ReFixLog("ManualDispatch_GetAPICallResult: hCall=%llu, expected=510 (LobbyMatchList_t), res=%d, bFailed=%d -> m_nLobbiesMatching=%u",
+                 hSteamAPICall, res ? 1 : 0, bFailedVal ? 1 : 0, nLobbies);
+    } else {
+        ReFixLog("ManualDispatch_GetAPICallResult: hCall=%llu, expected=%d, cubCallback=%d, res=%d, bFailed=%d",
+                 hSteamAPICall, iCallbackExpected, cubCallback, res ? 1 : 0, bFailedVal ? 1 : 0);
+    }
+    return res;
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void* self, void* pTicket, int cbMaxTicket, uint32_t* pcbTicket) {
-    return Hooked_ISteamUser_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
+    uint32_t handle = 1;
+    if (g_pfn_GetAuthSessionTicket) {
+        handle = g_pfn_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
+    }
+    ReFixLog("SteamAPI_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u", handle, (pcbTicket ? *pcbTicket : 0));
+    g_lastAuthTicketHandle = handle;
+    if (pTicket && pcbTicket && *pcbTicket > 0) {
+        g_lastAuthTicketData.assign((uint8_t*)pTicket, (uint8_t*)pTicket + *pcbTicket);
+    }
+    return handle;
 }
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWebApi(void* self, const char* pchIdentity) {
-    return Internal_GetAuthTicketForWebApi(self, pchIdentity, false);
+    uint32_t handle = 1;
+    if (g_pfn_GetAuthTicketForWebApi) {
+        handle = g_pfn_GetAuthTicketForWebApi(self, pchIdentity);
+    }
+    ReFixLog("SteamAPI_ISteamUser_GetAuthTicketForWebApi ('%s'): handle=%u", pchIdentity ? pchIdentity : "", handle);
+    if (handle != 0) {
+        g_lastAuthTicketHandle = handle;
+    }
+    return handle;
 }
+
 
 static void SafeBackendShutdown() {
     if (g_pfn_Shutdown) {
@@ -5128,6 +4425,7 @@ static void SafeBackendShutdown() {
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+    g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);
     SteamP2PHook::Uninstall();
     {
@@ -5137,18 +4435,7 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     {
         std::lock_guard<std::mutex> lg(g_callbackMutex);
         g_registeredCallbacks.clear();
-        g_lastAuthTicketHandle = 0;
-        g_lastAuthTicketData.clear();
     }
-    {
-        std::lock_guard<std::mutex> lg(g_synthetic168Mutex);
-        g_pendingSynthetic168.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
-        g_pendingAuthCallbacks.clear();
-    }
-    ReFixIdentity::GetActiveIdentityProvider()->InvalidateCapturedTicket(0);
     SafeBackendShutdown();
 }
 
@@ -5161,6 +4448,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             EnsureOriginal();
             break;
         case DLL_PROCESS_DETACH:
+            g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
             SteamP2PHook::Uninstall();
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary

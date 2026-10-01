@@ -249,6 +249,7 @@ void InitialiseModule() {
           EOS_MAJOR_VERSION, EOS_MINOR_VERSION, EOS_PATCH_VERSION,
           Config::Get().IniFound() ? Config::Get().IniPath().c_str() : "<not found>");
 
+#ifdef ENABLE_UNAE
     // Coordinate with UNAE (Universal Network Arbitration Engine) if loaded
     HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
     if (!hSteam) hSteam = GetModuleHandleA("steam_api64_valve.dll");
@@ -259,6 +260,7 @@ void InitialiseModule() {
             RFLOG(Core, "UNAE initialized via steam_api64 proxy");
         }
     }
+#endif
 }
 
 } // namespace refix
