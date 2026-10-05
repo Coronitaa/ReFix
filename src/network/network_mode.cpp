@@ -55,4 +55,13 @@ bool NetworkModeManager::IsOffline() {
     return s_mode == ReFixNetworkMode::Offline;
 }
 
+bool NetworkModeManager::IsGoldbergBackendActive() {
+    // Currently, both Lan and Offline modes use the Goldberg emulator backend
+    return s_mode == ReFixNetworkMode::Lan || s_mode == ReFixNetworkMode::Offline;
+}
+
+bool NetworkModeManager::IsExternalNetworkingAllowed() {
+    return s_mode == ReFixNetworkMode::Online;
+}
+
 } // namespace ReFix

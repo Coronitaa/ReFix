@@ -96,7 +96,23 @@ All public-facing initialization exports will shrink to simple wrappers:
 extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     return ReFixInitialize(nullptr);
 }
+## 4. Phase 2.2 Matrix Audit of EnsureOriginal
 
+| Operation             | Online     | LAN | Offline      | Allowed? |
+| --------------------- | ---------- | --- | ------------ | -------- |
+| Load Online backend   | YES        | NO  | NO           | YES      |
+| Load Goldberg backend | NO         | YES | YES          | YES      |
+| Steam registry        | YES/compat | NO  | NO           | YES      |
+| Steam overlay         | YES        | NO  | NO           | YES      |
+| Relay                 | YES        | NO  | NO           | YES      |
+| Callback hooks        | YES        | YES | YES          | YES      |
+
+**Justificación:**
+*   **Load Online Backend (Valve DLL)**: Se carga en modo Online. Bloqueado lógicamente en LAN/Offline mediante el renombramiento estático en el disco a `steam_api64_valve.dll` y `steam_api64_goldberg.dll`, priorizando la carga según el modo a través del ProviderFactory (que controla la lógica del entorno).
+*   **Steam Registry**: Goldberg localmente parchea y anula las lecturas del registro para SteamPath, y ReFix no invoca nada del Registry en LAN.
+*   **Steam Overlay**: Su inicialización `InjectSteamOverlay()` y el enmascaramiento explícito de `AppId` (Spacewar) se deshabilitan explícitamente en `ApplySteamEnv` si `IsGoldbergBackendActive()` es verdadero.
+*   **Relay / SDR**: Las funciones de red externa de relay devuelven `k_eRelayAvail_Current` estático sin contactar infraestructura externa si el proxy corre sobre Goldberg LAN.
+*   **Callback Hooks**: Operan unánimemente tanto en Online como en LAN porque ReFix intercepta los callbacks para inyectar su lógica de Join/Matchmaking y autenticación antes de pasárselos al juego.
 extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(const char* pszVersion, char* pOutErrMsg) {
     return ReFixInitialize(pOutErrMsg) ? 0 : 1; // 0 = k_ESteamAPIInitResult_OK
 }

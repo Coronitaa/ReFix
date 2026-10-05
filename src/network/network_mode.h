@@ -20,6 +20,10 @@ public:
     static bool IsLanOnly();
     static bool IsOffline();
     
+    // Semantic queries
+    static bool IsGoldbergBackendActive();
+    static bool IsExternalNetworkingAllowed();
+    
 private:
     static ReFixNetworkMode s_mode;
 };

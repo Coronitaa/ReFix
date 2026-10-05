@@ -159,7 +159,7 @@ std::string GetLocalIP() {
     return ip;
 }
 std::string GetPublicIP() {
-    if (!ReFix::NetworkModeManager::IsOnline()) {
+    if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed()) {
         return GetLocalIP();
     }
 

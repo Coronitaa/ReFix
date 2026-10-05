@@ -1704,7 +1704,7 @@ static void LoadConfig() {
     g_config.serverListAppIdNum = (sbAppId != 0) ? sbAppId : (g_config.realAppIdNum != 0 ? g_config.realAppIdNum : g_config.maskAppIdNum);
 
     // [Overlay]
-    if ((!ReFix::NetworkModeManager::IsOnline())) {
+    if (ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
         g_config.enableOverlay = false;
     } else {
         g_config.enableOverlay = ReadBool("Overlay", "EnableOverlay", true);
@@ -1877,7 +1877,7 @@ static void EnsureSteamAppIdFile(const char* appIdStr) {
 
 static void ApplySteamEnv() {
     LoadConfig();
-    if ((!ReFix::NetworkModeManager::IsOnline())) {
+    if (ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
         std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
         if (targetApp.empty() || targetApp == "0") targetApp = "480";
         SetEnvironmentVariableA("SteamAppId", targetApp.c_str());
@@ -1899,7 +1899,7 @@ static void ApplySteamEnv() {
         SetEnvironmentVariableA("SteamLanguage", g_config.language.c_str());
     }
 
-    if (g_config.enableOverlay && !(!ReFix::NetworkModeManager::IsOnline())) {
+    if (g_config.enableOverlay && !ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
         InjectSteamOverlay();
     }
 }
@@ -2192,7 +2192,7 @@ static uint32_t GetResolvedAppID() {
     } else if (_stricmp(g_config.getAppIdMode.c_str(), "real") == 0) {
         targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
     } else { // "auto"
-        if (!(!ReFix::NetworkModeManager::IsOnline())) {
+        if (!ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
             // In Valve Online mode (Spacewar 480):
             // Steam client, invites, lobbies, and presence run under MaskAppId (480).
             // Engines (Unreal, Unity Steamworks.NET, Godot) require GetAppID() to return
@@ -2706,7 +2706,7 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
     uint32_t targetApp = GetResolvedAppID();
     ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
-             targetApp, g_config.engineType.c_str(), (!ReFix::NetworkModeManager::IsOnline()) ? "Goldberg" : "Valve");
+             targetApp, g_config.engineType.c_str(), ReFix::NetworkModeManager::IsGoldbergBackendActive() ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -2792,7 +2792,7 @@ static void* Hooked_ISteamMatchmakingServers_RequestLANServerList(
 static uint32_t Hooked_ISteamUtils_GetAppID(void* self) {
     uint32_t targetApp = GetResolvedAppID();
     ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u (Engine=%s, Mode=%s)",
-             targetApp, g_config.engineType.c_str(), (!ReFix::NetworkModeManager::IsOnline()) ? "Goldberg" : "Valve");
+             targetApp, g_config.engineType.c_str(), ReFix::NetworkModeManager::IsGoldbergBackendActive() ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -3484,7 +3484,7 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
 
     if (g_pfn_RegisterCallback) g_pfn_RegisterCallback(pCallback, iCallback);
 
-    if ((!ReFix::NetworkModeManager::IsOnline())) {
+    if (ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
         if (iCallback == 101 || iCallback == 154 || iCallback == 163) {
             std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
             g_pendingAuthCallbacks.push_back({ pCallback, iCallback, 0, 0 });
