@@ -1,10 +1,10 @@
-phase: 1
+phase: 2
 status: complete
-last_verified_commit: 3a8ba0d refix-lan: phase 0 baseline
-last_verified_build: null
-online_status: unknown
-lan_status: unknown
+last_verified_commit: aa96cd4 refix-lan: phase 1 audit
+last_verified_build: SUCCESS
+online_status: preserved
+lan_status: provider_boundary_implemented
 current_failure: null
-completed: phase 1
-next: phase 2
+completed: phase 1, phase 2
+next: phase 3
 

@@ -18,6 +18,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include "network/network_policy.h"
+#include "providers/provider_factory.h"
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -1600,6 +1602,8 @@ static void LoadConfig() {
     if (attrib == INVALID_FILE_ATTRIBUTES) {
         ini = GetProxyDllDir() + "ReFix.ini";
     }
+
+    ReFix::NetworkPolicyManager::LoadPolicy(ini);
 
     auto ReadBool = [&](const char* section, const char* key, bool defaultVal) -> bool {
         char buf[64];
@@ -4093,6 +4097,11 @@ static void CapturePersonaName() {
 extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     ApplySteamEnv();
     ReFixLog("SteamAPI_Init called");
+    
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    provider->Init();
+    ReFixLog("Provider initialized: %s", provider->GetName());
+
     if (!EnsureOriginal()) {
         ReFixLog("SteamAPI_Init: EnsureOriginal failed");
         return false;
