@@ -55,10 +55,8 @@ if "%ENABLE_EOS_LEGACY%"=="1" (
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling EOSSDK-Win64-Shipping.dll & exit /b 1 )
 copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
 
-set "UNREAL_SRC=src\unreal_detect.cpp"
-if "%ENABLE_UNREAL_EOS%"=="1" (
-    set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp"
-)
+set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp"
+
 
 echo [*] Building steam_api64.dll proxy...
 cl /nologo /O2 /Zi /EHsc /std:c++17 /LD /Fobuild\ /Isrc\include /Isrc\include\steam src\steam_proxy.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
@@ -81,3 +79,8 @@ if exist bin\ (
     copy /Y build\steam_api64.dll bin\steam_api64.dll >nul
     echo [OK] Synchronized freshly compiled proxies to bin\
 )
+
+echo [*] Building refix_net_test.exe (Phase 3.6 loopback tester)...
+cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ src\network\refix_net_test.cpp /Febin\refix_net_test.exe
+if %ERRORLEVEL% neq 0 ( echo [!] Error building refix_net_test.exe & exit /b 1 )
+echo [OK] refix_net_test.exe built and placed in bin\

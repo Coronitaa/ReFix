@@ -26,6 +26,7 @@
 #include "upnp_firewall.h"
 #include "steam_p2p_hook.h"
 #include "unreal_detect.h"
+#include "unreal_steam_emu.h"
 #include "minhook/MinHook.h"
 
 #define STEAM_FORWARD_COUNT 1057
@@ -3010,12 +3011,26 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
 }
 
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
+    if (!pszVersion) return nullptr;
+    
+    if (strstr(pszVersion, "SteamNetworkingSockets")) {
+        void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
+        if (providerIface) return providerIface;
+    }
+
     void* iface = g_pfn_FindOrCreateUserInterface ? g_pfn_FindOrCreateUserInterface(hSteamUser, pszVersion) : nullptr;
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
 
 static void* Intercepted_SteamInternal_CreateInterface(const char* pszVersion) {
+    if (!pszVersion) return nullptr;
+    
+    if (strstr(pszVersion, "SteamNetworkingSockets")) {
+        void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
+        if (providerIface) return providerIface;
+    }
+
     void* iface = g_pfn_SteamInternal_CreateInterface ? g_pfn_SteamInternal_CreateInterface(pszVersion) : nullptr;
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
@@ -4117,6 +4132,12 @@ static void ReFixInitializePost(bool success) {
     } else {
         ReFixLog("ReFixInitializePost: Winsock P2P hook skipped (mode=%d)", (int)ReFix::NetworkModeManager::GetMode());
     }
+
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Initialize();
+        ReFixLog("ReFixInitializePost: UnrealSteamEmu LAN initialized");
+    }
+
     InstallVTableHooks();
 }
 
@@ -4288,9 +4309,20 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (s_runCallbacksLogged++ < 3) {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
-    if (g_pfn_RunCallbacks) g_pfn_RunCallbacks();
+    // Only call Valve's RunCallbacks in Online mode. In LAN/Offline mode,
+    // Steam client may not be fully initialized and would crash.
+    if (g_pfn_RunCallbacks && ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamAPI_RunCallbacks: calling valve RunCallbacks");
+        g_pfn_RunCallbacks();
+        ReFixLog("SteamAPI_RunCallbacks: valve RunCallbacks done");
+    }
+    ReFixLog("SteamAPI_RunCallbacks: calling UnrealSteamEmu::RunCallbacks");
+    UnrealSteamEmu::RunCallbacks();
+    ReFixLog("SteamAPI_RunCallbacks: calling DispatchRelayCallbacks");
     DispatchRelayCallbacks();
+    ReFixLog("SteamAPI_RunCallbacks: calling DispatchPendingAuthCallbacks");
     DispatchPendingAuthCallbacks();
+    ReFixLog("SteamAPI_RunCallbacks: done");
 }
 
 static int s_manualRunFrameLogged = 0;
