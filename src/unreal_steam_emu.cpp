@@ -501,7 +501,7 @@ namespace UnrealSteamEmu {
     #pragma pack(push, 1)
     struct NetPacketHeader {
         uint32_t magic;      // 0x52464958 'RFIX'
-        uint8_t  msgType;    // 1: Ping, 2: LobbyAnnounce, 3: LobbyQuery, 4: LobbyJoin, 5: P2P, 6: SocketsPayload, 7: SocketsHandshake, 8: SocketsACK
+        uint8_t  msgType;    // 1: Ping, 2: LobbyAnnounce, 3: LobbyQuery, 4: LobbyJoin, 5: P2P, 6: SocketsPayload, 7: SocketsHandshake, 8: SocketsHandshakeACK, 9: SocketsDataACK
         uint64_t senderID;
         uint32_t appID;
         uint32_t payloadLen;
@@ -510,8 +510,20 @@ namespace UnrealSteamEmu {
     struct SocketsHandshake {
         uint32_t protocolVersion; // 1
         uint32_t sessionId;       // random or lobby based
+        uint32_t connectionNonce; // unique per connection attempt
         uint32_t capabilities;
         uint64_t remotePeerId;
+    };
+
+    struct SocketsHandshakeAck {
+        uint32_t protocolVersion; // 1
+        uint32_t sessionId;
+        uint32_t connectionNonce;
+    };
+
+    struct SocketsAckPacket {
+        uint32_t sessionId;
+        uint64_t ackSequence;     // highest contiguous sequence received
     };
     
     struct SocketsPayloadHeader {
@@ -608,7 +620,7 @@ namespace UnrealSteamEmu {
         }
 
         if (sim_drop > 0 && (rand() % 100) < sim_drop) {
-            // Packet dropped
+            // Drop packet
             return;
         }
 
@@ -623,35 +635,35 @@ namespace UnrealSteamEmu {
         memcpy(netBuf.data(), &hdr, sizeof(hdr));
         if (payloadLen > 0) memcpy(netBuf.data() + sizeof(hdr), payload, payloadLen);
 
-        auto do_send = [netBuf, remoteID, msgType]() {
-            bool sentUnicast = false;
+        sockaddr_in dest = {};
+        bool hasEndpoint = false;
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_peers.find(remoteID.GetAccountID());
-            if (it != g_peers.end()) {
-                sockaddr_in dest = {};
+            auto it = g_peers.find(remoteID.ConvertToUint64());
+            if (it != g_peers.end() && it->second.ip != 0 && it->second.port != 0) {
                 dest.sin_family = AF_INET;
                 dest.sin_port = htons(it->second.port);
                 dest.sin_addr.s_addr = htonl(it->second.ip);
-                sendto(g_udpSocket, (const char*)netBuf.data(), (int)netBuf.size(), 0, (sockaddr*)&dest, sizeof(dest));
-                sentUnicast = true;
-                ReFixLog("[SendLanPacket] Sent unicast msgType=%d to=%llu", msgType, remoteID.ConvertToUint64());
+                hasEndpoint = true;
             }
         }
 
-        if (!sentUnicast) {
-            std::vector<std::string> destinations = { "255.255.255.255", "127.0.0.1" };
-            for (const auto& dstIP : destinations) {
-                for (uint16_t port : { (uint16_t)47584, (uint16_t)47585 }) {
-                    sockaddr_in dest = {};
-                    dest.sin_family = AF_INET;
-                    dest.sin_port = htons(port);
-                    inet_pton(AF_INET, dstIP.c_str(), &dest.sin_addr);
-                    sendto(g_udpSocket, (const char*)netBuf.data(), (int)netBuf.size(), 0, (sockaddr*)&dest, sizeof(dest));
+        auto do_send = [netBuf, dest, hasEndpoint, msgType, remoteID]() {
+            if (hasEndpoint) {
+                sendto(g_udpSocket, (const char*)netBuf.data(), (int)netBuf.size(), 0, (sockaddr*)&dest, sizeof(dest));
+                ReFixLog("[SendLanPacket] Sent unicast msgType=%d to=%llu", msgType, remoteID.ConvertToUint64());
+            } else {
+                for (uint16_t p : { (uint16_t)47584, (uint16_t)47585 }) {
+                    for (const char* ipStr : { "127.0.0.1", "255.255.255.255" }) {
+                        sockaddr_in bcast = {};
+                        bcast.sin_family = AF_INET;
+                        bcast.sin_port = htons(p);
+                        inet_pton(AF_INET, ipStr, &bcast.sin_addr);
+                        sendto(g_udpSocket, (const char*)netBuf.data(), (int)netBuf.size(), 0, (sockaddr*)&bcast, sizeof(bcast));
+                    }
                 }
+                ReFixLog("[SendLanPacket] Peer %llu not yet discovered; sent broadcast msgType=%d", remoteID.ConvertToUint64(), msgType);
             }
-            ReFixLog("[SendLanPacket] Sent broadcast msgType=%d to=%llu", msgType, remoteID.ConvertToUint64());
-        }
         };
 
         auto apply_send = [do_send]() {
@@ -667,7 +679,9 @@ namespace UnrealSteamEmu {
         };
 
         apply_send();
-        if (sim_dup > 0 && (rand() % 100) < sim_dup) apply_send();
+        if (sim_dup > 0 && (rand() % 100) < sim_dup) {
+            apply_send();
+        }
     }
 
     // --- SteamNetworkingSockets Connection Management ---
@@ -740,18 +754,18 @@ namespace UnrealSteamEmu {
         memset(&cb, 0, sizeof(cb));
         cb.m_hConn = handle;
         cb.m_eOldState = oldState;
+        cb.m_info.m_eState = newState;
         
-        std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
-        auto it = g_connections.find(handle);
-        if (it != g_connections.end()) {
-            cb.m_info.m_eState = newState;
-            cb.m_info.m_identityRemote.SetSteamID64(it->second.remoteSteamID.ConvertToUint64());
-            cb.m_info.m_nUserData = it->second.userData;
-        } else {
-            cb.m_info.m_eState = newState;
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+            auto it = g_connections.find(handle);
+            if (it != g_connections.end()) {
+                cb.m_info.m_identityRemote.SetSteamID64(it->second.remoteSteamID.ConvertToUint64());
+                cb.m_info.m_nUserData = it->second.userData;
+            }
         }
         
-        // Push callback to standard callback queue
+        // Push callback to standard callback queue with g_socketsMutex completely released
         std::lock_guard<std::recursive_mutex> cbLock(g_emuMutex);
         std::vector<uint8_t> cbData((uint8_t*)&cb, (uint8_t*)&cb + sizeof(cb));
         g_callbackQueue.push_back({SteamNetConnectionStatusChangedCallback_t::k_iCallback, cbData, std::chrono::steady_clock::now(), false});
@@ -788,6 +802,23 @@ namespace UnrealSteamEmu {
 
                     if (hdr->msgType == 1 && pLen > 0) { // Ping with persona name
                         peer.personaName.assign((char*)payload, pLen);
+                        if (pLen < 4 || memcmp(payload, "ACK_", 4) != 0) {
+                            std::string reply = "ACK_" + g_personaName;
+                            sockaddr_in replyDest = {};
+                            replyDest.sin_family = AF_INET;
+                            replyDest.sin_port = fromAddr.sin_port;
+                            replyDest.sin_addr = fromAddr.sin_addr;
+                            
+                            std::vector<uint8_t> rBuf(sizeof(NetPacketHeader) + reply.size());
+                            NetPacketHeader* rHdr = (NetPacketHeader*)rBuf.data();
+                            rHdr->magic = 0x52464958;
+                            rHdr->msgType = 1;
+                            rHdr->senderID = g_localSteamID;
+                            rHdr->appID = g_appID;
+                            rHdr->payloadLen = (uint32_t)reply.size();
+                            memcpy(rBuf.data() + sizeof(NetPacketHeader), reply.data(), reply.size());
+                            sendto(g_udpSocket, (const char*)rBuf.data(), (int)rBuf.size(), 0, (sockaddr*)&replyDest, sizeof(replyDest));
+                        }
                     } else if (hdr->msgType == 2 && pLen > 0) { // Lobby Announcement
                         std::string meta((char*)payload, pLen);
                         std::stringstream ss(meta);
@@ -819,37 +850,67 @@ namespace UnrealSteamEmu {
                         SocketsHandshake* hs = (SocketsHandshake*)payload;
                         if (hs->protocolVersion == 1) {
                             CSteamID remoteID(hdr->senderID);
-                            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+                            HSteamNetConnection handleToNotify = 0;
+                            ESteamNetworkingConnectionState oldSt = k_ESteamNetworkingConnectionState_None;
+                            ESteamNetworkingConnectionState newSt = k_ESteamNetworkingConnectionState_None;
                             uint32_t sessionId = hs->sessionId;
+                            uint32_t nonce = hs->connectionNonce;
                             
-                            if (g_sessionToConnection.find(sessionId) == g_sessionToConnection.end()) {
-                                // Incoming connection request
-                                HSteamNetConnection handle = CreateReFixConnection(remoteID, k_ESteamNetworkingConnectionState_Connecting, sessionId);
-                                EnqueueSocketCallback(handle, k_ESteamNetworkingConnectionState_None, k_ESteamNetworkingConnectionState_Connecting);
-                            } else {
-                                // We already have a connection, perhaps we initiated it or they are retrying.
-                                HSteamNetConnection handle = g_sessionToConnection[sessionId];
-                                if (g_connections[handle].state == k_ESteamNetworkingConnectionState_Connecting) {
-                                    // They sent a handshake, we sent one. Transition to connected.
-                                    g_connections[handle].state = k_ESteamNetworkingConnectionState_Connected;
-                                    EnqueueSocketCallback(handle, k_ESteamNetworkingConnectionState_Connecting, k_ESteamNetworkingConnectionState_Connected);
+                            {
+                                std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+                                if (g_sessionToConnection.find(sessionId) == g_sessionToConnection.end()) {
+                                    handleToNotify = CreateReFixConnection(remoteID, k_ESteamNetworkingConnectionState_Connecting, sessionId);
+                                    oldSt = k_ESteamNetworkingConnectionState_None;
+                                    newSt = k_ESteamNetworkingConnectionState_Connecting;
+                                } else {
+                                    HSteamNetConnection handle = g_sessionToConnection[sessionId];
+                                    if (g_connections[handle].state == k_ESteamNetworkingConnectionState_Connecting) {
+                                        g_connections[handle].state = k_ESteamNetworkingConnectionState_Connected;
+                                        handleToNotify = handle;
+                                        oldSt = k_ESteamNetworkingConnectionState_Connecting;
+                                        newSt = k_ESteamNetworkingConnectionState_Connected;
+                                    }
                                 }
                             }
-                            // Always ACK the handshake if we receive one so they can transition.
-                            // Send msgType=8 with sessionId
-                            SendLanPacket(remoteID, 8, (const uint8_t*)&sessionId, sizeof(sessionId));
+                            if (handleToNotify != 0) {
+                                EnqueueSocketCallback(handleToNotify, oldSt, newSt);
+                            }
+                            // Always ACK the handshake back
+                            SocketsHandshakeAck ack = { 1, sessionId, nonce };
+                            SendLanPacket(remoteID, 8, (const uint8_t*)&ack, sizeof(ack));
                         }
-                    } else if (hdr->msgType == 8 && pLen == sizeof(uint32_t)) { // Sockets Handshake ACK
-                        uint32_t sessionId = *(uint32_t*)payload;
+                    } else if (hdr->msgType == 8 && pLen >= sizeof(SocketsHandshakeAck)) { // Sockets Handshake ACK
+                        SocketsHandshakeAck* ack = (SocketsHandshakeAck*)payload;
+                        uint32_t sessionId = ack->sessionId;
+                        HSteamNetConnection handleToNotify = 0;
                         ReFixLog("[PollNetwork] ACK received sessionId=%u from=%llu", sessionId, hdr->senderID);
+                        {
+                            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+                            if (g_sessionToConnection.find(sessionId) != g_sessionToConnection.end()) {
+                                HSteamNetConnection handle = g_sessionToConnection[sessionId];
+                                ReFixLog("[PollNetwork] ACK found handle=%u state=%d", handle, g_connections[handle].state);
+                                if (g_connections[handle].state == k_ESteamNetworkingConnectionState_Connecting) {
+                                    g_connections[handle].state = k_ESteamNetworkingConnectionState_Connected;
+                                    ReFixLog("[PollNetwork] Connection %u -> Connected!", handle);
+                                    handleToNotify = handle;
+                                }
+                            }
+                        }
+                        if (handleToNotify != 0) {
+                            EnqueueSocketCallback(handleToNotify, k_ESteamNetworkingConnectionState_Connecting, k_ESteamNetworkingConnectionState_Connected);
+                        }
+                    } else if (hdr->msgType == 9 && pLen >= sizeof(SocketsAckPacket)) { // Sockets Data ACK
+                        SocketsAckPacket* ackPkt = (SocketsAckPacket*)payload;
                         std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
-                        if (g_sessionToConnection.find(sessionId) != g_sessionToConnection.end()) {
-                            HSteamNetConnection handle = g_sessionToConnection[sessionId];
-                            ReFixLog("[PollNetwork] ACK found handle=%u state=%d", handle, g_connections[handle].state);
-                            if (g_connections[handle].state == k_ESteamNetworkingConnectionState_Connecting) {
-                                g_connections[handle].state = k_ESteamNetworkingConnectionState_Connected;
-                                ReFixLog("[PollNetwork] Connection %u -> Connected!", handle);
-                                EnqueueSocketCallback(handle, k_ESteamNetworkingConnectionState_Connecting, k_ESteamNetworkingConnectionState_Connected);
+                        auto it = g_sessionToConnection.find(ackPkt->sessionId);
+                        if (it != g_sessionToConnection.end()) {
+                            ReFixConnection& conn = g_connections[it->second];
+                            if (ackPkt->ackSequence > conn.highestAckReceived) {
+                                conn.highestAckReceived = ackPkt->ackSequence;
+                                conn.unackedOutbound.erase(
+                                    std::remove_if(conn.unackedOutbound.begin(), conn.unackedOutbound.end(),
+                                        [&](const ReliablePacketOut& rOut) { return rOut.sequence <= ackPkt->ackSequence; }),
+                                    conn.unackedOutbound.end());
                             }
                         }
                     } else if (hdr->msgType == 6 && pLen >= (sizeof(uint32_t) + sizeof(SocketsPayloadHeader))) { // Sockets Payload
@@ -859,109 +920,135 @@ namespace UnrealSteamEmu {
                         const uint8_t* payloadData = payload + sizeof(uint32_t) + sizeof(SocketsPayloadHeader);
                         
                         CSteamID remoteID(hdr->senderID);
-                        std::lock_guard<std::recursive_mutex> sockLock(g_socketsMutex);
-                        
-                        auto it = g_sessionToConnection.find(sessionId);
-                        if (it != g_sessionToConnection.end() && g_connections[it->second].state == k_ESteamNetworkingConnectionState_Connected) {
-                            ReFixConnection& conn = g_connections[it->second];
+                        bool sendAck = false;
+                        uint64_t ackSeqToSend = 0;
+
+                        {
+                            std::lock_guard<std::recursive_mutex> sockLock(g_socketsMutex);
                             
-                            // Handle ACKs (remove acked messages from unackedOutbound)
-                            if (head.ack > conn.highestAckReceived) {
-                                conn.highestAckReceived = head.ack;
-                                conn.unackedOutbound.erase(
-                                    std::remove_if(conn.unackedOutbound.begin(), conn.unackedOutbound.end(),
-                                        [&](const ReliablePacketOut& rOut) { return rOut.sequence <= head.ack; }),
-                                    conn.unackedOutbound.end());
-                            }
-                            
-                            bool acceptMessage = false;
-                            bool isReliable = (head.flags & k_nSteamNetworkingSend_Reliable) != 0;
-                            
-                            if (isReliable) {
-                                if (head.sequence < conn.nextSequenceExpected) {
-                                    // Duplicate, ignore but we still might send ACK via normal flow.
-                                } else if (head.sequence > conn.nextSequenceExpected) {
-                                    // Out of order, buffer it
-                                    if (conn.outOfOrderInbound.find(head.sequence) == conn.outOfOrderInbound.end()) {
-                                        SteamNetworkingMessage_t* msg = (SteamNetworkingMessage_t*)malloc(sizeof(SteamNetworkingMessage_t) + payloadDataLen);
-                                        memset(msg, 0, sizeof(SteamNetworkingMessage_t));
-                                        msg->m_pData = (void*)(msg + 1);
-                                        memcpy(msg->m_pData, payloadData, payloadDataLen);
-                                        msg->m_cbSize = payloadDataLen;
-                                        msg->m_conn = it->second;
-                                        msg->m_identityPeer.SetSteamID64(hdr->senderID);
-                                        msg->m_pfnFreeData = ReleaseReFixMessage;
-                                        msg->m_pfnRelease = ReleaseReFixMessage;
-                                        msg->m_nChannel = head.channel;
-                                        msg->m_nFlags = head.flags;
-                                        msg->m_nMessageNumber = head.messageNumber;
-                                        conn.outOfOrderInbound[head.sequence] = msg;
-                                    }
-                                } else {
-                                    acceptMessage = true; // Sequence matches expected
+                            auto it = g_sessionToConnection.find(sessionId);
+                            if (it != g_sessionToConnection.end() && g_connections[it->second].state == k_ESteamNetworkingConnectionState_Connected) {
+                                ReFixConnection& conn = g_connections[it->second];
+                                
+                                // Handle piggybacked ACKs
+                                if (head.ack > conn.highestAckReceived) {
+                                    conn.highestAckReceived = head.ack;
+                                    conn.unackedOutbound.erase(
+                                        std::remove_if(conn.unackedOutbound.begin(), conn.unackedOutbound.end(),
+                                            [&](const ReliablePacketOut& rOut) { return rOut.sequence <= head.ack; }),
+                                        conn.unackedOutbound.end());
                                 }
-                            } else {
-                                acceptMessage = true; // Unreliable
-                            }
-                            
-                            if (acceptMessage) {
-                                SteamNetworkingMessage_t* msg = (SteamNetworkingMessage_t*)malloc(sizeof(SteamNetworkingMessage_t) + payloadDataLen);
-                                memset(msg, 0, sizeof(SteamNetworkingMessage_t));
-                                msg->m_pData = (void*)(msg + 1);
-                                memcpy(msg->m_pData, payloadData, payloadDataLen);
-                                msg->m_cbSize = payloadDataLen;
-                                msg->m_conn = it->second;
-                                msg->m_identityPeer.SetSteamID64(hdr->senderID);
-                                msg->m_pfnFreeData = ReleaseReFixMessage;
-                                msg->m_pfnRelease = ReleaseReFixMessage;
-                                msg->m_nChannel = head.channel;
-                                msg->m_nFlags = head.flags;
-                                msg->m_nMessageNumber = head.messageNumber;
-                                conn.incomingMessages.push(msg);
+                                
+                                bool acceptMessage = false;
+                                bool isReliable = (head.flags & k_nSteamNetworkingSend_Reliable) != 0;
                                 
                                 if (isReliable) {
-                                    conn.nextSequenceExpected++;
-                                    // Drain outOfOrderInbound
-                                    while (conn.outOfOrderInbound.find(conn.nextSequenceExpected) != conn.outOfOrderInbound.end()) {
-                                        conn.incomingMessages.push(conn.outOfOrderInbound[conn.nextSequenceExpected]);
-                                        conn.outOfOrderInbound.erase(conn.nextSequenceExpected);
+                                    sendAck = true;
+                                    if (head.sequence < conn.nextSequenceExpected) {
+                                        // Duplicate reliable: re-ACK with current expected sequence - 1
+                                        ackSeqToSend = conn.nextSequenceExpected > 0 ? (conn.nextSequenceExpected - 1) : 0;
+                                    } else if (head.sequence > conn.nextSequenceExpected) {
+                                        // Out of order: buffer it
+                                        if (conn.outOfOrderInbound.find(head.sequence) == conn.outOfOrderInbound.end()) {
+                                            SteamNetworkingMessage_t* msg = (SteamNetworkingMessage_t*)malloc(sizeof(SteamNetworkingMessage_t) + payloadDataLen);
+                                            memset(msg, 0, sizeof(SteamNetworkingMessage_t));
+                                            msg->m_pData = (void*)(msg + 1);
+                                            memcpy(msg->m_pData, payloadData, payloadDataLen);
+                                            msg->m_cbSize = payloadDataLen;
+                                            msg->m_conn = it->second;
+                                            msg->m_identityPeer.SetSteamID64(hdr->senderID);
+                                            msg->m_pfnFreeData = nullptr;
+                                            msg->m_pfnRelease = ReleaseReFixMessage;
+                                            msg->m_nChannel = head.channel;
+                                            msg->m_nFlags = head.flags;
+                                            msg->m_nMessageNumber = head.messageNumber;
+                                            conn.outOfOrderInbound[head.sequence] = msg;
+                                        }
+                                        ackSeqToSend = conn.nextSequenceExpected > 0 ? (conn.nextSequenceExpected - 1) : 0;
+                                    } else {
+                                        acceptMessage = true; // Sequence matches expected
+                                    }
+                                } else {
+                                    acceptMessage = true; // Unreliable
+                                }
+                                
+                                if (acceptMessage) {
+                                    SteamNetworkingMessage_t* msg = (SteamNetworkingMessage_t*)malloc(sizeof(SteamNetworkingMessage_t) + payloadDataLen);
+                                    memset(msg, 0, sizeof(SteamNetworkingMessage_t));
+                                    msg->m_pData = (void*)(msg + 1);
+                                    memcpy(msg->m_pData, payloadData, payloadDataLen);
+                                    msg->m_cbSize = payloadDataLen;
+                                    msg->m_conn = it->second;
+                                    msg->m_identityPeer.SetSteamID64(hdr->senderID);
+                                    msg->m_pfnFreeData = nullptr;
+                                    msg->m_pfnRelease = ReleaseReFixMessage;
+                                    msg->m_nChannel = head.channel;
+                                    msg->m_nFlags = head.flags;
+                                    msg->m_nMessageNumber = head.messageNumber;
+                                    conn.incomingMessages.push(msg);
+                                    
+                                    if (isReliable) {
                                         conn.nextSequenceExpected++;
+                                        // Drain outOfOrderInbound
+                                        while (conn.outOfOrderInbound.find(conn.nextSequenceExpected) != conn.outOfOrderInbound.end()) {
+                                            conn.incomingMessages.push(conn.outOfOrderInbound[conn.nextSequenceExpected]);
+                                            conn.outOfOrderInbound.erase(conn.nextSequenceExpected);
+                                            conn.nextSequenceExpected++;
+                                        }
+                                        ackSeqToSend = conn.nextSequenceExpected - 1;
                                     }
                                 }
                             }
+                        }
+
+                        if (sendAck) {
+                            SocketsAckPacket ackPkt = { sessionId, ackSeqToSend };
+                            SendLanPacket(remoteID, 9, (const uint8_t*)&ackPkt, sizeof(ackPkt));
                         }
                     }
                 }
             }
         }
         
-        // Retransmission Tick
-        auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
-        for (auto& pair : g_connections) {
-            ReFixConnection& conn = pair.second;
-            if (conn.state == k_ESteamNetworkingConnectionState_Connected) {
-                for (auto& rOut : conn.unackedOutbound) {
-                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - rOut.lastSendTime).count() > 200) {
-                        SocketsPayloadHeader head = {};
-                        head.flags = k_nSteamNetworkingSend_Reliable;
-                        head.messageNumber = 0;
-                        head.sequence = rOut.sequence;
-                        head.ack = conn.nextSequenceExpected > 0 ? (conn.nextSequenceExpected - 1) : 0;
-                        
-                        std::vector<uint8_t> payload(sizeof(uint32_t) + sizeof(SocketsPayloadHeader) + rOut.data.size());
-                        uint8_t* ptr = payload.data();
-                        *(uint32_t*)ptr = conn.sessionId; ptr += sizeof(uint32_t);
-                        memcpy(ptr, &head, sizeof(SocketsPayloadHeader)); ptr += sizeof(SocketsPayloadHeader);
-                        memcpy(ptr, rOut.data.data(), rOut.data.size());
-                        
-                        SendLanPacket(conn.remoteSteamID, 6, payload.data(), payload.size());
-                        
-                        rOut.lastSendTime = now;
-                        rOut.retries++;
+        // Retransmission Tick (collected under lock, sent outside lock)
+        struct PendingRetransmit {
+            CSteamID remoteSteamID;
+            std::vector<uint8_t> payload;
+        };
+        std::vector<PendingRetransmit> toRetransmit;
+
+        {
+            auto now = std::chrono::steady_clock::now();
+            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+            for (auto& pair : g_connections) {
+                ReFixConnection& conn = pair.second;
+                if (conn.state == k_ESteamNetworkingConnectionState_Connected) {
+                    for (auto& rOut : conn.unackedOutbound) {
+                        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - rOut.lastSendTime).count() > 100) {
+                            SocketsPayloadHeader head = {};
+                            head.flags = k_nSteamNetworkingSend_Reliable;
+                            head.messageNumber = 0;
+                            head.sequence = rOut.sequence;
+                            head.ack = conn.nextSequenceExpected > 0 ? (conn.nextSequenceExpected - 1) : 0;
+                            
+                            std::vector<uint8_t> payload(sizeof(uint32_t) + sizeof(SocketsPayloadHeader) + rOut.data.size());
+                            uint8_t* ptr = payload.data();
+                            *(uint32_t*)ptr = conn.sessionId; ptr += sizeof(uint32_t);
+                            memcpy(ptr, &head, sizeof(SocketsPayloadHeader)); ptr += sizeof(SocketsPayloadHeader);
+                            memcpy(ptr, rOut.data.data(), rOut.data.size());
+                            
+                            toRetransmit.push_back({ conn.remoteSteamID, std::move(payload) });
+                            
+                            rOut.lastSendTime = now;
+                            rOut.retries++;
+                        }
                     }
                 }
             }
+        }
+
+        for (const auto& item : toRetransmit) {
+            SendLanPacket(item.remoteSteamID, 6, item.payload.data(), item.payload.size());
         }
     }
 
@@ -970,45 +1057,78 @@ namespace UnrealSteamEmu {
 
         PollNetwork();
 
-        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-
         auto now = std::chrono::steady_clock::now();
 
-        // 1. Process CallResults
-        for (auto& pair : g_callResultMap) {
-            auto& cr = pair.second;
-            if (!cr.completed && now >= cr.triggerTime) {
-                cr.completed = true;
+        struct CallResultDispatch {
+            CCallbackBase* pListener;
+            std::vector<uint8_t> data;
+            bool failed;
+            uint64_t hAPICall;
+        };
+        std::vector<CallResultDispatch> crToDispatch;
 
-                auto itListener = g_callResultListeners.find(cr.hAPICall);
-                if (itListener != g_callResultListeners.end() && itListener->second) {
-                    itListener->second->Run(cr.data.data(), cr.failed, cr.hAPICall);
+        struct CallbackCompletedDispatch {
+            CCallbackBase* pCallback;
+            SteamAPICallCompleted_t cc;
+        };
+        std::vector<CallbackCompletedDispatch> ccToDispatch;
+
+        struct CallbackDispatch {
+            CCallbackBase* pCallback;
+            std::vector<uint8_t> data;
+        };
+        std::vector<CallbackDispatch> cbToDispatch;
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+
+            // 1. Process CallResults
+            for (auto& pair : g_callResultMap) {
+                auto& cr = pair.second;
+                if (!cr.completed && now >= cr.triggerTime) {
+                    cr.completed = true;
+
+                    auto itListener = g_callResultListeners.find(cr.hAPICall);
+                    if (itListener != g_callResultListeners.end() && itListener->second) {
+                        crToDispatch.push_back({ itListener->second, cr.data, cr.failed, cr.hAPICall });
+                    }
+
+                    // Trigger SteamAPICallCompleted_t (callback 703)
+                    SteamAPICallCompleted_t cc = {};
+                    cc.m_hAsyncCall = cr.hAPICall;
+                    cc.m_iCallback = cr.iCallback;
+                    cc.m_cubParam = (uint32_t)cr.data.size();
+
+                    auto range = g_clientCallbacks.equal_range(SteamAPICallCompleted_t::k_iCallback);
+                    for (auto it = range.first; it != range.second; ++it) {
+                        if (it->second) ccToDispatch.push_back({ it->second, cc });
+                    }
                 }
+            }
 
-                // Trigger SteamAPICallCompleted_t (callback 703)
-                SteamAPICallCompleted_t cc = {};
-                cc.m_hAsyncCall = cr.hAPICall;
-                cc.m_iCallback = cr.iCallback;
-                cc.m_cubParam = (uint32_t)cr.data.size();
-
-                auto range = g_clientCallbacks.equal_range(SteamAPICallCompleted_t::k_iCallback);
-                for (auto it = range.first; it != range.second; ++it) {
-                    if (it->second) it->second->Run(&cc);
+            // 2. Process generic Callbacks
+            for (auto it = g_callbackQueue.begin(); it != g_callbackQueue.end(); ) {
+                if (now >= it->triggerTime) {
+                    auto range = g_clientCallbacks.equal_range(it->iCallback);
+                    for (auto cbIt = range.first; cbIt != range.second; ++cbIt) {
+                        if (cbIt->second) cbToDispatch.push_back({ cbIt->second, it->data });
+                    }
+                    it = g_callbackQueue.erase(it);
+                } else {
+                    ++it;
                 }
             }
         }
 
-        // 2. Process generic Callbacks
-        for (auto it = g_callbackQueue.begin(); it != g_callbackQueue.end(); ) {
-            if (now >= it->triggerTime) {
-                auto range = g_clientCallbacks.equal_range(it->iCallback);
-                for (auto cbIt = range.first; cbIt != range.second; ++cbIt) {
-                    if (cbIt->second) cbIt->second->Run(it->data.data());
-                }
-                it = g_callbackQueue.erase(it);
-            } else {
-                ++it;
-            }
+        // Execute all dispatches with g_emuMutex RELEASED to eliminate lock inversion
+        for (auto& item : crToDispatch) {
+            item.pListener->Run(item.data.data(), item.failed, item.hAPICall);
+        }
+        for (auto& item : ccToDispatch) {
+            item.pCallback->Run(&item.cc);
+        }
+        for (auto& item : cbToDispatch) {
+            item.pCallback->Run(item.data.data());
         }
     }
 
@@ -1016,20 +1136,31 @@ namespace UnrealSteamEmu {
         if (!g_bInitialized) return;
 
         PollNetwork();
-
-        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
         auto now = std::chrono::steady_clock::now();
 
-        for (auto it = g_callbackQueue.begin(); it != g_callbackQueue.end(); ) {
-            if (it->isGameServer && now >= it->triggerTime) {
-                auto range = g_serverCallbacks.equal_range(it->iCallback);
-                for (auto cbIt = range.first; cbIt != range.second; ++cbIt) {
-                    if (cbIt->second) cbIt->second->Run(it->data.data());
+        struct ServerCallbackDispatch {
+            CCallbackBase* pCallback;
+            std::vector<uint8_t> data;
+        };
+        std::vector<ServerCallbackDispatch> serverCbToDispatch;
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            for (auto it = g_callbackQueue.begin(); it != g_callbackQueue.end(); ) {
+                if (it->isGameServer && now >= it->triggerTime) {
+                    auto range = g_serverCallbacks.equal_range(it->iCallback);
+                    for (auto cbIt = range.first; cbIt != range.second; ++cbIt) {
+                        if (cbIt->second) serverCbToDispatch.push_back({ cbIt->second, it->data });
+                    }
+                    it = g_callbackQueue.erase(it);
+                } else {
+                    ++it;
                 }
-                it = g_callbackQueue.erase(it);
-            } else {
-                ++it;
             }
+        }
+
+        for (auto& item : serverCbToDispatch) {
+            item.pCallback->Run(item.data.data());
         }
     }
 
@@ -2125,15 +2256,22 @@ namespace UnrealSteamEmu {
     // --- ISteamNetworkingSockets (SteamSockets NetDriver) ---
     class CSteamNetworkingSocketsEmu : public ISteamNetworkingSockets {
     public:
+        // 1. CreateListenSocketIP
         virtual HSteamListenSocket CreateListenSocketIP(const SteamNetworkingIPAddr &localAddress, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override {
             return 1;
         }
+
+        // 2. ConnectByIPAddress
         virtual HSteamNetConnection ConnectByIPAddress(const SteamNetworkingIPAddr &address, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override {
             return 1;
         }
+
+        // 3. CreateListenSocketP2P
         virtual HSteamListenSocket CreateListenSocketP2P(int nLocalVirtualPort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override {
-            return 1; // Dummy handle
+            return 1;
         }
+
+        // 4. ConnectP2P
         virtual HSteamNetConnection ConnectP2P(const SteamNetworkingIdentity &identityRemote, int nRemoteVirtualPort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override {
             CSteamID remoteID(identityRemote.GetSteamID64());
             HSteamNetConnection handle = CreateReFixConnection(remoteID, k_ESteamNetworkingConnectionState_Connecting);
@@ -2146,10 +2284,12 @@ namespace UnrealSteamEmu {
                 sessionId = g_connections[handle].sessionId;
             }
             
-            // Send Handshake
+            // Send Handshake with unique connectionNonce
             SocketsHandshake hs;
             hs.protocolVersion = 1;
             hs.sessionId = sessionId;
+            static std::atomic<uint32_t> s_nonceGen{ 1000 };
+            hs.connectionNonce = s_nonceGen.fetch_add(1);
             hs.capabilities = 0;
             hs.remotePeerId = remoteID.ConvertToUint64();
             
@@ -2157,38 +2297,62 @@ namespace UnrealSteamEmu {
             
             return handle;
         }
+
+        // 5. AcceptConnection
         virtual EResult AcceptConnection(HSteamNetConnection hConn) override { 
-            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
-            if (g_connections.find(hConn) != g_connections.end()) {
-                if (g_connections[hConn].state == k_ESteamNetworkingConnectionState_Connecting) {
-                    g_connections[hConn].state = k_ESteamNetworkingConnectionState_Connected;
-                    EnqueueSocketCallback(hConn, k_ESteamNetworkingConnectionState_Connecting, k_ESteamNetworkingConnectionState_Connected);
+            bool doEnqueue = false;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+                auto it = g_connections.find(hConn);
+                if (it != g_connections.end()) {
+                    if (it->second.state == k_ESteamNetworkingConnectionState_Connecting) {
+                        it->second.state = k_ESteamNetworkingConnectionState_Connected;
+                        doEnqueue = true;
+                    }
+                } else {
+                    return k_EResultInvalidParam;
                 }
-                return k_EResultOK;
             }
-            return k_EResultInvalidParam;
+            if (doEnqueue) {
+                EnqueueSocketCallback(hConn, k_ESteamNetworkingConnectionState_Connecting, k_ESteamNetworkingConnectionState_Connected);
+            }
+            return k_EResultOK;
         }
+
+        // 6. CloseConnection
         virtual bool CloseConnection(HSteamNetConnection hPeer, int nReason, const char *pszDebug, bool bEnableLinger) override { 
-            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
-            auto it = g_connections.find(hPeer);
-            if (it != g_connections.end()) {
-                ESteamNetworkingConnectionState oldState = it->second.state;
-                it->second.state = k_ESteamNetworkingConnectionState_ClosedByPeer;
-                EnqueueSocketCallback(hPeer, oldState, k_ESteamNetworkingConnectionState_ClosedByPeer);
-                
-                // Cleanup messages
-                while (!it->second.incomingMessages.empty()) {
-                    auto* msg = it->second.incomingMessages.front();
-                    if (msg->m_pfnFreeData) msg->m_pfnFreeData(msg);
-                    it->second.incomingMessages.pop();
+            bool doEnqueue = false;
+            ESteamNetworkingConnectionState oldState = k_ESteamNetworkingConnectionState_None;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+                auto it = g_connections.find(hPeer);
+                if (it != g_connections.end()) {
+                    oldState = it->second.state;
+                    it->second.state = k_ESteamNetworkingConnectionState_ClosedByPeer;
+                    doEnqueue = true;
+                    
+                    // Cleanup messages using Release()
+                    while (!it->second.incomingMessages.empty()) {
+                        auto* msg = it->second.incomingMessages.front();
+                        if (msg) msg->Release();
+                        it->second.incomingMessages.pop();
+                    }
+                    g_sessionToConnection.erase(it->second.sessionId);
+                    g_connections.erase(it);
+                } else {
+                    return false;
                 }
-                g_sessionToConnection.erase(it->second.sessionId);
-                g_connections.erase(it);
-                return true;
             }
-            return false;
+            if (doEnqueue) {
+                EnqueueSocketCallback(hPeer, oldState, k_ESteamNetworkingConnectionState_ClosedByPeer);
+            }
+            return true;
         }
+
+        // 7. CloseListenSocket
         virtual bool CloseListenSocket(HSteamListenSocket hSocket) override { return true; }
+
+        // 8. SetConnectionUserData
         virtual bool SetConnectionUserData(HSteamNetConnection hPeer, int64 nUserData) override { 
             std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
             if (g_connections.find(hPeer) != g_connections.end()) {
@@ -2197,6 +2361,8 @@ namespace UnrealSteamEmu {
             }
             return false;
         }
+
+        // 9. GetConnectionUserData
         virtual int64 GetConnectionUserData(HSteamNetConnection hPeer) override { 
             std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
             if (g_connections.find(hPeer) != g_connections.end()) {
@@ -2204,12 +2370,16 @@ namespace UnrealSteamEmu {
             }
             return 0;
         }
+
+        // 10. SetConnectionName
         virtual void SetConnectionName(HSteamNetConnection hPeer, const char *pszName) override {
             std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
             if (g_connections.find(hPeer) != g_connections.end() && pszName) {
                 strncpy_s(g_connections[hPeer].name, sizeof(g_connections[hPeer].name), pszName, _TRUNCATE);
             }
         }
+
+        // 11. GetConnectionName
         virtual bool GetConnectionName(HSteamNetConnection hPeer, char *pszName, int nMaxLen) override {
             std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
             if (g_connections.find(hPeer) != g_connections.end() && pszName && nMaxLen > 0) {
@@ -2218,6 +2388,8 @@ namespace UnrealSteamEmu {
             }
             return false;
         }
+
+        // 12. SendMessageToConnection
         virtual EResult SendMessageToConnection(HSteamNetConnection hConn, const void *pData, uint32 cbData, int nSendFlags, int64 *pOutMessageNumber) override {
             if (!pData || cbData == 0) return k_EResultInvalidParam;
             
@@ -2230,17 +2402,16 @@ namespace UnrealSteamEmu {
                 std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
                 auto it = g_connections.find(hConn);
                 if (it == g_connections.end()) return k_EResultInvalidParam;
-                if (it->second.state == k_ESteamNetworkingConnectionState_Connecting) return k_EResultIgnored; // Technically might queue it, but ignored for now
+                if (it->second.state == k_ESteamNetworkingConnectionState_Connecting) return k_EResultIgnored;
                 if (it->second.state != k_ESteamNetworkingConnectionState_Connected) return k_EResultNoConnection;
                 
                 remoteID = it->second.remoteSteamID;
                 sessionId = it->second.sessionId;
                 head.messageNumber = ++(it->second.messageCountOut);
                 head.sequence = it->second.nextSequenceOut++;
-                head.ack = it->second.nextSequenceExpected - 1; // Last received contiguous
+                head.ack = it->second.nextSequenceExpected > 0 ? (it->second.nextSequenceExpected - 1) : 0;
                 
                 if (nSendFlags & k_nSteamNetworkingSend_Reliable) {
-                    // Store for retransmission (sliding window)
                     ReliablePacketOut rOut;
                     rOut.sequence = head.sequence;
                     rOut.data.assign((const uint8_t*)pData, (const uint8_t*)pData + cbData);
@@ -2257,22 +2428,27 @@ namespace UnrealSteamEmu {
             memcpy(ptr, &head, sizeof(SocketsPayloadHeader)); ptr += sizeof(SocketsPayloadHeader);
             memcpy(ptr, pData, cbData);
             
-            // Route through existing LAN transport
+            // Send outside of g_socketsMutex lock
             SendLanPacket(remoteID, 6, payload.data(), payload.size());
             
             if (pOutMessageNumber) *pOutMessageNumber = head.messageNumber;
             return k_EResultOK;
         }
+
+        // 13. SendMessages
         virtual void SendMessages(int nMessages, SteamNetworkingMessage_t *const *pMessages, int64 *pOutMessageNumberOrResult) override {
             for (int i = 0; i < nMessages; i++) {
                 int64 num = 0;
                 EResult res = SendMessageToConnection(pMessages[i]->m_conn, pMessages[i]->m_pData, pMessages[i]->m_cbSize, pMessages[i]->m_nFlags, &num);
                 if (pOutMessageNumberOrResult) pOutMessageNumberOrResult[i] = (res == k_EResultOK) ? num : -res;
-                if (pMessages[i]->m_pfnFreeData) pMessages[i]->m_pfnFreeData(pMessages[i]);
+                pMessages[i]->Release();
             }
         }
+
+        // 14. FlushMessagesOnConnection
         virtual EResult FlushMessagesOnConnection(HSteamNetConnection hConn) override { return k_EResultOK; }
         
+        // 15. ReceiveMessagesOnConnection
         virtual int ReceiveMessagesOnConnection(HSteamNetConnection hConn, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages) override { 
             std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
             auto it = g_connections.find(hConn);
@@ -2289,8 +2465,77 @@ namespace UnrealSteamEmu {
             return count;
         }
         
+        // 16. GetConnectionInfo
+        virtual bool GetConnectionInfo(HSteamNetConnection hConn, SteamNetConnectionInfo_t *pInfo) override {
+            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
+            auto it = g_connections.find(hConn);
+            if (it != g_connections.end() && pInfo) {
+                memset(pInfo, 0, sizeof(SteamNetConnectionInfo_t));
+                pInfo->m_eState = it->second.state;
+                pInfo->m_identityRemote.SetSteamID64(it->second.remoteSteamID.ConvertToUint64());
+                pInfo->m_nUserData = it->second.userData;
+                return true;
+            }
+            return false;
+        }
+
+        // 17. GetConnectionRealTimeStatus
+        virtual EResult GetConnectionRealTimeStatus(HSteamNetConnection hConn, SteamNetConnectionRealTimeStatus_t *pStatus, int nLanes, SteamNetConnectionRealTimeLaneStatus_t *pLanes) override {
+            if (pStatus) memset(pStatus, 0, sizeof(SteamNetConnectionRealTimeStatus_t));
+            if (pLanes && nLanes > 0) memset(pLanes, 0, sizeof(SteamNetConnectionRealTimeLaneStatus_t) * nLanes);
+            return k_EResultOK;
+        }
+
+        // 18. GetDetailedConnectionStatus
+        virtual int GetDetailedConnectionStatus(HSteamNetConnection hConn, char *pszBuf, int cbBuf) override { return 0; }
+
+        // 19. GetListenSocketAddress
+        virtual bool GetListenSocketAddress(HSteamListenSocket hSocket, SteamNetworkingIPAddr *address) override {
+            if (address) {
+                address->Clear();
+                address->SetIPv4(0x7F000001, 7777);
+                return true;
+            }
+            return false;
+        }
+
+        // 20. CreateSocketPair
+        virtual bool CreateSocketPair(HSteamNetConnection *pOutConnection1, HSteamNetConnection *pOutConnection2, bool bUseNetworkLoopback, const SteamNetworkingIdentity *pIdentity1, const SteamNetworkingIdentity *pIdentity2) override {
+            if (pOutConnection1) *pOutConnection1 = 1;
+            if (pOutConnection2) *pOutConnection2 = 2;
+            return true;
+        }
+
+        // 21. ConfigureConnectionLanes
+        virtual EResult ConfigureConnectionLanes(HSteamNetConnection hConn, int nNumLanes, const int *pLanePriorities, const uint16 *pLaneWeights) override {
+            return k_EResultOK;
+        }
+
+        // 22. GetIdentity
+        virtual bool GetIdentity(SteamNetworkingIdentity *pIdentity) override {
+            if (pIdentity) { pIdentity->SetSteamID64(g_localSteamID); return true; }
+            return false;
+        }
+
+        // 23. InitAuthentication
+        virtual ESteamNetworkingAvailability InitAuthentication() override { return k_ESteamNetworkingAvailability_Current; }
+
+        // 24. GetAuthenticationStatus
+        virtual ESteamNetworkingAvailability GetAuthenticationStatus(SteamNetAuthenticationStatus_t *pDetails) override {
+            if (pDetails) {
+                memset(pDetails, 0, sizeof(SteamNetAuthenticationStatus_t));
+                pDetails->m_eAvail = k_ESteamNetworkingAvailability_Current;
+            }
+            return k_ESteamNetworkingAvailability_Current;
+        }
+
+        // 25. CreatePollGroup
         virtual HSteamNetPollGroup CreatePollGroup() override { return 1; }
+
+        // 26. DestroyPollGroup
         virtual bool DestroyPollGroup(HSteamNetPollGroup hPollGroup) override { return true; }
+
+        // 27. SetConnectionPollGroup
         virtual bool SetConnectionPollGroup(HSteamNetConnection hConn, HSteamNetPollGroup hPollGroup) override { 
             std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
             if (g_connections.find(hConn) != g_connections.end()) {
@@ -2299,10 +2544,11 @@ namespace UnrealSteamEmu {
             }
             return false;
         }
+
+        // 28. ReceiveMessagesOnPollGroup
         virtual int ReceiveMessagesOnPollGroup(HSteamNetPollGroup hPollGroup, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages) override { 
             std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
             int count = 0;
-            // Iterate all connections in this poll group
             for (auto& pair : g_connections) {
                 if (pair.second.pollGroup == hPollGroup && pair.second.state == k_ESteamNetworkingConnectionState_Connected) {
                     while (count < nMaxMessages && !pair.second.incomingMessages.empty()) {
@@ -2315,77 +2561,60 @@ namespace UnrealSteamEmu {
             }
             return count;
         }
-        
-        virtual bool GetConnectionInfo(HSteamNetConnection hConn, SteamNetConnectionInfo_t *pInfo) override {
-            ReFixLog("[GetConnectionInfo] hConn=%u pInfo=%p", hConn, (void*)pInfo);
-            std::lock_guard<std::recursive_mutex> lock(g_socketsMutex);
-            auto it = g_connections.find(hConn);
-            if (it != g_connections.end() && pInfo) {
-                memset(pInfo, 0, sizeof(SteamNetConnectionInfo_t));
-                pInfo->m_eState = it->second.state;
-                pInfo->m_identityRemote.SetSteamID64(it->second.remoteSteamID.ConvertToUint64());
-                pInfo->m_nUserData = it->second.userData;
-                ReFixLog("[GetConnectionInfo] hConn=%u found state=%d", hConn, (int)it->second.state);
-                return true;
-            }
-            return false;
-        }
-        virtual EResult GetConnectionRealTimeStatus(HSteamNetConnection hConn, SteamNetConnectionRealTimeStatus_t *pStatus, int nLanes, SteamNetConnectionRealTimeLaneStatus_t *pLanes) override {
-            if (pStatus) memset(pStatus, 0, sizeof(SteamNetConnectionRealTimeStatus_t));
-            if (pLanes && nLanes > 0) memset(pLanes, 0, sizeof(SteamNetConnectionRealTimeLaneStatus_t) * nLanes);
-            return k_EResultOK;
-        }
-        virtual int GetDetailedConnectionStatus(HSteamNetConnection hConn, char *pszBuf, int cbBuf) override { return 0; }
-        virtual bool GetListenSocketAddress(HSteamListenSocket hSocket, SteamNetworkingIPAddr *address) override {
-            if (address) {
-                address->Clear();
-                address->SetIPv4(0x7F000001, 7777);
-                return true;
-            }
-            return false;
-        }
-        virtual bool CreateSocketPair(HSteamNetConnection *pOutConnection1, HSteamNetConnection *pOutConnection2, bool bUseNetworkLoopback, const SteamNetworkingIdentity *pIdentity1, const SteamNetworkingIdentity *pIdentity2) override {
-            if (pOutConnection1) *pOutConnection1 = 1;
-            if (pOutConnection2) *pOutConnection2 = 2;
-            return true;
-        }
-        virtual EResult ConfigureConnectionLanes(HSteamNetConnection hConn, int nNumLanes, const int *pLanePriorities, const uint16 *pLaneWeights) override {
-            return k_EResultOK;
-        }
+
+        // 29. ReceivedRelayAuthTicket
         virtual bool ReceivedRelayAuthTicket(const void *pvTicket, int cbTicket, SteamDatagramRelayAuthTicket *pOutParsedTicket) override { return true; }
+
+        // 30. FindRelayAuthTicketForServer
         virtual int FindRelayAuthTicketForServer(const SteamNetworkingIdentity &identityGameServer, int nRemoteVirtualPort, SteamDatagramRelayAuthTicket *pOutParsedTicket) override { return 0; }
+
+        // 31. ConnectToHostedDedicatedServer
         virtual HSteamNetConnection ConnectToHostedDedicatedServer(const SteamNetworkingIdentity &identityTarget, int nRemoteVirtualPort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override {
             return 1;
         }
+
+        // 32. GetHostedDedicatedServerPort
         virtual uint16 GetHostedDedicatedServerPort() override { return 7777; }
+
+        // 33. GetHostedDedicatedServerPOPID
         virtual SteamNetworkingPOPID GetHostedDedicatedServerPOPID() override { return 0; }
+
+        // 34. GetHostedDedicatedServerAddress
         virtual EResult GetHostedDedicatedServerAddress(SteamDatagramHostedAddress *pRouting) override { return k_EResultOK; }
+
+        // 35. CreateHostedDedicatedServerListenSocket
         virtual HSteamListenSocket CreateHostedDedicatedServerListenSocket(int nLocalVirtualPort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override { return 1; }
+
+        // 36. GetGameCoordinatorServerLogin
         virtual EResult GetGameCoordinatorServerLogin(SteamDatagramGameCoordinatorServerLogin *pLoginInfo, int *pcbSignedBlob, void *pBlob) override { return k_EResultOK; }
+
+        // 37. ConnectP2PCustomSignaling
         virtual HSteamNetConnection ConnectP2PCustomSignaling(ISteamNetworkingConnectionSignaling *pSignaling, const SteamNetworkingIdentity *pPeerIdentity, int nRemoteVirtualPort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override {
             return 1;
         }
+
+        // 38. ReceivedP2PCustomSignal
         virtual bool ReceivedP2PCustomSignal(const void *pMsg, int cbMsg, ISteamNetworkingSignalingRecvContext *pContext) override { return true; }
+
+        // 39. GetCertificateRequest
         virtual bool GetCertificateRequest(int *pcbBlob, void *pBlob, SteamNetworkingErrMsg &errMsg) override {
             if (pcbBlob) *pcbBlob = 0;
             return true;
         }
+
+        // 40. SetCertificate
         virtual bool SetCertificate(const void *pCertificate, int cbCertificate, SteamNetworkingErrMsg &errMsg) override { return true; }
+
+        // 41. ResetIdentity
         virtual void ResetIdentity(const SteamNetworkingIdentity *pIdentity) override {}
-        virtual bool GetIdentity(SteamNetworkingIdentity *pIdentity) override {
-            if (pIdentity) { pIdentity->SetSteamID64(g_localSteamID); return true; }
-            return false;
-        }
-        virtual ESteamNetworkingAvailability InitAuthentication() override { return k_ESteamNetworkingAvailability_Current; }
-        virtual ESteamNetworkingAvailability GetAuthenticationStatus(SteamNetAuthenticationStatus_t *pDetails) override {
-            if (pDetails) {
-                memset(pDetails, 0, sizeof(SteamNetAuthenticationStatus_t));
-                pDetails->m_eAvail = k_ESteamNetworkingAvailability_Current;
-            }
-            return k_ESteamNetworkingAvailability_Current;
-        }
+
+        // 42. RunCallbacks
         virtual void RunCallbacks() override { UnrealSteamEmu::RunCallbacks(); }
+
+        // 43. BeginAsyncRequestFakeIP
         virtual bool BeginAsyncRequestFakeIP(int nNumPorts) override { return true; }
+
+        // 44. GetFakeIP
         virtual void GetFakeIP(int idxFirstPort, SteamNetworkingFakeIPResult_t *pInfo) override {
             if (pInfo) {
                 pInfo->m_eResult = k_EResultOK;
@@ -2394,7 +2623,11 @@ namespace UnrealSteamEmu {
                 pInfo->m_unPorts[0] = 7777;
             }
         }
+
+        // 45. CreateListenSocketP2PFakeIP
         virtual HSteamListenSocket CreateListenSocketP2PFakeIP(int idxFakePort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override { return 1; }
+
+        // 46. GetRemoteFakeIPForConnection
         virtual EResult GetRemoteFakeIPForConnection(HSteamNetConnection hConn, SteamNetworkingIPAddr *pOutAddr) override {
             if (pOutAddr) {
                 pOutAddr->Clear();
@@ -2403,6 +2636,8 @@ namespace UnrealSteamEmu {
             }
             return k_EResultInvalidParam;
         }
+
+        // 47. CreateFakeUDPPort
         virtual ISteamNetworkingFakeUDPPort *CreateFakeUDPPort(int idxFakeServerPort) override { return nullptr; }
     };
     static CSteamNetworkingSocketsEmu g_steamNetworkingSocketsInstance;

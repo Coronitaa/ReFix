@@ -3013,12 +3013,27 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
     if (!pszVersion) return nullptr;
     
-    if (strstr(pszVersion, "SteamNetworkingSockets")) {
-        void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
-        if (providerIface) return providerIface;
+    // In LAN/offline mode or when real Valve interface is absent, route networking interfaces to UnrealSteamEmu
+    if (!ReFix::NetworkModeManager::IsOnline() || !g_pfn_FindOrCreateUserInterface) {
+        if (strstr(pszVersion, "SteamNetworkingSockets")) {
+            void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
+            if (providerIface) return providerIface;
+        }
+        if (strstr(pszVersion, "SteamNetworkingUtils")) {
+            void* providerIface = UnrealSteamEmu::GetISteamNetworkingUtils();
+            if (providerIface) return providerIface;
+        }
     }
 
     void* iface = g_pfn_FindOrCreateUserInterface ? g_pfn_FindOrCreateUserInterface(hSteamUser, pszVersion) : nullptr;
+    if (!iface) {
+        if (strstr(pszVersion, "SteamNetworkingSockets")) {
+            return UnrealSteamEmu::GetISteamNetworkingSockets();
+        }
+        if (strstr(pszVersion, "SteamNetworkingUtils")) {
+            return UnrealSteamEmu::GetISteamNetworkingUtils();
+        }
+    }
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
@@ -3026,12 +3041,27 @@ static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteam
 static void* Intercepted_SteamInternal_CreateInterface(const char* pszVersion) {
     if (!pszVersion) return nullptr;
     
-    if (strstr(pszVersion, "SteamNetworkingSockets")) {
-        void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
-        if (providerIface) return providerIface;
+    // In LAN/offline mode or when real Valve interface is absent, route networking interfaces to UnrealSteamEmu
+    if (!ReFix::NetworkModeManager::IsOnline() || !g_pfn_SteamInternal_CreateInterface) {
+        if (strstr(pszVersion, "SteamNetworkingSockets")) {
+            void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
+            if (providerIface) return providerIface;
+        }
+        if (strstr(pszVersion, "SteamNetworkingUtils")) {
+            void* providerIface = UnrealSteamEmu::GetISteamNetworkingUtils();
+            if (providerIface) return providerIface;
+        }
     }
 
     void* iface = g_pfn_SteamInternal_CreateInterface ? g_pfn_SteamInternal_CreateInterface(pszVersion) : nullptr;
+    if (!iface) {
+        if (strstr(pszVersion, "SteamNetworkingSockets")) {
+            return UnrealSteamEmu::GetISteamNetworkingSockets();
+        }
+        if (strstr(pszVersion, "SteamNetworkingUtils")) {
+            return UnrealSteamEmu::GetISteamNetworkingUtils();
+        }
+    }
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
