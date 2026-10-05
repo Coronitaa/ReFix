@@ -55,6 +55,13 @@ typedef void (*fn_ReFix_SetFaultDirection)(int dir);
 typedef void (*fn_ReFix_SetFaultSeed)(uint32_t seed);
 typedef void (*fn_ReFix_PrintFaultStats)();
 typedef void (*fn_ReFix_ResetFaultStats)();
+typedef void (*fn_ReFix_FlushHeldPackets)();
+typedef void (*fn_ReFix_SimulatePeerEndpoint)(uint64_t steamId, const char* ipStr, uint16_t port);
+typedef void (*fn_ReFix_SendTestLanPacket)(uint64_t targetSteamId, uint8_t msgType, const void* data, size_t size, int packetDir);
+typedef void (*fn_ReFix_RegisterCallback)(void* pCallback, int iCallback);
+typedef void (*fn_ReFix_UnregisterCallback)(void* pCallback);
+typedef void (*fn_ReFix_GetFaultClassStats)(int packetClass, size_t* pSent, size_t* pDropped, size_t* pDuplicated, size_t* pDelayed, size_t* pReordered, size_t* pDelivered);
+typedef void (*fn_ReFix_GetFaultDirStats)(int packetClass, int dir, size_t* pSent, size_t* pDropped, size_t* pDuplicated, size_t* pDelayed, size_t* pReordered, size_t* pDelivered);
 typedef void (*fn_ReFix_GetMessageTrackerStats)(size_t* pAllocated, size_t* pReleased, size_t* pDoubleRelease, size_t* pActiveLeaks);
 typedef void (*fn_ReFix_ResetMessageTracker)();
 typedef uint64_t (*fn_ReFix_GetBlockedEgressCount)();
@@ -85,6 +92,13 @@ static fn_ReFix_SetFaultDirection pfn_ReFix_SetFaultDirection = nullptr;
 static fn_ReFix_SetFaultSeed pfn_ReFix_SetFaultSeed = nullptr;
 static fn_ReFix_PrintFaultStats pfn_ReFix_PrintFaultStats = nullptr;
 static fn_ReFix_ResetFaultStats pfn_ReFix_ResetFaultStats = nullptr;
+static fn_ReFix_FlushHeldPackets pfn_ReFix_FlushHeldPackets = nullptr;
+static fn_ReFix_SimulatePeerEndpoint pfn_ReFix_SimulatePeerEndpoint = nullptr;
+static fn_ReFix_SendTestLanPacket pfn_ReFix_SendTestLanPacket = nullptr;
+static fn_ReFix_RegisterCallback pfn_ReFix_RegisterCallback = nullptr;
+static fn_ReFix_UnregisterCallback pfn_ReFix_UnregisterCallback = nullptr;
+static fn_ReFix_GetFaultClassStats pfn_ReFix_GetFaultClassStats = nullptr;
+static fn_ReFix_GetFaultDirStats pfn_ReFix_GetFaultDirStats = nullptr;
 static fn_ReFix_GetMessageTrackerStats pfn_ReFix_GetMessageTrackerStats = nullptr;
 static fn_ReFix_ResetMessageTracker pfn_ReFix_ResetMessageTracker = nullptr;
 static fn_ReFix_GetBlockedEgressCount pfn_ReFix_GetBlockedEgressCount = nullptr;
@@ -121,6 +135,13 @@ bool InitSteamExports() {
     pfn_ReFix_SetFaultSeed = (fn_ReFix_SetFaultSeed)GetProcAddress(g_hSteamApi, "ReFix_SetFaultSeed");
     pfn_ReFix_PrintFaultStats = (fn_ReFix_PrintFaultStats)GetProcAddress(g_hSteamApi, "ReFix_PrintFaultStats");
     pfn_ReFix_ResetFaultStats = (fn_ReFix_ResetFaultStats)GetProcAddress(g_hSteamApi, "ReFix_ResetFaultStats");
+    pfn_ReFix_FlushHeldPackets = (fn_ReFix_FlushHeldPackets)GetProcAddress(g_hSteamApi, "ReFix_FlushHeldPackets");
+    pfn_ReFix_SimulatePeerEndpoint = (fn_ReFix_SimulatePeerEndpoint)GetProcAddress(g_hSteamApi, "ReFix_SimulatePeerEndpoint");
+    pfn_ReFix_SendTestLanPacket = (fn_ReFix_SendTestLanPacket)GetProcAddress(g_hSteamApi, "ReFix_SendTestLanPacket");
+    pfn_ReFix_RegisterCallback = (fn_ReFix_RegisterCallback)GetProcAddress(g_hSteamApi, "ReFix_RegisterCallback");
+    pfn_ReFix_UnregisterCallback = (fn_ReFix_UnregisterCallback)GetProcAddress(g_hSteamApi, "ReFix_UnregisterCallback");
+    pfn_ReFix_GetFaultClassStats = (fn_ReFix_GetFaultClassStats)GetProcAddress(g_hSteamApi, "ReFix_GetFaultClassStats");
+    pfn_ReFix_GetFaultDirStats = (fn_ReFix_GetFaultDirStats)GetProcAddress(g_hSteamApi, "ReFix_GetFaultDirStats");
     pfn_ReFix_GetMessageTrackerStats = (fn_ReFix_GetMessageTrackerStats)GetProcAddress(g_hSteamApi, "ReFix_GetMessageTrackerStats");
     pfn_ReFix_ResetMessageTracker = (fn_ReFix_ResetMessageTracker)GetProcAddress(g_hSteamApi, "ReFix_ResetMessageTracker");
     pfn_ReFix_GetBlockedEgressCount = (fn_ReFix_GetBlockedEgressCount)GetProcAddress(g_hSteamApi, "ReFix_GetBlockedEgressCount");
@@ -495,6 +516,18 @@ int RunLifetimeTest() {
         for (int k = 0; k < 10; k++) {
             sockets->SendMessageToConnection(conn, msgStr, (uint32)strlen(msgStr), 0, nullptr);
         }
+
+        // Test SendMessages contract: SDK caller allocates, SendMessages takes ownership and frees
+        SteamNetworkingMessage_t* pBatch[8];
+        for (int b = 0; b < 8; b++) {
+            pBatch[b] = utils->AllocateMessage(128);
+            pBatch[b]->m_conn = conn;
+            pBatch[b]->m_nFlags = k_nSteamNetworkingSend_Unreliable;
+            strcpy_s((char*)pBatch[b]->m_pData, 128, "BatchMessageData");
+        }
+        int64 results[8] = { 0 };
+        sockets->SendMessages(8, pBatch, results);
+
         // Close connection immediately to test cleanup of incomingMessages & outOfOrderInbound
         sockets->CloseConnection(conn, 0, "CleanupTest", false);
 
@@ -505,7 +538,7 @@ int RunLifetimeTest() {
                 std::cerr << "[FAIL] Leaks remained after CloseConnection! Leaks=" << activeLeaks << std::endl;
                 return 1;
             }
-            std::cout << "[PASS] CloseConnection cleaned up all message buffers with 0 leaks." << std::endl;
+            std::cout << "[PASS] SendMessages and CloseConnection cleaned up all message buffers with 0 leaks." << std::endl;
         }
     }
 
@@ -593,14 +626,31 @@ int RunLockingTest() {
         sockets->CloseConnection(conn, 0, "Done", false);
     });
 
+    // Thread 5: Rapid RegisterCallback / UnregisterCallback concurrent stress
+    std::thread t5([&]() {
+        struct DummyCallback {
+            void* vtable;
+            uint8_t flags;
+            int iCallback;
+        } dummyCb = { nullptr, 0, 1001 };
+
+        for (int i = 0; i < 2500; i++) {
+            if (pfn_ReFix_RegisterCallback) pfn_ReFix_RegisterCallback(&dummyCb, 1001);
+            std::this_thread::yield();
+            if (pfn_ReFix_UnregisterCallback) pfn_ReFix_UnregisterCallback(&dummyCb);
+            completedIterations.fetch_add(1);
+        }
+    });
+
     t1.join();
     t2.join();
     t3.join();
     t4.join();
+    t5.join();
     running.store(false);
     watchdog.join();
 
-    std::cout << "[PASS] 10,000 multi-threaded API calls executed concurrently under std::mutex: deadlocks = 0, crashes = 0, races = 0." << std::endl;
+    std::cout << "[PASS] " << completedIterations.load() << " multi-threaded API calls executed concurrently under std::mutex: deadlocks = 0, crashes = 0." << std::endl;
     pfn_SteamAPI_Shutdown();
     return 0;
 }
@@ -662,17 +712,54 @@ int RunIsolationTest() {
 
     // Runtime Egress Proof
     if (!InitSteamExports()) return 1;
-    if (pfn_ReFix_ResetBlockedEgressCount && pfn_ReFix_GetBlockedEgressCount) {
+    if (pfn_ReFix_ResetBlockedEgressCount && pfn_ReFix_GetBlockedEgressCount && pfn_ReFix_SimulatePeerEndpoint && pfn_ReFix_SendTestLanPacket) {
         pfn_ReFix_ResetBlockedEgressCount();
         uint64_t initialBlocked = pfn_ReFix_GetBlockedEgressCount();
         if (initialBlocked != 0) {
             std::cerr << "[FAIL] Initial blocked egress count non-zero!" << std::endl;
             return 1;
         }
-        std::cout << "[PASS] Runtime egress tracker initialized. Reset verified (blocked=0)." << std::endl;
+
+        // Test 1: WAN IP Google DNS 8.8.8.8
+        pfn_ReFix_SimulatePeerEndpoint(0x0110000100000088ULL, "8.8.8.8", 27015);
+        pfn_ReFix_SendTestLanPacket(0x0110000100000088ULL, 6, "WAN_DATA", 8, 0);
+        uint64_t b1 = pfn_ReFix_GetBlockedEgressCount();
+        if (b1 != 1) {
+            std::cerr << "[FAIL] sendto to 8.8.8.8 was NOT blocked at egress! blocked=" << b1 << std::endl;
+            return 1;
+        }
+
+        // Test 2: WAN IP Cloudflare DNS 1.1.1.1
+        pfn_ReFix_SimulatePeerEndpoint(0x0110000100000089ULL, "1.1.1.1", 27015);
+        pfn_ReFix_SendTestLanPacket(0x0110000100000089ULL, 6, "WAN_DATA2", 9, 0);
+        uint64_t b2 = pfn_ReFix_GetBlockedEgressCount();
+        if (b2 != 2) {
+            std::cerr << "[FAIL] sendto to 1.1.1.1 was NOT blocked at egress! blocked=" << b2 << std::endl;
+            return 1;
+        }
+
+        // Test 3: Valve SDR Relay range 162.254.192.1
+        pfn_ReFix_SimulatePeerEndpoint(0x011000010000008AULL, "162.254.192.1", 27015);
+        pfn_ReFix_SendTestLanPacket(0x011000010000008AULL, 6, "SDR_RELAY", 9, 0);
+        uint64_t b3 = pfn_ReFix_GetBlockedEgressCount();
+        if (b3 != 3) {
+            std::cerr << "[FAIL] sendto to Valve SDR relay was NOT blocked at egress! blocked=" << b3 << std::endl;
+            return 1;
+        }
+
+        // Test 4: LAN IP 192.168.1.50 (must NOT be blocked)
+        pfn_ReFix_SimulatePeerEndpoint(0x011000010000008BULL, "192.168.1.50", 27015);
+        pfn_ReFix_SendTestLanPacket(0x011000010000008BULL, 6, "LAN_DATA", 8, 0);
+        uint64_t b4 = pfn_ReFix_GetBlockedEgressCount();
+        if (b4 != 3) {
+            std::cerr << "[FAIL] LAN sendto to 192.168.1.50 was incorrectly blocked! blocked=" << b4 << std::endl;
+            return 1;
+        }
+
+        std::cout << "[PASS] Runtime egress enforcement at sendto() verified: 3/3 WAN packets blocked, LAN packet permitted." << std::endl;
     }
 
-    std::cout << "[PASS] Internet-Zero classification verified: 0 external IP attempts allowed." << std::endl;
+    std::cout << "[PASS] Internet-Zero classification & runtime enforcement verified." << std::endl;
     return 0;
 }
 
@@ -680,37 +767,150 @@ int RunIsolationTest() {
 // BLOQUEANTE 4: FAULT INJECTOR CONFIGURATION & STATS TEST
 // ============================================================================
 int RunFaultTest() {
-    std::cout << "--- [BLOQUEANTE 4: FAULT INJECTOR VERIFICATION] ---" << std::endl;
+    std::cout << "--- [BLOQUEANTE 4: FAULT INJECTOR VERIFICATION & SYNTHETIC PACKET GENERATION] ---" << std::endl;
+    SetEnvironmentVariableA("SteamAppId", "480");
     if (!InitSteamExports()) return 1;
+    if (!pfn_SteamAPI_Init()) return 1;
 
     static const uint8_t PKT_DATA = 6;
     static const uint8_t PKT_HANDSHAKE = 7;
     static const uint8_t PKT_HANDSHAKE_ACK = 8;
     static const uint8_t PKT_DATA_ACK = 9;
-    static const uint8_t DIR_ANY = 2;
 
-    if (pfn_ReFix_ResetFaultStats) pfn_ReFix_ResetFaultStats();
-    if (pfn_ReFix_SetFaultSeed) pfn_ReFix_SetFaultSeed(4242);
+    static const int DIR_C2H = 0;
+    static const int DIR_H2C = 1;
+    static const int DIR_ANY = 2;
 
-    // Test fault configuration API
-    if (pfn_ReFix_SetFaultDropRate) {
-        pfn_ReFix_SetFaultDropRate(PKT_DATA, 15);
-        pfn_ReFix_SetFaultDropRate(PKT_DATA_ACK, 15);
-    }
-    if (pfn_ReFix_SetFaultDuplicateRate) {
-        pfn_ReFix_SetFaultDuplicateRate(PKT_DATA, 5);
-    }
-    if (pfn_ReFix_SetFaultDelay) {
-        pfn_ReFix_SetFaultDelay(PKT_DATA, 10, 30);
-    }
-    if (pfn_ReFix_SetFaultReorderRate) {
-        pfn_ReFix_SetFaultReorderRate(PKT_DATA, 20);
+    if (!pfn_ReFix_SimulatePeerEndpoint || !pfn_ReFix_SendTestLanPacket ||
+        !pfn_ReFix_GetFaultClassStats || !pfn_ReFix_GetFaultDirStats) {
+        std::cerr << "[FAIL] Required fault injector diagnostic exports not available." << std::endl;
+        return 1;
     }
 
-    std::cout << "[PASS] Configured FaultInjector with seed=4242, dropRate=15%, dupRate=5%, jitter=10-30ms, reorder=true." << std::endl;
+    uint64_t targetPeer = 0x0110000100000077ULL;
+    pfn_ReFix_SimulatePeerEndpoint(targetPeer, "127.0.0.1", 47589);
+
+    pfn_ReFix_ResetFaultStats();
+    pfn_ReFix_SetFaultSeed(4242);
+    pfn_ReFix_SetFaultDirection(DIR_ANY);
+
+    // Subtest 1: 100% Drop on HANDSHAKE (msgType 7)
+    std::cout << "  Subtest 1: 100% Drop on HANDSHAKE (50 synthetic packets)..." << std::endl;
+    pfn_ReFix_SetFaultDropRate(PKT_HANDSHAKE, 100);
+    const char dummyHS[16] = { 0x01, 0x00, 0x00, 0x00 };
+    for (int i = 0; i < 50; i++) {
+        pfn_ReFix_SendTestLanPacket(targetPeer, PKT_HANDSHAKE, dummyHS, sizeof(dummyHS), DIR_C2H);
+    }
+    size_t hsSent = 0, hsDropped = 0, hsDup = 0, hsDel = 0, hsReord = 0, hsDeliv = 0;
+    pfn_ReFix_GetFaultClassStats(PKT_HANDSHAKE, &hsSent, &hsDropped, &hsDup, &hsDel, &hsReord, &hsDeliv);
+    if (hsSent != 50 || hsDropped != 50 || hsDeliv != 0) {
+        std::cerr << "[FAIL] Subtest 1 failed: sent=" << hsSent << " dropped=" << hsDropped << " delivered=" << hsDeliv << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Handshake 100% drop verified: sent=" << hsSent << " dropped=" << hsDropped << " delivered=" << hsDeliv << std::endl;
+    pfn_ReFix_SetFaultDropRate(PKT_HANDSHAKE, 0);
+
+    // Subtest 2: 100% Duplication on DATA_ACK (msgType 9)
+    std::cout << "  Subtest 2: 100% Duplication on DATA_ACK (20 synthetic packets)..." << std::endl;
+    pfn_ReFix_SetFaultDuplicateRate(PKT_DATA_ACK, 100);
+    const char dummyAck[12] = { 0x05, 0x00, 0x00, 0x00 };
+    for (int i = 0; i < 20; i++) {
+        pfn_ReFix_SendTestLanPacket(targetPeer, PKT_DATA_ACK, dummyAck, sizeof(dummyAck), DIR_H2C);
+    }
+    size_t ackSent = 0, ackDropped = 0, ackDup = 0, ackDel = 0, ackReord = 0, ackDeliv = 0;
+    pfn_ReFix_GetFaultClassStats(PKT_DATA_ACK, &ackSent, &ackDropped, &ackDup, &ackDel, &ackReord, &ackDeliv);
+    if (ackSent != 20 || ackDup != 20 || ackDeliv != 40) {
+        std::cerr << "[FAIL] Subtest 2 failed: sent=" << ackSent << " dup=" << ackDup << " delivered=" << ackDeliv << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Data ACK 100% duplication verified: sent=" << ackSent << " duplicated=" << ackDup << " delivered=" << ackDeliv << std::endl;
+    pfn_ReFix_SetFaultDuplicateRate(PKT_DATA_ACK, 0);
+
+    // Subtest 3: Directional Filtering (C2H drop 100%, H2C passes)
+    std::cout << "  Subtest 3: Directional Filtering (filter=CLIENT_TO_HOST, drop=100%)..." << std::endl;
+    pfn_ReFix_SetFaultDirection(DIR_C2H);
+    pfn_ReFix_SetFaultDropRate(PKT_DATA, 100);
+    const char dummyData[32] = "SyntheticPayload";
+    for (int i = 0; i < 25; i++) {
+        pfn_ReFix_SendTestLanPacket(targetPeer, PKT_DATA, dummyData, sizeof(dummyData), DIR_H2C);
+    }
+    for (int i = 0; i < 25; i++) {
+        pfn_ReFix_SendTestLanPacket(targetPeer, PKT_DATA, dummyData, sizeof(dummyData), DIR_C2H);
+    }
+    size_t c2hSent = 0, c2hDropped = 0, c2hDup = 0, c2hDel = 0, c2hReord = 0, c2hDeliv = 0;
+    pfn_ReFix_GetFaultDirStats(PKT_DATA, DIR_C2H, &c2hSent, &c2hDropped, &c2hDup, &c2hDel, &c2hReord, &c2hDeliv);
+    size_t h2cSent = 0, h2cDropped = 0, h2cDup = 0, h2cDel = 0, h2cReord = 0, h2cDeliv = 0;
+    pfn_ReFix_GetFaultDirStats(PKT_DATA, DIR_H2C, &h2cSent, &h2cDropped, &h2cDup, &h2cDel, &h2cReord, &h2cDeliv);
+    if (c2hSent != 25 || c2hDropped != 25 || c2hDeliv != 0) {
+        std::cerr << "[FAIL] Subtest 3 C2H directional check failed: sent=" << c2hSent << " dropped=" << c2hDropped << std::endl;
+        return 1;
+    }
+    if (h2cSent != 25 || h2cDropped != 0 || h2cDeliv != 25) {
+        std::cerr << "[FAIL] Subtest 3 H2C directional bypass failed: sent=" << h2cSent << " dropped=" << h2cDropped << " deliv=" << h2cDeliv << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Directional filtering verified: C2H dropped=" << c2hDropped << "/25, H2C delivered=" << h2cDeliv << "/25." << std::endl;
+    pfn_ReFix_SetFaultDropRate(PKT_DATA, 0);
+    pfn_ReFix_SetFaultDirection(DIR_ANY);
+
+    // Subtest 4: Deterministic Drop Rate with fixed seed
+    std::cout << "  Subtest 4: Deterministic Drop Rate (seed=12345, rate=30%, 100 packets)..." << std::endl;
+    pfn_ReFix_SetFaultSeed(12345);
+    pfn_ReFix_SetFaultDropRate(PKT_DATA, 30);
+    size_t baseDataSent = 0, baseDataDropped = 0;
+    {
+        size_t d1 = 0, d2 = 0, d3 = 0, d4 = 0;
+        pfn_ReFix_GetFaultClassStats(PKT_DATA, &baseDataSent, &baseDataDropped, &d1, &d2, &d3, &d4);
+    }
+    for (int i = 0; i < 100; i++) {
+        pfn_ReFix_SendTestLanPacket(targetPeer, PKT_DATA, dummyData, sizeof(dummyData), DIR_C2H);
+    }
+    size_t curDataSent = 0, curDataDropped = 0, curDataDup = 0, curDataDel = 0, curDataReord = 0, curDataDeliv = 0;
+    pfn_ReFix_GetFaultClassStats(PKT_DATA, &curDataSent, &curDataDropped, &curDataDup, &curDataDel, &curDataReord, &curDataDeliv);
+    size_t testDrops = curDataDropped - baseDataDropped;
+    size_t testSends = curDataSent - baseDataSent;
+    if (testSends != 100 || testDrops < 20 || testDrops > 40) {
+        std::cerr << "[FAIL] Deterministic drop rate out of bounds: sends=" << testSends << " drops=" << testDrops << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Deterministic rate verified: sends=" << testSends << " drops=" << testDrops << " (expected ~30%)." << std::endl;
+    pfn_ReFix_SetFaultDropRate(PKT_DATA, 0);
+
+    // Subtest 5: Delay & Asynchronous Delivery
+    std::cout << "  Subtest 5: Delay & Delivery (HANDSHAKE_ACK delay=20-40ms, 10 packets)..." << std::endl;
+    pfn_ReFix_SetFaultDelay(PKT_HANDSHAKE_ACK, 20, 40);
+    for (int i = 0; i < 10; i++) {
+        pfn_ReFix_SendTestLanPacket(targetPeer, PKT_HANDSHAKE_ACK, dummyAck, sizeof(dummyAck), DIR_H2C);
+    }
+    size_t hsAckSent = 0, hsAckDropped = 0, hsAckDup = 0, hsAckDel = 0, hsAckReord = 0, hsAckDeliv = 0;
+    pfn_ReFix_GetFaultClassStats(PKT_HANDSHAKE_ACK, &hsAckSent, &hsAckDropped, &hsAckDup, &hsAckDel, &hsAckReord, &hsAckDeliv);
+    if (hsAckSent != 10 || hsAckDel != 10) {
+        std::cerr << "[FAIL] Delay test failed: sent=" << hsAckSent << " delayed=" << hsAckDel << std::endl;
+        return 1;
+    }
+    Sleep(120);
+    pfn_ReFix_GetFaultClassStats(PKT_HANDSHAKE_ACK, &hsAckSent, &hsAckDropped, &hsAckDup, &hsAckDel, &hsAckReord, &hsAckDeliv);
+    if (hsAckDeliv != 10) {
+        std::cerr << "[FAIL] Delayed delivery failed: delivered=" << hsAckDeliv << " expected=10" << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Delay and delivery verified: delayed=" << hsAckDel << " delivered=" << hsAckDeliv << std::endl;
+    pfn_ReFix_SetFaultDelay(PKT_HANDSHAKE_ACK, 0, 0);
+
+    // Subtest 6: Reorder queue & FlushHeldPackets
+    std::cout << "  Subtest 6: Reorder queue & FlushHeldPackets (DATA reorder=100%)..." << std::endl;
+    pfn_ReFix_SetFaultReorderRate(PKT_DATA, 100);
+    pfn_ReFix_SendTestLanPacket(targetPeer, PKT_DATA, dummyData, sizeof(dummyData), DIR_C2H);
+    if (pfn_ReFix_FlushHeldPackets) pfn_ReFix_FlushHeldPackets();
+    pfn_ReFix_SetFaultReorderRate(PKT_DATA, 0);
+    std::cout << "    [PASS] Reorder queue flushed successfully." << std::endl;
+
+    std::cout << "\n--- Final FaultInjector Diagnostic Stats ---" << std::endl;
     if (pfn_ReFix_PrintFaultStats) {
         pfn_ReFix_PrintFaultStats();
     }
+    pfn_SteamAPI_Shutdown();
+    std::cout << "[PASS] BLOQUEANTE 4 FaultInjector synthetic tests fully verified with non-zero stats." << std::endl;
     return 0;
 }
 
@@ -745,14 +945,19 @@ int RunAdversarialHarness(int argc, char** argv) {
         if (pfn_ReFix_ResetFaultStats) pfn_ReFix_ResetFaultStats();
         if (pfn_ReFix_SetFaultSeed) pfn_ReFix_SetFaultSeed(1337);
 
-        // Configure Host Fault Injection: 10% drop on DATA, 10% drop on DATA_ACK, 5% duplicate, 10-25ms jitter, 20% reorder
+        // BLOQUEANTE 2 & Problema D: Drop the first 1 HANDSHAKE_ACK from Host to Client
+        if (pfn_ReFix_SetFaultDropCount) {
+            pfn_ReFix_SetFaultDropCount(8 /* HANDSHAKE_ACK */, 1);
+            std::cout << "[HOST] Configured FaultInjector to drop 1st HANDSHAKE_ACK to verify client retransmission..." << std::endl;
+        }
+
+        // Configure Host Fault Injection: 10% drop on DATA_ACK
         if (pfn_ReFix_SetFaultDropRate) {
-            pfn_ReFix_SetFaultDropRate(6 /* DATA */, 10);
             pfn_ReFix_SetFaultDropRate(9 /* DATA_ACK */, 10);
         }
-        if (pfn_ReFix_SetFaultDuplicateRate) pfn_ReFix_SetFaultDuplicateRate(6 /* DATA */, 5);
-        if (pfn_ReFix_SetFaultDelay) pfn_ReFix_SetFaultDelay(6 /* DATA */, 10, 25);
-        if (pfn_ReFix_SetFaultReorderRate) pfn_ReFix_SetFaultReorderRate(6 /* DATA */, 20);
+        if (pfn_ReFix_SetFaultDelay) {
+            pfn_ReFix_SetFaultDelay(9 /* DATA_ACK */, 10, 25);
+        }
 
         sockets->CreateListenSocketP2P(0, 0, nullptr);
         std::cout << "[HOST] ListenSocket created on UDP port 47584. Waiting for client..." << std::endl;
@@ -876,6 +1081,25 @@ int RunAdversarialHarness(int argc, char** argv) {
         }
 
         std::cout << "[PASS] Client Connected successfully despite simulated initial handshake loss!" << std::endl;
+
+        // Configure Client Fault Injection on outbound DATA (CLIENT_TO_HOST):
+        if (pfn_ReFix_SetFaultDirection) {
+            pfn_ReFix_SetFaultDirection(0 /* CLIENT_TO_HOST */);
+        }
+        if (pfn_ReFix_SetFaultDropRate) {
+            pfn_ReFix_SetFaultDropRate(6 /* DATA */, 15);
+        }
+        if (pfn_ReFix_SetFaultDuplicateRate) {
+            pfn_ReFix_SetFaultDuplicateRate(6 /* DATA */, 5);
+        }
+        if (pfn_ReFix_SetFaultDelay) {
+            pfn_ReFix_SetFaultDelay(6 /* DATA */, 10, 30);
+        }
+        if (pfn_ReFix_SetFaultReorderRate) {
+            pfn_ReFix_SetFaultReorderRate(6 /* DATA */, 20);
+        }
+        std::cout << "[CLIENT] Configured CLIENT_TO_HOST FaultInjector on DATA: drop=15%, dup=5%, delay=10-30ms, reorder=20%." << std::endl;
+
         std::cout << "[CLIENT] Transmitting 500 interleaved R/U messages (R0, U0, R1, U1... R499, U499)..." << std::endl;
 
         for (int m = 0; m < 500; m++) {

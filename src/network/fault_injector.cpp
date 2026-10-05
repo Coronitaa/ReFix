@@ -92,6 +92,13 @@ void FaultInjector::ResetStats() {
     m_statsData.Reset();
     m_statsDataAck.Reset();
     m_statsOther.Reset();
+    for (int d = 0; d < 2; d++) {
+        m_statsHandshakeDir[d].Reset();
+        m_statsHandshakeAckDir[d].Reset();
+        m_statsDataDir[d].Reset();
+        m_statsDataAckDir[d].Reset();
+        m_statsOtherDir[d].Reset();
+    }
     std::lock_guard<std::mutex> lock(m_heldMutex);
     m_heldPacketsData.clear();
     m_heldPacketsAck.clear();
@@ -103,7 +110,17 @@ void FaultInjector::SetSeed(uint32_t seed) {
     m_rng.seed(m_seed);
 }
 
+static PacketClass NormalizePacketClass(PacketClass pClass) {
+    int val = (int)pClass;
+    if (val == 6) return PacketClass::DATA;
+    if (val == 7) return PacketClass::HANDSHAKE;
+    if (val == 8) return PacketClass::HANDSHAKE_ACK;
+    if (val == 9) return PacketClass::DATA_ACK;
+    return pClass;
+}
+
 void FaultInjector::SetDropRate(PacketClass pClass, int percent) {
+    pClass = NormalizePacketClass(pClass);
     switch (pClass) {
         case PacketClass::HANDSHAKE: m_configHandshake.dropRate = percent; break;
         case PacketClass::HANDSHAKE_ACK: m_configHandshakeAck.dropRate = percent; break;
@@ -114,6 +131,7 @@ void FaultInjector::SetDropRate(PacketClass pClass, int percent) {
 }
 
 void FaultInjector::SetDropCount(PacketClass pClass, int count) {
+    pClass = NormalizePacketClass(pClass);
     switch (pClass) {
         case PacketClass::HANDSHAKE: m_configHandshake.dropCount = count; break;
         case PacketClass::HANDSHAKE_ACK: m_configHandshakeAck.dropCount = count; break;
@@ -124,6 +142,7 @@ void FaultInjector::SetDropCount(PacketClass pClass, int count) {
 }
 
 void FaultInjector::SetDuplicateRate(PacketClass pClass, int percent) {
+    pClass = NormalizePacketClass(pClass);
     switch (pClass) {
         case PacketClass::HANDSHAKE: m_configHandshake.dupRate = percent; break;
         case PacketClass::HANDSHAKE_ACK: m_configHandshakeAck.dupRate = percent; break;
@@ -134,6 +153,7 @@ void FaultInjector::SetDuplicateRate(PacketClass pClass, int percent) {
 }
 
 void FaultInjector::SetReorderRate(PacketClass pClass, int percent) {
+    pClass = NormalizePacketClass(pClass);
     switch (pClass) {
         case PacketClass::DATA: m_configData.reorderRate = percent; break;
         case PacketClass::DATA_ACK: m_configDataAck.reorderRate = percent; break;
@@ -142,6 +162,7 @@ void FaultInjector::SetReorderRate(PacketClass pClass, int percent) {
 }
 
 void FaultInjector::SetDelay(PacketClass pClass, int minMs, int maxMs) {
+    pClass = NormalizePacketClass(pClass);
     switch (pClass) {
         case PacketClass::HANDSHAKE: m_configHandshake.delayMinMs = minMs; m_configHandshake.delayMaxMs = maxMs; break;
         case PacketClass::HANDSHAKE_ACK: m_configHandshakeAck.delayMinMs = minMs; m_configHandshakeAck.delayMaxMs = maxMs; break;
@@ -161,12 +182,26 @@ bool FaultInjector::ShouldProcessDirection(PacketDirection dir) const {
 }
 
 PacketClassStats& FaultInjector::GetStatsInternal(PacketClass pClass) {
+    pClass = NormalizePacketClass(pClass);
     switch (pClass) {
         case PacketClass::HANDSHAKE: return m_statsHandshake;
         case PacketClass::HANDSHAKE_ACK: return m_statsHandshakeAck;
         case PacketClass::DATA: return m_statsData;
         case PacketClass::DATA_ACK: return m_statsDataAck;
         default: return m_statsOther;
+    }
+}
+
+PacketClassStats* FaultInjector::GetDirStatsInternal(PacketClass pClass, PacketDirection dir) {
+    pClass = NormalizePacketClass(pClass);
+    int idx = (dir == PacketDirection::CLIENT_TO_HOST) ? 0 : ((dir == PacketDirection::HOST_TO_CLIENT) ? 1 : -1);
+    if (idx < 0) return nullptr;
+    switch (pClass) {
+        case PacketClass::HANDSHAKE: return &m_statsHandshakeDir[idx];
+        case PacketClass::HANDSHAKE_ACK: return &m_statsHandshakeAckDir[idx];
+        case PacketClass::DATA: return &m_statsDataDir[idx];
+        case PacketClass::DATA_ACK: return &m_statsDataAckDir[idx];
+        default: return &m_statsOtherDir[idx];
     }
 }
 
@@ -180,17 +215,46 @@ const PacketClassStats& FaultInjector::GetStats(PacketClass pClass) const {
     }
 }
 
+const PacketClassStats& FaultInjector::GetStats(PacketClass pClass, PacketDirection dir) const {
+    int idx = (dir == PacketDirection::CLIENT_TO_HOST) ? 0 : ((dir == PacketDirection::HOST_TO_CLIENT) ? 1 : -1);
+    if (idx < 0) return GetStats(pClass);
+    switch (pClass) {
+        case PacketClass::HANDSHAKE: return m_statsHandshakeDir[idx];
+        case PacketClass::HANDSHAKE_ACK: return m_statsHandshakeAckDir[idx];
+        case PacketClass::DATA: return m_statsDataDir[idx];
+        case PacketClass::DATA_ACK: return m_statsDataAckDir[idx];
+        default: return m_statsOtherDir[idx];
+    }
+}
+
+void FaultInjector::FlushHeldPackets() {
+    std::unique_lock<std::mutex> hLock(m_heldMutex);
+    for (auto& held : m_heldPacketsData) {
+        held.sendFn(held.data.data(), held.data.size());
+        m_statsData.delivered.fetch_add(1);
+    }
+    m_heldPacketsData.clear();
+    for (auto& held : m_heldPacketsAck) {
+        held.sendFn(held.data.data(), held.data.size());
+        m_statsDataAck.delivered.fetch_add(1);
+    }
+    m_heldPacketsAck.clear();
+}
+
 bool FaultInjector::ProcessSend(PacketClass pClass,
                                PacketDirection dir,
                                const uint8_t* data,
                                size_t len,
                                std::function<void(const uint8_t*, size_t)> sendFn) {
     PacketClassStats& stats = GetStatsInternal(pClass);
+    PacketClassStats* dirStats = GetDirStatsInternal(pClass, dir);
     stats.sent.fetch_add(1);
+    if (dirStats) dirStats->sent.fetch_add(1);
 
     if (!ShouldProcessDirection(dir)) {
         sendFn(data, len);
         stats.delivered.fetch_add(1);
+        if (dirStats) dirStats->delivered.fetch_add(1);
         return true;
     }
 
@@ -206,6 +270,7 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
     if (!cfg) {
         sendFn(data, len);
         stats.delivered.fetch_add(1);
+        if (dirStats) dirStats->delivered.fetch_add(1);
         return true;
     }
 
@@ -213,6 +278,7 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
     if (cfg->dropCount > 0) {
         cfg->dropCount--;
         stats.dropped.fetch_add(1);
+        if (dirStats) dirStats->dropped.fetch_add(1);
         return false;
     }
 
@@ -224,12 +290,11 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
     }
     if (cfg->dropRate > 0 && roll < cfg->dropRate) {
         stats.dropped.fetch_add(1);
+        if (dirStats) dirStats->dropped.fetch_add(1);
         return false;
     }
 
     // 3. Check forced reorder
-    // If reordering is triggered, we buffer this packet. When the next packet arrives,
-    // we send the new packet first, and immediately afterwards release the buffered packet!
     if (cfg->reorderRate > 0 && (pClass == PacketClass::DATA || pClass == PacketClass::DATA_ACK)) {
         int reorderRoll = 0;
         {
@@ -244,11 +309,13 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
             // Deliver current packet FIRST
             sendFn(data, len);
             stats.delivered.fetch_add(1);
+            if (dirStats) dirStats->delivered.fetch_add(1);
 
             // Now release held packets (they arrive AFTER current -> forced reorder!)
             for (auto& held : heldQueue) {
                 held.sendFn(held.data.data(), held.data.size());
                 stats.delivered.fetch_add(1);
+                if (dirStats) dirStats->delivered.fetch_add(1);
             }
             heldQueue.clear();
             return true;
@@ -259,6 +326,7 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
             hp.sendFn = sendFn;
             heldQueue.push_back(std::move(hp));
             stats.reordered.fetch_add(1);
+            if (dirStats) dirStats->reordered.fetch_add(1);
             return true;
         }
     }
@@ -273,11 +341,13 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
 
         std::vector<uint8_t> copyData(data, data + len);
         stats.delayed.fetch_add(1);
+        if (dirStats) dirStats->delayed.fetch_add(1);
 
-        std::thread([this, &stats, copyData, sendFn, delayMs]() {
+        std::thread([this, &stats, dirStats, copyData, sendFn, delayMs]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             sendFn(copyData.data(), copyData.size());
             stats.delivered.fetch_add(1);
+            if (dirStats) dirStats->delivered.fetch_add(1);
         }).detach();
 
         // Check duplicate even with delay
@@ -288,10 +358,12 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
         }
         if (cfg->dupRate > 0 && dupRoll < cfg->dupRate) {
             stats.duplicated.fetch_add(1);
-            std::thread([this, &stats, copyData, sendFn, delayMs]() {
+            if (dirStats) dirStats->duplicated.fetch_add(1);
+            std::thread([this, &stats, dirStats, copyData, sendFn, delayMs]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs + 10));
                 sendFn(copyData.data(), copyData.size());
                 stats.delivered.fetch_add(1);
+                if (dirStats) dirStats->delivered.fetch_add(1);
             }).detach();
         }
         return true;
@@ -300,6 +372,7 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
     // 5. Send packet
     sendFn(data, len);
     stats.delivered.fetch_add(1);
+    if (dirStats) dirStats->delivered.fetch_add(1);
 
     // 6. Check duplicate
     int dupRoll = 0;
@@ -309,28 +382,37 @@ bool FaultInjector::ProcessSend(PacketClass pClass,
     }
     if (cfg->dupRate > 0 && dupRoll < cfg->dupRate) {
         stats.duplicated.fetch_add(1);
+        if (dirStats) dirStats->duplicated.fetch_add(1);
         sendFn(data, len);
         stats.delivered.fetch_add(1);
+        if (dirStats) dirStats->delivered.fetch_add(1);
     }
 
     return true;
 }
 
 void FaultInjector::PrintStats() const {
-    auto printClass = [](const char* name, const PacketClassStats& st) {
-        std::cout << "  Class " << name << ": sent=" << st.sent.load()
-                  << ", dropped=" << st.dropped.load()
-                  << ", duplicated=" << st.duplicated.load()
-                  << ", delayed=" << st.delayed.load()
-                  << ", reordered=" << st.reordered.load()
-                  << ", delivered=" << st.delivered.load() << std::endl;
+    auto printClass = [this](const char* name, PacketClass pClass) {
+        const PacketClassStats& total = GetStats(pClass);
+        const PacketClassStats& c2h = GetStats(pClass, PacketDirection::CLIENT_TO_HOST);
+        const PacketClassStats& h2c = GetStats(pClass, PacketDirection::HOST_TO_CLIENT);
+        std::cout << "  Class " << name << " [TOTAL]: sent=" << total.sent.load()
+                  << ", dropped=" << total.dropped.load()
+                  << ", duplicated=" << total.duplicated.load()
+                  << ", delayed=" << total.delayed.load()
+                  << ", reordered=" << total.reordered.load()
+                  << ", delivered=" << total.delivered.load() << std::endl;
+        std::cout << "    -> C2H: sent=" << c2h.sent.load() << ", drop=" << c2h.dropped.load()
+                  << ", dup=" << c2h.duplicated.load() << ", deliv=" << c2h.delivered.load() << std::endl;
+        std::cout << "    -> H2C: sent=" << h2c.sent.load() << ", drop=" << h2c.dropped.load()
+                  << ", dup=" << h2c.duplicated.load() << ", deliv=" << h2c.delivered.load() << std::endl;
     };
 
     std::cout << "=== REFIX FAULT INJECTOR STATS (seed=" << m_seed << ") ===" << std::endl;
-    printClass("HANDSHAKE", m_statsHandshake);
-    printClass("HANDSHAKE_ACK", m_statsHandshakeAck);
-    printClass("DATA", m_statsData);
-    printClass("DATA_ACK", m_statsDataAck);
+    printClass("HANDSHAKE", PacketClass::HANDSHAKE);
+    printClass("HANDSHAKE_ACK", PacketClass::HANDSHAKE_ACK);
+    printClass("DATA", PacketClass::DATA);
+    printClass("DATA_ACK", PacketClass::DATA_ACK);
     std::cout << "==========================================================" << std::endl;
 }
 

@@ -3089,6 +3089,10 @@ extern "C" __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingMessage
 
 static void InstallVTableHooks() {
     if (g_vtableHooksInstalled) return;
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("InstallVTableHooks: Skipped in LAN/Offline mode (no Valve DLL hook target needed)");
+        return;
+    }
 
     MH_Initialize();
 
@@ -3783,6 +3787,10 @@ static bool EnsureOriginal() {
     }
 
     if (!g_hOriginalDll) {
+        if (!ReFix::NetworkModeManager::IsOnline()) {
+            ReFixLog("EnsureOriginal: Original Valve DLL not present; running autonomous Steam-free LAN mode.");
+            return true;
+        }
         ReFixLog("EnsureOriginal: ERROR - Could not find steam_api64_valve.dll (proxyDir='%s', exeDir='%s')",
                  proxyDir.c_str(), exeDir.c_str());
         MessageBoxA(NULL,
@@ -4225,6 +4233,11 @@ static void ReFixInitializePost(bool success) {
 extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     ReFixInitializePre();
     ReFixLog("SteamAPI_Init called");
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamAPI_Init: autonomous LAN mode -> returning true");
+        ReFixInitializePost(true);
+        return true;
+    }
     
     if (!EnsureOriginal()) {
         ReFixLog("SteamAPI_Init: EnsureOriginal failed");
@@ -4257,6 +4270,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
 extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
     ReFixInitializePre();
     ReFixLog("SteamAPI_InitSafe called");
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamAPI_InitSafe: autonomous LAN mode -> returning true");
+        ReFixInitializePost(true);
+        return true;
+    }
     if (!EnsureOriginal()) return false;
     bool result = false;
     if (g_pfn_InitSafe) {
@@ -4278,6 +4296,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
 extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
     ReFixInitializePre();
     ReFixLog("SteamAPI_InitFlat called");
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamAPI_InitFlat: autonomous LAN mode -> returning 0");
+        ReFixInitializePost(true);
+        return 0;
+    }
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
         return 1;
@@ -4304,6 +4327,11 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
 
 extern "C" __declspec(dllexport) bool SteamAPI_InitAnonymousUser() {
     ReFixInitializePre();
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamAPI_InitAnonymousUser: autonomous LAN mode -> returning true");
+        ReFixInitializePost(true);
+        return true;
+    }
     if (!EnsureOriginal()) return false;
     bool result = false;
     if (g_pfn_InitAnon) result = g_pfn_InitAnon();
@@ -4324,6 +4352,11 @@ extern "C" __declspec(dllexport) bool SteamInternal_GameServer_Init(
     ReFixInitializePre();
     ReFixLog("SteamInternal_GameServer_Init: IP=%u, GamePort=%u, QueryPort=%u, Mode=%d, Ver=%s",
              unIP, usGamePort, usQueryPort, eServerMode, pchVersionString ? pchVersionString : "null");
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamInternal_GameServer_Init: autonomous LAN mode -> returning true");
+        ReFixInitializePost(true);
+        return true;
+    }
     if (!EnsureOriginal() || !g_pfn_GSInit) return false;
     return g_pfn_GSInit(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
 }
@@ -4335,6 +4368,11 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
 {
     ReFixInitializePre();
     ReFixLog("SteamInternal_SteamAPI_Init called (ver='%s')", pszInternalCheckInterfaceVersions ? pszInternalCheckInterfaceVersions : "");
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamInternal_SteamAPI_Init: autonomous LAN mode -> returning 0");
+        ReFixInitializePost(true);
+        return 0;
+    }
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
         return 1; // k_ESteamAPIInitResult_NoSteamClient
@@ -4362,6 +4400,11 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
 extern "C" __declspec(dllexport) bool SteamGameServer_InitSafe() {
     ReFixInitializePre();
     ReFixLog("SteamGameServer_InitSafe called");
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFixLog("SteamGameServer_InitSafe: autonomous LAN mode -> returning true");
+        ReFixInitializePost(true);
+        return true;
+    }
     if (!EnsureOriginal() || !g_pfn_GSInitSafe) return false;
     return g_pfn_GSInitSafe();
 }
@@ -4615,6 +4658,39 @@ extern "C" {
     }
     __declspec(dllexport) const char* ReFix_GetSteamProviderName() {
         return ReFix::ProviderFactory::GetSteamProvider()->GetName();
+    }
+    __declspec(dllexport) void ReFix_FlushHeldPackets() {
+        ReFix::FaultInjector::Get().FlushHeldPackets();
+    }
+    __declspec(dllexport) void ReFix_SimulatePeerEndpoint(uint64_t steamId, const char* ipStr, uint16_t port) {
+        UnrealSteamEmu::SimulatePeerEndpoint(steamId, ipStr, port);
+    }
+    __declspec(dllexport) void ReFix_SendTestLanPacket(uint64_t targetSteamId, uint8_t msgType, const void* data, size_t size, int packetDir) {
+        UnrealSteamEmu::SendTestLanPacket(targetSteamId, msgType, data, size, packetDir);
+    }
+    __declspec(dllexport) void ReFix_RegisterCallback(void* pCallback, int iCallback) {
+        UnrealSteamEmu::RegisterCallback((CCallbackBase*)pCallback, iCallback);
+    }
+    __declspec(dllexport) void ReFix_UnregisterCallback(void* pCallback) {
+        UnrealSteamEmu::UnregisterCallback((CCallbackBase*)pCallback);
+    }
+    __declspec(dllexport) void ReFix_GetFaultClassStats(int packetClass, size_t* pSent, size_t* pDropped, size_t* pDuplicated, size_t* pDelayed, size_t* pReordered, size_t* pDelivered) {
+        const auto& stats = ReFix::FaultInjector::Get().GetStats((ReFix::PacketClass)packetClass);
+        if (pSent) *pSent = stats.sent;
+        if (pDropped) *pDropped = stats.dropped;
+        if (pDuplicated) *pDuplicated = stats.duplicated;
+        if (pDelayed) *pDelayed = stats.delayed;
+        if (pReordered) *pReordered = stats.reordered;
+        if (pDelivered) *pDelivered = stats.delivered;
+    }
+    __declspec(dllexport) void ReFix_GetFaultDirStats(int packetClass, int dir, size_t* pSent, size_t* pDropped, size_t* pDuplicated, size_t* pDelayed, size_t* pReordered, size_t* pDelivered) {
+        const auto& stats = ReFix::FaultInjector::Get().GetStats((ReFix::PacketClass)packetClass, (ReFix::PacketDirection)dir);
+        if (pSent) *pSent = stats.sent;
+        if (pDropped) *pDropped = stats.dropped;
+        if (pDuplicated) *pDuplicated = stats.duplicated;
+        if (pDelayed) *pDelayed = stats.delayed;
+        if (pReordered) *pReordered = stats.reordered;
+        if (pDelivered) *pDelivered = stats.delivered;
     }
 }
 

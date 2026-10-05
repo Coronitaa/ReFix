@@ -117,5 +117,7 @@ namespace UnrealSteamEmu {
     // Network isolation runtime verification
     uint64_t GetBlockedEgressCount();
     void ResetBlockedEgressCount();
+    void SimulatePeerEndpoint(uint64_t steamID, const char* ipStr, uint16_t port);
+    void SendTestLanPacket(uint64_t remoteID, uint8_t msgType, const void* payload, size_t payloadLen, int dir);
 }
 

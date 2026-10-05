@@ -651,7 +651,7 @@ namespace UnrealSteamEmu {
         }
     }
 
-    static void SendLanPacket(CSteamID remoteID, uint8_t msgType, const void* payload, size_t payloadLen) {
+    static void SendLanPacket(CSteamID remoteID, uint8_t msgType, const void* payload, size_t payloadLen, ReFix::PacketDirection dir = ReFix::PacketDirection::ANY) {
         if (g_udpSocket == INVALID_SOCKET) return;
 
         sockaddr_in dest = {};
@@ -714,7 +714,7 @@ namespace UnrealSteamEmu {
         };
 
         // BLOQUEANTE 4: Fault injection real y direccionable
-        ReFix::FaultInjector::Get().ProcessSend(pClass, ReFix::PacketDirection::ANY, netBuf.data(), netBuf.size(), sendFn);
+        ReFix::FaultInjector::Get().ProcessSend(pClass, dir, netBuf.data(), netBuf.size(), sendFn);
     }
 
     // --- SteamNetworkingSockets Connection Management ---
@@ -745,6 +745,7 @@ namespace UnrealSteamEmu {
         int64 messageCountOut;
         std::queue<SteamNetworkingMessage_t*> incomingMessages;
         HSteamNetPollGroup pollGroup;
+        bool isInitiator{ false };
 
         // Handshake retry timer & count
         std::chrono::steady_clock::time_point connectionStartTime;
@@ -839,6 +840,7 @@ namespace UnrealSteamEmu {
         memset(conn.name, 0, sizeof(conn.name));
         conn.messageCountOut = 0;
         conn.pollGroup = 0;
+        conn.isInitiator = true;
         conn.connectionStartTime = std::chrono::steady_clock::now();
         conn.lastHandshakeSendTime = conn.connectionStartTime;
         conn.handshakeRetries = 0;
@@ -961,6 +963,7 @@ namespace UnrealSteamEmu {
                                     memset(conn.name, 0, sizeof(conn.name));
                                     conn.messageCountOut = 0;
                                     conn.pollGroup = 0;
+                                    conn.isInitiator = false;
                                     conn.connectionStartTime = std::chrono::steady_clock::now();
                                     conn.lastHandshakeSendTime = conn.connectionStartTime;
                                     conn.handshakeRetries = 0;
@@ -984,9 +987,9 @@ namespace UnrealSteamEmu {
                                 EnqueueSocketCallbackFromSnapshot(snap);
                             }
 
-                            // Always send Handshake ACK back UNICAST
+                            // Always send Handshake ACK back UNICAST (HOST_TO_CLIENT)
                             SocketsHandshakeAck ack = { 1, sessionId, nonce };
-                            SendLanPacket(remoteID, 8, &ack, sizeof(ack));
+                            SendLanPacket(remoteID, 8, &ack, sizeof(ack), ReFix::PacketDirection::HOST_TO_CLIENT);
                         }
                     } else if (hdr->msgType == 8 && pLen >= sizeof(SocketsHandshakeAck)) { // Sockets Handshake ACK
                         SocketsHandshakeAck* ack = (SocketsHandshakeAck*)payload;
@@ -1015,8 +1018,9 @@ namespace UnrealSteamEmu {
                                         conn.substate = ReFixConnSubstate::Connected;
                                         stateChanged = true;
 
+                                        // Real measured RTT: from lastHandshakeSendTime to now!
                                         auto now = std::chrono::steady_clock::now();
-                                        conn.pingMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - conn.connectionStartTime).count();
+                                        conn.pingMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - conn.lastHandshakeSendTime).count();
                                     }
                                 } else {
                                     ReFixLog("[PollNetwork] REJECTED handshake ACK: nonce or remoteID mismatch!");
@@ -1059,12 +1063,14 @@ namespace UnrealSteamEmu {
                         CSteamID remoteID(hdr->senderID);
                         bool sendAck = false;
                         uint64_t ackSeqToSend = 0;
+                        bool connIsInitiator = false;
 
                         {
                             std::lock_guard<std::mutex> sockLock(g_socketsMutex);
                             auto it = g_sessionToConnection.find(sessionId);
                             if (it != g_sessionToConnection.end() && g_connections[it->second].state == k_ESteamNetworkingConnectionState_Connected) {
                                 ReFixConnection& conn = g_connections[it->second];
+                                connIsInitiator = conn.isInitiator;
                                 if (conn.remoteSteamID == remoteID) {
                                     // 1. Process piggybacked ACK
                                     if (head.ack > conn.highestReliableAckReceived) {
@@ -1154,7 +1160,8 @@ namespace UnrealSteamEmu {
 
                         if (sendAck) {
                             SocketsAckPacket ackPkt = { sessionId, ackSeqToSend };
-                            SendLanPacket(remoteID, 9, &ackPkt, sizeof(ackPkt));
+                            ReFix::PacketDirection ackDir = connIsInitiator ? ReFix::PacketDirection::CLIENT_TO_HOST : ReFix::PacketDirection::HOST_TO_CLIENT;
+                            SendLanPacket(remoteID, 9, &ackPkt, sizeof(ackPkt), ackDir);
                         }
                     }
                 }
@@ -1166,9 +1173,23 @@ namespace UnrealSteamEmu {
             CSteamID remoteSteamID;
             uint8_t msgType;
             std::vector<uint8_t> payload;
+            ReFix::PacketDirection dir;
         };
         std::vector<PendingSend> toSend;
         std::vector<ConnectionSnapshot> timeoutsToNotify;
+        bool needDiscoveryBroadcast = false;
+        std::string discoveryBroadcastPayload;
+
+        // Snapshot known resolved peer IDs under g_emuMutex FIRST (Strict lock hierarchy: zero nesting!)
+        std::vector<uint64_t> resolvedPeersList;
+        {
+            std::lock_guard<std::mutex> emuLock(g_emuMutex);
+            for (const auto& kv : g_peers) {
+                if (kv.second.ip != 0 && kv.second.port != 0) {
+                    resolvedPeersList.push_back(kv.first);
+                }
+            }
+        }
 
         {
             auto now = std::chrono::steady_clock::now();
@@ -1177,12 +1198,12 @@ namespace UnrealSteamEmu {
                 ReFixConnection& conn = pair.second;
                 if (conn.state == k_ESteamNetworkingConnectionState_Connecting) {
                     if (conn.substate == ReFixConnSubstate::Connecting_WaitingDiscovery) {
+                        uint64_t targetPeer = conn.remoteSteamID.ConvertToUint64();
                         bool peerResolved = false;
-                        {
-                            std::lock_guard<std::mutex> emuLock(g_emuMutex);
-                            auto itPeer = g_peers.find(conn.remoteSteamID.ConvertToUint64());
-                            if (itPeer != g_peers.end() && itPeer->second.ip != 0 && itPeer->second.port != 0) {
+                        for (uint64_t pId : resolvedPeersList) {
+                            if (pId == targetPeer) {
                                 peerResolved = true;
+                                break;
                             }
                         }
 
@@ -1199,12 +1220,12 @@ namespace UnrealSteamEmu {
                             hs.remotePeerId = conn.remoteSteamID.ConvertToUint64();
 
                             std::vector<uint8_t> hsData((uint8_t*)&hs, (uint8_t*)&hs + sizeof(hs));
-                            toSend.push_back({ conn.remoteSteamID, 7, std::move(hsData) });
+                            toSend.push_back({ conn.remoteSteamID, 7, std::move(hsData), ReFix::PacketDirection::CLIENT_TO_HOST });
                         } else {
                             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - conn.lastHandshakeSendTime).count() > 100) {
                                 conn.lastHandshakeSendTime = now;
-                                std::string pingPayload = g_personaName;
-                                BroadcastNetPacket(1, pingPayload.c_str(), pingPayload.size());
+                                needDiscoveryBroadcast = true;
+                                discoveryBroadcastPayload = g_personaName;
                             }
                         }
                     } else if (conn.substate == ReFixConnSubstate::Connecting_HandshakeSent) {
@@ -1233,7 +1254,7 @@ namespace UnrealSteamEmu {
                             hs.remotePeerId = conn.remoteSteamID.ConvertToUint64();
 
                             std::vector<uint8_t> hsData((uint8_t*)&hs, (uint8_t*)&hs + sizeof(hs));
-                            toSend.push_back({ conn.remoteSteamID, 7, std::move(hsData) });
+                            toSend.push_back({ conn.remoteSteamID, 7, std::move(hsData), ReFix::PacketDirection::CLIENT_TO_HOST });
                         }
                     }
                 } else if (conn.state == k_ESteamNetworkingConnectionState_Connected) {
@@ -1251,7 +1272,8 @@ namespace UnrealSteamEmu {
                             memcpy(ptr, &head, sizeof(SocketsPayloadHeader)); ptr += sizeof(SocketsPayloadHeader);
                             memcpy(ptr, rOut.data.data(), rOut.data.size());
 
-                            toSend.push_back({ conn.remoteSteamID, 6, std::move(payload) });
+                            ReFix::PacketDirection dir = conn.isInitiator ? ReFix::PacketDirection::CLIENT_TO_HOST : ReFix::PacketDirection::HOST_TO_CLIENT;
+                            toSend.push_back({ conn.remoteSteamID, 6, std::move(payload), dir });
 
                             rOut.lastSendTime = now;
                             rOut.retries++;
@@ -1261,14 +1283,19 @@ namespace UnrealSteamEmu {
             }
         }
 
+        // Discovery broadcast OUTSIDE of any lock (No I/O under lock!)
+        if (needDiscoveryBroadcast) {
+            BroadcastNetPacket(1, discoveryBroadcastPayload.c_str(), discoveryBroadcastPayload.size());
+        }
+
         // Notify timeouts outside lock
         for (const auto& snap : timeoutsToNotify) {
             EnqueueSocketCallbackFromSnapshot(snap);
         }
 
-        // Send all retransmitted packets outside of g_socketsMutex lock
+        // Send all retransmitted packets outside of g_socketsMutex lock with exact direction
         for (const auto& item : toSend) {
-            SendLanPacket(item.remoteSteamID, item.msgType, item.payload.data(), item.payload.size());
+            SendLanPacket(item.remoteSteamID, item.msgType, item.payload.data(), item.payload.size(), item.dir);
         }
     }
 
@@ -2527,7 +2554,7 @@ namespace UnrealSteamEmu {
                 hs.connectionNonce = nonce;
                 hs.capabilities = 0;
                 hs.remotePeerId = remoteID.ConvertToUint64();
-                SendLanPacket(remoteID, 7, (const uint8_t*)&hs, sizeof(hs));
+                SendLanPacket(remoteID, 7, (const uint8_t*)&hs, sizeof(hs), ReFix::PacketDirection::CLIENT_TO_HOST);
             } else {
                 // Endpoint unresolved: broadcast discovery ping so peer announces itself (BLOQUEANTE 1)
                 std::string pingPayload = g_personaName;
@@ -2657,6 +2684,7 @@ namespace UnrealSteamEmu {
             
             CSteamID remoteID;
             uint32_t sessionId = 0;
+            bool isInitiator = false;
             SocketsPayloadHeader head = {};
             head.flags = (uint16_t)nSendFlags;
             
@@ -2670,6 +2698,7 @@ namespace UnrealSteamEmu {
                 remoteID = it->second.remoteSteamID;
                 sessionId = it->second.sessionId;
                 head.messageNumber = ++(it->second.messageCountOut);
+                isInitiator = it->second.isInitiator;
 
                 // BLOQUEANTE 3: Decouple reliable sequence from unreliable!
                 if (nSendFlags & k_nSteamNetworkingSend_Reliable) {
@@ -2693,8 +2722,9 @@ namespace UnrealSteamEmu {
             memcpy(ptr, &head, sizeof(SocketsPayloadHeader)); ptr += sizeof(SocketsPayloadHeader);
             memcpy(ptr, pData, cbData);
             
-            // Send outside of g_socketsMutex lock
-            SendLanPacket(remoteID, 6, payload.data(), payload.size());
+            // Send outside of g_socketsMutex lock with exact packet direction
+            ReFix::PacketDirection dir = isInitiator ? ReFix::PacketDirection::CLIENT_TO_HOST : ReFix::PacketDirection::HOST_TO_CLIENT;
+            SendLanPacket(remoteID, 6, payload.data(), payload.size(), dir);
             
             if (pOutMessageNumber) *pOutMessageNumber = head.messageNumber;
             return k_EResultOK;
@@ -4048,6 +4078,20 @@ namespace UnrealSteamEmu {
 
     bool IsInitialized() {
         return g_bInitialized;
+    }
+
+    void SimulatePeerEndpoint(uint64_t steamID, const char* ipStr, uint16_t port) {
+        std::lock_guard<std::mutex> lock(g_emuMutex);
+        DiscoveredPeer& peer = g_peers[steamID];
+        peer.steamID = steamID;
+        inet_pton(AF_INET, ipStr, &peer.ip);
+        peer.ip = ntohl(peer.ip);
+        peer.port = port;
+        peer.lastSeen = std::chrono::steady_clock::now();
+    }
+
+    void SendTestLanPacket(uint64_t remoteID, uint8_t msgType, const void* payload, size_t payloadLen, int dir) {
+        SendLanPacket(CSteamID(remoteID), msgType, payload, payloadLen, (ReFix::PacketDirection)dir);
     }
 }
 

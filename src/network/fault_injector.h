@@ -68,6 +68,8 @@ public:
                      std::function<void(const uint8_t*, size_t)> sendFn);
 
     const PacketClassStats& GetStats(PacketClass pClass) const;
+    const PacketClassStats& GetStats(PacketClass pClass, PacketDirection dir) const;
+    void FlushHeldPackets();
     void PrintStats() const;
 
 private:
@@ -76,6 +78,7 @@ private:
 
     bool ShouldProcessDirection(PacketDirection dir) const;
     PacketClassStats& GetStatsInternal(PacketClass pClass);
+    PacketClassStats* GetDirStatsInternal(PacketClass pClass, PacketDirection dir);
 
     uint32_t m_seed{ 1337 };
     std::mt19937 m_rng;
@@ -99,12 +102,19 @@ private:
     ClassConfig m_configData;
     ClassConfig m_configDataAck;
 
-    // Per-class stats
+    // Per-class stats (Aggregates)
     PacketClassStats m_statsHandshake;
     PacketClassStats m_statsHandshakeAck;
     PacketClassStats m_statsData;
     PacketClassStats m_statsDataAck;
     PacketClassStats m_statsOther;
+
+    // Directional stats breakdown: [0] = CLIENT_TO_HOST, [1] = HOST_TO_CLIENT
+    PacketClassStats m_statsHandshakeDir[2];
+    PacketClassStats m_statsHandshakeAckDir[2];
+    PacketClassStats m_statsDataDir[2];
+    PacketClassStats m_statsDataAckDir[2];
+    PacketClassStats m_statsOtherDir[2];
 
     // Reorder buffer per packet class
     struct HeldPacket {
