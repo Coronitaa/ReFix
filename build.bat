@@ -55,7 +55,7 @@ if "%ENABLE_EOS_LEGACY%"=="1" (
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling EOSSDK-Win64-Shipping.dll & exit /b 1 )
 copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
 
-set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp"
+set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp src\network\fault_injector.cpp src\network\message_tracker.cpp"
 
 
 echo [*] Building steam_api64.dll proxy...

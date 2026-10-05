@@ -113,10 +113,9 @@ namespace UnrealSteamEmu {
 
     // Lobby sync notification with EOS
     void NotifyEOSLobby(uint64_t lobbyID);
-}
 
-extern "C" {
-    __declspec(dllexport) void* SteamAPI_SteamNetworkingMessages_SteamAPI_v002();
-    __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002();
+    // Network isolation runtime verification
+    uint64_t GetBlockedEgressCount();
+    void ResetBlockedEgressCount();
 }
 

@@ -28,6 +28,8 @@
 #include "unreal_detect.h"
 #include "unreal_steam_emu.h"
 #include "minhook/MinHook.h"
+#include "network/fault_injector.h"
+#include "network/message_tracker.h"
 
 #define STEAM_FORWARD_COUNT 1057
 
@@ -1095,7 +1097,7 @@ static const char* g_forwardNames[STEAM_FORWARD_COUNT] = {
     "SteamInternal_GameServer_Init_V2"
 };
 
-static HMODULE g_hOriginalDll = nullptr;
+extern "C" HMODULE g_hOriginalDll = nullptr;
 static HMODULE g_hSelfModule = nullptr;
 static bool g_configLoaded = false;
 static bool g_enableLogAllowed = false;
@@ -3012,26 +3014,19 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
 
 static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
     if (!pszVersion) return nullptr;
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
     
-    // In LAN/offline mode or when real Valve interface is absent, route networking interfaces to UnrealSteamEmu
-    if (!ReFix::NetworkModeManager::IsOnline() || !g_pfn_FindOrCreateUserInterface) {
-        if (strstr(pszVersion, "SteamNetworkingSockets")) {
-            void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
-            if (providerIface) return providerIface;
-        }
-        if (strstr(pszVersion, "SteamNetworkingUtils")) {
-            void* providerIface = UnrealSteamEmu::GetISteamNetworkingUtils();
-            if (providerIface) return providerIface;
-        }
+    // In LAN/offline mode, strictly route through LanSteamProvider (BLOQUEANTE 9 & 10)
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return provider->FindOrCreateUserInterface(hSteamUser, pszVersion);
     }
 
-    void* iface = g_pfn_FindOrCreateUserInterface ? g_pfn_FindOrCreateUserInterface(hSteamUser, pszVersion) : nullptr;
+    // In Online mode, query provider (which delegates to original Valve DLL)
+    void* iface = provider->FindOrCreateUserInterface(hSteamUser, pszVersion);
     if (!iface) {
-        if (strstr(pszVersion, "SteamNetworkingSockets")) {
-            return UnrealSteamEmu::GetISteamNetworkingSockets();
-        }
-        if (strstr(pszVersion, "SteamNetworkingUtils")) {
-            return UnrealSteamEmu::GetISteamNetworkingUtils();
+        // Fallback for newer networking interface requested on older steam client
+        if (strstr(pszVersion, "SteamNetworkingSockets") || strstr(pszVersion, "SteamNetworkingUtils") || strstr(pszVersion, "SteamNetworkingMessages")) {
+            return UnrealSteamEmu::FindOrCreateUserInterface(hSteamUser, pszVersion);
         }
     }
     HookInterfaceByVersion(iface, pszVersion);
@@ -3040,30 +3035,56 @@ static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteam
 
 static void* Intercepted_SteamInternal_CreateInterface(const char* pszVersion) {
     if (!pszVersion) return nullptr;
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
     
-    // In LAN/offline mode or when real Valve interface is absent, route networking interfaces to UnrealSteamEmu
-    if (!ReFix::NetworkModeManager::IsOnline() || !g_pfn_SteamInternal_CreateInterface) {
-        if (strstr(pszVersion, "SteamNetworkingSockets")) {
-            void* providerIface = UnrealSteamEmu::GetISteamNetworkingSockets();
-            if (providerIface) return providerIface;
-        }
-        if (strstr(pszVersion, "SteamNetworkingUtils")) {
-            void* providerIface = UnrealSteamEmu::GetISteamNetworkingUtils();
-            if (providerIface) return providerIface;
-        }
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return provider->CreateInterface(pszVersion);
     }
 
-    void* iface = g_pfn_SteamInternal_CreateInterface ? g_pfn_SteamInternal_CreateInterface(pszVersion) : nullptr;
+    void* iface = provider->CreateInterface(pszVersion);
     if (!iface) {
-        if (strstr(pszVersion, "SteamNetworkingSockets")) {
-            return UnrealSteamEmu::GetISteamNetworkingSockets();
-        }
-        if (strstr(pszVersion, "SteamNetworkingUtils")) {
-            return UnrealSteamEmu::GetISteamNetworkingUtils();
+        if (strstr(pszVersion, "SteamNetworkingSockets") || strstr(pszVersion, "SteamNetworkingUtils") || strstr(pszVersion, "SteamNetworkingMessages")) {
+            return UnrealSteamEmu::CreateInterface(pszVersion);
         }
     }
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
+}
+
+extern "C" __declspec(dllexport) void* CreateInterface(const char* pszVersion, int* pReturnCode) {
+    if (!pszVersion) {
+        if (pReturnCode) *pReturnCode = 1;
+        return nullptr;
+    }
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    void* iface = provider->CreateInterface(pszVersion);
+    if (pReturnCode) *pReturnCode = (iface != nullptr) ? 0 : 1;
+    return iface;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamNetworkingSockets_SteamAPI_v012() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider->GetNetworkingSockets();
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamNetworkingUtils_SteamAPI_v004() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider->GetNetworkingUtils();
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamNetworkingMessages_SteamAPI_v002() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider->GetNetworkingMessages();
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider->GetNetworkingSockets();
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider->GetNetworkingMessages();
 }
 
 static void InstallVTableHooks() {
@@ -4100,6 +4121,36 @@ static bool EnsureOriginal() {
         ReFixLog("EnsureOriginal: Intercepted SteamInternal_CreateInterface");
     }
 
+    int idxSockets = FindSteamExportIndex("SteamAPI_SteamNetworkingSockets_SteamAPI_v012");
+    if (idxSockets >= 0) {
+        g_steamProcs[idxSockets] = (FARPROC)SteamAPI_SteamNetworkingSockets_SteamAPI_v012;
+        ReFixLog("EnsureOriginal: Intercepted SteamAPI_SteamNetworkingSockets_SteamAPI_v012");
+    }
+
+    int idxUtils = FindSteamExportIndex("SteamAPI_SteamNetworkingUtils_SteamAPI_v004");
+    if (idxUtils >= 0) {
+        g_steamProcs[idxUtils] = (FARPROC)SteamAPI_SteamNetworkingUtils_SteamAPI_v004;
+        ReFixLog("EnsureOriginal: Intercepted SteamAPI_SteamNetworkingUtils_SteamAPI_v004");
+    }
+
+    int idxMsgs = FindSteamExportIndex("SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
+    if (idxMsgs >= 0) {
+        g_steamProcs[idxMsgs] = (FARPROC)SteamAPI_SteamNetworkingMessages_SteamAPI_v002;
+        ReFixLog("EnsureOriginal: Intercepted SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
+    }
+
+    int idxGSSockets = FindSteamExportIndex("SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012");
+    if (idxGSSockets >= 0) {
+        g_steamProcs[idxGSSockets] = (FARPROC)SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012;
+        ReFixLog("EnsureOriginal: Intercepted SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012");
+    }
+
+    int idxGSMsgs = FindSteamExportIndex("SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002");
+    if (idxGSMsgs >= 0) {
+        g_steamProcs[idxGSMsgs] = (FARPROC)SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002;
+        ReFixLog("EnsureOriginal: Intercepted SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002");
+    }
+
     // SteamInternal_SteamAPI_Init is handled via C++ __declspec(dllexport) below
     // (no slot redirect needed — dllexport takes precedence over the .def passthrough)
 
@@ -4511,6 +4562,60 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
         g_registeredCallbacks.clear();
     }
     SafeBackendShutdown();
+}
+
+// =============================================================================
+// REFIX TEST HARNESS & DIAGNOSTIC EXPORTS
+// =============================================================================
+extern "C" {
+    __declspec(dllexport) void ReFix_SetFaultDropRate(int packetClass, int percent) {
+        ReFix::FaultInjector::Get().SetDropRate((ReFix::PacketClass)packetClass, percent);
+    }
+    __declspec(dllexport) void ReFix_SetFaultDropCount(int packetClass, int count) {
+        ReFix::FaultInjector::Get().SetDropCount((ReFix::PacketClass)packetClass, count);
+    }
+    __declspec(dllexport) void ReFix_SetFaultDuplicateRate(int packetClass, int percent) {
+        ReFix::FaultInjector::Get().SetDuplicateRate((ReFix::PacketClass)packetClass, percent);
+    }
+    __declspec(dllexport) void ReFix_SetFaultReorderRate(int packetClass, int percent) {
+        ReFix::FaultInjector::Get().SetReorderRate((ReFix::PacketClass)packetClass, percent);
+    }
+    __declspec(dllexport) void ReFix_SetFaultDelay(int packetClass, int minMs, int maxMs) {
+        ReFix::FaultInjector::Get().SetDelay((ReFix::PacketClass)packetClass, minMs, maxMs);
+    }
+    __declspec(dllexport) void ReFix_SetFaultDirection(int dir) {
+        ReFix::FaultInjector::Get().SetDirectionFilter((ReFix::PacketDirection)dir);
+    }
+    __declspec(dllexport) void ReFix_SetFaultSeed(uint32_t seed) {
+        ReFix::FaultInjector::Get().SetSeed(seed);
+    }
+    __declspec(dllexport) void ReFix_PrintFaultStats() {
+        ReFix::FaultInjector::Get().PrintStats();
+    }
+    __declspec(dllexport) void ReFix_ResetFaultStats() {
+        ReFix::FaultInjector::Get().ResetStats();
+    }
+    __declspec(dllexport) void ReFix_GetMessageTrackerStats(size_t* pAllocated, size_t* pReleased, size_t* pDoubleRelease, size_t* pActiveLeaks) {
+        if (pAllocated) *pAllocated = ReFix::MessageTracker::Get().GetTotalAllocated();
+        if (pReleased) *pReleased = ReFix::MessageTracker::Get().GetTotalReleased();
+        if (pDoubleRelease) *pDoubleRelease = ReFix::MessageTracker::Get().GetDoubleReleaseCount();
+        if (pActiveLeaks) *pActiveLeaks = ReFix::MessageTracker::Get().GetLeakCount();
+    }
+    __declspec(dllexport) void ReFix_ResetMessageTracker() {
+        ReFix::MessageTracker::Get().Reset();
+    }
+    __declspec(dllexport) uint64_t ReFix_GetBlockedEgressCount() {
+        return UnrealSteamEmu::GetBlockedEgressCount();
+    }
+    __declspec(dllexport) void ReFix_ResetBlockedEgressCount() {
+        UnrealSteamEmu::ResetBlockedEgressCount();
+    }
+    __declspec(dllexport) void* ReFix_GetSteamProvider() {
+        return ReFix::ProviderFactory::GetSteamProvider().get();
+    }
+    __declspec(dllexport) const char* ReFix_GetSteamProviderName() {
+        return ReFix::ProviderFactory::GetSteamProvider()->GetName();
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
