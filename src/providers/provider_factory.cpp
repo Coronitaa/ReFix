@@ -1,5 +1,5 @@
 #include "provider_factory.h"
-#include "../network/network_policy.h"
+#include "../network/network_mode.h"
 
 namespace ReFix {
 
@@ -12,7 +12,7 @@ public:
         return true; 
     }
     void Shutdown() override {}
-    const char* GetName() const { return m_name; }
+    const char* GetName() const override { return m_name; }
 private:
     const char* m_name;
 };
@@ -21,8 +21,8 @@ std::shared_ptr<IReFixSteamProvider> ProviderFactory::s_steamProvider = nullptr;
 
 std::shared_ptr<IReFixSteamProvider> ProviderFactory::GetSteamProvider() {
     if (!s_steamProvider) {
-        NetworkPolicy policy = NetworkPolicyManager::GetPolicy();
-        if (policy == NetworkPolicy::Online) {
+        ReFixNetworkMode mode = NetworkModeManager::GetMode();
+        if (mode == ReFixNetworkMode::Online) {
             s_steamProvider = std::make_shared<DummySteamProvider>("OnlineSteamProvider");
         } else {
             s_steamProvider = std::make_shared<DummySteamProvider>("LanSteamProvider");

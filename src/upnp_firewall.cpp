@@ -9,6 +9,7 @@
 #include <comdef.h>
 #include <cstdio>
 #include <thread>
+#include "network/network_mode.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "wininet.lib")
@@ -157,8 +158,11 @@ std::string GetLocalIP() {
 
     return ip;
 }
-
 std::string GetPublicIP() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return GetLocalIP();
+    }
+
     HINTERNET hSession = InternetOpenA("ReFixPublicIPCheck", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
     if (!hSession) return GetLocalIP();
 

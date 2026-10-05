@@ -32,6 +32,22 @@
 
 #include "steam_p2p_hook.h"
 #include "minhook/MinHook.h"
+#include "network/network_mode.h"
+
+// Helper to determine if an IP is local/LAN
+static bool IsLanOrLocalIP(const sockaddr_in* addr) {
+    uint32_t ip = ntohl(addr->sin_addr.S_un.S_addr);
+    if ((ip >= 0x0A000000 && ip <= 0x0AFFFFFF) || // 10.0.0.0/8
+        (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) || // 172.16.0.0/12
+        (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) || // 192.168.0.0/16
+        (ip >= 0x7F000000 && ip <= 0x7FFFFFFF) || // 127.0.0.0/8
+        (ip >= 0xE0000000 && ip <= 0xEFFFFFFF) || // Multicast 224.0.0.0/4
+        (ip == 0xFFFFFFFF))                       // Broadcast 255.255.255.255
+    {
+        return true;
+    }
+    return false;
+}
 
 // =============================================================================
 // ISteamNetworking vtable layout (ISteamNetworking008)
@@ -710,6 +726,12 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     }
 
     // Fall through to real Winsock for raw packets
+    if (to && to->sa_family == AF_INET) {
+        if (!ReFix::NetworkModeManager::IsOnline() && !IsLanOrLocalIP(reinterpret_cast<const struct sockaddr_in*>(to))) {
+            // Drop packet
+            return len; // Pretend it was sent
+        }
+    }
     return g_orig_sendto(s, buf, len, flags, to, tolen);
 }
 
@@ -844,6 +866,11 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
         if (steamID != 0 && g_pSteamNetworking) {
             ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, steamID);
             SteamP2PHook::Log("Hook_connect: P2P session accepted for SteamID=%llu", steamID);
+        }
+
+        if (!ReFix::NetworkModeManager::IsOnline() && !IsLanOrLocalIP(sin)) {
+            WSASetLastError(WSAEHOSTUNREACH);
+            return SOCKET_ERROR;
         }
     }
     return g_orig_connect(s, name, namelen);

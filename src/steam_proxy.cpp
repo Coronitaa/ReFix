@@ -18,7 +18,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <string>
-#include "network/network_policy.h"
+#include "network/network_mode.h"
 #include "providers/provider_factory.h"
 #include <vector>
 #include <thread>
@@ -1383,7 +1383,7 @@ static CRefixLobbyCreatedCallResult g_lobbyCreatedCallResult;
 // =============================================================================
 static bool g_godotIsEngine = false;  // Set to true once config is loaded and EngineType=Godot
 static bool g_unrealIsEngine = false; // Set to true once config is loaded and EngineType=Unreal
-static bool g_isGoldbergMode = false; // Set to true if Online Mode=goldberg/offline/lan
+// Mode check now happens via NetworkModeManager
 
 struct CRefixCallback {
     void** m_pVtable;
@@ -1603,7 +1603,7 @@ static void LoadConfig() {
         ini = GetProxyDllDir() + "ReFix.ini";
     }
 
-    ReFix::NetworkPolicyManager::LoadPolicy(ini);
+    ReFix::NetworkModeManager::LoadMode(ini);
 
     auto ReadBool = [&](const char* section, const char* key, bool defaultVal) -> bool {
         char buf[64];
@@ -1618,7 +1618,7 @@ static void LoadConfig() {
     // [Online]
     char bufOnlineMode[64];
     ReadString("Online", "Mode", "valve", bufOnlineMode, sizeof(bufOnlineMode));
-    g_isGoldbergMode = (_stricmp(bufOnlineMode, "goldberg") == 0 || _stricmp(bufOnlineMode, "offline") == 0 || _stricmp(bufOnlineMode, "lan") == 0);
+    // Mode check now happens via NetworkModeManager
 
     // [Game]
     char bufGameName[128], bufEngine[64];
@@ -1704,7 +1704,7 @@ static void LoadConfig() {
     g_config.serverListAppIdNum = (sbAppId != 0) ? sbAppId : (g_config.realAppIdNum != 0 ? g_config.realAppIdNum : g_config.maskAppIdNum);
 
     // [Overlay]
-    if (g_isGoldbergMode) {
+    if ((!ReFix::NetworkModeManager::IsOnline())) {
         g_config.enableOverlay = false;
     } else {
         g_config.enableOverlay = ReadBool("Overlay", "EnableOverlay", true);
@@ -1877,7 +1877,7 @@ static void EnsureSteamAppIdFile(const char* appIdStr) {
 
 static void ApplySteamEnv() {
     LoadConfig();
-    if (g_isGoldbergMode) {
+    if ((!ReFix::NetworkModeManager::IsOnline())) {
         std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
         if (targetApp.empty() || targetApp == "0") targetApp = "480";
         SetEnvironmentVariableA("SteamAppId", targetApp.c_str());
@@ -1899,7 +1899,7 @@ static void ApplySteamEnv() {
         SetEnvironmentVariableA("SteamLanguage", g_config.language.c_str());
     }
 
-    if (g_config.enableOverlay && !g_isGoldbergMode) {
+    if (g_config.enableOverlay && !(!ReFix::NetworkModeManager::IsOnline())) {
         InjectSteamOverlay();
     }
 }
@@ -2192,7 +2192,7 @@ static uint32_t GetResolvedAppID() {
     } else if (_stricmp(g_config.getAppIdMode.c_str(), "real") == 0) {
         targetApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
     } else { // "auto"
-        if (!g_isGoldbergMode) {
+        if (!(!ReFix::NetworkModeManager::IsOnline())) {
             // In Valve Online mode (Spacewar 480):
             // Steam client, invites, lobbies, and presence run under MaskAppId (480).
             // Engines (Unreal, Unity Steamworks.NET, Godot) require GetAppID() to return
@@ -2706,7 +2706,7 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
     uint32_t targetApp = GetResolvedAppID();
     ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
-             targetApp, g_config.engineType.c_str(), g_isGoldbergMode ? "Goldberg" : "Valve");
+             targetApp, g_config.engineType.c_str(), (!ReFix::NetworkModeManager::IsOnline()) ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -2792,7 +2792,7 @@ static void* Hooked_ISteamMatchmakingServers_RequestLANServerList(
 static uint32_t Hooked_ISteamUtils_GetAppID(void* self) {
     uint32_t targetApp = GetResolvedAppID();
     ReFixLog("ISteamUtils::GetAppID Hook returning AppId=%u (Engine=%s, Mode=%s)",
-             targetApp, g_config.engineType.c_str(), g_isGoldbergMode ? "Goldberg" : "Valve");
+             targetApp, g_config.engineType.c_str(), (!ReFix::NetworkModeManager::IsOnline()) ? "Goldberg" : "Valve");
     return targetApp;
 }
 
@@ -3484,7 +3484,7 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
 
     if (g_pfn_RegisterCallback) g_pfn_RegisterCallback(pCallback, iCallback);
 
-    if (g_isGoldbergMode) {
+    if ((!ReFix::NetworkModeManager::IsOnline())) {
         if (iCallback == 101 || iCallback == 154 || iCallback == 163) {
             std::lock_guard<std::mutex> lg(g_pendingAuthMutex);
             g_pendingAuthCallbacks.push_back({ pCallback, iCallback, 0, 0 });
@@ -4094,14 +4094,36 @@ static void CapturePersonaName() {
 }
 
 // Intercepted Exports implemented directly
-extern "C" __declspec(dllexport) bool SteamAPI_Init() {
+extern "C" void SteamP2PHook_ForceResolve();
+
+static void ReFixInitializePre() {
     ApplySteamEnv();
-    ReFixLog("SteamAPI_Init called");
-    
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     provider->Init();
     ReFixLog("Provider initialized: %s", provider->GetName());
+}
 
+static void ReFixInitializePost(bool success) {
+    if (!success) return;
+    
+    g_steamInitTick = GetTickCount();
+    CapturePersonaName();
+    TriggerSyntheticRelayCallback();
+    
+    if (g_unrealIsEngine && !ReFix::NetworkModeManager::IsLanOnly() && !ReFix::NetworkModeManager::IsOffline()) {
+        SteamP2PHook::Install(g_hOriginalDll);
+        ReFixLog("ReFixInitializePost: Steam P2P Winsock hooks installed");
+        SteamP2PHook_ForceResolve();
+    } else {
+        ReFixLog("ReFixInitializePost: Winsock P2P hook skipped (mode=%d)", (int)ReFix::NetworkModeManager::GetMode());
+    }
+    InstallVTableHooks();
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_Init() {
+    ReFixInitializePre();
+    ReFixLog("SteamAPI_Init called");
+    
     if (!EnsureOriginal()) {
         ReFixLog("SteamAPI_Init: EnsureOriginal failed");
         return false;
@@ -4125,27 +4147,13 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         ReFixLog("SteamAPI_Init: called via SteamAPI_InitSafe -> result=%d", result);
     }
     ReFixLog("SteamAPI_Init: final result=%d", result);
-    if (result) {
-        g_steamInitTick = GetTickCount();
-        CapturePersonaName();
-        TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
-        if (g_unrealIsEngine && !g_isGoldbergMode) {
-            SteamP2PHook::Install(g_hOriginalDll);
-            ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
-            // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
-            extern void SteamP2PHook_ForceResolve();
-            SteamP2PHook_ForceResolve();
-        } else {
-            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
-        }
-        InstallVTableHooks();
-    }
+    
+    ReFixInitializePost(result);
     return result;
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
-    ApplySteamEnv();
+    ReFixInitializePre();
     ReFixLog("SteamAPI_InitSafe called");
     if (!EnsureOriginal()) return false;
     bool result = false;
@@ -4161,12 +4169,12 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
         result = (g_pfn_SteamAPIInit_Internal("", errMsg) == 0);
     }
     ReFixLog("SteamAPI_InitSafe: result=%d", result);
-    if (result) { CapturePersonaName(); InstallVTableHooks(); }
+    ReFixInitializePost(result);
     return result;
 }
 
 extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
-    ApplySteamEnv();
+    ReFixInitializePre();
     ReFixLog("SteamAPI_InitFlat called");
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
@@ -4188,25 +4196,17 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
         result = ok ? 0 : 1;
     }
     ReFixLog("SteamAPI_InitFlat: result=%d, msg='%s'", result, targetErr);
-    if (result == 0) {
-        CapturePersonaName();
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
-            SteamP2PHook::Install(g_hOriginalDll);
-            extern void SteamP2PHook_ForceResolve();
-            SteamP2PHook_ForceResolve();
-        }
-        InstallVTableHooks();
-    }
+    ReFixInitializePost(result == 0);
     return result;
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_InitAnonymousUser() {
-    ApplySteamEnv();
+    ReFixInitializePre();
     if (!EnsureOriginal()) return false;
     bool result = false;
     if (g_pfn_InitAnon) result = g_pfn_InitAnon();
     else if (g_pfn_Init) result = g_pfn_Init();
-    if (result) { CapturePersonaName(); InstallVTableHooks(); }
+    ReFixInitializePost(result);
     return result;
 }
 
@@ -4219,7 +4219,7 @@ extern "C" __declspec(dllexport) bool SteamInternal_GameServer_Init(
     uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort,
     int eServerMode, const char* pchVersionString)
 {
-    ApplySteamEnv();
+    ReFixInitializePre();
     ReFixLog("SteamInternal_GameServer_Init: IP=%u, GamePort=%u, QueryPort=%u, Mode=%d, Ver=%s",
              unIP, usGamePort, usQueryPort, eServerMode, pchVersionString ? pchVersionString : "null");
     if (!EnsureOriginal() || !g_pfn_GSInit) return false;
@@ -4231,7 +4231,7 @@ extern "C" __declspec(dllexport) bool SteamInternal_GameServer_Init(
 extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
     const char* pszInternalCheckInterfaceVersions, char* pOutErrMsg)
 {
-    ApplySteamEnv();
+    ReFixInitializePre();
     ReFixLog("SteamInternal_SteamAPI_Init called (ver='%s')", pszInternalCheckInterfaceVersions ? pszInternalCheckInterfaceVersions : "");
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
@@ -4253,26 +4253,12 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         result = ok ? 0 : 1;
     }
     ReFixLog("SteamInternal_SteamAPI_Init: result=%d, msg='%s'", result, targetErr);
-    if (result == 0) {
-        g_steamInitTick = GetTickCount();
-        CapturePersonaName();
-        TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
-        if (g_unrealIsEngine && !g_isGoldbergMode) {
-            SteamP2PHook::Install(g_hOriginalDll);
-            extern void SteamP2PHook_ForceResolve();
-            SteamP2PHook_ForceResolve();
-        } else {
-            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
-        }
-        InstallVTableHooks();
-    }
-
+    ReFixInitializePost(result == 0);
     return result;
 }
 
 extern "C" __declspec(dllexport) bool SteamGameServer_InitSafe() {
-    ApplySteamEnv();
+    ReFixInitializePre();
     ReFixLog("SteamGameServer_InitSafe called");
     if (!EnsureOriginal() || !g_pfn_GSInitSafe) return false;
     return g_pfn_GSInitSafe();
