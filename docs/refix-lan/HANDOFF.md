@@ -1,19 +1,18 @@
 # ReFix LAN / Re:Goldberg — Handoff
 
 ## Estado Actual
-- **Fases Completadas:** Fase 0, Fase 1, Fase 2, y Fase 2.1 (Hardening e Internet-Zero).
-- **Commit Actual:** `563a7d9 refix-lan: phase 2.1 provider hardening and internet-zero enforcement`
-- **Resultados Phase 2.1:** 
-  1. Se bloqueó proactivamente el tráfico de WinInet (`api.ipify.org`) y Winsock (`sendto`/`connect`) hacia redes externas si `NetworkModeManager::IsOnline()` es falso.
-  2. Todas las 7 rutas de inicialización de SteamAPI están unificadas bajo `ReFixInitializePre()` y `ReFixInitializePost()`, asegurando que el provider se cree y el ruteo de hooks sea inequívoco.
-  3. Los subagentes auditaron Callbacks y SDR comprobando que Relay aborta limpiamente sin red externa en LAN, y que `ISteamNetworkingSockets` actual carece de transmisión de datos real.
+- **Fases Completadas:** Fase 0, Fase 1, Fase 2.1, Fase 2.2 (Correctness Audit).
+- **Commit Actual:** `10ad9f0 docs: complete phase 2.2 correctness and network isolation audit`
+- **Resultados Phase 2.2:** 
+  1. Se depuraron las semánticas de inicialización usando `NetworkModeManager::IsGoldbergBackendActive()` para distinguir el proxy vs backend y `IsExternalNetworkingAllowed()` para ruteo de paquetes, removiendo el genérico `!IsOnline()`.
+  2. `IsAllowedLanEndpoint()` implementa de forma explícita RFC1918, Multicast, Link-Local y Loopback para IPv4 e IPv6. La prueba en `test_isolation.cpp` pasó exitosamente aislando IPs WAN (ej. `8.8.8.8`).
+  3. Múltiples auditorías confirmaron la ausencia de regresiones: initialization-graph.md, network-block-semantics.md, relay-semantics.md, ensure-original matrix y steam-networking-sockets.md detallan comportamientos esperados en LAN y Offline, demostrando que Phase 2.1 es sólida.
 
 ## Próximo Paso (Phase 3)
 El próximo agente debe **iniciar la Fase 3 (Steamworks LAN)**.
-- El objetivo inmediato de la Fase 3 es dotar al `LanSteamProvider` (y clases vinculadas) de una funcionalidad real de backend.
-- Se debe reestructurar/adaptar el código de `unreal_steam_emu.cpp` (que actualmente ya tiene emulación P2P e ISteamNetworking stub) para que actúe explícitamente bajo la jerarquía del `LanSteamProvider`.
-- Hay un requerimiento urgente: `ISteamNetworkingSockets` debe ser implementado y/o el transporte UDP de Winsock modificado para que el LAN matchmaking y transmisión funcione apropiadamente usando Unicast en lugar del Broadcast destructivo actual.
+- El diagnóstico de `ISteamNetworkingSockets` expuso que el `SendMessageToConnection` actual del proxy local descarta (`drops`) el payload UDP en LAN.
+- Se debe reutilizar y conectar el backend LAN/UDP existente (Multicast + P2P) a `ISteamNetworkingSockets` para que la nueva API de Sockets funcione en entornos aislados.
 
 **Instrucción Inmediata para el Agente:** 
-1. Leer `docs/refix-lan/REFIX_LAN_STATE.md` y `docs/refix-lan/audits/steamnetworkingsockets-diag.md`
+1. Leer `docs/refix-lan/REFIX_LAN_STATE.md` y `docs/refix-lan/audits/steam-networking-sockets.md`.
 2. Comenzar la **Fase 3**.
