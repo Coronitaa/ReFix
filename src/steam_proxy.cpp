@@ -1,7 +1,7 @@
 // =============================================================================
 // ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
 // =============================================================================
-// Forwards 1055 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
+// Forwards 1141 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
 // Intercepts SteamAPI_Init, ISteamMatchmaking (CreateLobby, RequestLobbyList, SetLobbyData),
 // and callbacks (GameLobbyJoinRequested_t, GameRichPresenceJoinRequested_t).
 //
@@ -24,9 +24,10 @@
 #include "upnp_firewall.h"
 #include "steam_p2p_hook.h"
 #include "unreal_detect.h"
+#include "steam_network_compat.h"
 #include "minhook/MinHook.h"
 
-#define STEAM_FORWARD_COUNT 1057
+#define STEAM_FORWARD_COUNT 1141
 
 extern "C" {
     __declspec(dllexport) FARPROC g_steamProcs[STEAM_FORWARD_COUNT] = { 0 };
@@ -1089,10 +1090,95 @@ static const char* g_forwardNames[STEAM_FORWARD_COUNT] = {
     "SteamInternal_GameServer_Init",
     "g_pSteamClientGameServer",
     "SteamInternal_SteamAPI_Init",
-    "SteamInternal_GameServer_Init_V2"
+    "SteamInternal_GameServer_Init_V2",
+    "SteamAPI_ISteamGameServer_EnableHeartbeats",
+    "SteamAPI_ISteamGameServer_ForceHeartbeat",
+    "SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate",
+    "SteamAPI_ISteamGameServer_SendUserDisconnect",
+    "SteamAPI_ISteamGameServer_SetHeartbeatInterval",
+    "SteamAPI_ISteamInput_GetGlyphForActionOrigin",
+    "SteamAPI_ISteamInput_TriggerHapticPulse",
+    "SteamAPI_ISteamInput_TriggerRepeatedHapticPulse",
+    "SteamAPI_ISteamNetworkingConnectionCustomSignaling_Release",
+    "SteamAPI_ISteamNetworkingConnectionCustomSignaling_SendSignal",
+    "SteamAPI_ISteamNetworkingCustomSignalingRecvContext_OnConnectRequest",
+    "SteamAPI_ISteamNetworkingCustomSignalingRecvContext_SendRejectionSignal",
+    "SteamAPI_ISteamNetworkingSockets_GetQuickConnectionStatus",
+    "SteamAPI_ISteamNetworkingUtils_GetFirstConfigValue",
+    "SteamAPI_ISteamTV_AddBroadcastGameData",
+    "SteamAPI_ISteamTV_AddRegion",
+    "SteamAPI_ISteamTV_AddTimelineMarker",
+    "SteamAPI_ISteamTV_IsBroadcasting",
+    "SteamAPI_ISteamTV_RemoveBroadcastGameData",
+    "SteamAPI_ISteamTV_RemoveRegion",
+    "SteamAPI_ISteamTV_RemoveTimelineMarker",
+    "SteamAPI_ISteamUser_InitiateGameConnection",
+    "SteamAPI_ISteamUser_TerminateGameConnection",
+    "SteamAPI_ISteamUtils_GetCSERIPPort",
+    "SteamAPI_SteamController_v007",
+    "SteamAPI_SteamGameServerApps_v008",
+    "SteamAPI_SteamGameServerNetworkingSockets_v008",
+    "SteamAPI_SteamGameServerUGC_v014",
+    "SteamAPI_SteamGameServerUtils_v009",
+    "SteamAPI_SteamGameServer_v013",
+    "SteamAPI_SteamInput_v001",
+    "SteamAPI_SteamNetworkingSockets_v008",
+    "SteamAPI_SteamNetworkingUtils_v003",
+    "SteamAPI_SteamRemoteStorage_v014",
+    "SteamAPI_SteamTV_v001",
+    "SteamAPI_SteamUGC_v014",
+    "SteamAPI_SteamUserStats_v011",
+    "SteamAPI_SteamUser_v020",
+    "SteamAPI_SteamUtils_v009",
+    "SteamAPI_ISteamApps_GetBetaInfo",
+    "SteamAPI_ISteamApps_GetNumBetas",
+    "SteamAPI_ISteamApps_SetActiveBeta",
+    "SteamAPI_ISteamApps_SetDlcContext",
+    "SteamAPI_ISteamFriends_BHasEquippedProfileItem",
+    "SteamAPI_ISteamFriends_GetProfileItemPropertyString",
+    "SteamAPI_ISteamFriends_GetProfileItemPropertyUint",
+    "SteamAPI_ISteamFriends_RequestEquippedProfileItems",
+    "SteamAPI_ISteamInput_SetDualSenseTriggerEffect",
+    "SteamAPI_ISteamRemotePlay_BStartRemotePlayTogether",
+    "SteamAPI_ISteamTimeline_AddGamePhaseTag",
+    "SteamAPI_ISteamTimeline_AddInstantaneousTimelineEvent",
+    "SteamAPI_ISteamTimeline_AddRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_ClearTimelineTooltip",
+    "SteamAPI_ISteamTimeline_DoesEventRecordingExist",
+    "SteamAPI_ISteamTimeline_DoesGamePhaseRecordingExist",
+    "SteamAPI_ISteamTimeline_EndGamePhase",
+    "SteamAPI_ISteamTimeline_EndRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_OpenOverlayToGamePhase",
+    "SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent",
+    "SteamAPI_ISteamTimeline_RemoveTimelineEvent",
+    "SteamAPI_ISteamTimeline_SetGamePhaseAttribute",
+    "SteamAPI_ISteamTimeline_SetGamePhaseID",
+    "SteamAPI_ISteamTimeline_SetTimelineGameMode",
+    "SteamAPI_ISteamTimeline_SetTimelineTooltip",
+    "SteamAPI_ISteamTimeline_StartGamePhase",
+    "SteamAPI_ISteamTimeline_StartRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_UpdateRangeTimelineEvent",
+    "SteamAPI_ISteamUGC_AddContentDescriptor",
+    "SteamAPI_ISteamUGC_GetNumSupportedGameVersions",
+    "SteamAPI_ISteamUGC_GetQueryUGCContentDescriptors",
+    "SteamAPI_ISteamUGC_GetSupportedGameVersionData",
+    "SteamAPI_ISteamUGC_GetUserContentDescriptorPreferences",
+    "SteamAPI_ISteamUGC_RemoveContentDescriptor",
+    "SteamAPI_ISteamUGC_SetAdminQuery",
+    "SteamAPI_ISteamUGC_SetRequiredGameVersions",
+    "SteamAPI_ISteamUtils_DismissGamepadTextInput",
+    "SteamAPI_SteamGameServerUGC_v020",
+    "SteamAPI_SteamGameServer_v015",
+    "SteamAPI_SteamRemotePlay_v002",
+    "SteamAPI_SteamTimeline_v004",
+    "SteamAPI_SteamUGC_v020",
+    "SteamAPI_SteamUserStats_v013",
+    "SteamAPI_SteamUser_v023",
+    "SteamAPI_SteamVideo_v007",
 };
 
-static HMODULE g_hOriginalDll = nullptr;
+
+HMODULE g_hOriginalDll = nullptr;
 static HMODULE g_hSelfModule = nullptr;
 static bool g_configLoaded = false;
 static bool g_enableLogAllowed = false;
@@ -1599,6 +1685,21 @@ static void LoadConfig() {
     DWORD attrib = GetFileAttributesA(ini.c_str());
     if (attrib == INVALID_FILE_ATTRIBUTES) {
         ini = GetProxyDllDir() + "ReFix.ini";
+        attrib = GetFileAttributesA(ini.c_str());
+    }
+    if (attrib == INVALID_FILE_ATTRIBUTES) {
+        std::string cand = GetExeDir() + "..\\ReFix.ini";
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ini = cand;
+            attrib = 0;
+        }
+    }
+    if (attrib == INVALID_FILE_ATTRIBUTES) {
+        std::string cand = GetExeDir() + "..\\..\\ReFix.ini";
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ini = cand;
+            attrib = 0;
+        }
     }
 
     auto ReadBool = [&](const char* section, const char* key, bool defaultVal) -> bool {
@@ -3579,7 +3680,7 @@ extern "C" void ReFix_NotifyLobbyMemberChange(uint64_t lobbyID) {
 }
 
 extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort) {
-    uint64_t targetLobby = g_activeLobbyID;
+    uint64_t targetLobby = g_hostedLobbyID != 0 ? g_hostedLobbyID : g_activeLobbyID;
     if (targetLobby != 0) {
         void* matchmaking = nullptr;
         typedef void* (*fn_SteamMatchmaking_t)();
@@ -3595,6 +3696,44 @@ extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort) {
     }
 }
 
+extern "C" __declspec(dllexport) bool ReFix_Steam_GetCapturedTicketData(uint8_t* outBuf, size_t maxLen, size_t* outLen, uint32_t* outHandle) {
+    std::lock_guard<std::mutex> lg(g_callbackMutex);
+    if (g_lastAuthTicketData.empty()) return false;
+    if (outBuf && maxLen > 0) {
+        size_t copyLen = (g_lastAuthTicketData.size() < maxLen) ? g_lastAuthTicketData.size() : maxLen;
+        memcpy(outBuf, g_lastAuthTicketData.data(), copyLen);
+        if (outLen) *outLen = copyLen;
+        if (outHandle) *outHandle = g_lastAuthTicketHandle;
+        return true;
+    }
+    return false;
+}
+
+// UNAE (Universal Network Arbitration Engine) fallback exports for external consumers
+extern "C" {
+static char s_unaeSelectedRegion[16] = "sa";
+
+__declspec(dllexport) void UNAE_Initialize() {
+    ReFixLog("[UNAE] UNAE_Initialize fallback called via steam_api64 export");
+}
+__declspec(dllexport) int UNAE_GetTopology() {
+    return 0; // Fallback Topology: Auto / Direct P2P
+}
+__declspec(dllexport) int UNAE_GetActiveTier() {
+    return 2; // Fallback Tier 2: Steam P2P / SDR
+}
+__declspec(dllexport) bool UNAE_IsDirectP2PAllowed() {
+    return true; // Fallback: Direct P2P permitted
+}
+__declspec(dllexport) void UNAE_SetSelectedRegion(const char* regionStr) {
+    if (regionStr && regionStr[0]) {
+        strncpy_s(s_unaeSelectedRegion, sizeof(s_unaeSelectedRegion), regionStr, _TRUNCATE);
+    }
+}
+__declspec(dllexport) const char* UNAE_GetSelectedRegion() {
+    return s_unaeSelectedRegion;
+}
+}
 static bool Intercepted_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
     return Hooked_ISteamMatchmaking_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
 }
@@ -4051,9 +4190,33 @@ static bool EnsureOriginal() {
         ReFixLog("EnsureOriginal: Intercepted SteamInternal_CreateInterface");
     }
 
-    // SteamInternal_SteamAPI_Init is handled via C++ __declspec(dllexport) below
-    // (no slot redirect needed — dllexport takes precedence over the .def passthrough)
-
+    // Intercept SteamNetworkingSockets APIs for generic networking compatibility (SteamNetCompat)
+    if (!g_isGoldbergMode) {
+        int idxCreateListen = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P");
+        if (idxCreateListen >= 0) {
+            g_steamProcs[idxCreateListen] = (FARPROC)SteamNetCompat::Intercept_CreateListenSocketP2P;
+        }
+        int idxConnectP2P = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_ConnectP2P");
+        if (idxConnectP2P >= 0) {
+            g_steamProcs[idxConnectP2P] = (FARPROC)SteamNetCompat::Intercept_ConnectP2P;
+        }
+        int idxAcceptConn = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_AcceptConnection");
+        if (idxAcceptConn >= 0) {
+            g_steamProcs[idxAcceptConn] = (FARPROC)SteamNetCompat::Intercept_AcceptConnection;
+        }
+        int idxCloseConn = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_CloseConnection");
+        if (idxCloseConn >= 0) {
+            g_steamProcs[idxCloseConn] = (FARPROC)SteamNetCompat::Intercept_CloseConnection;
+        }
+        int idxSocketsV8 = FindSteamExportIndex("SteamAPI_SteamNetworkingSockets_v008");
+        if (idxSocketsV8 >= 0) {
+            g_steamProcs[idxSocketsV8] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingSockets_v008;
+        }
+        int idxUtilsV3 = FindSteamExportIndex("SteamAPI_SteamNetworkingUtils_v003");
+        if (idxUtilsV3 >= 0) {
+            g_steamProcs[idxUtilsV3] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingUtils_v003;
+        }
+    }
 
     // Check engine type for Godot-specific behavior
     g_godotIsEngine = (_stricmp(g_config.engineType.c_str(), "Godot") == 0);
@@ -4131,6 +4294,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
             ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
         }
         InstallVTableHooks();
+        SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
     }
     return result;
 }
@@ -4152,7 +4316,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
         result = (g_pfn_SteamAPIInit_Internal("", errMsg) == 0);
     }
     ReFixLog("SteamAPI_InitSafe: result=%d", result);
-    if (result) { CapturePersonaName(); InstallVTableHooks(); }
+    if (result) {
+        CapturePersonaName();
+        InstallVTableHooks();
+        SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
+    }
     return result;
 }
 
@@ -4187,6 +4355,7 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
             SteamP2PHook_ForceResolve();
         }
         InstallVTableHooks();
+        SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
     }
     return result;
 }
@@ -4197,7 +4366,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitAnonymousUser() {
     bool result = false;
     if (g_pfn_InitAnon) result = g_pfn_InitAnon();
     else if (g_pfn_Init) result = g_pfn_Init();
-    if (result) { CapturePersonaName(); InstallVTableHooks(); }
+    if (result) {
+        CapturePersonaName();
+        InstallVTableHooks();
+        SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
+    }
     return result;
 }
 
@@ -4257,6 +4430,7 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
             ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
         }
         InstallVTableHooks();
+        SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
     }
 
     return result;
@@ -4345,6 +4519,8 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 333 (GameLobbyJoinRequested_t)");
                 } else if (msg->m_iCallback == 504) {
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 504 (LobbyEnter_t)");
+                } else if (msg->m_iCallback == 1221) {
+                    SteamNetCompat::ProcessConnectionStatusChanged(msg->m_pubParam, msg->m_cubParam);
                 }
             }
             return true;
@@ -4442,6 +4618,7 @@ static void SafeBackendShutdown() {
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+    SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);
     SteamP2PHook::Uninstall();

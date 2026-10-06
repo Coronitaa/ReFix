@@ -1,7 +1,7 @@
 param(
-    [string]$TargetDir,
-    [string]$BinDir,
-    [string]$ExeDir,
+    [string]$TargetDir = "",
+    [string]$BinDir = "",
+    [string]$ExeDir = "",
     [string]$EngineType = "Unity",
     [string]$OnlineMode = "valve",
     [string]$PhotonAppId = "",
@@ -22,14 +22,41 @@ param(
     [string]$DefaultRegion = "sa"
 )
 
-# Clean paths by trimming trailing quotes/slashes
-if ($TargetDir) { $TargetDir = $TargetDir.TrimEnd('\').Trim('"') }
-if ($BinDir)    { $BinDir    = $BinDir.TrimEnd('\').Trim('"') }
-if ($ExeDir)    { $ExeDir    = $ExeDir.TrimEnd('\').Trim('"') }
+# Fallback to environment variables if parameters were omitted or empty
+if (-not $TargetDir -and $env:REFIX_TARGET_DIR) { $TargetDir = $env:REFIX_TARGET_DIR }
+if (-not $BinDir    -and $env:REFIX_BIN_DIR)    { $BinDir    = $env:REFIX_BIN_DIR }
+if (-not $ExeDir    -and $env:REFIX_EXE_DIR)    { $ExeDir    = $env:REFIX_EXE_DIR }
+if (-not $EngineType -and $env:REFIX_ENGINE_TYPE) { $EngineType = $env:REFIX_ENGINE_TYPE }
+if (-not $OnlineMode -and $env:REFIX_ONLINE_MODE) { $OnlineMode = $env:REFIX_ONLINE_MODE }
+if (-not $GameName  -and $env:REFIX_GAME_NAME)  { $GameName  = $env:REFIX_GAME_NAME }
+if (-not $UserName  -and $env:REFIX_USERNAME)   { $UserName  = $env:REFIX_USERNAME }
+if ((-not $RealAppId -or $RealAppId -eq "480") -and $env:REFIX_REAL_APPID) { $RealAppId = $env:REFIX_REAL_APPID }
+if ((-not $MaskAppId -or $MaskAppId -eq "480") -and $env:REFIX_MASK_APPID) { $MaskAppId = $env:REFIX_MASK_APPID }
+if ((-not $ListenPort -or $ListenPort -eq "47584") -and $env:REFIX_LAN_PORT) { $ListenPort = $env:REFIX_LAN_PORT }
+if (-not $DLCMode   -and $env:REFIX_DLC_MODE)   { $DLCMode   = $env:REFIX_DLC_MODE }
+if (-not $DLCs      -and $env:REFIX_DLCS)       { $DLCs      = $env:REFIX_DLCS }
+if (-not $CustomBroadcasts -and $env:REFIX_CUSTOM_BROADCASTS) { $CustomBroadcasts = $env:REFIX_CUSTOM_BROADCASTS }
+if (-not $PhotonAppId -and $env:REFIX_PHOTON_APPID) { $PhotonAppId = $env:REFIX_PHOTON_APPID }
+if (-not $PhotonRegion -and $env:REFIX_PHOTON_REGION) { $PhotonRegion = $env:REFIX_PHOTON_REGION }
+
+# Clean paths by trimming whitespace and trailing quotes/slashes
+if ($TargetDir) { $TargetDir = $TargetDir.Trim().Trim('"').TrimEnd('\').TrimEnd('/') }
+if ($BinDir)    { $BinDir    = $BinDir.Trim().Trim('"').TrimEnd('\').TrimEnd('/') }
+if ($ExeDir)    { $ExeDir    = $ExeDir.Trim().Trim('"').TrimEnd('\').TrimEnd('/') }
 if (-not $ExeDir) { $ExeDir  = $TargetDir }
+
+if (-not (Test-Path -LiteralPath $TargetDir)) {
+    Write-Host "[ERROR] Target directory does not exist: $TargetDir" -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $BinDir)) {
+    Write-Host "[ERROR] Binary directory does not exist: $BinDir" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
 Write-Host " [ReFix Deploy Engine] Target: $TargetDir" -ForegroundColor Cyan
+Write-Host " [ReFix Deploy Engine] ExeDir: $ExeDir" -ForegroundColor Cyan
 Write-Host " [ReFix Deploy Engine] Mode:   $OnlineMode ($EngineType)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
@@ -48,8 +75,8 @@ function Get-Or-Generate-Identity {
     $autoGenerateSteamId = $true
 
     # Check if ReFix.ini exists and already has persistent identity configured
-    if (Test-Path $ConfigPath) {
-        $iniLines = Get-Content $ConfigPath -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $ConfigPath) {
+        $iniLines = Get-Content -LiteralPath $ConfigPath -ErrorAction SilentlyContinue
         foreach ($line in $iniLines) {
             if ($line -match "^\s*AutoGenerateSteamId\s*=\s*(false|0)\s*$") {
                 $autoGenerateSteamId = $false
@@ -120,16 +147,16 @@ function Get-Or-Generate-Identity {
 function Detect-UNAE-Topology {
     param([string]$TargetDir)
 
-    $hasPhotonRealtime = (Get-ChildItem -Path $TargetDir -Filter "PhotonRealtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasPhoton3Unity   = (Get-ChildItem -Path $TargetDir -Filter "Photon3Unity3D.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasPhotonVoice    = (Get-ChildItem -Path $TargetDir -Filter "PhotonVoice.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasPhotonFusion   = (Get-ChildItem -Path $TargetDir -Filter "Fusion.Runtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasNanosockets    = (Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasMirror         = (Get-ChildItem -Path $TargetDir -Filter "Mirror.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasKcp            = (Get-ChildItem -Path $TargetDir -Filter "kcp2k.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasEOS            = (Get-ChildItem -Path $TargetDir -Filter "*EOSSDK*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhotonRealtime = (Get-ChildItem -LiteralPath $TargetDir -Filter "PhotonRealtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhoton3Unity   = (Get-ChildItem -LiteralPath $TargetDir -Filter "Photon3Unity3D.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhotonVoice    = (Get-ChildItem -LiteralPath $TargetDir -Filter "PhotonVoice.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasPhotonFusion   = (Get-ChildItem -LiteralPath $TargetDir -Filter "Fusion.Runtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasNanosockets    = (Get-ChildItem -LiteralPath $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasMirror         = (Get-ChildItem -LiteralPath $TargetDir -Filter "Mirror.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasKcp            = (Get-ChildItem -LiteralPath $TargetDir -Filter "kcp2k.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $hasEOS            = (Get-ChildItem -LiteralPath $TargetDir -Filter "*EOSSDK*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
 
-    $il2cppMeta = Get-ChildItem -Path $TargetDir -Filter "global-metadata.dat" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $il2cppMeta = Get-ChildItem -LiteralPath $TargetDir -Filter "global-metadata.dat" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
     $il2cppPUN = $false
     $il2cppFusion = $false
     if ($il2cppMeta) {
@@ -472,20 +499,22 @@ $pluginDirs = @()
 
 # For Unity games, discover dedicated Plugins folders (e.g. *_Data\Plugins\x86_64 or *_Data\Plugins)
 $unityPluginDirs = @()
-$unityDataDirs = Get-ChildItem -Path $TargetDir -Directory -Filter "*_Data" -Recurse -ErrorAction SilentlyContinue
+# For Unity games, discover dedicated Plugins folders (e.g. *_Data\Plugins\x86_64 or *_Data\Plugins)
+$unityPluginDirs = @()
+$unityDataDirs = Get-ChildItem -LiteralPath $TargetDir -Directory -Filter "*_Data" -Recurse -ErrorAction SilentlyContinue
 foreach ($uData in $unityDataDirs) {
     $p64 = Join-Path $uData.FullName "Plugins\x86_64"
     $pRoot = Join-Path $uData.FullName "Plugins"
-    if (Test-Path $p64) { $unityPluginDirs += $p64 }
-    elseif (Test-Path $pRoot) { $unityPluginDirs += $pRoot }
+    if (Test-Path -LiteralPath $p64) { $unityPluginDirs += $p64 }
+    elseif (Test-Path -LiteralPath $pRoot) { $unityPluginDirs += $pRoot }
 }
 
-$steamDlls = Get-ChildItem -Path $TargetDir -Filter "steam_api64.dll" -Recurse -ErrorAction SilentlyContinue
+$steamDlls = Get-ChildItem -LiteralPath $TargetDir -Filter "steam_api64.dll" -Recurse -ErrorAction SilentlyContinue
 foreach ($dll in $steamDlls) {
     if ($pluginDirs -notcontains $dll.DirectoryName) { $pluginDirs += $dll.DirectoryName }
 }
 
-$valveDlls = Get-ChildItem -Path $TargetDir -Filter "steam_api64_valve.dll" -Recurse -ErrorAction SilentlyContinue
+$valveDlls = Get-ChildItem -LiteralPath $TargetDir -Filter "steam_api64_valve.dll" -Recurse -ErrorAction SilentlyContinue
 foreach ($v in $valveDlls) {
     if ($pluginDirs -notcontains $v.DirectoryName) { $pluginDirs += $v.DirectoryName }
 }
@@ -499,8 +528,8 @@ if ($unityPluginDirs.Count -gt 0) {
         $pluginDirs = @($pluginDirs | Where-Object { $_ -ne $ExeDir })
         $straySteam = Join-Path $ExeDir "steam_api64.dll"
         $strayValve = Join-Path $ExeDir "steam_api64_valve.dll"
-        if (Test-Path $straySteam) { Remove-Item -Path $straySteam -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $strayValve) { Remove-Item -Path $strayValve -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $straySteam) { Remove-Item -LiteralPath $straySteam -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $strayValve) { Remove-Item -LiteralPath $strayValve -Force -ErrorAction SilentlyContinue }
         Write-Host "  [OK] Cleaned stray steam_api64 DLLs from Unity root folder to prevent DLL shadowing" -ForegroundColor Green
     }
 }
@@ -519,20 +548,20 @@ $pluginDirs32 = @()
 # Unity x86 plugin subfolder: *_Data\Plugins\x86
 foreach ($uData in $unityDataDirs) {
     $p32 = Join-Path $uData.FullName "Plugins\x86"
-    if (Test-Path $p32) {
+    if (Test-Path -LiteralPath $p32) {
         if ($pluginDirs32 -notcontains $p32) { $pluginDirs32 += $p32 }
     }
 }
 
 # Scan for standalone steam_api.dll (exactly "steam_api.dll", not steam_api64.dll)
-$steamDlls32 = Get-ChildItem -Path $TargetDir -Filter "steam_api.dll" -Recurse -ErrorAction SilentlyContinue |
+$steamDlls32 = Get-ChildItem -LiteralPath $TargetDir -Filter "steam_api.dll" -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -eq "steam_api.dll" }
 foreach ($dll32 in $steamDlls32) {
     if ($pluginDirs32 -notcontains $dll32.DirectoryName) { $pluginDirs32 += $dll32.DirectoryName }
 }
 
 # Also pick up dirs that only have steam_api_o.dll or steam_api_valve.dll (already-deployed x86)
-$valveDlls32 = Get-ChildItem -Path $TargetDir -Filter "steam_api_valve.dll" -Recurse -ErrorAction SilentlyContinue
+$valveDlls32 = Get-ChildItem -LiteralPath $TargetDir -Filter "steam_api_valve.dll" -Recurse -ErrorAction SilentlyContinue
 foreach ($v32 in $valveDlls32) {
     if ($pluginDirs32 -notcontains $v32.DirectoryName) { $pluginDirs32 += $v32.DirectoryName }
 }
@@ -552,7 +581,7 @@ switch ($OnlineMode) {
         $proxyPath = Join-Path $BinDir "steam_api64.dll"
         $valveStockDll = Join-Path $BinDir "valve\steam_api64.dll"
         $goldbergDll = Join-Path $BinDir "goldberg\steam_api64.dll"
-        if (-not (Test-Path $proxyPath)) {
+        if (-not (Test-Path -LiteralPath $proxyPath)) {
             Write-Host "  [ERROR] ReFix proxy steam_api64.dll not found at: $proxyPath" -ForegroundColor Red
             exit 1
         }
@@ -563,69 +592,81 @@ switch ($OnlineMode) {
 
             # Check if existing $valvePath is actually Goldberg (e.g. from previous Goldberg deployment)
             $isGoldbergAtValve = $false
-            if (Test-Path $valvePath) {
-                if (Test-Path $goldbergDll) {
-                    if ((Get-Item $valvePath).Length -eq (Get-Item $goldbergDll).Length) {
+            if (Test-Path -LiteralPath $valvePath) {
+                if (Test-Path -LiteralPath $goldbergDll) {
+                    if ((Get-Item -LiteralPath $valvePath).Length -eq (Get-Item -LiteralPath $goldbergDll).Length) {
                         $isGoldbergAtValve = $true
                     }
                 }
             }
 
             # If $origPath exists, make sure $valvePath is restored from $origPath
-            if (Test-Path $origPath) {
-                if ((-not (Test-Path $valvePath)) -or $isGoldbergAtValve) {
-                    Copy-Item -Path $origPath -Destination $valvePath -Force
+            if (Test-Path -LiteralPath $origPath) {
+                if ((-not (Test-Path -LiteralPath $valvePath)) -or $isGoldbergAtValve) {
+                    Copy-Item -LiteralPath $origPath -Destination $valvePath -Force
                     Write-Host "  [OK] Restored original Valve DLL from $origPath -> steam_api64_valve.dll in $dir" -ForegroundColor Green
                     $isGoldbergAtValve = $false
                 }
-            } elseif (Test-Path $steamPath) {
-                $isAlreadyProxy = ((Get-Item $steamPath).Length -eq (Get-Item $proxyPath).Length)
-                $isGoldbergAtSteam = (Test-Path $goldbergDll) -and ((Get-Item $steamPath).Length -eq (Get-Item $goldbergDll).Length)
+            } elseif (Test-Path -LiteralPath $steamPath) {
+                $isAlreadyProxy = ((Get-Item -LiteralPath $steamPath).Length -eq (Get-Item -LiteralPath $proxyPath).Length)
+                $isGoldbergAtSteam = (Test-Path -LiteralPath $goldbergDll) -and ((Get-Item -LiteralPath $steamPath).Length -eq (Get-Item -LiteralPath $goldbergDll).Length)
                 if ((-not $isAlreadyProxy) -and (-not $isGoldbergAtSteam)) {
                     # This is genuine original DLL
-                    Copy-Item -Path $steamPath -Destination $origPath -Force
-                    Copy-Item -Path $steamPath -Destination $valvePath -Force
+                    Copy-Item -LiteralPath $steamPath -Destination $origPath -Force
+                    Copy-Item -LiteralPath $steamPath -Destination $valvePath -Force
                     Write-Host "  [OK] Preserved original steam_api64.dll -> steam_api64_original.dll & steam_api64_valve.dll in $dir" -ForegroundColor Green
                     $isGoldbergAtValve = $false
                 }
             }
 
             # If valvePath is still missing or still Goldberg, use stock genuine Valve DLL as fallback
-            if ((-not (Test-Path $valvePath)) -or $isGoldbergAtValve) {
-                if (Test-Path $valveStockDll) {
-                    Copy-Item -Path $valveStockDll -Destination $valvePath -Force
+            if ((-not (Test-Path -LiteralPath $valvePath)) -or $isGoldbergAtValve) {
+                if (Test-Path -LiteralPath $valveStockDll) {
+                    Copy-Item -LiteralPath $valveStockDll -Destination $valvePath -Force
                     Write-Host "  [OK] Deployed stock genuine Valve steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
                 } else {
                     Write-Host "  [WARNING] Genuine Valve steam_api64.dll not found; Steam Spacewar overlay/connection may fail!" -ForegroundColor Red
                 }
             }
 
-            Copy-Item -Path $proxyPath -Destination $steamPath -Force
-            Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
+            try {
+                Copy-Item -LiteralPath $proxyPath -Destination $steamPath -Force -ErrorAction Stop
+                if (-not (Test-Path -LiteralPath $steamPath)) { throw "Target file not created: $steamPath" }
+                Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
+            } catch {
+                Write-Host "  [ERROR] Failed to deploy steam_api64.dll to $dir : $_" -ForegroundColor Red
+                exit 1
+            }
         }
 
         # Also deploy x86 proxy if 32-bit game detected
         if ($pluginDirs32.Count -gt 0) {
             $proxyPath32 = Join-Path $BinDir "x86\steam_api.dll"
-            if (Test-Path $proxyPath32) {
+            if (Test-Path -LiteralPath $proxyPath32) {
                 foreach ($dir32 in $pluginDirs32) {
                     $valvePath32 = Join-Path $dir32 "steam_api_o.dll"
                     $steamPath32 = Join-Path $dir32 "steam_api.dll"
                     $origPath32  = Join-Path $dir32 "steam_api_original.dll"
 
-                    if (Test-Path $origPath32) {
-                        Copy-Item -Path $origPath32 -Destination $valvePath32 -Force
+                    if (Test-Path -LiteralPath $origPath32) {
+                        Copy-Item -LiteralPath $origPath32 -Destination $valvePath32 -Force
                         Write-Host "  [OK] Restored genuine Valve x86 steam_api.dll -> steam_api_o.dll in $dir32" -ForegroundColor Green
-                    } elseif (Test-Path $steamPath32) {
-                        $isAlreadyProxy = ((Get-Item $steamPath32).Length -eq (Get-Item $proxyPath32).Length)
-                        if ((-not (Test-Path $valvePath32)) -and (-not $isAlreadyProxy)) {
-                            Copy-Item -Path $steamPath32 -Destination $origPath32 -Force
-                            Rename-Item -Path $steamPath32 -NewName "steam_api_o.dll" -Force
+                    } elseif (Test-Path -LiteralPath $steamPath32) {
+                        $isAlreadyProxy = ((Get-Item -LiteralPath $steamPath32).Length -eq (Get-Item -LiteralPath $proxyPath32).Length)
+                        if ((-not (Test-Path -LiteralPath $valvePath32)) -and (-not $isAlreadyProxy)) {
+                            Copy-Item -LiteralPath $steamPath32 -Destination $origPath32 -Force
+                            Rename-Item -LiteralPath $steamPath32 -NewName "steam_api_o.dll" -Force
                             Write-Host "  [OK] Backed up original x86 steam_api.dll -> steam_api_o.dll in $dir32" -ForegroundColor Green
                         }
                     }
-                    Copy-Item -Path $proxyPath32 -Destination $steamPath32 -Force
-                    Write-Host "  [OK] Deployed ReFix proxy x86 steam_api.dll to $dir32" -ForegroundColor Green
+                    try {
+                        Copy-Item -LiteralPath $proxyPath32 -Destination $steamPath32 -Force -ErrorAction Stop
+                        if (-not (Test-Path -LiteralPath $steamPath32)) { throw "Target x86 file not created: $steamPath32" }
+                        Write-Host "  [OK] Deployed ReFix proxy x86 steam_api.dll to $dir32" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  [ERROR] Failed to deploy x86 steam_api.dll to $dir32 : $_" -ForegroundColor Red
+                        exit 1
+                    }
                 }
             }
         }
@@ -633,7 +674,7 @@ switch ($OnlineMode) {
         # Detect if game is 32-bit (x86) to prevent fatal 64-bit DLL injection into 32-bit processes
         $isX86Game = ($pluginDirs32.Count -gt 0)
         if (-not $isX86Game) {
-            $gameExesInDir = Get-ChildItem -Path $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+            $gameExesInDir = Get-ChildItem -LiteralPath $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
             
             $candidateExes = @()
@@ -659,25 +700,31 @@ switch ($OnlineMode) {
 
         # Also deploy winmm.dll to ExeDir for early Steam Overlay injection (64-bit only)
         $winmmPath = Join-Path $BinDir "winmm.dll"
-        if ((Test-Path $winmmPath) -and (-not $isX86Game)) {
+        if ((Test-Path -LiteralPath $winmmPath) -and (-not $isX86Game)) {
             $targetWinmm = Join-Path $ExeDir "winmm.dll"
             $targetWinmmOrig = Join-Path $ExeDir "winmm_o.dll"
-            if ((Test-Path $targetWinmm) -and (-not (Test-Path $targetWinmmOrig)) -and ((Get-Item $targetWinmm).Length -ne (Get-Item $winmmPath).Length)) {
-                Rename-Item -Path $targetWinmm -NewName "winmm_o.dll" -Force
+            try {
+                if ((Test-Path -LiteralPath $targetWinmm) -and (-not (Test-Path -LiteralPath $targetWinmmOrig)) -and ((Get-Item -LiteralPath $targetWinmm).Length -ne (Get-Item -LiteralPath $winmmPath).Length)) {
+                    Rename-Item -LiteralPath $targetWinmm -NewName "winmm_o.dll" -Force
+                }
+                Copy-Item -LiteralPath $winmmPath -Destination $targetWinmm -Force -ErrorAction Stop
+                if (-not (Test-Path -LiteralPath $targetWinmm)) { throw "Target winmm.dll not created: $targetWinmm" }
+                Write-Host "  [OK] Deployed ReFix winmm.dll proxy to root folder $ExeDir for early Steam Overlay injection" -ForegroundColor Green
+            } catch {
+                Write-Host "  [ERROR] Failed to deploy winmm.dll to $ExeDir : $_" -ForegroundColor Red
+                exit 1
             }
-            Copy-Item -Path $winmmPath -Destination $targetWinmm -Force
-            Write-Host "  [OK] Deployed ReFix winmm.dll proxy to root folder $ExeDir for early Steam Overlay injection" -ForegroundColor Green
         } elseif ($isX86Game) {
             # Critical: Ensure no 64-bit winmm.dll remains in 32-bit game directory
             $strayWinmm = Join-Path $ExeDir "winmm.dll"
-            if (Test-Path $strayWinmm) {
+            if (Test-Path -LiteralPath $strayWinmm) {
                 try {
                     $wBytes = [System.IO.File]::ReadAllBytes($strayWinmm)
                     if ($wBytes.Length -ge 0x40) {
                         $peOff = [System.BitConverter]::ToInt32($wBytes, 0x3C)
                         $mach = [System.BitConverter]::ToUInt16($wBytes, $peOff + 4)
                         if ($mach -eq 0x8664) {
-                            Remove-Item -Path $strayWinmm -Force -ErrorAction SilentlyContinue
+                            Remove-Item -LiteralPath $strayWinmm -Force -ErrorAction SilentlyContinue
                             Write-Host "  [CRITICAL FIX] Removed stray 64-bit winmm.dll from 32-bit game directory: $strayWinmm" -ForegroundColor Yellow
                         }
                     }
@@ -822,9 +869,9 @@ switch ($OnlineMode) {
                     Set-Location $origWorkingDir
 
                     $localGenFile = Join-Path $dir "steam_interfaces.txt"
-                    if (Test-Path $localGenFile) {
+                    if (Test-Path -LiteralPath $localGenFile) {
                         # Clean and deduplicate keeping the highest interface version for each prefix
-                        $rawLines = Get-Content $localGenFile | Where-Object { $_.Trim() -ne "" }
+                        $rawLines = Get-Content -LiteralPath $localGenFile | Where-Object { $_.Trim() -ne "" }
                         $families = [ordered]@{}
                         foreach ($line in $rawLines) {
                             $trimmed = $line.Trim()
@@ -854,31 +901,38 @@ switch ($OnlineMode) {
             $origPath  = Join-Path $dir "steam_api64_original.dll"
 
             # Preserve genuine Valve DLL before placing Goldberg as steam_api64_valve.dll
-            if (Test-Path $valvePath) {
-                if ((Get-Item $valvePath).Length -ne (Get-Item $goldbergDll).Length) {
-                    if (-not (Test-Path $origPath)) {
-                        Copy-Item -Path $valvePath -Destination $origPath -Force
+            if (Test-Path -LiteralPath $valvePath) {
+                if ((Get-Item -LiteralPath $valvePath).Length -ne (Get-Item -LiteralPath $goldbergDll).Length) {
+                    if (-not (Test-Path -LiteralPath $origPath)) {
+                        Copy-Item -LiteralPath $valvePath -Destination $origPath -Force
                         Write-Host "  [OK] Preserved genuine Valve DLL -> steam_api64_original.dll in $dir" -ForegroundColor Green
                     }
                 }
-            } elseif (Test-Path $steamPath) {
-                $isAlreadyProxy = (Test-Path $proxyPath) -and ((Get-Item $steamPath).Length -eq (Get-Item $proxyPath).Length)
-                $isAlreadyGoldberg = ((Get-Item $steamPath).Length -eq (Get-Item $goldbergDll).Length)
+            } elseif (Test-Path -LiteralPath $steamPath) {
+                $isAlreadyProxy = (Test-Path -LiteralPath $proxyPath) -and ((Get-Item -LiteralPath $steamPath).Length -eq (Get-Item -LiteralPath $proxyPath).Length)
+                $isAlreadyGoldberg = ((Get-Item -LiteralPath $steamPath).Length -eq (Get-Item -LiteralPath $goldbergDll).Length)
                 if ((-not $isAlreadyProxy) -and (-not $isAlreadyGoldberg)) {
-                    if (-not (Test-Path $origPath)) {
-                        Copy-Item -Path $steamPath -Destination $origPath -Force
+                    if (-not (Test-Path -LiteralPath $origPath)) {
+                        Copy-Item -LiteralPath $steamPath -Destination $origPath -Force
                         Write-Host "  [OK] Preserved genuine Valve DLL -> steam_api64_original.dll in $dir" -ForegroundColor Green
                     }
                 }
             }
 
-            # Place Goldberg DLL as steam_api64_valve.dll
-            Copy-Item -Path $goldbergDll -Destination $valvePath -Force
-            Write-Host "  [OK] Deployed Goldberg emulator backend as steam_api64_valve.dll to $dir" -ForegroundColor Green
+            try {
+                # Place Goldberg DLL as steam_api64_valve.dll
+                Copy-Item -LiteralPath $goldbergDll -Destination $valvePath -Force -ErrorAction Stop
+                if (-not (Test-Path -LiteralPath $valvePath)) { throw "Target file not created: $valvePath" }
+                Write-Host "  [OK] Deployed Goldberg emulator backend as steam_api64_valve.dll to $dir" -ForegroundColor Green
 
-            # Deploy ReFix proxy as steam_api64.dll (provides SteamInternal_SteamAPI_Init and all API exports)
-            Copy-Item -Path $proxyPath -Destination $steamPath -Force
-            Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
+                # Deploy ReFix proxy as steam_api64.dll (provides SteamInternal_SteamAPI_Init and all API exports)
+                Copy-Item -LiteralPath $proxyPath -Destination $steamPath -Force -ErrorAction Stop
+                if (-not (Test-Path -LiteralPath $steamPath)) { throw "Target file not created: $steamPath" }
+                Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
+            } catch {
+                Write-Host "  [ERROR] Failed to deploy Goldberg backend / proxy to $dir : $_" -ForegroundColor Red
+                exit 1
+            }
         }
 
         # --- x86 deployment: Re:Goldberg for 32-bit games (Unity IL2CPP x86, etc.) ---
@@ -888,9 +942,9 @@ switch ($OnlineMode) {
             $goldbergDll32 = Join-Path $BinDir "goldberg\steam_api.dll"
             $proxyDll32    = Join-Path $BinDir "x86\steam_api.dll"
 
-            if (-not (Test-Path $goldbergDll32)) {
+            if (-not (Test-Path -LiteralPath $goldbergDll32)) {
                 Write-Host "  [NOTICE] Goldberg x86 backend not found at $goldbergDll32 - skipping x86 deployment" -ForegroundColor Yellow
-            } elseif (-not (Test-Path $proxyDll32)) {
+            } elseif (-not (Test-Path -LiteralPath $proxyDll32)) {
                 Write-Host "  [NOTICE] ReFix proxy x86 not found at $proxyDll32 - skipping x86 deployment (run build_x86.bat first)" -ForegroundColor Yellow
             } else {
                 Write-Host "  [Re:Goldberg x86] Deploying 32-bit backend + proxy to $($pluginDirs32.Count) location(s)..." -ForegroundColor Cyan
@@ -900,28 +954,33 @@ switch ($OnlineMode) {
                     $origPath32    = Join-Path $dir32 "steam_api_original.dll"  # Original Steam (preserved)
 
                     # Backup original steam_api.dll if it is not our proxy32 (compare sizes)
-                    if (Test-Path $steamPath32) {
-                        $existingSz = (Get-Item $steamPath32).Length
-                        $proxySz    = (Get-Item $proxyDll32).Length
+                    if (Test-Path -LiteralPath $steamPath32) {
+                        $existingSz = (Get-Item -LiteralPath $steamPath32).Length
+                        $proxySz    = (Get-Item -LiteralPath $proxyDll32).Length
                         if ($existingSz -ne $proxySz) {
                             # Not our proxy - could be original Steam or goldberg; preserve as _original
-                            if (-not (Test-Path $origPath32)) {
-                                Copy-Item -Path $steamPath32 -Destination $origPath32 -Force
+                            if (-not (Test-Path -LiteralPath $origPath32)) {
+                                Copy-Item -LiteralPath $steamPath32 -Destination $origPath32 -Force
                                 Write-Host "  [OK] Backed up original x86 steam_api.dll -> steam_api_original.dll in $dir32" -ForegroundColor Green
                             }
                         }
                     }
 
-                    # Deploy Goldberg x86 as backend (steam_api_o.dll loaded by proxy32's EnsureOrigLoaded)
-                    Copy-Item -Path $goldbergDll32 -Destination $backendPath32 -Force
-                    Write-Host "  [OK] Deployed Goldberg x86 emulator as steam_api_o.dll to $dir32" -ForegroundColor Green
+                    try {
+                        # Deploy Goldberg x86 as backend (steam_api_o.dll loaded by proxy32's EnsureOrigLoaded)
+                        Copy-Item -LiteralPath $goldbergDll32 -Destination $backendPath32 -Force -ErrorAction Stop
+                        Write-Host "  [OK] Deployed Goldberg x86 emulator as steam_api_o.dll to $dir32" -ForegroundColor Green
 
-                    # Deploy ReFix proxy32 as steam_api.dll
-                    Copy-Item -Path $proxyDll32 -Destination $steamPath32 -Force
-                    Write-Host "  [OK] Deployed ReFix proxy x86 steam_api.dll to $dir32" -ForegroundColor Green
+                        # Deploy ReFix proxy32 as steam_api.dll
+                        Copy-Item -LiteralPath $proxyDll32 -Destination $steamPath32 -Force -ErrorAction Stop
+                        Write-Host "  [OK] Deployed ReFix proxy x86 steam_api.dll to $dir32" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  [ERROR] Failed to deploy x86 Goldberg emulator / proxy to $dir32 : $_" -ForegroundColor Red
+                        exit 1
+                    }
 
                     # Generate steam_interfaces.txt for this x86 dir if tool is available
-                    if (Test-Path $genTool) {
+                    if (Test-Path -LiteralPath $genTool) {
                         try {
                             $origWd32 = Get-Location
                             Set-Location $dir32
@@ -981,8 +1040,8 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
 
     # Create local saves folder in ExeDir for portable storage
     $savesDir = Join-Path $ExeDir "saves"
-    if (-not (Test-Path $savesDir)) {
-        New-Item -ItemType Directory -Path $savesDir -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $savesDir)) {
+        [System.IO.Directory]::CreateDirectory($savesDir) | Out-Null
         Write-Host "  [OK] Initialized portable save directory: $savesDir" -ForegroundColor Green
     }
 
@@ -998,8 +1057,8 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
 
     foreach ($baseDir in $settingsDirsToPopulate) {
         $settingsDir = Join-Path $baseDir "steam_settings"
-        if (-not (Test-Path $settingsDir)) {
-            New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+        if (-not (Test-Path -LiteralPath $settingsDir)) {
+            [System.IO.Directory]::CreateDirectory($settingsDir) | Out-Null
         }
 
         # 1. Base legacy text configuration files (guaranteed support across all Goldberg versions)
@@ -1857,8 +1916,8 @@ FixedRegion=$effectiveRegion
 
     $reFixIni = Join-Path $ExeDir "ReFix.ini"
     $targetAppId = "480"
-    if (Test-Path $reFixIni) {
-        $iniLines = Get-Content $reFixIni -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $reFixIni) {
+        $iniLines = Get-Content -LiteralPath $reFixIni -ErrorAction SilentlyContinue
         foreach ($line in $iniLines) {
             if ($OnlineMode -eq "valve") {
                 if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
@@ -1870,19 +1929,31 @@ FixedRegion=$effectiveRegion
     if (-not $targetAppId -or $targetAppId -eq "0") { $targetAppId = "480" }
 
     # Place steam_appid.txt in Godot root folder
-    $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"
-    [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
-    Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in Godot root $ExeDir" -ForegroundColor Green
+    try {
+        $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"
+        [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
+        if (-not (Test-Path -LiteralPath $exeAppIdPath)) { throw "Failed to write steam_appid.txt" }
+        Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in Godot root $ExeDir" -ForegroundColor Green
+    } catch {
+        Write-Host "  [ERROR] Failed to write steam_appid.txt: $_" -ForegroundColor Red
+        exit 1
+    }
 
     $winmmPath = Join-Path $BinDir "winmm.dll"
-    if (Test-Path $winmmPath) {
+    if (Test-Path -LiteralPath $winmmPath) {
         $targetWinmm = Join-Path $ExeDir "winmm.dll"
         $targetWinmmOrig = Join-Path $ExeDir "winmm_o.dll"
-        if ((Test-Path $targetWinmm) -and (-not (Test-Path $targetWinmmOrig)) -and ((Get-Item $targetWinmm).Length -ne (Get-Item $winmmPath).Length)) {
-            Rename-Item -Path $targetWinmm -NewName "winmm_o.dll" -Force
+        try {
+            if ((Test-Path -LiteralPath $targetWinmm) -and (-not (Test-Path -LiteralPath $targetWinmmOrig)) -and ((Get-Item -LiteralPath $targetWinmm).Length -ne (Get-Item -LiteralPath $winmmPath).Length)) {
+                Rename-Item -LiteralPath $targetWinmm -NewName "winmm_o.dll" -Force
+            }
+            Copy-Item -LiteralPath $winmmPath -Destination $targetWinmm -Force -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $targetWinmm)) { throw "Failed to copy winmm.dll" }
+            Write-Host "  [OK] Deployed ReFix winmm.dll proxy to Godot root folder $ExeDir" -ForegroundColor Green
+        } catch {
+            Write-Host "  [ERROR] Failed to deploy winmm.dll: $_" -ForegroundColor Red
+            exit 1
         }
-        Copy-Item -Path $winmmPath -Destination $targetWinmm -Force
-        Write-Host "  [OK] Deployed ReFix winmm.dll proxy to Godot root folder $ExeDir" -ForegroundColor Green
     }
     Write-Host "  [OK] Godot adapter ready (GodotSteam & SteamMultiplayerPeer supported)" -ForegroundColor Green
 
@@ -1891,8 +1962,8 @@ FixedRegion=$effectiveRegion
     
     $reFixIni = Join-Path $ExeDir "ReFix.ini"
     $targetAppId = "480"
-    if (Test-Path $reFixIni) {
-        $iniLines = Get-Content $reFixIni -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $reFixIni) {
+        $iniLines = Get-Content -LiteralPath $reFixIni -ErrorAction SilentlyContinue
         foreach ($line in $iniLines) {
             if ($OnlineMode -eq "valve") {
                 if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
@@ -1904,35 +1975,67 @@ FixedRegion=$effectiveRegion
     if (-not $targetAppId -or $targetAppId -eq "0") { $targetAppId = "480" }
 
     # 1. Place steam_appid.txt in ExeDir and TargetDir root
-    $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"
-    [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
-    Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in $ExeDir" -ForegroundColor Green
+    try {
+        $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"
+        [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
+        if (-not (Test-Path -LiteralPath $exeAppIdPath)) { throw "Failed to write steam_appid.txt in ExeDir" }
+        Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in $ExeDir" -ForegroundColor Green
 
-    $rootAppIdPath = Join-Path $TargetDir "steam_appid.txt"
-    [System.IO.File]::WriteAllText($rootAppIdPath, "$targetAppId`r`n")
+        $rootAppIdPath = Join-Path $TargetDir "steam_appid.txt"
+        if ($rootAppIdPath -ne $exeAppIdPath) {
+            [System.IO.File]::WriteAllText($rootAppIdPath, "$targetAppId`r`n")
+        }
+    } catch {
+        Write-Host "  [ERROR] Failed to write steam_appid.txt: $_" -ForegroundColor Red
+        exit 1
+    }
 
     # 2. Deploy winmm.dll proxy to Unreal root folder ExeDir
     $winmmPath = Join-Path $BinDir "winmm.dll"
-    if (Test-Path $winmmPath) {
+    if (Test-Path -LiteralPath $winmmPath) {
         $targetWinmm = Join-Path $ExeDir "winmm.dll"
         $targetWinmmOrig = Join-Path $ExeDir "winmm_o.dll"
-        if ((Test-Path $targetWinmm) -and (-not (Test-Path $targetWinmmOrig)) -and ((Get-Item $targetWinmm).Length -ne (Get-Item $winmmPath).Length)) {
-            Rename-Item -Path $targetWinmm -NewName "winmm_o.dll" -Force
+        try {
+            if ((Test-Path -LiteralPath $targetWinmm) -and (-not (Test-Path -LiteralPath $targetWinmmOrig)) -and ((Get-Item -LiteralPath $targetWinmm).Length -ne (Get-Item -LiteralPath $winmmPath).Length)) {
+                Rename-Item -LiteralPath $targetWinmm -NewName "winmm_o.dll" -Force
+            }
+            Copy-Item -LiteralPath $winmmPath -Destination $targetWinmm -Force -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $targetWinmm)) { throw "Failed to copy winmm.dll" }
+            Write-Host "  [OK] Deployed ReFix winmm.dll proxy to Unreal root folder $ExeDir" -ForegroundColor Green
+        } catch {
+            Write-Host "  [ERROR] Failed to deploy winmm.dll to $($ExeDir): $_" -ForegroundColor Red
+            exit 1
         }
-        Copy-Item -Path $winmmPath -Destination $targetWinmm -Force
-        Write-Host "  [OK] Deployed ReFix winmm.dll proxy to Unreal root folder $ExeDir" -ForegroundColor Green
     }
 } else {
     Write-Host "[4/6] Processing Native/Custom deployment (mode: $OnlineMode)..." -ForegroundColor Cyan
     $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"
     $targetAppId = if ($OnlineMode -eq "valve") { $MaskAppId } else { $finalRealAppId }
     if (-not $targetAppId -or $targetAppId -eq "0") { $targetAppId = "480" }
-    [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
-    Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in $ExeDir" -ForegroundColor Green
+    try {
+        [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
+        if (-not (Test-Path -LiteralPath $exeAppIdPath)) { throw "Failed to write steam_appid.txt" }
+        Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in $ExeDir" -ForegroundColor Green
 
-    $rootAppIdPath = Join-Path $TargetDir "steam_appid.txt"
-    if ($rootAppIdPath -ne $exeAppIdPath) {
-        [System.IO.File]::WriteAllText($rootAppIdPath, "$targetAppId`r`n")
+        $rootAppIdPath = Join-Path $TargetDir "steam_appid.txt"
+        if ($rootAppIdPath -ne $exeAppIdPath) {
+            [System.IO.File]::WriteAllText($rootAppIdPath, "$targetAppId`r`n")
+        }
+    } catch {
+        Write-Host "  [ERROR] Failed to write steam_appid.txt: $_" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Deploy shortcut helper scripts for Valve mode
+if ($OnlineMode -eq "valve") {
+    $srcPs1 = Join-Path $BinDir "add_steam_shortcut.ps1"
+    $srcBat = Join-Path $BinDir "Install_ReFix_Steam_Shortcut.bat"
+    if (Test-Path -LiteralPath $srcPs1) {
+        Copy-Item -LiteralPath $srcPs1 -Destination (Join-Path $ExeDir "add_steam_shortcut.ps1") -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $srcBat) {
+        Copy-Item -LiteralPath $srcBat -Destination (Join-Path $ExeDir "Install_ReFix_Steam_Shortcut.bat") -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1944,12 +2047,12 @@ Write-Host "[5/6] Checking for Epic Online Services (EOS / Redbone)..." -Foregro
 
 $eosProxyPath = Join-Path $BinDir "EOSSDK-Win64-Shipping.dll"
 $redboneProxyPath = Join-Path $BinDir "RedboneEOS.dll"
-if (-not (Test-Path $redboneProxyPath) -and (Test-Path $eosProxyPath)) {
+if ((-not (Test-Path -LiteralPath $redboneProxyPath)) -and (Test-Path -LiteralPath $eosProxyPath)) {
     $redboneProxyPath = $eosProxyPath
 }
 
-$eosDlls = Get-ChildItem -Path $TargetDir -Filter "EOSSDK-Win64-Shipping.dll" -Recurse -File -ErrorAction SilentlyContinue
-$redboneDlls = Get-ChildItem -Path $TargetDir -Filter "RedboneEOS*.dll" -Recurse -File -ErrorAction SilentlyContinue
+$eosDlls = Get-ChildItem -LiteralPath $TargetDir -Filter "EOSSDK-Win64-Shipping.dll" -Recurse -File -ErrorAction SilentlyContinue
+$redboneDlls = Get-ChildItem -LiteralPath $TargetDir -Filter "RedboneEOS*.dll" -Recurse -File -ErrorAction SilentlyContinue
 
 $eosDirs = @()
 foreach ($dll in $eosDlls) {
@@ -1960,30 +2063,30 @@ foreach ($dll in $redboneDlls) {
 }
 
 if ($eosDirs.Count -eq 0) {
-    $redpointFolder = Get-ChildItem -Path $TargetDir -Filter "RedpointEOS" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    $redpointFolder = Get-ChildItem -LiteralPath $TargetDir -Filter "RedpointEOS" -Directory -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($redpointFolder) { $eosDirs += $redpointFolder.FullName }
 }
 
-if ($eosDirs.Count -gt 0 -and (Test-Path $eosProxyPath)) {
-    $proxySize = (Get-Item $eosProxyPath).Length
+if ($eosDirs.Count -gt 0 -and (Test-Path -LiteralPath $eosProxyPath)) {
+    $proxySize = (Get-Item -LiteralPath $eosProxyPath).Length
     foreach ($dir in $eosDirs) {
         $eosOriginal = Join-Path $dir "EOSSDK_original.dll"
         $eosPath = Join-Path $dir "EOSSDK-Win64-Shipping.dll"
 
-        if (Test-Path $eosPath) {
-            $curSize = (Get-Item $eosPath).Length
-            if ($curSize -ne $proxySize -and (-not (Test-Path $eosOriginal))) {
-                Rename-Item -Path $eosPath -NewName "EOSSDK_original.dll" -Force
+        if (Test-Path -LiteralPath $eosPath) {
+            $curSize = (Get-Item -LiteralPath $eosPath).Length
+            if ($curSize -ne $proxySize -and (-not (Test-Path -LiteralPath $eosOriginal))) {
+                Rename-Item -LiteralPath $eosPath -NewName "EOSSDK_original.dll" -Force
                 Write-Host "  [OK] Preserved original EOSSDK -> EOSSDK_original.dll in $dir" -ForegroundColor Green
             }
         }
-        Copy-Item -Path $eosProxyPath -Destination $eosPath -Force
+        Copy-Item -LiteralPath $eosProxyPath -Destination $eosPath -Force
         Write-Host "  [OK] Deployed Dual-Mode EOSSDK-Win64-Shipping.dll proxy to $dir" -ForegroundColor Green
 
         # If RedboneEOS.dll exists, replace with proxy
         $targetRedbone = Join-Path $dir "RedboneEOS.dll"
-        if (Test-Path $targetRedbone) {
-            Copy-Item -Path $redboneProxyPath -Destination $targetRedbone -Force
+        if (Test-Path -LiteralPath $targetRedbone) {
+            Copy-Item -LiteralPath $redboneProxyPath -Destination $targetRedbone -Force
             Write-Host "  [OK] Deployed RedboneEOS.dll proxy to $dir" -ForegroundColor Green
         }
     }
@@ -1992,9 +2095,9 @@ if ($eosDirs.Count -gt 0 -and (Test-Path $eosProxyPath)) {
     if ($eosDirs.Count -gt 0 -and ($eosDirs -notcontains $ExeDir)) {
         $exeEos = Join-Path $ExeDir "EOSSDK-Win64-Shipping.dll"
         $exeEosOrig = Join-Path $ExeDir "EOSSDK_original.dll"
-        if ((Test-Path $exeEos) -and (-not (Test-Path $exeEosOrig))) {
-            if ((Get-Item $exeEos).Length -eq $proxySize) {
-                Remove-Item -Path $exeEos -Force -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath $exeEos) -and (-not (Test-Path -LiteralPath $exeEosOrig))) {
+            if ((Get-Item -LiteralPath $exeEos).Length -eq $proxySize) {
+                Remove-Item -LiteralPath $exeEos -Force -ErrorAction SilentlyContinue
                 Write-Host "  [OK] Cleaned redundant EOS proxy from $ExeDir" -ForegroundColor Green
             }
         }
@@ -2004,9 +2107,188 @@ if ($eosDirs.Count -gt 0 -and (Test-Path $eosProxyPath)) {
 }
 
 # ============================================================
-# Step 6: Final Verification & Summary
+# Step 6: Final Verification & Post-Deploy Validation (FASE 6)
 # ============================================================
-Write-Host "[6/6] Verifying ReFix deployment..." -ForegroundColor Cyan
-Write-Host "  [SUCCESS] ReFix deployment successfully completed for $GameName!" -ForegroundColor Green
+function Verify-ReFixDeployment {
+    param(
+        [string]$TargetDir,
+        [string]$ExeDir,
+        [string]$BinDir,
+        [string]$OnlineMode,
+        [string]$EngineType,
+        [string]$GameName,
+        [array]$PluginDirs,
+        [array]$PluginDirs32,
+        [bool]$IsX86
+    )
+
+    Write-Host "`n============================================================" -ForegroundColor Cyan
+    Write-Host " [POST-DEPLOY VERIFICATION] Validating Deployment Integrity..." -ForegroundColor Cyan
+    Write-Host "============================================================" -ForegroundColor Cyan
+
+    $errors = @()
+
+    # 1. Target Directory & Exe Directory
+    if (-not (Test-Path -LiteralPath $TargetDir)) {
+        $errors += "Target directory does not exist: $TargetDir"
+    }
+    if (-not (Test-Path -LiteralPath $ExeDir)) {
+        $errors += "Executable directory does not exist: $ExeDir"
+    }
+
+    # 2. ReFix.ini check (Mandatory for all deployments)
+    $iniPath = Join-Path $ExeDir "ReFix.ini"
+    if (-not (Test-Path -LiteralPath $iniPath)) {
+        $errors += "Mandatory ReFix.ini missing in $ExeDir"
+    } else {
+        $iniLen = (Get-Item -LiteralPath $iniPath).Length
+        if ($iniLen -le 0) {
+            $errors += "ReFix.ini in $ExeDir is empty (0 bytes)"
+        } else {
+            Write-Host "  [VERIFY OK] ReFix.ini verified in $ExeDir ($iniLen bytes)" -ForegroundColor Green
+        }
+    }
+
+    # 3. steam_appid.txt check (Mandatory)
+    $appIdPath = Join-Path $ExeDir "steam_appid.txt"
+    if (-not (Test-Path -LiteralPath $appIdPath)) {
+        $foundInPlugin = $false
+        foreach ($p in $PluginDirs) {
+            if (Test-Path -LiteralPath (Join-Path $p "steam_appid.txt")) { $foundInPlugin = $true; break }
+        }
+        if (-not $foundInPlugin) {
+            $errors += "Mandatory steam_appid.txt missing in $ExeDir and plugin directories"
+        }
+    } else {
+        $appIdContent = (Get-Content -LiteralPath $appIdPath -Raw -ErrorAction SilentlyContinue)
+        if (-not $appIdContent -or $appIdContent.Trim() -eq "") {
+            $errors += "steam_appid.txt in $ExeDir is empty"
+        } else {
+            Write-Host "  [VERIFY OK] steam_appid.txt verified ($($appIdContent.Trim()))" -ForegroundColor Green
+        }
+    }
+
+    # 4. Steam API DLL and Backup verification
+    if (-not $IsX86) {
+        $proxyPath = Join-Path $BinDir "steam_api64.dll"
+        $expectedProxySize = if (Test-Path -LiteralPath $proxyPath) { (Get-Item -LiteralPath $proxyPath).Length } else { 0 }
+
+        foreach ($pDir in $PluginDirs) {
+            $steamDllPath = Join-Path $pDir "steam_api64.dll"
+            if (-not (Test-Path -LiteralPath $steamDllPath)) {
+                $errors += "steam_api64.dll missing in $pDir"
+            } else {
+                $dllSize = (Get-Item -LiteralPath $steamDllPath).Length
+                if ($expectedProxySize -gt 0 -and $dllSize -ne $expectedProxySize) {
+                    $errors += "steam_api64.dll size mismatch in $pDir (Expected $expectedProxySize, got $dllSize)"
+                } else {
+                    Write-Host "  [VERIFY OK] steam_api64.dll proxy verified in $pDir ($dllSize bytes)" -ForegroundColor Green
+                }
+            }
+
+            # Check backup
+            $valveBackup = Join-Path $pDir "steam_api64_valve.dll"
+            $origBackup  = Join-Path $pDir "steam_api64_original.dll"
+            if ((-not (Test-Path -LiteralPath $valveBackup)) -and (-not (Test-Path -LiteralPath $origBackup))) {
+                $errors += "Mandatory original/backend DLL backup missing in $pDir (neither steam_api64_valve.dll nor steam_api64_original.dll exists)"
+            } else {
+                $bkName = if (Test-Path -LiteralPath $valveBackup) { "steam_api64_valve.dll" } else { "steam_api64_original.dll" }
+                Write-Host "  [VERIFY OK] Backup DLL $bkName verified in $pDir" -ForegroundColor Green
+            }
+        }
+    } else {
+        # x86 game verification
+        $proxyPath32 = Join-Path $BinDir "x86\steam_api.dll"
+        $expectedProxy32Size = if (Test-Path -LiteralPath $proxyPath32) { (Get-Item -LiteralPath $proxyPath32).Length } else { 0 }
+
+        foreach ($pDir32 in $PluginDirs32) {
+            $steamDllPath32 = Join-Path $pDir32 "steam_api.dll"
+            if (-not (Test-Path -LiteralPath $steamDllPath32)) {
+                $errors += "x86 steam_api.dll missing in $pDir32"
+            } else {
+                $dllSize32 = (Get-Item -LiteralPath $steamDllPath32).Length
+                Write-Host "  [VERIFY OK] x86 steam_api.dll proxy verified in $pDir32 ($dllSize32 bytes)" -ForegroundColor Green
+            }
+
+            $bk32a = Join-Path $pDir32 "steam_api_o.dll"
+            $bk32b = Join-Path $pDir32 "steam_api_original.dll"
+            $bk32c = Join-Path $pDir32 "steam_api_valve.dll"
+            if ((-not (Test-Path -LiteralPath $bk32a)) -and (-not (Test-Path -LiteralPath $bk32b)) -and (-not (Test-Path -LiteralPath $bk32c))) {
+                $errors += "Mandatory x86 backup DLL missing in $pDir32"
+            } else {
+                Write-Host "  [VERIFY OK] x86 backup DLL verified in $pDir32" -ForegroundColor Green
+            }
+        }
+    }
+
+    # 5. Loader proxy verification (winmm.dll)
+    # Required for Valve mode on 64-bit games
+    if ($OnlineMode -eq "valve" -and (-not $IsX86)) {
+        $winmmPath = Join-Path $BinDir "winmm.dll"
+        if (Test-Path -LiteralPath $winmmPath) {
+            $destWinmm = Join-Path $ExeDir "winmm.dll"
+            if (-not (Test-Path -LiteralPath $destWinmm)) {
+                $errors += "Mandatory winmm.dll proxy missing in $ExeDir (required for Valve mode overlay injection)"
+            } else {
+                $wSize = (Get-Item -LiteralPath $destWinmm).Length
+                $expectedWSize = (Get-Item -LiteralPath $winmmPath).Length
+                if ($wSize -ne $expectedWSize) {
+                    $errors += "winmm.dll in $ExeDir size mismatch (Expected $expectedWSize, got $wSize)"
+                } else {
+                    Write-Host "  [VERIFY OK] winmm.dll proxy verified in $ExeDir ($wSize bytes)" -ForegroundColor Green
+                }
+            }
+        }
+    }
+
+    # 6. Goldberg mode specific verification
+    if ($OnlineMode -in @("goldberg", "offline", "lan")) {
+        $settingsDir = Join-Path $ExeDir "steam_settings"
+        if (-not (Test-Path -LiteralPath $settingsDir)) {
+            $errors += "steam_settings directory missing in $ExeDir"
+        } else {
+            $cfgApp = Join-Path $settingsDir "configs.app.ini"
+            $txtAppId = Join-Path $settingsDir "steam_appid.txt"
+            if ((-not (Test-Path -LiteralPath $cfgApp)) -and (-not (Test-Path -LiteralPath $txtAppId))) {
+                $errors += "steam_settings configuration files missing in $settingsDir"
+            } else {
+                Write-Host "  [VERIFY OK] steam_settings configuration verified in $settingsDir" -ForegroundColor Green
+            }
+        }
+    }
+
+    # 7. Final verdict
+    if ($errors.Count -gt 0) {
+        Write-Host "`n[FATAL VERIFICATION FAILURE] Deployment failed validation checks:" -ForegroundColor Red
+        foreach ($err in $errors) {
+            Write-Host "  [-] $err" -ForegroundColor Red
+        }
+        Write-Host "============================================================" -ForegroundColor Red
+        return $false
+    } else {
+        Write-Host "`n  [SUCCESS] All mandatory binaries, backups, configurations, and proxies verified successfully!" -ForegroundColor Green
+        Write-Host "============================================================" -ForegroundColor Cyan
+        return $true
+    }
+}
+
+$verifySuccess = Verify-ReFixDeployment `
+    -TargetDir $TargetDir `
+    -ExeDir $ExeDir `
+    -BinDir $BinDir `
+    -OnlineMode $OnlineMode `
+    -EngineType $EngineType `
+    -GameName $GameName `
+    -PluginDirs $pluginDirs `
+    -PluginDirs32 $pluginDirs32 `
+    -IsX86 $isX86Game
+
+if (-not $verifySuccess) {
+    Write-Host "[FATAL ERROR] Post-deploy verification failed! Mandatory files are missing or corrupted." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "  [SUCCESS] ReFix deployment verified successfully for $GameName!" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
+exit 0
 
