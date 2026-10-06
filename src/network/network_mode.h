@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <atomic>
 
 namespace ReFix {
 
@@ -26,7 +27,7 @@ public:
     static bool IsExternalNetworkingAllowed();
     
 private:
-    static ReFixNetworkMode s_mode;
+    static std::atomic<ReFixNetworkMode> s_mode;
 };
 
 } // namespace ReFix

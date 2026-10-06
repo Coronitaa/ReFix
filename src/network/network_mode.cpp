@@ -4,7 +4,7 @@
 
 namespace ReFix {
 
-ReFixNetworkMode NetworkModeManager::s_mode = ReFixNetworkMode::Online;
+std::atomic<ReFixNetworkMode> NetworkModeManager::s_mode{ ReFixNetworkMode::Online };
 
 void NetworkModeManager::LoadMode(const std::string& iniPath) {
     char buf[64] = {0};
@@ -40,32 +40,32 @@ void NetworkModeManager::LoadMode(const std::string& iniPath) {
 }
 
 ReFixNetworkMode NetworkModeManager::GetMode() {
-    return s_mode;
+    return s_mode.load(std::memory_order_acquire);
 }
 
 void NetworkModeManager::SetMode(ReFixNetworkMode mode) {
-    s_mode = mode;
+    s_mode.store(mode, std::memory_order_release);
 }
 
 bool NetworkModeManager::IsOnline() {
-    return s_mode == ReFixNetworkMode::Online;
+    return s_mode.load(std::memory_order_acquire) == ReFixNetworkMode::Online;
 }
 
 bool NetworkModeManager::IsLanOnly() {
-    return s_mode == ReFixNetworkMode::Lan;
+    return s_mode.load(std::memory_order_acquire) == ReFixNetworkMode::Lan;
 }
 
 bool NetworkModeManager::IsOffline() {
-    return s_mode == ReFixNetworkMode::Offline;
+    return s_mode.load(std::memory_order_acquire) == ReFixNetworkMode::Offline;
 }
 
 bool NetworkModeManager::IsGoldbergBackendActive() {
-    // Currently, both Lan and Offline modes use the Goldberg emulator backend
-    return s_mode == ReFixNetworkMode::Lan || s_mode == ReFixNetworkMode::Offline;
+    auto m = s_mode.load(std::memory_order_acquire);
+    return m == ReFixNetworkMode::Lan || m == ReFixNetworkMode::Offline;
 }
 
 bool NetworkModeManager::IsExternalNetworkingAllowed() {
-    return s_mode == ReFixNetworkMode::Online;
+    return s_mode.load(std::memory_order_acquire) == ReFixNetworkMode::Online;
 }
 
 } // namespace ReFix

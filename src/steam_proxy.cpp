@@ -3012,7 +3012,7 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     }
 }
 
-static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
+extern "C" __declspec(dllexport) void* SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
     if (!pszVersion) return nullptr;
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     
@@ -3031,7 +3031,7 @@ static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteam
     return iface;
 }
 
-static void* Intercepted_SteamInternal_CreateInterface(const char* pszVersion) {
+extern "C" __declspec(dllexport) void* SteamInternal_CreateInterface(const char* pszVersion) {
     if (!pszVersion) return nullptr;
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     
@@ -3678,7 +3678,11 @@ static uint64_t Intercepted_RequestLobbyList(void* self) {
 
 extern "C" __declspec(dllexport) bool SteamAPI_Init();
 
+static std::atomic<uint64_t> g_ensureOriginalCallCount{ 0 };
+static std::atomic<uint64_t> g_valveDllLoadCount{ 0 };
+
 static bool EnsureOriginal() {
+    g_ensureOriginalCallCount.fetch_add(1, std::memory_order_relaxed);
     if (g_hOriginalDll) return true;
 
     std::string proxyDir = GetProxyDllDir();
@@ -3768,6 +3772,7 @@ static bool EnsureOriginal() {
             }
             if (pProbe && pProbe != (FARPROC)SteamAPI_Init) {
                 g_hOriginalDll = hMod;
+                g_valveDllLoadCount.fetch_add(1, std::memory_order_relaxed);
                 ReFixLog("EnsureOriginal: Successfully loaded original Valve DLL from '%s'", path.c_str());
                 break;
             } else {
@@ -3784,7 +3789,10 @@ static bool EnsureOriginal() {
             std::string exeTarget = exeDir + "steam_api64_valve.dll";
             CopyFileA(fallbackSource.c_str(), exeTarget.c_str(), FALSE);
             HMODULE hMod = LoadLibraryA(exeTarget.c_str());
-            if (hMod && hMod != g_hSelfModule) g_hOriginalDll = hMod;
+            if (hMod && hMod != g_hSelfModule) {
+                g_hOriginalDll = hMod;
+                g_valveDllLoadCount.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -4123,14 +4131,14 @@ static bool EnsureOriginal() {
     int idxFindOrCreateUser = FindSteamExportIndex("SteamInternal_FindOrCreateUserInterface");
     if (idxFindOrCreateUser >= 0) {
         g_pfn_FindOrCreateUserInterface = (fn_SteamInternal_FindOrCreateUserInterface_t)g_steamProcs[idxFindOrCreateUser];
-        g_steamProcs[idxFindOrCreateUser] = (FARPROC)Intercepted_SteamInternal_FindOrCreateUserInterface;
+        g_steamProcs[idxFindOrCreateUser] = (FARPROC)SteamInternal_FindOrCreateUserInterface;
         ReFixLog("EnsureOriginal: Intercepted SteamInternal_FindOrCreateUserInterface");
     }
 
     int idxCreateInterface = FindSteamExportIndex("SteamInternal_CreateInterface");
     if (idxCreateInterface >= 0) {
         g_pfn_SteamInternal_CreateInterface = (fn_SteamInternal_CreateInterface_t)g_steamProcs[idxCreateInterface];
-        g_steamProcs[idxCreateInterface] = (FARPROC)Intercepted_SteamInternal_CreateInterface;
+        g_steamProcs[idxCreateInterface] = (FARPROC)SteamInternal_CreateInterface;
         ReFixLog("EnsureOriginal: Intercepted SteamInternal_CreateInterface");
     }
 
@@ -4695,6 +4703,16 @@ extern "C" {
     __declspec(dllexport) void ReFix_SetNetworkMode(int mode) {
         ReFix::NetworkModeManager::SetMode((ReFix::ReFixNetworkMode)mode);
     }
+    __declspec(dllexport) uint64_t ReFix_GetEnsureOriginalCallCount() {
+        return g_ensureOriginalCallCount.load(std::memory_order_relaxed);
+    }
+    __declspec(dllexport) uint64_t ReFix_GetValveDllLoadCount() {
+        return g_valveDllLoadCount.load(std::memory_order_relaxed);
+    }
+    __declspec(dllexport) void ReFix_ResetEnsureOriginalCallCount() {
+        g_ensureOriginalCallCount.store(0, std::memory_order_relaxed);
+        g_valveDllLoadCount.store(0, std::memory_order_relaxed);
+    }
     __declspec(dllexport) bool ReFix_EnsureOriginalDll() {
         return EnsureOriginal();
     }
@@ -4706,7 +4724,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_hSelfModule = hModule;
             DisableThreadLibraryCalls(hModule);
             ApplySteamEnv();
-            EnsureOriginal();
+            // Note: DO NOT call EnsureOriginal() or LoadLibrary in DllMain!
+            // In LAN/offline mode, genuine Valve DLL must NEVER be loaded.
+            // In Online mode, EnsureOriginal is explicitly invoked during normal initialization.
             break;
         case DLL_PROCESS_DETACH:
             g_authDispatchRunning.store(false, std::memory_order_relaxed);

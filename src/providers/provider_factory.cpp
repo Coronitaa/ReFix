@@ -3,6 +3,7 @@
 #include "../unreal_steam_emu.h"
 #include <windows.h>
 #include <string>
+#include <mutex>
 
 extern "C" {
     extern HMODULE g_hOriginalDll;
@@ -201,23 +202,31 @@ public:
     }
 };
 
+static std::mutex s_providerMutex;
 std::shared_ptr<IReFixSteamProvider> ProviderFactory::s_steamProvider = nullptr;
 std::shared_ptr<IReFixEOSProvider> ProviderFactory::s_eosProvider = nullptr;
 std::shared_ptr<IReFixPhotonProvider> ProviderFactory::s_photonProvider = nullptr;
 std::shared_ptr<IReFixNetworkProvider> ProviderFactory::s_networkProvider = nullptr;
 
 void ProviderFactory::Reset() {
-    s_steamProvider = nullptr;
+    std::lock_guard<std::mutex> lock(s_providerMutex);
+    if (s_steamProvider) {
+        s_steamProvider->Shutdown();
+        s_steamProvider = nullptr;
+    }
     s_eosProvider = nullptr;
     s_photonProvider = nullptr;
     s_networkProvider = nullptr;
 }
 
 std::shared_ptr<IReFixSteamProvider> ProviderFactory::GetSteamProvider() {
+    std::lock_guard<std::mutex> lock(s_providerMutex);
     ReFixNetworkMode mode = NetworkModeManager::GetMode();
     if (s_steamProvider) {
         if ((mode == ReFixNetworkMode::Online && strcmp(s_steamProvider->GetName(), "OnlineSteamProvider") != 0) ||
             (mode != ReFixNetworkMode::Online && strcmp(s_steamProvider->GetName(), "LanSteamProvider") != 0)) {
+            // Safely shut down active provider before replacing (BLOCKER 9)
+            s_steamProvider->Shutdown();
             s_steamProvider = nullptr;
         }
     }

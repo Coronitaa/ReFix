@@ -23,6 +23,11 @@ void AutoOpenPorts() {
     if (s_opened) return;
     s_opened = true;
 
+    // Internet-Zero: Never initiate UPnP NAT port-forwarding or external firewall rule threads in LAN/Offline modes!
+    if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed()) {
+        return;
+    }
+
     std::thread([]() {
         AddFirewallRule(7777, L"ReFix Game P2P (7777 UDP)");
         AddFirewallRule(7778, L"ReFix Game P2P (7778 UDP)");

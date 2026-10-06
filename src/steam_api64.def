@@ -5,6 +5,9 @@ EXPORTS
     ReFix_RegisterP2PPeer
     ReFix_RegisterP2PPeerStr
     ReFix_GetBoundGamePort
+    ReFix_GetEnsureOriginalCallCount
+    ReFix_GetValveDllLoadCount
+    ReFix_ResetEnsureOriginalCallCount
     GetHSteamPipe=GetHSteamPipe_proxy
     GetHSteamUser=GetHSteamUser_proxy
     SteamAPI_GetHSteamPipe=SteamAPI_GetHSteamPipe_proxy
@@ -926,20 +929,20 @@ EXPORTS
     SteamAPI_ISteamVideo_GetVideoURL=SteamAPI_ISteamVideo_GetVideoURL_proxy
     SteamAPI_ISteamVideo_IsBroadcasting=SteamAPI_ISteamVideo_IsBroadcasting_proxy
     SteamAPI_IsSteamRunning=SteamAPI_IsSteamRunning_proxy
-    SteamAPI_ManualDispatch_FreeLastCallback=SteamAPI_ManualDispatch_FreeLastCallback_proxy
-    SteamAPI_ManualDispatch_GetAPICallResult=SteamAPI_ManualDispatch_GetAPICallResult_proxy
-    SteamAPI_ManualDispatch_GetNextCallback=SteamAPI_ManualDispatch_GetNextCallback_proxy
+    SteamAPI_ManualDispatch_FreeLastCallback
+    SteamAPI_ManualDispatch_GetAPICallResult
+    SteamAPI_ManualDispatch_GetNextCallback
     SteamAPI_ManualDispatch_Init=SteamAPI_ManualDispatch_Init_proxy
-    SteamAPI_ManualDispatch_RunFrame=SteamAPI_ManualDispatch_RunFrame_proxy
+    SteamAPI_ManualDispatch_RunFrame
     SteamAPI_MatchMakingKeyValuePair_t_Construct=SteamAPI_MatchMakingKeyValuePair_t_Construct_proxy
     SteamAPI_RegisterCallResult=SteamAPI_RegisterCallResult_proxy
     SteamAPI_RegisterCallback=SteamAPI_RegisterCallback_proxy
     SteamAPI_ReleaseCurrentThreadMemory=SteamAPI_ReleaseCurrentThreadMemory_proxy
-    SteamAPI_RunCallbacks=SteamAPI_RunCallbacks_proxy
+    SteamAPI_RunCallbacks
     SteamAPI_SetBreakpadAppID=SteamAPI_SetBreakpadAppID_proxy
     SteamAPI_SetMiniDumpComment=SteamAPI_SetMiniDumpComment_proxy
     SteamAPI_SetTryCatchCallbacks=SteamAPI_SetTryCatchCallbacks_proxy
-    SteamAPI_Shutdown=SteamAPI_Shutdown_proxy
+    SteamAPI_Shutdown
     SteamAPI_SteamAppList_v001=SteamAPI_SteamAppList_v001_proxy
     SteamAPI_SteamApps_v008=SteamAPI_SteamApps_v008_proxy
     SteamAPI_SteamController_v008=SteamAPI_SteamController_v008_proxy
@@ -950,8 +953,8 @@ EXPORTS
     SteamAPI_SteamGameSearch_v001=SteamAPI_SteamGameSearch_v001_proxy
     SteamAPI_SteamGameServerHTTP_v003=SteamAPI_SteamGameServerHTTP_v003_proxy
     SteamAPI_SteamGameServerInventory_v003=SteamAPI_SteamGameServerInventory_v003_proxy
-    SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002=SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002_proxy
-    SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012=SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012_proxy
+    SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002
+    SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012
     SteamAPI_SteamGameServerNetworking_v006=SteamAPI_SteamGameServerNetworking_v006_proxy
     SteamAPI_SteamGameServerStats_v001=SteamAPI_SteamGameServerStats_v001_proxy
     SteamAPI_SteamGameServerUGC_v016=SteamAPI_SteamGameServerUGC_v016_proxy
@@ -1012,9 +1015,9 @@ EXPORTS
     SteamAPI_SteamNetworkingIdentity_SetXboxPairwiseID=SteamAPI_SteamNetworkingIdentity_SetXboxPairwiseID_proxy
     SteamAPI_SteamNetworkingIdentity_ToString=SteamAPI_SteamNetworkingIdentity_ToString_proxy
     SteamAPI_SteamNetworkingMessage_t_Release=SteamAPI_SteamNetworkingMessage_t_Release_proxy
-    SteamAPI_SteamNetworkingMessages_SteamAPI_v002=SteamAPI_SteamNetworkingMessages_SteamAPI_v002_proxy
-    SteamAPI_SteamNetworkingSockets_SteamAPI_v012=SteamAPI_SteamNetworkingSockets_SteamAPI_v012_proxy
-    SteamAPI_SteamNetworkingUtils_SteamAPI_v004=SteamAPI_SteamNetworkingUtils_SteamAPI_v004_proxy
+    SteamAPI_SteamNetworkingMessages_SteamAPI_v002
+    SteamAPI_SteamNetworkingSockets_SteamAPI_v012
+    SteamAPI_SteamNetworkingUtils_SteamAPI_v004
     SteamAPI_SteamNetworking_v006=SteamAPI_SteamNetworking_v006_proxy
     SteamAPI_SteamParentalSettings_v001=SteamAPI_SteamParentalSettings_v001_proxy
     SteamAPI_SteamParties_v002=SteamAPI_SteamParties_v002_proxy
@@ -1055,9 +1058,9 @@ EXPORTS
     SteamGameServer_RunCallbacks=SteamGameServer_RunCallbacks_proxy
     SteamGameServer_Shutdown=SteamGameServer_Shutdown_proxy
     SteamInternal_ContextInit=SteamInternal_ContextInit_proxy
-    SteamInternal_CreateInterface=SteamInternal_CreateInterface_proxy
+    SteamInternal_CreateInterface
     SteamInternal_FindOrCreateGameServerInterface=SteamInternal_FindOrCreateGameServerInterface_proxy
-    SteamInternal_FindOrCreateUserInterface=SteamInternal_FindOrCreateUserInterface_proxy
+    SteamInternal_FindOrCreateUserInterface
     SteamInternal_GameServer_Init
     g_pSteamClientGameServer=g_pSteamClientGameServer_proxy
     SteamInternal_SteamAPI_Init

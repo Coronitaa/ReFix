@@ -585,26 +585,22 @@ namespace UnrealSteamEmu {
         if (addr->sa_family == AF_INET) {
             const sockaddr_in* sin = reinterpret_cast<const sockaddr_in*>(addr);
             uint32_t ip = ntohl(sin->sin_addr.s_addr);
-            if ((ip >= 0x0A000000 && ip <= 0x0AFFFFFF) || // 10.0.0.0/8
-                (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) || // 172.16.0.0/12
-                (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) || // 192.168.0.0/16
-                (ip >= 0xA9FE0000 && ip <= 0xA9FEFFFF) || // 169.254.0.0/16
-                (ip >= 0x7F000000 && ip <= 0x7FFFFFFF) || // 127.0.0.0/8
-                (ip >= 0xE0000000 && ip <= 0xEFFFFFFF) || // Multicast 224.0.0.0/4
-                (ip == 0xFFFFFFFF))                       // Broadcast 255.255.255.255
+            if ((ip >= 0x0A000000 && ip <= 0x0AFFFFFF) || // 10.0.0.0/8 (RFC 1918)
+                (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) || // 172.16.0.0/12 (RFC 1918)
+                (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) || // 192.168.0.0/16 (RFC 1918)
+                (ip >= 0xA9FE0000 && ip <= 0xA9FEFFFF) || // 169.254.0.0/16 (APIPA/Link-Local)
+                (ip >= 0x7F000000 && ip <= 0x7FFFFFFF) || // 127.0.0.0/8 (Loopback)
+                (ip >= 0xE0000000 && ip <= 0xE00000FF) || // Multicast: Link-Local Control Block 224.0.0.0/24 (RFC 5771, TTL=1, LAN only)
+                (ip >= 0xEF000000 && ip <= 0xEFFFFFFF) || // Multicast: Administratively Scoped / Org-Local 239.0.0.0/8 (RFC 2365, private LAN)
+                (ip == 0xFFFFFFFF))                       // Limited Broadcast 255.255.255.255 (Discovery only)
             {
                 return true;
             }
+            // Note: 224.0.1.0 - 238.255.255.255 are globally routable Internet multicast and are strictly BLOCKED (BLOCKER 7)
             return false;
         } else if (addr->sa_family == AF_INET6) {
-            const sockaddr_in6* sin6 = reinterpret_cast<const sockaddr_in6*>(addr);
-            const uint8_t* b = sin6->sin6_addr.u.Byte;
-            bool isLoopback = true;
-            for (int i = 0; i < 15; i++) if (b[i] != 0) isLoopback = false;
-            if (isLoopback && b[15] == 1) return true;
-            if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true; // Link-local fe80::/10
-            if ((b[0] & 0xFE) == 0xFC) return true;                 // ULA fc00::/7
-            if (b[0] == 0xFF) return true;                          // Multicast ff00::/8
+            // BLOCKER 8: AF_INET6 audit - The ReFix LAN transport currently uses AF_INET sockets exclusively.
+            // IPv6 transport is UNVERIFIED / unsupported at Phase 3.6. Disallowed to prevent false claims.
             return false;
         }
         return false;
