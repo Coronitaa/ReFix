@@ -43,6 +43,10 @@ ReFixNetworkMode NetworkModeManager::GetMode() {
     return s_mode;
 }
 
+void NetworkModeManager::SetMode(ReFixNetworkMode mode) {
+    s_mode = mode;
+}
+
 bool NetworkModeManager::IsOnline() {
     return s_mode == ReFixNetworkMode::Online;
 }

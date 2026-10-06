@@ -91,6 +91,11 @@ namespace UnrealSteamEmu {
     uint64_t GetBlockedEgressCount() { return g_blockedEgressCount.load(); }
     void ResetBlockedEgressCount() { g_blockedEgressCount.store(0); }
 
+    static std::atomic<uint64_t> s_unrealSteamEmuCallCount{ 0 };
+    uint64_t GetCallCount() { return s_unrealSteamEmuCallCount.load(std::memory_order_relaxed); }
+    void ResetCallCount() { s_unrealSteamEmuCallCount.store(0, std::memory_order_relaxed); }
+    inline void RecordCall() { s_unrealSteamEmuCallCount.fetch_add(1, std::memory_order_relaxed); }
+
     static uint64_t g_localSteamID = 0;
     static std::string g_personaName = "Player";
     static uint32_t g_appID = 480;
@@ -652,8 +657,6 @@ namespace UnrealSteamEmu {
     }
 
     static void SendLanPacket(CSteamID remoteID, uint8_t msgType, const void* payload, size_t payloadLen, ReFix::PacketDirection dir = ReFix::PacketDirection::ANY) {
-        if (g_udpSocket == INVALID_SOCKET) return;
-
         sockaddr_in dest = {};
         bool hasEndpoint = false;
         {
@@ -675,7 +678,7 @@ namespace UnrealSteamEmu {
             return;
         }
 
-        // BLOQUEANTE 11: Internet-zero enforcement at sendto site
+        // BLOQUEANTE 11 & 13: Internet-zero enforcement at sendto site
         if (!IsAllowedLanAddress((const sockaddr*)&dest)) {
             char ipStr[INET_ADDRSTRLEN] = { 0 };
             inet_ntop(AF_INET, &dest.sin_addr, ipStr, sizeof(ipStr));
@@ -684,6 +687,8 @@ namespace UnrealSteamEmu {
             g_blockedEgressCount.fetch_add(1);
             return;
         }
+
+        if (g_udpSocket == INVALID_SOCKET) return;
 
         NetPacketHeader hdr;
         hdr.magic = 0x52464958;
@@ -821,12 +826,34 @@ namespace UnrealSteamEmu {
 
     static HSteamNetConnection CreateReFixConnection(CSteamID remoteID, ESteamNetworkingConnectionState initialState, uint32_t sessionId = 0, uint32_t connectionNonce = 0) {
         std::lock_guard<std::mutex> lock(g_socketsMutex);
+
+        // 1. Allocate unique handle (generate -> verify unused)
         HSteamNetConnection handle = g_nextConnectionHandle++;
-        if (sessionId == 0) {
-            sessionId = GenerateUniqueSessionId();
+        while (handle == k_HSteamNetConnection_Invalid || g_connections.find(handle) != g_connections.end()) {
+            handle = g_nextConnectionHandle++;
         }
+
+        // 2. Allocate unique sessionId (generate -> verify unused)
+        if (sessionId == 0) {
+            do {
+                sessionId = GenerateUniqueSessionId();
+            } while (sessionId == 0 || g_sessionToConnection.find(sessionId) != g_sessionToConnection.end());
+        }
+
+        // 3. Allocate unique connectionNonce (generate -> verify unused)
         if (connectionNonce == 0) {
-            connectionNonce = GenerateConnectionNonce();
+            bool inUse = true;
+            while (inUse) {
+                connectionNonce = GenerateConnectionNonce();
+                if (connectionNonce == 0) continue;
+                inUse = false;
+                for (const auto& pair : g_connections) {
+                    if (pair.second.connectionNonce == connectionNonce) {
+                        inUse = true;
+                        break;
+                    }
+                }
+            }
         }
 
         ReFixConnection conn;
@@ -876,13 +903,18 @@ namespace UnrealSteamEmu {
 
                     ReFixLog("[PollNetwork] Received msgType=%d from=%llu payloadLen=%zu", hdr->msgType, hdr->senderID, pLen);
 
-                    // Track peer under g_emuMutex
-                    {
+                    uint32_t senderIp = ntohl(fromAddr.sin_addr.s_addr);
+                    uint16_t senderPort = ntohs(fromAddr.sin_port);
+
+                    // BLOCKER 12: Discovery Source Policy
+                    // 1. DISCOVERY (msgType 1 [Ping/Beacon] or 2 [Lobby Announcement])
+                    //    can establish or update peer endpoints.
+                    if (hdr->msgType == 1 || hdr->msgType == 2) {
                         std::lock_guard<std::mutex> lock(g_emuMutex);
                         DiscoveredPeer& peer = g_peers[hdr->senderID];
                         peer.steamID = hdr->senderID;
-                        peer.ip = ntohl(fromAddr.sin_addr.s_addr);
-                        peer.port = ntohs(fromAddr.sin_port);
+                        peer.ip = senderIp;
+                        peer.port = senderPort;
                         peer.lastSeen = std::chrono::steady_clock::now();
 
                         if (hdr->msgType == 1 && pLen > 0) { // Ping with persona name
@@ -907,12 +939,63 @@ namespace UnrealSteamEmu {
                                     lob.members.push_back(lOwner);
                                 }
                             }
-                        } else if (hdr->msgType == 5 && pLen >= 4) { // P2P packet
+                        }
+                    } else if (hdr->msgType == 7 || hdr->msgType == 8) {
+                        // 2. HANDSHAKE (7=Handshake, 8=Handshake ACK)
+                        //    Only allowed if peer/endpoint is coherent.
+                        //    Do NOT allow a packet to silently change the endpoint of an already discovered peer!
+                        bool endpointCoherent = true;
+                        {
+                            std::lock_guard<std::mutex> lock(g_emuMutex);
+                            auto it = g_peers.find(hdr->senderID);
+                            if (it != g_peers.end()) {
+                                if (it->second.ip != senderIp || it->second.port != senderPort) {
+                                    ReFixLog("[PollNetwork] INCOHERENT handshake endpoint from steamID=%llu! Known=%u:%u, Received=%u:%u. Dropping packet.",
+                                             hdr->senderID, it->second.ip, it->second.port, senderIp, senderPort);
+                                    endpointCoherent = false;
+                                } else {
+                                    it->second.lastSeen = std::chrono::steady_clock::now();
+                                }
+                            } else {
+                                // First-time establishment via handshake
+                                DiscoveredPeer& peer = g_peers[hdr->senderID];
+                                peer.steamID = hdr->senderID;
+                                peer.ip = senderIp;
+                                peer.port = senderPort;
+                                peer.lastSeen = std::chrono::steady_clock::now();
+                            }
+                        }
+                        if (!endpointCoherent) {
+                            continue; // Drop incoherent handshake packet!
+                        }
+                    } else if (hdr->msgType == 6 || hdr->msgType == 9 || hdr->msgType == 5) {
+                        // 3. DATA / ACK (6=Sockets Payload, 9=Sockets ACK, 5=P2P)
+                        //    MUST NOT turn into discovery by themselves.
+                        //    If peer already discovered, verify matching endpoint; if mismatched, reject!
+                        bool endpointValid = true;
+                        {
+                            std::lock_guard<std::mutex> lock(g_emuMutex);
+                            auto it = g_peers.find(hdr->senderID);
+                            if (it != g_peers.end()) {
+                                if (it->second.ip != senderIp || it->second.port != senderPort) {
+                                    ReFixLog("[PollNetwork] DATA/ACK rejected: mismatched endpoint for steamID=%llu! Known=%u:%u, Received=%u:%u.",
+                                             hdr->senderID, it->second.ip, it->second.port, senderIp, senderPort);
+                                    endpointValid = false;
+                                } else {
+                                    it->second.lastSeen = std::chrono::steady_clock::now();
+                                }
+                            }
+                        }
+                        if (!endpointValid) {
+                            continue; // Drop data packet from mismatched endpoint!
+                        }
+                        if (hdr->msgType == 5 && pLen >= 4) { // P2P packet
                             int channel = *(int*)payload;
                             P2PPacket pkt;
                             pkt.senderID = hdr->senderID;
                             pkt.channel = channel;
                             pkt.data.assign(payload + 4, payload + pLen);
+                            std::lock_guard<std::mutex> lock(g_emuMutex);
                             g_p2pIncoming[channel].push(pkt);
                         }
                     }
@@ -952,6 +1035,9 @@ namespace UnrealSteamEmu {
                                 auto it = g_sessionToConnection.find(sessionId);
                                 if (it == g_sessionToConnection.end()) {
                                     hNotify = g_nextConnectionHandle++;
+                                    while (hNotify == k_HSteamNetConnection_Invalid || g_connections.find(hNotify) != g_connections.end()) {
+                                        hNotify = g_nextConnectionHandle++;
+                                    }
                                     ReFixConnection conn;
                                     conn.handle = hNotify;
                                     conn.sessionId = sessionId;
@@ -1018,7 +1104,7 @@ namespace UnrealSteamEmu {
                                         conn.substate = ReFixConnSubstate::Connected;
                                         stateChanged = true;
 
-                                        // Real measured RTT: from lastHandshakeSendTime to now!
+                                        // Measured Initial Handshake RTT: round-trip duration from client handshake transmission to handshake ACK reception
                                         auto now = std::chrono::steady_clock::now();
                                         conn.pingMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - conn.lastHandshakeSendTime).count();
                                     }
@@ -1300,6 +1386,7 @@ namespace UnrealSteamEmu {
     }
 
     void RunCallbacks() {
+        RecordCall();
         if (!g_bInitialized) return;
 
         PollNetwork();
@@ -1687,11 +1774,14 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool GetFriendGamePlayed(CSteamID steamIDFriend, FriendGameInfo_t *pFriendGameInfo) override {
-            if (pFriendGameInfo) {
+            if (!pFriendGameInfo) return false;
+            std::lock_guard<std::mutex> lock(g_emuMutex);
+            auto it = g_peers.find(steamIDFriend.ConvertToUint64());
+            if (it != g_peers.end() && it->second.port != 0) {
                 pFriendGameInfo->m_gameID = CGameID(g_appID);
-                pFriendGameInfo->m_unGameIP = 0x7F000001;
-                pFriendGameInfo->m_usGamePort = 7777;
-                pFriendGameInfo->m_usQueryPort = 27015;
+                pFriendGameInfo->m_unGameIP = it->second.ip;
+                pFriendGameInfo->m_usGamePort = it->second.port;
+                pFriendGameInfo->m_usQueryPort = it->second.port;
                 pFriendGameInfo->m_steamIDLobby = CSteamID(g_activeLobbyID.load());
                 return true;
             }
@@ -2465,15 +2555,18 @@ namespace UnrealSteamEmu {
         virtual bool CloseP2PChannelWithUser(CSteamID steamIDRemote, int nChannel) override { return true; }
 
         virtual bool GetP2PSessionState(CSteamID steamIDRemote, P2PSessionState_t *pConnectionState) override {
-            if (pConnectionState) {
+            if (!pConnectionState) return false;
+            std::lock_guard<std::mutex> lock(g_emuMutex);
+            auto it = g_peers.find(steamIDRemote.ConvertToUint64());
+            if (it != g_peers.end()) {
                 pConnectionState->m_bConnectionActive = 1;
                 pConnectionState->m_bConnecting = 0;
                 pConnectionState->m_eP2PSessionError = 0;
                 pConnectionState->m_bUsingRelay = 0;
                 pConnectionState->m_nBytesQueuedForSend = 0;
                 pConnectionState->m_nPacketsQueuedForSend = 0;
-                pConnectionState->m_nRemoteIP = 0x7F000001;
-                pConnectionState->m_nRemotePort = 7777;
+                pConnectionState->m_nRemoteIP = it->second.ip;
+                pConnectionState->m_nRemotePort = it->second.port;
                 return true;
             }
             return false;
@@ -3859,6 +3952,7 @@ namespace UnrealSteamEmu {
     // INTERFACE RESOLUTION & PUBLIC ACCESSORS
     // =========================================================================
     void* GetGenericInterface(const char* pchVersion) {
+        RecordCall();
         if (!pchVersion) return nullptr;
 
         ReFixLog("[UnrealSteam] Resolving Interface Version: '%s'", pchVersion);
@@ -3906,8 +4000,8 @@ namespace UnrealSteamEmu {
         if (strstr(pchVersion, "STEAMTIMELINE") || strstr(pchVersion, "SteamTimeline"))
             return &g_steamTimelineInstance;
 
-        ReFixLog("[UnrealSteam] Warning: Unrecognized interface '%s', falling back to Client", pchVersion);
-        return &g_steamClientInstance;
+        ReFixLog("[UnrealSteam] Warning: Unrecognized interface '%s'", pchVersion);
+        return nullptr;
     }
 
     void* FindOrCreateUserInterface(int32_t hUser, const char* pszVersion) {
@@ -3961,9 +4055,9 @@ namespace UnrealSteamEmu {
     void* GetSteamUserStats() { return &g_steamUserStatsInstance; }
     void* GetSteamApps() { return &g_steamAppsInstance; }
     void* GetSteamNetworking() { return &g_steamNetworkingInstance; }
-    void* GetSteamNetworkingSockets() { return &g_steamNetworkingSocketsInstance; }
-    void* GetSteamNetworkingUtils() { return &g_steamNetworkingUtilsInstance; }
-    void* GetSteamNetworkingMessages() { return &g_steamNetworkingMessagesInstance; }
+    void* GetSteamNetworkingSockets() { RecordCall(); return &g_steamNetworkingSocketsInstance; }
+    void* GetSteamNetworkingUtils() { RecordCall(); return &g_steamNetworkingUtilsInstance; }
+    void* GetSteamNetworkingMessages() { RecordCall(); return &g_steamNetworkingMessagesInstance; }
     void* GetSteamRemoteStorage() { return &g_steamRemoteStorageInstance; }
     void* GetSteamUGC() { return &g_steamUGCInstance; }
     void* GetSteamGameServer() { return &g_steamGameServerInstance; }
@@ -4035,6 +4129,23 @@ namespace UnrealSteamEmu {
         g_callResultMap.clear();
         g_lobbies.clear();
         g_peers.clear();
+
+        {
+            std::lock_guard<std::mutex> sLock(g_socketsMutex);
+            for (auto& pair : g_connections) {
+                while (!pair.second.incomingMessages.empty()) {
+                    auto* msg = pair.second.incomingMessages.front();
+                    if (msg) msg->Release();
+                    pair.second.incomingMessages.pop();
+                }
+                for (auto& ooo : pair.second.outOfOrderInbound) {
+                    if (ooo.second) ooo.second->Release();
+                }
+                pair.second.outOfOrderInbound.clear();
+            }
+            g_connections.clear();
+            g_sessionToConnection.clear();
+        }
 
         g_bInitialized = false;
         ReFixLog("[UnrealSteam] Shutdown complete.");

@@ -14,6 +14,8 @@ public:
     virtual void* GetNetworkingSockets() = 0;
     virtual void* GetNetworkingUtils() = 0;
     virtual void* GetNetworkingMessages() = 0;
+    virtual void* GetGameServerNetworkingSockets() = 0;
+    virtual void* GetGameServerNetworkingMessages() = 0;
     virtual void* FindOrCreateUserInterface(int32_t hUser, const char* pszVersion) = 0;
     virtual void* CreateInterface(const char* pszVersion) = 0;
     virtual void RunCallbacks() = 0;

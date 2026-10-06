@@ -6,6 +6,7 @@
 
 extern "C" {
     extern HMODULE g_hOriginalDll;
+    bool ReFix_EnsureOriginalDll();
 }
 
 namespace ReFix {
@@ -41,6 +42,14 @@ public:
         return UnrealSteamEmu::GetSteamNetworkingMessages();
     }
 
+    void* GetGameServerNetworkingSockets() override {
+        return UnrealSteamEmu::GetSteamNetworkingSockets();
+    }
+
+    void* GetGameServerNetworkingMessages() override {
+        return UnrealSteamEmu::GetSteamNetworkingMessages();
+    }
+
     void* FindOrCreateUserInterface(int32_t hUser, const char* pszVersion) override {
         return UnrealSteamEmu::FindOrCreateUserInterface(hUser, pszVersion);
     }
@@ -62,10 +71,33 @@ public:
     virtual ~OnlineSteamProvider() = default;
 
     bool Init() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
         if (!g_hOriginalDll) return false;
         typedef bool (*fn_Init_t)();
         fn_Init_t pfn = (fn_Init_t)GetProcAddress(g_hOriginalDll, "SteamAPI_Init");
-        return pfn ? pfn() : false;
+        if (pfn) return pfn();
+
+        typedef bool (*fn_InitSafe_t)();
+        fn_InitSafe_t pfnSafe = (fn_InitSafe_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitSafe");
+        if (pfnSafe) return pfnSafe();
+
+        typedef int (*fn_InitFlat_t)(char*);
+        fn_InitFlat_t pfnFlat = (fn_InitFlat_t)GetProcAddress(g_hOriginalDll, "SteamAPI_InitFlat");
+        if (pfnFlat) {
+            char errMsg[1024] = { 0 };
+            return (pfnFlat(errMsg) == 0);
+        }
+
+        typedef int (*fn_SteamAPIInit_Internal_t)(const char*, char*);
+        fn_SteamAPIInit_Internal_t pfnInternal = (fn_SteamAPIInit_Internal_t)GetProcAddress(g_hOriginalDll, "SteamInternal_SteamAPI_Init");
+        if (pfnInternal) {
+            char errMsg[1024] = { 0 };
+            return (pfnInternal("", errMsg) == 0);
+        }
+
+        return false;
     }
 
     void Shutdown() override {
@@ -80,22 +112,33 @@ public:
     }
 
     void* GetNetworkingSockets() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
         if (!g_hOriginalDll) return nullptr;
         typedef void* (*fn_GetSockets_t)();
         fn_GetSockets_t pfn = (fn_GetSockets_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamNetworkingSockets_SteamAPI_v012");
+        if (!pfn) pfn = (fn_GetSockets_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamNetworkingSockets_SteamAPI_v009");
         if (pfn) return pfn();
         return FindOrCreateUserInterface(0, "SteamNetworkingSockets012");
     }
 
     void* GetNetworkingUtils() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
         if (!g_hOriginalDll) return nullptr;
         typedef void* (*fn_GetUtils_t)();
         fn_GetUtils_t pfn = (fn_GetUtils_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004");
+        if (!pfn) pfn = (fn_GetUtils_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamNetworkingUtils_SteamAPI_v003");
         if (pfn) return pfn();
         return FindOrCreateUserInterface(0, "SteamNetworkingUtils004");
     }
 
     void* GetNetworkingMessages() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
         if (!g_hOriginalDll) return nullptr;
         typedef void* (*fn_GetMsgs_t)();
         fn_GetMsgs_t pfn = (fn_GetMsgs_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
@@ -103,7 +146,33 @@ public:
         return FindOrCreateUserInterface(0, "SteamNetworkingMessages002");
     }
 
+    void* GetGameServerNetworkingSockets() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_GetGSSockets_t)();
+        fn_GetGSSockets_t pfn = (fn_GetGSSockets_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012");
+        if (!pfn) pfn = (fn_GetGSSockets_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v009");
+        if (pfn) return pfn();
+        return nullptr;
+    }
+
+    void* GetGameServerNetworkingMessages() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_GetGSMsgs_t)();
+        fn_GetGSMsgs_t pfn = (fn_GetGSMsgs_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002");
+        if (pfn) return pfn();
+        return nullptr;
+    }
+
     void* FindOrCreateUserInterface(int32_t hUser, const char* pszVersion) override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
         if (!g_hOriginalDll || !pszVersion) return nullptr;
         typedef void* (*fn_Find_t)(int32_t, const char*);
         fn_Find_t pfn = (fn_Find_t)GetProcAddress(g_hOriginalDll, "SteamInternal_FindOrCreateUserInterface");
@@ -111,6 +180,9 @@ public:
     }
 
     void* CreateInterface(const char* pszVersion) override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
         if (!g_hOriginalDll || !pszVersion) return nullptr;
         typedef void* (*fn_Create_t)(const char*);
         fn_Create_t pfn = (fn_Create_t)GetProcAddress(g_hOriginalDll, "SteamInternal_CreateInterface");
@@ -119,6 +191,9 @@ public:
     }
 
     void RunCallbacks() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
         if (!g_hOriginalDll) return;
         typedef void (*fn_RunCallbacks_t)();
         fn_RunCallbacks_t pfn = (fn_RunCallbacks_t)GetProcAddress(g_hOriginalDll, "SteamAPI_RunCallbacks");
@@ -139,8 +214,14 @@ void ProviderFactory::Reset() {
 }
 
 std::shared_ptr<IReFixSteamProvider> ProviderFactory::GetSteamProvider() {
+    ReFixNetworkMode mode = NetworkModeManager::GetMode();
+    if (s_steamProvider) {
+        if ((mode == ReFixNetworkMode::Online && strcmp(s_steamProvider->GetName(), "OnlineSteamProvider") != 0) ||
+            (mode != ReFixNetworkMode::Online && strcmp(s_steamProvider->GetName(), "LanSteamProvider") != 0)) {
+            s_steamProvider = nullptr;
+        }
+    }
     if (!s_steamProvider) {
-        ReFixNetworkMode mode = NetworkModeManager::GetMode();
         if (mode == ReFixNetworkMode::Online) {
             s_steamProvider = std::make_shared<OnlineSteamProvider>();
         } else {

@@ -14,6 +14,7 @@ class NetworkModeManager {
 public:
     static void LoadMode(const std::string& iniPath);
     static ReFixNetworkMode GetMode();
+    static void SetMode(ReFixNetworkMode mode);
     
     // Convenience checkers
     static bool IsOnline();

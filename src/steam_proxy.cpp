@@ -3022,12 +3022,10 @@ static void* Intercepted_SteamInternal_FindOrCreateUserInterface(uint32_t hSteam
     }
 
     // In Online mode, query provider (which delegates to original Valve DLL)
+    // BLOCKER 1: STRICT ZERO FALLBACK TO UnrealSteamEmu
     void* iface = provider->FindOrCreateUserInterface(hSteamUser, pszVersion);
     if (!iface) {
-        // Fallback for newer networking interface requested on older steam client
-        if (strstr(pszVersion, "SteamNetworkingSockets") || strstr(pszVersion, "SteamNetworkingUtils") || strstr(pszVersion, "SteamNetworkingMessages")) {
-            return UnrealSteamEmu::FindOrCreateUserInterface(hSteamUser, pszVersion);
-        }
+        return nullptr;
     }
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
@@ -3041,11 +3039,11 @@ static void* Intercepted_SteamInternal_CreateInterface(const char* pszVersion) {
         return provider->CreateInterface(pszVersion);
     }
 
+    // In Online mode, query provider (which delegates to original Valve DLL)
+    // BLOCKER 1: STRICT ZERO FALLBACK TO UnrealSteamEmu
     void* iface = provider->CreateInterface(pszVersion);
     if (!iface) {
-        if (strstr(pszVersion, "SteamNetworkingSockets") || strstr(pszVersion, "SteamNetworkingUtils") || strstr(pszVersion, "SteamNetworkingMessages")) {
-            return UnrealSteamEmu::CreateInterface(pszVersion);
-        }
+        return nullptr;
     }
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
@@ -3079,12 +3077,12 @@ extern "C" __declspec(dllexport) void* SteamAPI_SteamNetworkingMessages_SteamAPI
 
 extern "C" __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012() {
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
-    return provider->GetNetworkingSockets();
+    return provider->GetGameServerNetworkingSockets();
 }
 
 extern "C" __declspec(dllexport) void* SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002() {
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
-    return provider->GetNetworkingMessages();
+    return provider->GetGameServerNetworkingMessages();
 }
 
 static void InstallVTableHooks() {
@@ -3704,6 +3702,10 @@ static bool EnsureOriginal() {
         fullPaths.push_back(exeDir + "..\\..\\..\\Engine\\Binaries\\ThirdParty\\Steamworks\\Steamv157\\Win64\\" + name);
         fullPaths.push_back(exeDir + "..\\..\\..\\Engine\\Binaries\\ThirdParty\\Steamworks\\Steamv153\\Win64\\" + name);
     }
+    fullPaths.push_back(proxyDir + "valve\\steam_api64.dll");
+    fullPaths.push_back(exeDir + "valve\\steam_api64.dll");
+    fullPaths.push_back(proxyDir + "bin\\valve\\steam_api64.dll");
+    fullPaths.push_back(exeDir + "bin\\valve\\steam_api64.dll");
 
     // Auto-discover Unity *_Data/Plugins and Plugins/ folders
     std::vector<std::string> searchDirs;
@@ -3793,10 +3795,13 @@ static bool EnsureOriginal() {
         }
         ReFixLog("EnsureOriginal: ERROR - Could not find steam_api64_valve.dll (proxyDir='%s', exeDir='%s')",
                  proxyDir.c_str(), exeDir.c_str());
-        MessageBoxA(NULL,
-            "ReFix Error: Could not find 'steam_api64_valve.dll'.\n\n"
-            "Please ensure 'steam_api64_valve.dll' is present in the game's plugins folder.",
-            "ReFix - Steam Proxy", MB_ICONERROR | MB_OK);
+        char envHeadless[32] = { 0 };
+        if (GetEnvironmentVariableA("REFIX_HEADLESS_TEST", envHeadless, sizeof(envHeadless)) == 0) {
+            MessageBoxA(NULL,
+                "ReFix Error: Could not find 'steam_api64_valve.dll'.\n\n"
+                "Please ensure 'steam_api64_valve.dll' is present in the game's plugins folder.",
+                "ReFix - Steam Proxy", MB_ICONERROR | MB_OK);
+        }
         return false;
     }
 
@@ -4202,9 +4207,14 @@ extern "C" void SteamP2PHook_ForceResolve();
 
 static void ReFixInitializePre() {
     ApplySteamEnv();
-    auto provider = ReFix::ProviderFactory::GetSteamProvider();
-    provider->Init();
-    ReFixLog("Provider initialized: %s", provider->GetName());
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        auto provider = ReFix::ProviderFactory::GetSteamProvider();
+        provider->Init();
+        ReFixLog("Provider initialized (LAN): %s", provider->GetName());
+    } else {
+        EnsureOriginal();
+        ReFixLog("ReFixInitializePre: Online mode, EnsureOriginal called");
+    }
 }
 
 static void ReFixInitializePost(bool success) {
@@ -4243,25 +4253,9 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         ReFixLog("SteamAPI_Init: EnsureOriginal failed");
         return false;
     }
-    bool result = false;
-    if (g_pfn_Init) {
-        result = g_pfn_Init();
-        ReFixLog("SteamAPI_Init: called via SteamAPI_Init -> result=%d", result);
-    } else if (g_pfn_InitFlat) {
-        char errMsg[1024] = { 0 };
-        int flatRes = g_pfn_InitFlat(errMsg);
-        result = (flatRes == 0);
-        ReFixLog("SteamAPI_Init: called via SteamAPI_InitFlat -> result=%d, msg='%s'", flatRes, errMsg);
-    } else if (g_pfn_SteamAPIInit_Internal) {
-        char errMsg[1024] = { 0 };
-        int intRes = g_pfn_SteamAPIInit_Internal("", errMsg);
-        result = (intRes == 0);
-        ReFixLog("SteamAPI_Init: called via SteamInternal_SteamAPI_Init -> result=%d, msg='%s'", intRes, errMsg);
-    } else if (g_pfn_InitSafe) {
-        result = g_pfn_InitSafe();
-        ReFixLog("SteamAPI_Init: called via SteamAPI_InitSafe -> result=%d", result);
-    }
-    ReFixLog("SteamAPI_Init: final result=%d", result);
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    bool result = provider->Init();
+    ReFixLog("SteamAPI_Init: provider->Init() result=%d", result);
     
     ReFixInitializePost(result);
     return result;
@@ -4433,19 +4427,14 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (s_runCallbacksLogged++ < 3) {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
-    // Only call Valve's RunCallbacks in Online mode. In LAN/Offline mode,
-    // Steam client may not be fully initialized and would crash.
-    if (g_pfn_RunCallbacks && ReFix::NetworkModeManager::IsOnline()) {
-        ReFixLog("SteamAPI_RunCallbacks: calling valve RunCallbacks");
-        g_pfn_RunCallbacks();
-        ReFixLog("SteamAPI_RunCallbacks: valve RunCallbacks done");
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    if (provider) {
+        provider->RunCallbacks();
     }
-    ReFixLog("SteamAPI_RunCallbacks: calling UnrealSteamEmu::RunCallbacks");
-    UnrealSteamEmu::RunCallbacks();
-    ReFixLog("SteamAPI_RunCallbacks: calling DispatchRelayCallbacks");
-    DispatchRelayCallbacks();
-    ReFixLog("SteamAPI_RunCallbacks: calling DispatchPendingAuthCallbacks");
-    DispatchPendingAuthCallbacks();
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        DispatchRelayCallbacks();
+        DispatchPendingAuthCallbacks();
+    }
     ReFixLog("SteamAPI_RunCallbacks: done");
 }
 
@@ -4604,7 +4593,12 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
         std::lock_guard<std::mutex> lg(g_callbackMutex);
         g_registeredCallbacks.clear();
     }
-    SafeBackendShutdown();
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        auto provider = ReFix::ProviderFactory::GetSteamProvider();
+        if (provider) provider->Shutdown();
+    } else {
+        SafeBackendShutdown();
+    }
 }
 
 // =============================================================================
@@ -4691,6 +4685,18 @@ extern "C" {
         if (pDelayed) *pDelayed = stats.delayed;
         if (pReordered) *pReordered = stats.reordered;
         if (pDelivered) *pDelivered = stats.delivered;
+    }
+    __declspec(dllexport) uint64_t ReFix_GetUnrealSteamEmuCallCount() {
+        return UnrealSteamEmu::GetCallCount();
+    }
+    __declspec(dllexport) void ReFix_ResetUnrealSteamEmuCallCount() {
+        UnrealSteamEmu::ResetCallCount();
+    }
+    __declspec(dllexport) void ReFix_SetNetworkMode(int mode) {
+        ReFix::NetworkModeManager::SetMode((ReFix::ReFixNetworkMode)mode);
+    }
+    __declspec(dllexport) bool ReFix_EnsureOriginalDll() {
+        return EnsureOriginal();
     }
 }
 
