@@ -3180,5 +3180,13 @@ SteamInternal_SteamAPI_Init_proxy ENDP
 SteamInternal_GameServer_Init_V2_proxy PROC
     jmp QWORD PTR [g_steamProcs + 8448]
 SteamInternal_GameServer_Init_V2_proxy ENDP
+
+PUBLIC SafeUnsupportedExportStub
+SafeUnsupportedExportStub PROC
+    xor rax, rax
+    xorps xmm0, xmm0
+    ret
+SafeUnsupportedExportStub ENDP
+
 END
 

@@ -11,6 +11,17 @@ public:
     virtual void Shutdown() = 0;
     virtual const char* GetName() const = 0;
 
+    virtual void* GetSteamClient() = 0;
+    virtual void* GetSteamUser() = 0;
+    virtual void* GetSteamFriends() = 0;
+    virtual void* GetSteamApps() = 0;
+    virtual void* GetSteamUtils() = 0;
+    virtual void* GetSteamMatchmaking() = 0;
+    virtual void* GetSteamMatchmakingServers() = 0;
+    virtual int32_t GetHSteamUser() = 0;
+    virtual int32_t GetHSteamPipe() = 0;
+    virtual bool IsSteamRunning() = 0;
+
     virtual void* GetNetworkingSockets() = 0;
     virtual void* GetNetworkingUtils() = 0;
     virtual void* GetNetworkingMessages() = 0;

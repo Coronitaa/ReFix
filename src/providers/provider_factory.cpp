@@ -31,6 +31,46 @@ public:
         return "LanSteamProvider";
     }
 
+    void* GetSteamClient() override {
+        return UnrealSteamEmu::GetSteamClient();
+    }
+
+    void* GetSteamUser() override {
+        return UnrealSteamEmu::GetSteamUser();
+    }
+
+    void* GetSteamFriends() override {
+        return UnrealSteamEmu::GetSteamFriends();
+    }
+
+    void* GetSteamApps() override {
+        return UnrealSteamEmu::GetSteamApps();
+    }
+
+    void* GetSteamUtils() override {
+        return UnrealSteamEmu::GetSteamUtils();
+    }
+
+    void* GetSteamMatchmaking() override {
+        return UnrealSteamEmu::GetSteamMatchmaking();
+    }
+
+    void* GetSteamMatchmakingServers() override {
+        return UnrealSteamEmu::GetSteamMatchmakingServers();
+    }
+
+    int32_t GetHSteamUser() override {
+        return UnrealSteamEmu::GetHSteamUser();
+    }
+
+    int32_t GetHSteamPipe() override {
+        return UnrealSteamEmu::GetHSteamPipe();
+    }
+
+    bool IsSteamRunning() override {
+        return UnrealSteamEmu::IsInitialized();
+    }
+
     void* GetNetworkingSockets() override {
         return UnrealSteamEmu::GetSteamNetworkingSockets();
     }
@@ -110,6 +150,121 @@ public:
 
     const char* GetName() const override {
         return "OnlineSteamProvider";
+    }
+
+    void* GetSteamClient() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamClient");
+        if (pfn) return pfn();
+        return CreateInterface("SteamClient023");
+    }
+
+    void* GetSteamUser() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamUser_v021");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamUser");
+        if (pfn) return pfn();
+        return FindOrCreateUserInterface(0, "SteamUser021");
+    }
+
+    void* GetSteamFriends() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamFriends_v017");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamFriends");
+        if (pfn) return pfn();
+        return FindOrCreateUserInterface(0, "SteamFriends017");
+    }
+
+    void* GetSteamApps() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamApps_v008");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamApps");
+        if (pfn) return pfn();
+        return FindOrCreateUserInterface(0, "SteamApps008");
+    }
+
+    void* GetSteamUtils() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamUtils_v010");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamUtils");
+        if (pfn) return pfn();
+        return FindOrCreateUserInterface(0, "SteamUtils010");
+    }
+
+    void* GetSteamMatchmaking() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamMatchmaking_v009");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamMatchmaking");
+        if (pfn) return pfn();
+        return FindOrCreateUserInterface(0, "SteamMatchmaking009");
+    }
+
+    void* GetSteamMatchmakingServers() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return nullptr;
+        typedef void* (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamMatchmakingServers_v002");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamMatchmakingServers");
+        if (pfn) return pfn();
+        return FindOrCreateUserInterface(0, "SteamMatchmakingServers002");
+    }
+
+    int32_t GetHSteamUser() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return 0;
+        typedef int32_t (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_GetHSteamUser");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "GetHSteamUser");
+        return pfn ? pfn() : 0;
+    }
+
+    int32_t GetHSteamPipe() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return 0;
+        typedef int32_t (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_GetHSteamPipe");
+        if (!pfn) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "GetHSteamPipe");
+        return pfn ? pfn() : 0;
+    }
+
+    bool IsSteamRunning() override {
+        if (!g_hOriginalDll) {
+            ReFix_EnsureOriginalDll();
+        }
+        if (!g_hOriginalDll) return false;
+        typedef bool (*fn_t)();
+        fn_t pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_IsSteamRunning");
+        return pfn ? pfn() : (g_hOriginalDll != nullptr);
     }
 
     void* GetNetworkingSockets() override {

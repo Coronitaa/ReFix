@@ -115,6 +115,42 @@ typedef uint64_t (*fn_ReFix_GetEnsureOriginalCallCount)();
 typedef uint64_t (*fn_ReFix_GetValveDllLoadCount)();
 typedef void (*fn_ReFix_ResetEnsureOriginalCallCount)();
 
+// Suite 13 Bootstrap Function Pointers
+typedef bool (*SteamAPI_InitSafe_t)();
+typedef int (*SteamAPI_InitFlat_t)(char* pOutErrMsg);
+typedef int (*SteamInternal_SteamAPI_Init_t)(const char* pszVer, char* pOutErrMsg);
+typedef int32_t (*SteamAPI_GetHSteamUser_t)();
+typedef int32_t (*SteamAPI_GetHSteamPipe_t)();
+typedef int32_t (*GetHSteamUser_t)();
+typedef int32_t (*GetHSteamPipe_t)();
+typedef void* (*SteamClient_t)();
+typedef bool (*SteamAPI_IsSteamRunning_t)();
+typedef bool (*SteamAPI_RestartAppIfNecessary_t)(uint32_t unOwnAppID);
+typedef void (*SteamAPI_ReleaseCurrentThreadMemory_t)();
+typedef void (*SteamAPI_RegisterCallback_t)(void* pCallback, int iCallback);
+typedef void (*SteamAPI_UnregisterCallback_t)(void* pCallback);
+typedef void (*SteamAPI_RegisterCallResult_t)(void* pCallback, uint64_t hAPICall);
+typedef void (*SteamAPI_UnregisterCallResult_t)(void* pCallback, uint64_t hAPICall);
+
+typedef void* (*SteamAPI_ISteamClient_GetISteamGenericInterface_t)(void* self, int32_t hUser, int32_t hPipe, const char* pchVersion);
+typedef void* (*SteamAPI_ISteamClient_GetISteamUser_t)(void* self, int32_t hUser, int32_t hPipe, const char* pchVersion);
+typedef void* (*SteamAPI_ISteamClient_GetISteamFriends_t)(void* self, int32_t hUser, int32_t hPipe, const char* pchVersion);
+typedef void* (*SteamAPI_ISteamClient_GetISteamUtils_t)(void* self, int32_t hPipe, const char* pchVersion);
+typedef void* (*SteamAPI_ISteamClient_GetISteamMatchmaking_t)(void* self, int32_t hUser, int32_t hPipe, const char* pchVersion);
+typedef void* (*SteamAPI_ISteamClient_GetISteamMatchmakingServers_t)(void* self, int32_t hUser, int32_t hPipe, const char* pchVersion);
+typedef void* (*SteamAPI_ISteamClient_GetISteamApps_t)(void* self, int32_t hUser, int32_t hPipe, const char* pchVersion);
+typedef void* (*SteamAPI_ISteamClient_GetISteamNetworking_t)(void* self, int32_t hUser, int32_t hPipe, const char* pchVersion);
+
+typedef void* (*fn_SteamAPI_SteamUser_v021)();
+typedef void* (*fn_SteamAPI_SteamFriends_v017)();
+typedef void* (*fn_SteamAPI_SteamApps_v008)();
+typedef void* (*fn_SteamAPI_SteamUtils_v010)();
+typedef void* (*fn_SteamAPI_SteamMatchmaking_v009)();
+typedef void* (*fn_SteamAPI_SteamMatchmakingServers_v002)();
+typedef void* (*fn_SteamAPI_SteamNetworking_v006)();
+
+typedef uint32_t (*fn_SteamAPI_ISteamAppList_GetAppBuildId)(void* self, uint32_t nAppID);
+
 static HMODULE g_hSteamApi = nullptr;
 static SteamAPI_Init_t pfn_SteamAPI_Init = nullptr;
 static SteamAPI_Shutdown_t pfn_SteamAPI_Shutdown = nullptr;
@@ -160,6 +196,41 @@ static fn_ReFix_GetEnsureOriginalCallCount pfn_ReFix_GetEnsureOriginalCallCount 
 static fn_ReFix_GetValveDllLoadCount pfn_ReFix_GetValveDllLoadCount = nullptr;
 static fn_ReFix_ResetEnsureOriginalCallCount pfn_ReFix_ResetEnsureOriginalCallCount = nullptr;
 
+static SteamAPI_InitSafe_t pfn_SteamAPI_InitSafe = nullptr;
+static SteamAPI_InitFlat_t pfn_SteamAPI_InitFlat = nullptr;
+static SteamInternal_SteamAPI_Init_t pfn_SteamInternal_SteamAPI_Init = nullptr;
+static SteamAPI_GetHSteamUser_t pfn_SteamAPI_GetHSteamUser = nullptr;
+static SteamAPI_GetHSteamPipe_t pfn_SteamAPI_GetHSteamPipe = nullptr;
+static GetHSteamUser_t pfn_GetHSteamUser = nullptr;
+static GetHSteamPipe_t pfn_GetHSteamPipe = nullptr;
+static SteamClient_t pfn_SteamClient = nullptr;
+static SteamAPI_IsSteamRunning_t pfn_SteamAPI_IsSteamRunning = nullptr;
+static SteamAPI_RestartAppIfNecessary_t pfn_SteamAPI_RestartAppIfNecessary = nullptr;
+static SteamAPI_ReleaseCurrentThreadMemory_t pfn_SteamAPI_ReleaseCurrentThreadMemory = nullptr;
+static SteamAPI_RegisterCallback_t pfn_SteamAPI_RegisterCallback = nullptr;
+static SteamAPI_UnregisterCallback_t pfn_SteamAPI_UnregisterCallback = nullptr;
+static SteamAPI_RegisterCallResult_t pfn_SteamAPI_RegisterCallResult = nullptr;
+static SteamAPI_UnregisterCallResult_t pfn_SteamAPI_UnregisterCallResult = nullptr;
+
+static SteamAPI_ISteamClient_GetISteamGenericInterface_t pfn_SteamAPI_ISteamClient_GetISteamGenericInterface = nullptr;
+static SteamAPI_ISteamClient_GetISteamUser_t pfn_SteamAPI_ISteamClient_GetISteamUser = nullptr;
+static SteamAPI_ISteamClient_GetISteamFriends_t pfn_SteamAPI_ISteamClient_GetISteamFriends = nullptr;
+static SteamAPI_ISteamClient_GetISteamUtils_t pfn_SteamAPI_ISteamClient_GetISteamUtils = nullptr;
+static SteamAPI_ISteamClient_GetISteamMatchmaking_t pfn_SteamAPI_ISteamClient_GetISteamMatchmaking = nullptr;
+static SteamAPI_ISteamClient_GetISteamMatchmakingServers_t pfn_SteamAPI_ISteamClient_GetISteamMatchmakingServers = nullptr;
+static SteamAPI_ISteamClient_GetISteamApps_t pfn_SteamAPI_ISteamClient_GetISteamApps = nullptr;
+static SteamAPI_ISteamClient_GetISteamNetworking_t pfn_SteamAPI_ISteamClient_GetISteamNetworking = nullptr;
+
+static fn_SteamAPI_SteamUser_v021 pfn_SteamAPI_SteamUser_v021 = nullptr;
+static fn_SteamAPI_SteamFriends_v017 pfn_SteamAPI_SteamFriends_v017 = nullptr;
+static fn_SteamAPI_SteamApps_v008 pfn_SteamAPI_SteamApps_v008 = nullptr;
+static fn_SteamAPI_SteamUtils_v010 pfn_SteamAPI_SteamUtils_v010 = nullptr;
+static fn_SteamAPI_SteamMatchmaking_v009 pfn_SteamAPI_SteamMatchmaking_v009 = nullptr;
+static fn_SteamAPI_SteamMatchmakingServers_v002 pfn_SteamAPI_SteamMatchmakingServers_v002 = nullptr;
+static fn_SteamAPI_SteamNetworking_v006 pfn_SteamAPI_SteamNetworking_v006 = nullptr;
+
+static fn_SteamAPI_ISteamAppList_GetAppBuildId pfn_SteamAPI_ISteamAppList_GetAppBuildId = nullptr;
+
 bool InitSteamExports() {
     if (g_hSteamApi) return true;
     SetEnvironmentVariableA("REFIX_HEADLESS_TEST", "1");
@@ -180,6 +251,41 @@ bool InitSteamExports() {
     pfn_FlatMsgs = (fn_SteamAPI_SteamNetworkingMessages_v002)GetProcAddress(g_hSteamApi, "SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
     pfn_FlatGSSockets = (fn_SteamAPI_SteamGameServerNetworkingSockets_v012)GetProcAddress(g_hSteamApi, "SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012");
     pfn_FlatGSMsgs = (fn_SteamAPI_SteamGameServerNetworkingMessages_v002)GetProcAddress(g_hSteamApi, "SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002");
+
+    pfn_SteamAPI_InitSafe = (SteamAPI_InitSafe_t)GetProcAddress(g_hSteamApi, "SteamAPI_InitSafe");
+    pfn_SteamAPI_InitFlat = (SteamAPI_InitFlat_t)GetProcAddress(g_hSteamApi, "SteamAPI_InitFlat");
+    pfn_SteamInternal_SteamAPI_Init = (SteamInternal_SteamAPI_Init_t)GetProcAddress(g_hSteamApi, "SteamInternal_SteamAPI_Init");
+    pfn_SteamAPI_GetHSteamUser = (SteamAPI_GetHSteamUser_t)GetProcAddress(g_hSteamApi, "SteamAPI_GetHSteamUser");
+    pfn_SteamAPI_GetHSteamPipe = (SteamAPI_GetHSteamPipe_t)GetProcAddress(g_hSteamApi, "SteamAPI_GetHSteamPipe");
+    pfn_GetHSteamUser = (GetHSteamUser_t)GetProcAddress(g_hSteamApi, "GetHSteamUser");
+    pfn_GetHSteamPipe = (GetHSteamPipe_t)GetProcAddress(g_hSteamApi, "GetHSteamPipe");
+    pfn_SteamClient = (SteamClient_t)GetProcAddress(g_hSteamApi, "SteamClient");
+    pfn_SteamAPI_IsSteamRunning = (SteamAPI_IsSteamRunning_t)GetProcAddress(g_hSteamApi, "SteamAPI_IsSteamRunning");
+    pfn_SteamAPI_RestartAppIfNecessary = (SteamAPI_RestartAppIfNecessary_t)GetProcAddress(g_hSteamApi, "SteamAPI_RestartAppIfNecessary");
+    pfn_SteamAPI_ReleaseCurrentThreadMemory = (SteamAPI_ReleaseCurrentThreadMemory_t)GetProcAddress(g_hSteamApi, "SteamAPI_ReleaseCurrentThreadMemory");
+    pfn_SteamAPI_RegisterCallback = (SteamAPI_RegisterCallback_t)GetProcAddress(g_hSteamApi, "SteamAPI_RegisterCallback");
+    pfn_SteamAPI_UnregisterCallback = (SteamAPI_UnregisterCallback_t)GetProcAddress(g_hSteamApi, "SteamAPI_UnregisterCallback");
+    pfn_SteamAPI_RegisterCallResult = (SteamAPI_RegisterCallResult_t)GetProcAddress(g_hSteamApi, "SteamAPI_RegisterCallResult");
+    pfn_SteamAPI_UnregisterCallResult = (SteamAPI_UnregisterCallResult_t)GetProcAddress(g_hSteamApi, "SteamAPI_UnregisterCallResult");
+
+    pfn_SteamAPI_ISteamClient_GetISteamGenericInterface = (SteamAPI_ISteamClient_GetISteamGenericInterface_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamGenericInterface");
+    pfn_SteamAPI_ISteamClient_GetISteamUser = (SteamAPI_ISteamClient_GetISteamUser_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamUser");
+    pfn_SteamAPI_ISteamClient_GetISteamFriends = (SteamAPI_ISteamClient_GetISteamFriends_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamFriends");
+    pfn_SteamAPI_ISteamClient_GetISteamUtils = (SteamAPI_ISteamClient_GetISteamUtils_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamUtils");
+    pfn_SteamAPI_ISteamClient_GetISteamMatchmaking = (SteamAPI_ISteamClient_GetISteamMatchmaking_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamMatchmaking");
+    pfn_SteamAPI_ISteamClient_GetISteamMatchmakingServers = (SteamAPI_ISteamClient_GetISteamMatchmakingServers_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamMatchmakingServers");
+    pfn_SteamAPI_ISteamClient_GetISteamApps = (SteamAPI_ISteamClient_GetISteamApps_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamApps");
+    pfn_SteamAPI_ISteamClient_GetISteamNetworking = (SteamAPI_ISteamClient_GetISteamNetworking_t)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamClient_GetISteamNetworking");
+
+    pfn_SteamAPI_SteamUser_v021 = (fn_SteamAPI_SteamUser_v021)GetProcAddress(g_hSteamApi, "SteamAPI_SteamUser_v021");
+    pfn_SteamAPI_SteamFriends_v017 = (fn_SteamAPI_SteamFriends_v017)GetProcAddress(g_hSteamApi, "SteamAPI_SteamFriends_v017");
+    pfn_SteamAPI_SteamApps_v008 = (fn_SteamAPI_SteamApps_v008)GetProcAddress(g_hSteamApi, "SteamAPI_SteamApps_v008");
+    pfn_SteamAPI_SteamUtils_v010 = (fn_SteamAPI_SteamUtils_v010)GetProcAddress(g_hSteamApi, "SteamAPI_SteamUtils_v010");
+    pfn_SteamAPI_SteamMatchmaking_v009 = (fn_SteamAPI_SteamMatchmaking_v009)GetProcAddress(g_hSteamApi, "SteamAPI_SteamMatchmaking_v009");
+    pfn_SteamAPI_SteamMatchmakingServers_v002 = (fn_SteamAPI_SteamMatchmakingServers_v002)GetProcAddress(g_hSteamApi, "SteamAPI_SteamMatchmakingServers_v002");
+    pfn_SteamAPI_SteamNetworking_v006 = (fn_SteamAPI_SteamNetworking_v006)GetProcAddress(g_hSteamApi, "SteamAPI_SteamNetworking_v006");
+
+    pfn_SteamAPI_ISteamAppList_GetAppBuildId = (fn_SteamAPI_ISteamAppList_GetAppBuildId)GetProcAddress(g_hSteamApi, "SteamAPI_ISteamAppList_GetAppBuildId");
 
     pfn_ReFix_GetSteamProviderName = (fn_ReFix_GetSteamProviderName)GetProcAddress(g_hSteamApi, "ReFix_GetSteamProviderName");
     pfn_ReFix_GetSteamProvider = (fn_ReFix_GetSteamProvider)GetProcAddress(g_hSteamApi, "ReFix_GetSteamProvider");
@@ -1932,6 +2038,258 @@ int RunFaultTest() {
 }
 
 // ============================================================================
+// SUITE 13: STEAMWORKS BOOTSTRAP, ZERO-CRASH LAN & ROUTING TEST (SECTIONS 3-10)
+// ============================================================================
+int RunSteamworksBootstrapLanTest() {
+    std::cout << "--- [SUITE 13: STEAMWORKS BOOTSTRAP, ZERO-CRASH LAN & ROUTING TEST] ---" << std::endl;
+    SetEnvironmentVariableA("SteamAppId", "480");
+    if (!InitSteamExports()) return 1;
+
+    // ------------------------------------------------------------------------
+    // Part 1: Forward Table Zero-Crash Safety (Section 2 & 4)
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 1: Verifying g_steamProcs zero-crash forward table safety in LAN..." << std::endl;
+    if (pfn_ReFix_SetNetworkMode) pfn_ReFix_SetNetworkMode(1); // LAN mode
+    if (pfn_ReFix_ResetEnsureOriginalCallCount) pfn_ReFix_ResetEnsureOriginalCallCount();
+    if (pfn_ReFix_ResetUnrealSteamEmuCallCount) pfn_ReFix_ResetUnrealSteamEmuCallCount();
+
+    // Call an unintercepted proxy export. Prior to our fix, this jumped to null g_steamProcs[idx] causing AV.
+    // Now it safely lands on SafeUnsupportedExportStub and returns 0 without crashing.
+    if (pfn_SteamAPI_ISteamAppList_GetAppBuildId) {
+        uint32_t dummyBuildId = pfn_SteamAPI_ISteamAppList_GetAppBuildId(nullptr, 480);
+        std::cout << "    Unintercepted proxy call returned: " << dummyBuildId << " (zero crash confirmed)" << std::endl;
+        if (dummyBuildId != 0) {
+            std::cerr << "[FAIL] SafeUnsupportedExportStub did not return 0!" << std::endl;
+            return 1;
+        }
+    }
+    std::cout << "    [PASS] g_steamProcs safety: unintercepted forwarders safely return 0 without crash or null jump." << std::endl;
+
+    // ------------------------------------------------------------------------
+    // Part 2: Bootstrap Lifecycle (SteamAPI_Init, InitSafe, InitFlat, SteamInternal_SteamAPI_Init)
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 2: Testing Steamworks bootstrap APIs in LAN..." << std::endl;
+
+    if (pfn_SteamAPI_IsSteamRunning && pfn_SteamAPI_IsSteamRunning()) {
+        std::cerr << "[FAIL] SteamAPI_IsSteamRunning returned true before SteamAPI_Init!" << std::endl;
+        return 1;
+    }
+
+    if (!pfn_SteamAPI_Init()) {
+        std::cerr << "[FAIL] SteamAPI_Init failed in LAN mode!" << std::endl;
+        return 1;
+    }
+
+    if (pfn_SteamAPI_IsSteamRunning && !pfn_SteamAPI_IsSteamRunning()) {
+        std::cerr << "[FAIL] SteamAPI_IsSteamRunning returned false after SteamAPI_Init!" << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] SteamAPI_Init succeeded and SteamAPI_IsSteamRunning is true." << std::endl;
+
+    if (pfn_SteamAPI_InitSafe && !pfn_SteamAPI_InitSafe()) {
+        std::cerr << "[FAIL] SteamAPI_InitSafe failed in LAN mode!" << std::endl;
+        return 1;
+    }
+    char initFlatErr[512] = { 0 };
+    if (pfn_SteamAPI_InitFlat && pfn_SteamAPI_InitFlat(initFlatErr) != 0) {
+        std::cerr << "[FAIL] SteamAPI_InitFlat failed in LAN mode: " << initFlatErr << std::endl;
+        return 1;
+    }
+    char internalInitErr[512] = { 0 };
+    if (pfn_SteamInternal_SteamAPI_Init && pfn_SteamInternal_SteamAPI_Init("SteamClient020", internalInitErr) != 0) {
+        std::cerr << "[FAIL] SteamInternal_SteamAPI_Init failed in LAN mode: " << internalInitErr << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] SteamAPI_InitSafe, SteamAPI_InitFlat, SteamInternal_SteamAPI_Init all succeeded." << std::endl;
+
+    // ------------------------------------------------------------------------
+    // Part 3: Common Initialization APIs & Handles (Section 7 & 8)
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 3: Testing handles and common initialization APIs..." << std::endl;
+    int32_t hUser1 = pfn_SteamAPI_GetHSteamUser ? pfn_SteamAPI_GetHSteamUser() : 0;
+    int32_t hUser2 = pfn_GetHSteamUser ? pfn_GetHSteamUser() : 0;
+    int32_t hPipe1 = pfn_SteamAPI_GetHSteamPipe ? pfn_SteamAPI_GetHSteamPipe() : 0;
+    int32_t hPipe2 = pfn_GetHSteamPipe ? pfn_GetHSteamPipe() : 0;
+
+    if (hUser1 == 0 || hUser2 == 0 || hUser1 != hUser2) {
+        std::cerr << "[FAIL] HSteamUser mismatch or zero! hUser1=" << hUser1 << " hUser2=" << hUser2 << std::endl;
+        return 1;
+    }
+    if (hPipe1 == 0 || hPipe2 == 0 || hPipe1 != hPipe2) {
+        std::cerr << "[FAIL] HSteamPipe mismatch or zero! hPipe1=" << hPipe1 << " hPipe2=" << hPipe2 << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Valid non-zero handles obtained: HSteamUser=" << hUser1 << ", HSteamPipe=" << hPipe1 << std::endl;
+
+    // SteamAPI_RestartAppIfNecessary: in LAN must return FALSE
+    if (pfn_SteamAPI_RestartAppIfNecessary && pfn_SteamAPI_RestartAppIfNecessary(480)) {
+        std::cerr << "[FAIL] SteamAPI_RestartAppIfNecessary returned true in LAN mode! Must be false." << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] SteamAPI_RestartAppIfNecessary returned false (bypassing restart)." << std::endl;
+
+    // SteamAPI_ReleaseCurrentThreadMemory: must execute safely without crash
+    if (pfn_SteamAPI_ReleaseCurrentThreadMemory) {
+        pfn_SteamAPI_ReleaseCurrentThreadMemory();
+        std::cout << "    [PASS] SteamAPI_ReleaseCurrentThreadMemory executed safely." << std::endl;
+    }
+
+    // ------------------------------------------------------------------------
+    // Part 4: SteamClient C++ Vtable & Flat Interface Resolution (Section 5 & 6)
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 4: Testing SteamClient interface routing (C++ vtable & flat APIs)..." << std::endl;
+    void* pClientRaw = pfn_SteamClient ? pfn_SteamClient() : nullptr;
+    if (!pClientRaw) {
+        std::cerr << "[FAIL] SteamClient() returned null!" << std::endl;
+        return 1;
+    }
+    std::cout << "    SteamClient instance: " << pClientRaw << std::endl;
+
+    ISteamClient* pClient = (ISteamClient*)pClientRaw;
+    void* vUser = pClient->GetISteamUser(hUser1, hPipe1, "SteamUser021");
+    void* vFriends = pClient->GetISteamFriends(hUser1, hPipe1, "SteamFriends017");
+    void* vUtils = pClient->GetISteamUtils(hPipe1, "SteamUtils010");
+    void* vMatchmaking = pClient->GetISteamMatchmaking(hUser1, hPipe1, "SteamMatchmaking009");
+    void* vMatchServers = pClient->GetISteamMatchmakingServers(hUser1, hPipe1, "SteamMatchmakingServers002");
+    void* vApps = pClient->GetISteamApps(hUser1, hPipe1, "SteamApps008");
+    void* vNetworking = pClient->GetISteamNetworking(hUser1, hPipe1, "SteamNetworking006");
+    void* vSockets = pClient->GetISteamGenericInterface(hUser1, hPipe1, "SteamNetworkingSockets012");
+    void* vNetUtils = pClient->GetISteamGenericInterface(hUser1, hPipe1, "SteamNetworkingUtils004");
+    void* vNetMsgs = pClient->GetISteamGenericInterface(hUser1, hPipe1, "SteamNetworkingMessages002");
+
+    if (!vUser || !vFriends || !vUtils || !vMatchmaking || !vMatchServers || !vApps ||
+        !vNetworking || !vSockets || !vNetUtils || !vNetMsgs) {
+        std::cerr << "[FAIL] One or more interfaces returned null via ISteamClient virtual methods!" << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] All core interfaces resolved via ISteamClient virtual methods." << std::endl;
+
+    // Flat APIs
+    if (pfn_SteamAPI_ISteamClient_GetISteamGenericInterface) {
+        void* fSockets = pfn_SteamAPI_ISteamClient_GetISteamGenericInterface(pClientRaw, hUser1, hPipe1, "SteamNetworkingSockets012");
+        void* fUtils = pfn_SteamAPI_ISteamClient_GetISteamGenericInterface(pClientRaw, hUser1, hPipe1, "SteamNetworkingUtils004");
+        void* fMsgs = pfn_SteamAPI_ISteamClient_GetISteamGenericInterface(pClientRaw, hUser1, hPipe1, "SteamNetworkingMessages002");
+        if (fSockets != vSockets || fUtils != vNetUtils || fMsgs != vNetMsgs) {
+            std::cerr << "[FAIL] Flat ISteamClient interface mismatch with virtual methods!" << std::endl;
+            return 1;
+        }
+        std::cout << "    [PASS] Flat SteamAPI_ISteamClient_GetISteamGenericInterface matched virtual methods." << std::endl;
+    }
+
+    // Flat interface exports (SteamAPI_Steam*_v*)
+    if (pfn_SteamAPI_SteamUser_v021 && pfn_SteamAPI_SteamUser_v021() != vUser) return 1;
+    if (pfn_SteamAPI_SteamFriends_v017 && pfn_SteamAPI_SteamFriends_v017() != vFriends) return 1;
+    if (pfn_SteamAPI_SteamApps_v008 && pfn_SteamAPI_SteamApps_v008() != vApps) return 1;
+    if (pfn_SteamAPI_SteamUtils_v010 && pfn_SteamAPI_SteamUtils_v010() != vUtils) return 1;
+    if (pfn_SteamAPI_SteamMatchmaking_v009 && pfn_SteamAPI_SteamMatchmaking_v009() != vMatchmaking) return 1;
+    if (pfn_SteamAPI_SteamMatchmakingServers_v002 && pfn_SteamAPI_SteamMatchmakingServers_v002() != vMatchServers) return 1;
+    if (pfn_SteamAPI_SteamNetworking_v006 && pfn_SteamAPI_SteamNetworking_v006() != vNetworking) return 1;
+    std::cout << "    [PASS] Direct flat interface getters (SteamAPI_Steam*_v*) all matched." << std::endl;
+
+    // ------------------------------------------------------------------------
+    // Part 5: FindOrCreateUserInterface & CreateInterface Routing
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 5: Testing FindOrCreateUserInterface & CreateInterface..." << std::endl;
+    void* ifUser = pfn_FindOrCreateUserInterface(0, "SteamUser021");
+    void* ifFriends = pfn_FindOrCreateUserInterface(0, "SteamFriends017");
+    void* ifApps = pfn_FindOrCreateUserInterface(0, "SteamApps008");
+    void* ifUtils = pfn_FindOrCreateUserInterface(0, "SteamUtils010");
+    void* ifMatchmaking = pfn_FindOrCreateUserInterface(0, "SteamMatchmaking009");
+    void* ifMatchServers = pfn_FindOrCreateUserInterface(0, "SteamMatchmakingServers002");
+    void* ifNetworking = pfn_FindOrCreateUserInterface(0, "SteamNetworking006");
+    void* ifSockets = pfn_FindOrCreateUserInterface(0, "SteamNetworkingSockets012");
+
+    std::cout << "    User:        v=" << vUser << " if=" << ifUser << std::endl;
+    std::cout << "    Friends:     v=" << vFriends << " if=" << ifFriends << std::endl;
+    std::cout << "    Apps:        v=" << vApps << " if=" << ifApps << std::endl;
+    std::cout << "    Utils:       v=" << vUtils << " if=" << ifUtils << std::endl;
+    std::cout << "    Matchmaking: v=" << vMatchmaking << " if=" << ifMatchmaking << std::endl;
+    std::cout << "    MatchServer: v=" << vMatchServers << " if=" << ifMatchServers << std::endl;
+    std::cout << "    Networking:  v=" << vNetworking << " if=" << ifNetworking << std::endl;
+    std::cout << "    Sockets:     v=" << vSockets << " if=" << ifSockets << std::endl;
+
+    if (ifUser != vUser || ifFriends != vFriends || ifApps != vApps || ifUtils != vUtils ||
+        ifMatchmaking != vMatchmaking || ifMatchServers != vMatchServers ||
+        ifNetworking != vNetworking || ifSockets != vSockets) {
+        std::cerr << "[FAIL] FindOrCreateUserInterface instances mismatch!" << std::endl;
+        return 1;
+    }
+
+    // Safe failure check on unknown interface
+    void* ifUnknown = pfn_FindOrCreateUserInterface(0, "NonExistentInterface_v999");
+    if (ifUnknown != nullptr) {
+        std::cerr << "[FAIL] FindOrCreateUserInterface returned non-null for unknown interface!" << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Safe failure check on unknown interface verified (returned nullptr)." << std::endl;
+
+    // ------------------------------------------------------------------------
+    // Part 6: Callbacks & CallResults Registration and Dispatch (Section 7)
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 6: Testing Callbacks & CallResults registration and RunCallbacks..." << std::endl;
+    TestStatusCallback dummyCb;
+    if (pfn_SteamAPI_RegisterCallback) pfn_SteamAPI_RegisterCallback(&dummyCb, dummyCb.GetICallback());
+    if (pfn_SteamAPI_RegisterCallResult) pfn_SteamAPI_RegisterCallResult(&dummyCb, 0x11223344);
+
+    pfn_SteamAPI_RunCallbacks();
+
+    if (pfn_SteamAPI_UnregisterCallResult) pfn_SteamAPI_UnregisterCallResult(&dummyCb, 0x11223344);
+    if (pfn_SteamAPI_UnregisterCallback) pfn_SteamAPI_UnregisterCallback(&dummyCb);
+    std::cout << "    [PASS] Callbacks and CallResults registered, dispatched and unregistered safely." << std::endl;
+
+    // ------------------------------------------------------------------------
+    // Part 7: LAN Mode Valve Isolation Verification (Section 4 & 9)
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 7: Verifying LAN Valve DLL isolation..." << std::endl;
+    uint64_t ensureCalls = pfn_ReFix_GetEnsureOriginalCallCount ? pfn_ReFix_GetEnsureOriginalCallCount() : 0;
+    uint64_t valveLoads = pfn_ReFix_GetValveDllLoadCount ? pfn_ReFix_GetValveDllLoadCount() : 0;
+    if (ensureCalls != 0 || valveLoads != 0) {
+        std::cerr << "[FAIL] Valve DLL was touched during LAN tests! ensureCalls=" << ensureCalls << " valveLoads=" << valveLoads << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] LAN Valve isolation verified: EnsureOriginal=0, Valve DLL loads=0." << std::endl;
+
+    // ------------------------------------------------------------------------
+    // Part 8: Clean Shutdown & Post-Shutdown State
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 8: Testing clean SteamAPI_Shutdown..." << std::endl;
+    pfn_SteamAPI_Shutdown();
+    if (pfn_SteamAPI_IsSteamRunning && pfn_SteamAPI_IsSteamRunning()) {
+        std::cerr << "[FAIL] SteamAPI_IsSteamRunning returned true after SteamAPI_Shutdown!" << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] SteamAPI_Shutdown cleanly reset running state." << std::endl;
+
+    // ------------------------------------------------------------------------
+    // Part 9: Online Routing Isolation Check (Section 9)
+    // ------------------------------------------------------------------------
+    std::cout << "  Part 9: Testing Online Routing Isolation..." << std::endl;
+    if (pfn_ReFix_SetNetworkMode) pfn_ReFix_SetNetworkMode(0); // Mode 0 = Online
+    if (pfn_ReFix_ResetUnrealSteamEmuCallCount) pfn_ReFix_ResetUnrealSteamEmuCallCount();
+
+    const char* onlProv = pfn_ReFix_GetSteamProviderName ? pfn_ReFix_GetSteamProviderName() : "Unknown";
+    std::cout << "    Online Active Provider: " << onlProv << std::endl;
+    if (strcmp(onlProv, "OnlineSteamProvider") != 0) {
+        std::cerr << "[FAIL] Expected OnlineSteamProvider in Online mode, got: " << onlProv << std::endl;
+        return 1;
+    }
+
+    uint64_t onlEmuCalls = pfn_ReFix_GetUnrealSteamEmuCallCount ? pfn_ReFix_GetUnrealSteamEmuCallCount() : 0;
+    if (onlEmuCalls != 0) {
+        std::cerr << "[FAIL] UnrealSteamEmu called in Online mode! EmuCalls=" << onlEmuCalls << std::endl;
+        return 1;
+    }
+    std::cout << "    [PASS] Online routing isolation verified: UnrealSteamEmu calls = 0." << std::endl;
+
+    // Restore LAN mode for remaining tests
+    if (pfn_ReFix_SetNetworkMode) pfn_ReFix_SetNetworkMode(1);
+    if (pfn_ReFix_ResetEnsureOriginalCallCount) pfn_ReFix_ResetEnsureOriginalCallCount();
+
+    std::cout << "[ALL PASS] Suite 13 Steamworks Bootstrap & Routing Certified." << std::endl;
+    return 0;
+}
+
+// ============================================================================
 // SUITE 12: ALL UNIT TESTS MASTER RUNNER
 // ============================================================================
 int RunAllUnitTests() {
@@ -1972,6 +2330,9 @@ int RunAllUnitTests() {
     if (RunFaultTest() != 0) return 1;
     std::cout << std::endl;
 
+    if (RunSteamworksBootstrapLanTest() != 0) return 1;
+    std::cout << std::endl;
+
     std::cout << "==========================================================" << std::endl;
     std::cout << "             REFIX AUDITED TEST MATRIX                   " << std::endl;
     std::cout << "==========================================================" << std::endl;
@@ -2007,11 +2368,16 @@ int RunAllUnitTests() {
     std::cout << "Whole-process Internet-zero:     CONDITIONAL" << std::endl;
     std::cout << "Multiprocess:                    CONDITIONAL" << std::endl;
     std::cout << "Two-PC LAN:                      UNVERIFIED" << std::endl;
-    std::cout << "Online routing:                  PASS" << std::endl;
-    std::cout << "Online runtime:                  PASS" << std::endl;
+    std::cout << "Online routing isolation:        PASS" << std::endl;
+    std::cout << "Online runtime regression:       UNVERIFIED" << std::endl;
     std::cout << "No cooked metrics:               PASS" << std::endl;
+    std::cout << "Steamworks bootstrap LAN:        PASS" << std::endl;
+    std::cout << "SteamClient routing:             PASS" << std::endl;
+    std::cout << "Networking routing:              PASS" << std::endl;
+    std::cout << "Non-networking Steam APIs:       PASS" << std::endl;
+    std::cout << "g_steamProcs safety:             PASS" << std::endl;
     std::cout << "==========================================================" << std::endl;
-    std::cout << "  [SUCCESS] ALL REFIX VERIFICATION SUITES COMPLETED (11/11)" << std::endl;
+    std::cout << "  [SUCCESS] ALL REFIX VERIFICATION SUITES COMPLETED (12/12)" << std::endl;
     std::cout << "==========================================================" << std::endl;
     return 0;
 }
@@ -2236,10 +2602,11 @@ int main(int argc, char** argv) {
         if (mode == "locking") return RunLockingTest();
         if (mode == "isolation") return RunIsolationTest();
         if (mode == "fault") return RunFaultTest();
+        if (mode == "bootstrap") return RunSteamworksBootstrapLanTest();
         if (mode == "all") return RunAllUnitTests();
         if (mode == "host" || mode == "client") return RunAdversarialHarness(argc, argv);
     }
 
-    std::cout << "Usage: refix_net_test.exe [abi|entrypoints|identity|lifetime|reorder|duplication|handshake|callback|locking|isolation|fault|all|host|client]" << std::endl;
+    std::cout << "Usage: refix_net_test.exe [abi|entrypoints|identity|lifetime|reorder|duplication|handshake|callback|locking|isolation|fault|bootstrap|all|host|client]" << std::endl;
     return 1;
 }

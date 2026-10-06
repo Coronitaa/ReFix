@@ -3961,7 +3961,7 @@ namespace UnrealSteamEmu {
             return &g_steamFriendsInstance;
         if (strstr(pchVersion, "SteamUtils") || strstr(pchVersion, "STEAMUTILS"))
             return &g_steamUtilsInstance;
-        if (strstr(pchVersion, "SteamMatchMakingServers") || strstr(pchVersion, "STEAMMATCHMAKINGSERVERS"))
+        if (strstr(pchVersion, "SteamMatchMakingServers") || strstr(pchVersion, "STEAMMATCHMAKINGSERVERS") || strstr(pchVersion, "SteamMatchmakingServers"))
             return &g_steamMatchmakingServersInstance;
         if (strstr(pchVersion, "SteamMatchMaking") || strstr(pchVersion, "STEAMMATCHMAKING") || strstr(pchVersion, "SteamMatchmaking"))
             return &g_steamMatchmakingInstance;

@@ -1110,6 +1110,8 @@ static char g_language[32] = "english";
 static std::string g_hostPublicIP = "";
 static std::string g_hostLocalIP = "";
 
+static void InitializeLanForwardTable();
+
 // Function pointer typedefs
 typedef bool(*fn_SteamAPI_Init_t)();
 typedef bool(*fn_SteamAPI_InitSafe_t)();
@@ -3521,7 +3523,9 @@ static void Intercepted_SteamAPI_UnregisterCallback(void* pCallback) {
             }
         }
     }
-    if (g_pfn_UnregisterCallback) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::UnregisterCallback((CCallbackBase*)pCallback);
+    } else if (g_pfn_UnregisterCallback) {
         g_pfn_UnregisterCallback(pCallback);
     }
 }
@@ -3550,7 +3554,11 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
         TrackCallback(pCallback, iCallback);
     }
 
-    if (g_pfn_RegisterCallback) g_pfn_RegisterCallback(pCallback, iCallback);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::RegisterCallback((CCallbackBase*)pCallback, iCallback);
+    } else if (g_pfn_RegisterCallback) {
+        g_pfn_RegisterCallback(pCallback, iCallback);
+    }
 
     if (ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
         if (iCallback == 101 || iCallback == 154 || iCallback == 163) {
@@ -3798,6 +3806,7 @@ static bool EnsureOriginal() {
 
     if (!g_hOriginalDll) {
         if (!ReFix::NetworkModeManager::IsOnline()) {
+            InitializeLanForwardTable();
             ReFixLog("EnsureOriginal: Original Valve DLL not present; running autonomous Steam-free LAN mode.");
             return true;
         }
@@ -4216,6 +4225,7 @@ extern "C" void SteamP2PHook_ForceResolve();
 static void ReFixInitializePre() {
     ApplySteamEnv();
     if (!ReFix::NetworkModeManager::IsOnline()) {
+        InitializeLanForwardTable();
         auto provider = ReFix::ProviderFactory::GetSteamProvider();
         provider->Init();
         ReFixLog("Provider initialized (LAN): %s", provider->GetName());
@@ -4252,9 +4262,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     ReFixInitializePre();
     ReFixLog("SteamAPI_Init called");
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        ReFixLog("SteamAPI_Init: autonomous LAN mode -> returning true");
-        ReFixInitializePost(true);
-        return true;
+        auto provider = ReFix::ProviderFactory::GetSteamProvider();
+        bool result = provider ? provider->Init() : UnrealSteamEmu::Initialize();
+        ReFixLog("SteamAPI_Init: autonomous LAN mode -> result=%d", result);
+        ReFixInitializePost(result);
+        return result;
     }
     
     if (!EnsureOriginal()) {
@@ -4273,9 +4285,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
     ReFixInitializePre();
     ReFixLog("SteamAPI_InitSafe called");
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        ReFixLog("SteamAPI_InitSafe: autonomous LAN mode -> returning true");
-        ReFixInitializePost(true);
-        return true;
+        auto provider = ReFix::ProviderFactory::GetSteamProvider();
+        bool result = provider ? provider->Init() : UnrealSteamEmu::Initialize();
+        ReFixLog("SteamAPI_InitSafe: autonomous LAN mode -> result=%d", result);
+        ReFixInitializePost(result);
+        return result;
     }
     if (!EnsureOriginal()) return false;
     bool result = false;
@@ -4299,9 +4313,10 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
     ReFixInitializePre();
     ReFixLog("SteamAPI_InitFlat called");
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        ReFixLog("SteamAPI_InitFlat: autonomous LAN mode -> returning 0");
-        ReFixInitializePost(true);
-        return 0;
+        bool ok = UnrealSteamEmu::InitFlat(pOutErrMsg);
+        ReFixLog("SteamAPI_InitFlat: autonomous LAN mode -> returning %d", ok ? 0 : 1);
+        ReFixInitializePost(ok);
+        return ok ? 0 : 1;
     }
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
@@ -4355,9 +4370,10 @@ extern "C" __declspec(dllexport) bool SteamInternal_GameServer_Init(
     ReFixLog("SteamInternal_GameServer_Init: IP=%u, GamePort=%u, QueryPort=%u, Mode=%d, Ver=%s",
              unIP, usGamePort, usQueryPort, eServerMode, pchVersionString ? pchVersionString : "null");
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        ReFixLog("SteamInternal_GameServer_Init: autonomous LAN mode -> returning true");
-        ReFixInitializePost(true);
-        return true;
+        bool result = UnrealSteamEmu::GameServer_Init(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
+        ReFixLog("SteamInternal_GameServer_Init: autonomous LAN mode -> returning %d", result);
+        ReFixInitializePost(result);
+        return result;
     }
     if (!EnsureOriginal() || !g_pfn_GSInit) return false;
     return g_pfn_GSInit(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
@@ -4371,9 +4387,10 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
     ReFixInitializePre();
     ReFixLog("SteamInternal_SteamAPI_Init called (ver='%s')", pszInternalCheckInterfaceVersions ? pszInternalCheckInterfaceVersions : "");
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        ReFixLog("SteamInternal_SteamAPI_Init: autonomous LAN mode -> returning 0");
-        ReFixInitializePost(true);
-        return 0;
+        int result = UnrealSteamEmu::InitInternal(pszInternalCheckInterfaceVersions, pOutErrMsg);
+        ReFixLog("SteamInternal_SteamAPI_Init: autonomous LAN mode -> returning %d", result);
+        ReFixInitializePost(result == 0);
+        return result;
     }
     if (!EnsureOriginal()) {
         if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
@@ -4403,9 +4420,10 @@ extern "C" __declspec(dllexport) bool SteamGameServer_InitSafe() {
     ReFixInitializePre();
     ReFixLog("SteamGameServer_InitSafe called");
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        ReFixLog("SteamGameServer_InitSafe: autonomous LAN mode -> returning true");
-        ReFixInitializePost(true);
-        return true;
+        bool result = UnrealSteamEmu::GameServer_InitSafe();
+        ReFixLog("SteamGameServer_InitSafe: autonomous LAN mode -> returning %d", result);
+        ReFixInitializePost(result);
+        return result;
     }
     if (!EnsureOriginal() || !g_pfn_GSInitSafe) return false;
     return g_pfn_GSInitSafe();
@@ -4610,6 +4628,523 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
 }
 
 // =============================================================================
+// ZERO-CRASH LAN FORWARD TABLE SAFETY & CORE STEAMWORKS IMPLEMENTATIONS
+// =============================================================================
+
+extern "C" void* SafeUnsupportedExportStub();
+
+static std::atomic<uint64_t> s_unsupportedLanCallCount{ 0 };
+extern "C" __declspec(dllexport) uint64_t ReFix_GetUnsupportedLanCallCount() {
+    return s_unsupportedLanCallCount.load(std::memory_order_relaxed);
+}
+
+extern "C" __declspec(dllexport) int32_t SteamAPI_GetHSteamUser() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetHSteamUser() : 0;
+}
+
+extern "C" __declspec(dllexport) int32_t GetHSteamUser() {
+    return SteamAPI_GetHSteamUser();
+}
+
+extern "C" __declspec(dllexport) int32_t SteamAPI_GetHSteamPipe() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetHSteamPipe() : 0;
+}
+
+extern "C" __declspec(dllexport) int32_t GetHSteamPipe() {
+    return SteamAPI_GetHSteamPipe();
+}
+
+extern "C" __declspec(dllexport) void* SteamClient() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamClient() : nullptr;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_IsSteamRunning() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->IsSteamRunning() : false;
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_ReleaseCurrentThreadMemory() {
+    if (ReFix::NetworkModeManager::IsOnline()) {
+        if (EnsureOriginal()) {
+            typedef void (*fn_t)();
+            static fn_t pfn = nullptr;
+            if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ReleaseCurrentThreadMemory");
+            if (pfn) pfn();
+        }
+    }
+}
+
+extern "C" __declspec(dllexport) void* SteamInternal_ContextInit(void* pContextInitData) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::ContextInit(pContextInitData);
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamInternal_ContextInit");
+        if (pfn) return pfn(pContextInitData);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamInternal_FindOrCreateGameServerInterface(int32_t hUser, const char* pszVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::FindOrCreateGameServerInterface(hUser, pszVersion);
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamInternal_FindOrCreateGameServerInterface");
+        if (pfn) return pfn(hUser, pszVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_RegisterCallResult(void* pCallback, uint64_t hAPICall) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::RegisterCallResult((CCallbackBase*)pCallback, hAPICall);
+        return;
+    }
+    if (EnsureOriginal()) {
+        if (g_pfn_RegisterCallResult) g_pfn_RegisterCallResult(pCallback, hAPICall);
+    }
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_UnregisterCallResult(void* pCallback, uint64_t hAPICall) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::UnregisterCallResult((CCallbackBase*)pCallback, hAPICall);
+        return;
+    }
+    if (EnsureOriginal()) {
+        typedef void (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_UnregisterCallResult");
+        if (pfn) pfn(pCallback, hAPICall);
+    }
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_RegisterCallback(void* pCallback, int iCallback) {
+    Intercepted_SteamAPI_RegisterCallback(pCallback, iCallback);
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_UnregisterCallback(void* pCallback) {
+    Intercepted_SteamAPI_UnregisterCallback(pCallback);
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamUser_v021() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamUser() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamFriends_v017() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamFriends() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamApps_v008() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamApps() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamUtils_v010() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamUtils() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamMatchmaking_v009() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamMatchmaking() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamMatchmakingServers_v002() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamMatchmakingServers() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamNetworking_v006() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamNetworking();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamNetworking_v006");
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamNetworking");
+        if (pfn) return pfn();
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamUserStats_v012() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamUserStats();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamUserStats_v012");
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamUserStats");
+        if (pfn) return pfn();
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamGenericInterface(void* self, int32_t hSteamUser, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetGenericInterface(pchVersion);
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamGenericInterface");
+        if (pfn) return pfn(self, hSteamUser, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamUser(void* self, int32_t hSteamUser, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamUser();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamUser");
+        if (pfn) return pfn(self, hSteamUser, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamFriends(void* self, int32_t hSteamUser, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamFriends();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamFriends");
+        if (pfn) return pfn(self, hSteamUser, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamUtils(void* self, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamUtils();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamUtils");
+        if (pfn) return pfn(self, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamMatchmaking(void* self, int32_t hSteamUser, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamMatchmaking();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamMatchmaking");
+        if (pfn) return pfn(self, hSteamUser, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamMatchmakingServers(void* self, int32_t hSteamUser, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamMatchmakingServers();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamMatchmakingServers");
+        if (pfn) return pfn(self, hSteamUser, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamApps(void* self, int32_t hSteamUser, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamApps();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamApps");
+        if (pfn) return pfn(self, hSteamUser, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_ISteamClient_GetISteamNetworking(void* self, int32_t hSteamUser, int32_t hSteamPipe, const char* pchVersion) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetSteamNetworking();
+    }
+    if (EnsureOriginal()) {
+        typedef void* (*fn_t)(void*, int32_t, int32_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_GetISteamNetworking");
+        if (pfn) return pfn(self, hSteamUser, hSteamPipe, pchVersion);
+    }
+    return nullptr;
+}
+
+extern "C" __declspec(dllexport) int32_t SteamAPI_ISteamClient_CreateSteamPipe(void* self) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetHSteamPipe();
+    }
+    if (EnsureOriginal()) {
+        typedef int32_t (*fn_t)(void*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_CreateSteamPipe");
+        if (pfn) return pfn(self);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamClient_BReleaseSteamPipe(void* self, int32_t hSteamPipe) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return true;
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, int32_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_BReleaseSteamPipe");
+        if (pfn) return pfn(self, hSteamPipe);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) int32_t SteamAPI_ISteamClient_ConnectToGlobalUser(void* self, int32_t hSteamPipe) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetHSteamUser();
+    }
+    if (EnsureOriginal()) {
+        typedef int32_t (*fn_t)(void*, int32_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_ConnectToGlobalUser");
+        if (pfn) return pfn(self, hSteamPipe);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int32_t SteamAPI_ISteamClient_CreateLocalUser(void* self, int32_t* phSteamPipe, int eAccountType) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        if (phSteamPipe) *phSteamPipe = UnrealSteamEmu::GetHSteamPipe();
+        return UnrealSteamEmu::GetHSteamUser();
+    }
+    if (EnsureOriginal()) {
+        typedef int32_t (*fn_t)(void*, int32_t*, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_CreateLocalUser");
+        if (pfn) return pfn(self, phSteamPipe, eAccountType);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_ISteamClient_ReleaseUser(void* self, int32_t hSteamPipe, int32_t hUser) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return;
+    }
+    if (EnsureOriginal()) {
+        typedef void (*fn_t)(void*, int32_t, int32_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_ReleaseUser");
+        if (pfn) pfn(self, hSteamPipe, hUser);
+    }
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamClient_BShutdownIfAllPipesClosed(void* self) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return true;
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamClient_BShutdownIfAllPipesClosed");
+        if (pfn) return pfn(self);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) void SteamGameServer_RunCallbacks() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::GameServer_RunCallbacks();
+        return;
+    }
+    if (EnsureOriginal()) {
+        typedef void (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_RunCallbacks");
+        if (pfn) pfn();
+    }
+}
+
+extern "C" __declspec(dllexport) void SteamGameServer_Shutdown() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Shutdown();
+        return;
+    }
+    if (EnsureOriginal()) {
+        typedef void (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_Shutdown");
+        if (pfn) pfn();
+    }
+}
+
+extern "C" __declspec(dllexport) int32_t SteamGameServer_GetHSteamUser() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GameServer_GetHSteamUser();
+    }
+    if (EnsureOriginal()) {
+        typedef int32_t (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_GetHSteamUser");
+        if (pfn) return pfn();
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int32_t SteamGameServer_GetHSteamPipe() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GameServer_GetHSteamPipe();
+    }
+    if (EnsureOriginal()) {
+        typedef int32_t (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_GetHSteamPipe");
+        if (pfn) return pfn();
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) uint64_t SteamGameServer_GetSteamID() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetLocalSteamID();
+    }
+    if (EnsureOriginal()) {
+        typedef uint64_t (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_GetSteamID");
+        if (pfn) return pfn();
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) bool SteamGameServer_BSecure() {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return true;
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)();
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamGameServer_BSecure");
+        if (pfn) return pfn();
+    }
+    return true;
+}
+
+static void InitializeLanForwardTable() {
+    for (int i = 0; i < STEAM_FORWARD_COUNT; i++) {
+        const char* name = g_forwardNames[i];
+        if (!name) continue;
+
+        if (strcmp(name, "SteamClient") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamClient;
+        } else if (strcmp(name, "SteamAPI_GetHSteamUser") == 0 || strcmp(name, "GetHSteamUser") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_GetHSteamUser;
+        } else if (strcmp(name, "SteamAPI_GetHSteamPipe") == 0 || strcmp(name, "GetHSteamPipe") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_GetHSteamPipe;
+        } else if (strcmp(name, "SteamAPI_RegisterCallback") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_RegisterCallback;
+        } else if (strcmp(name, "SteamAPI_RegisterCallResult") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_RegisterCallResult;
+        } else if (strcmp(name, "SteamAPI_UnregisterCallback") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_UnregisterCallback;
+        } else if (strcmp(name, "SteamAPI_UnregisterCallResult") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_UnregisterCallResult;
+        } else if (strcmp(name, "SteamAPI_ReleaseCurrentThreadMemory") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ReleaseCurrentThreadMemory;
+        } else if (strcmp(name, "SteamAPI_IsSteamRunning") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_IsSteamRunning;
+        } else if (strcmp(name, "SteamAPI_RestartAppIfNecessary") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_RestartAppIfNecessary;
+        } else if (strcmp(name, "SteamInternal_ContextInit") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamInternal_ContextInit;
+        } else if (strcmp(name, "SteamInternal_FindOrCreateGameServerInterface") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamInternal_FindOrCreateGameServerInterface;
+        } else if (strcmp(name, "SteamAPI_SteamFriends_v017") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamFriends_v017;
+        } else if (strcmp(name, "SteamAPI_SteamUser_v021") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamUser_v021;
+        } else if (strcmp(name, "SteamAPI_SteamApps_v008") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamApps_v008;
+        } else if (strcmp(name, "SteamAPI_SteamUtils_v010") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamUtils_v010;
+        } else if (strcmp(name, "SteamAPI_SteamMatchmaking_v009") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamMatchmaking_v009;
+        } else if (strcmp(name, "SteamAPI_SteamMatchmakingServers_v002") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamMatchmakingServers_v002;
+        } else if (strcmp(name, "SteamAPI_SteamNetworking_v006") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamNetworking_v006;
+        } else if (strcmp(name, "SteamAPI_SteamUserStats_v012") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_SteamUserStats_v012;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamGenericInterface") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamGenericInterface;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamUser") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamUser;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamFriends") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamFriends;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamUtils") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamUtils;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamMatchmaking") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamMatchmaking;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamMatchmakingServers") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamMatchmakingServers;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamApps") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamApps;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamNetworking") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamNetworking;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_CreateSteamPipe") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_CreateSteamPipe;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_ConnectToGlobalUser") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_ConnectToGlobalUser;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_CreateLocalUser") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_CreateLocalUser;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_BReleaseSteamPipe") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_BReleaseSteamPipe;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_ReleaseUser") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_ReleaseUser;
+        } else if (strcmp(name, "SteamAPI_ISteamClient_BShutdownIfAllPipesClosed") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_BShutdownIfAllPipesClosed;
+        } else if (strcmp(name, "SteamGameServer_RunCallbacks") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamGameServer_RunCallbacks;
+        } else if (strcmp(name, "SteamGameServer_Shutdown") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamGameServer_Shutdown;
+        } else if (strcmp(name, "SteamGameServer_GetHSteamUser") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamGameServer_GetHSteamUser;
+        } else if (strcmp(name, "SteamGameServer_GetHSteamPipe") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamGameServer_GetHSteamPipe;
+        } else if (strcmp(name, "SteamGameServer_GetSteamID") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamGameServer_GetSteamID;
+        } else if (strcmp(name, "SteamGameServer_BSecure") == 0) {
+            g_steamProcs[i] = (FARPROC)SteamGameServer_BSecure;
+        } else {
+            g_steamProcs[i] = (FARPROC)SafeUnsupportedExportStub;
+        }
+    }
+    ReFixLog("InitializeLanForwardTable: Forward table hardened for LAN (zero-crash fallback installed)");
+}
+
+// =============================================================================
 // REFIX TEST HARNESS & DIAGNOSTIC EXPORTS
 // =============================================================================
 extern "C" {
@@ -4702,6 +5237,9 @@ extern "C" {
     }
     __declspec(dllexport) void ReFix_SetNetworkMode(int mode) {
         ReFix::NetworkModeManager::SetMode((ReFix::ReFixNetworkMode)mode);
+        if (!ReFix::NetworkModeManager::IsOnline()) {
+            InitializeLanForwardTable();
+        }
     }
     __declspec(dllexport) uint64_t ReFix_GetEnsureOriginalCallCount() {
         return g_ensureOriginalCallCount.load(std::memory_order_relaxed);
@@ -4724,6 +5262,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_hSelfModule = hModule;
             DisableThreadLibraryCalls(hModule);
             ApplySteamEnv();
+            if (!ReFix::NetworkModeManager::IsOnline()) {
+                InitializeLanForwardTable();
+            }
             // Note: DO NOT call EnsureOriginal() or LoadLibrary in DllMain!
             // In LAN/offline mode, genuine Valve DLL must NEVER be loaded.
             // In Online mode, EnsureOriginal is explicitly invoked during normal initialization.
