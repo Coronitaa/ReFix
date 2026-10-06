@@ -1,7 +1,7 @@
 // =============================================================================
 // ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
 // =============================================================================
-// Forwards 1055 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
+// Forwards 1096 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
 // Intercepts SteamAPI_Init, ISteamMatchmaking (CreateLobby, RequestLobbyList, SetLobbyData),
 // and callbacks (GameLobbyJoinRequested_t, GameRichPresenceJoinRequested_t).
 //

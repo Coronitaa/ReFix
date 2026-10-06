@@ -142,6 +142,9 @@ if %ERRORLEVEL% neq 0 ( echo [!] test_synthetic_cb168 FAILED & exit /b 1 )
 python tools\audit_steam_exports.py
 if %ERRORLEVEL% neq 0 ( echo [!] audit_steam_exports FAILED & exit /b 1 )
 
+python tools\verify_pe_exports.py
+if %ERRORLEVEL% neq 0 ( echo [!] verify_pe_exports FAILED & exit /b 1 )
+
 build\tests\test_steam_network_compat.exe
 if %ERRORLEVEL% neq 0 ( echo [!] test_steam_network_compat FAILED & exit /b 1 )
 
