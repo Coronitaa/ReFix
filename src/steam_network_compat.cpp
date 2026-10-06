@@ -102,6 +102,10 @@ static std::string GetIniPath() {
                 if (GetFileAttributesA(fallback.c_str()) != INVALID_FILE_ATTRIBUTES) return fallback;
             }
         }
+        std::string parent = dir + "..\\ReFix.ini";
+        if (GetFileAttributesA(parent.c_str()) != INVALID_FILE_ATTRIBUTES) return parent;
+        std::string grandparent = dir + "..\\..\\ReFix.ini";
+        if (GetFileAttributesA(grandparent.c_str()) != INVALID_FILE_ATTRIBUTES) return grandparent;
     }
     return ini;
 }

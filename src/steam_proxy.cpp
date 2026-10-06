@@ -1,7 +1,7 @@
 // =============================================================================
 // ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
 // =============================================================================
-// Forwards 1096 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
+// Forwards 1141 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
 // Intercepts SteamAPI_Init, ISteamMatchmaking (CreateLobby, RequestLobbyList, SetLobbyData),
 // and callbacks (GameLobbyJoinRequested_t, GameRichPresenceJoinRequested_t).
 //
@@ -27,7 +27,7 @@
 #include "steam_network_compat.h"
 #include "minhook/MinHook.h"
 
-#define STEAM_FORWARD_COUNT 1096
+#define STEAM_FORWARD_COUNT 1141
 
 extern "C" {
     __declspec(dllexport) FARPROC g_steamProcs[STEAM_FORWARD_COUNT] = { 0 };
@@ -1130,6 +1130,51 @@ static const char* g_forwardNames[STEAM_FORWARD_COUNT] = {
     "SteamAPI_SteamUserStats_v011",
     "SteamAPI_SteamUser_v020",
     "SteamAPI_SteamUtils_v009",
+    "SteamAPI_ISteamApps_GetBetaInfo",
+    "SteamAPI_ISteamApps_GetNumBetas",
+    "SteamAPI_ISteamApps_SetActiveBeta",
+    "SteamAPI_ISteamApps_SetDlcContext",
+    "SteamAPI_ISteamFriends_BHasEquippedProfileItem",
+    "SteamAPI_ISteamFriends_GetProfileItemPropertyString",
+    "SteamAPI_ISteamFriends_GetProfileItemPropertyUint",
+    "SteamAPI_ISteamFriends_RequestEquippedProfileItems",
+    "SteamAPI_ISteamInput_SetDualSenseTriggerEffect",
+    "SteamAPI_ISteamRemotePlay_BStartRemotePlayTogether",
+    "SteamAPI_ISteamTimeline_AddGamePhaseTag",
+    "SteamAPI_ISteamTimeline_AddInstantaneousTimelineEvent",
+    "SteamAPI_ISteamTimeline_AddRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_ClearTimelineTooltip",
+    "SteamAPI_ISteamTimeline_DoesEventRecordingExist",
+    "SteamAPI_ISteamTimeline_DoesGamePhaseRecordingExist",
+    "SteamAPI_ISteamTimeline_EndGamePhase",
+    "SteamAPI_ISteamTimeline_EndRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_OpenOverlayToGamePhase",
+    "SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent",
+    "SteamAPI_ISteamTimeline_RemoveTimelineEvent",
+    "SteamAPI_ISteamTimeline_SetGamePhaseAttribute",
+    "SteamAPI_ISteamTimeline_SetGamePhaseID",
+    "SteamAPI_ISteamTimeline_SetTimelineGameMode",
+    "SteamAPI_ISteamTimeline_SetTimelineTooltip",
+    "SteamAPI_ISteamTimeline_StartGamePhase",
+    "SteamAPI_ISteamTimeline_StartRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_UpdateRangeTimelineEvent",
+    "SteamAPI_ISteamUGC_AddContentDescriptor",
+    "SteamAPI_ISteamUGC_GetNumSupportedGameVersions",
+    "SteamAPI_ISteamUGC_GetQueryUGCContentDescriptors",
+    "SteamAPI_ISteamUGC_GetSupportedGameVersionData",
+    "SteamAPI_ISteamUGC_GetUserContentDescriptorPreferences",
+    "SteamAPI_ISteamUGC_RemoveContentDescriptor",
+    "SteamAPI_ISteamUGC_SetAdminQuery",
+    "SteamAPI_ISteamUGC_SetRequiredGameVersions",
+    "SteamAPI_ISteamUtils_DismissGamepadTextInput",
+    "SteamAPI_SteamGameServerUGC_v020",
+    "SteamAPI_SteamGameServer_v015",
+    "SteamAPI_SteamRemotePlay_v002",
+    "SteamAPI_SteamTimeline_v004",
+    "SteamAPI_SteamUGC_v020",
+    "SteamAPI_SteamUserStats_v013",
+    "SteamAPI_SteamUser_v023",
+    "SteamAPI_SteamVideo_v007",
 };
 
 
@@ -1640,6 +1685,21 @@ static void LoadConfig() {
     DWORD attrib = GetFileAttributesA(ini.c_str());
     if (attrib == INVALID_FILE_ATTRIBUTES) {
         ini = GetProxyDllDir() + "ReFix.ini";
+        attrib = GetFileAttributesA(ini.c_str());
+    }
+    if (attrib == INVALID_FILE_ATTRIBUTES) {
+        std::string cand = GetExeDir() + "..\\ReFix.ini";
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ini = cand;
+            attrib = 0;
+        }
+    }
+    if (attrib == INVALID_FILE_ATTRIBUTES) {
+        std::string cand = GetExeDir() + "..\\..\\ReFix.ini";
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ini = cand;
+            attrib = 0;
+        }
     }
 
     auto ReadBool = [&](const char* section, const char* key, bool defaultVal) -> bool {

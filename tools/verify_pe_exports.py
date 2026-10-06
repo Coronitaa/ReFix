@@ -72,6 +72,7 @@ def main():
         'SteamAPI_Init',
         'SteamAPI_InitSafe',
         'SteamAPI_RestartAppIfNecessary',
+        'SteamAPI_SteamUGC_v020',
         'ReFix_Steam_GetCapturedTicketData',
         'UNAE_Initialize',
         'UNAE_GetTopology',

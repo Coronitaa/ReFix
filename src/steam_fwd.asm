@@ -3298,5 +3298,140 @@ SteamAPI_SteamUser_v020_proxy ENDP
 SteamAPI_SteamUtils_v009_proxy PROC
     jmp QWORD PTR [g_steamProcs + 8760]
 SteamAPI_SteamUtils_v009_proxy ENDP
+SteamAPI_ISteamApps_GetBetaInfo_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8768]
+SteamAPI_ISteamApps_GetBetaInfo_proxy ENDP
+SteamAPI_ISteamApps_GetNumBetas_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8776]
+SteamAPI_ISteamApps_GetNumBetas_proxy ENDP
+SteamAPI_ISteamApps_SetActiveBeta_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8784]
+SteamAPI_ISteamApps_SetActiveBeta_proxy ENDP
+SteamAPI_ISteamApps_SetDlcContext_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8792]
+SteamAPI_ISteamApps_SetDlcContext_proxy ENDP
+SteamAPI_ISteamFriends_BHasEquippedProfileItem_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8800]
+SteamAPI_ISteamFriends_BHasEquippedProfileItem_proxy ENDP
+SteamAPI_ISteamFriends_GetProfileItemPropertyString_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8808]
+SteamAPI_ISteamFriends_GetProfileItemPropertyString_proxy ENDP
+SteamAPI_ISteamFriends_GetProfileItemPropertyUint_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8816]
+SteamAPI_ISteamFriends_GetProfileItemPropertyUint_proxy ENDP
+SteamAPI_ISteamFriends_RequestEquippedProfileItems_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8824]
+SteamAPI_ISteamFriends_RequestEquippedProfileItems_proxy ENDP
+SteamAPI_ISteamInput_SetDualSenseTriggerEffect_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8832]
+SteamAPI_ISteamInput_SetDualSenseTriggerEffect_proxy ENDP
+SteamAPI_ISteamRemotePlay_BStartRemotePlayTogether_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8840]
+SteamAPI_ISteamRemotePlay_BStartRemotePlayTogether_proxy ENDP
+SteamAPI_ISteamTimeline_AddGamePhaseTag_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8848]
+SteamAPI_ISteamTimeline_AddGamePhaseTag_proxy ENDP
+SteamAPI_ISteamTimeline_AddInstantaneousTimelineEvent_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8856]
+SteamAPI_ISteamTimeline_AddInstantaneousTimelineEvent_proxy ENDP
+SteamAPI_ISteamTimeline_AddRangeTimelineEvent_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8864]
+SteamAPI_ISteamTimeline_AddRangeTimelineEvent_proxy ENDP
+SteamAPI_ISteamTimeline_ClearTimelineTooltip_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8872]
+SteamAPI_ISteamTimeline_ClearTimelineTooltip_proxy ENDP
+SteamAPI_ISteamTimeline_DoesEventRecordingExist_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8880]
+SteamAPI_ISteamTimeline_DoesEventRecordingExist_proxy ENDP
+SteamAPI_ISteamTimeline_DoesGamePhaseRecordingExist_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8888]
+SteamAPI_ISteamTimeline_DoesGamePhaseRecordingExist_proxy ENDP
+SteamAPI_ISteamTimeline_EndGamePhase_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8896]
+SteamAPI_ISteamTimeline_EndGamePhase_proxy ENDP
+SteamAPI_ISteamTimeline_EndRangeTimelineEvent_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8904]
+SteamAPI_ISteamTimeline_EndRangeTimelineEvent_proxy ENDP
+SteamAPI_ISteamTimeline_OpenOverlayToGamePhase_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8912]
+SteamAPI_ISteamTimeline_OpenOverlayToGamePhase_proxy ENDP
+SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8920]
+SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent_proxy ENDP
+SteamAPI_ISteamTimeline_RemoveTimelineEvent_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8928]
+SteamAPI_ISteamTimeline_RemoveTimelineEvent_proxy ENDP
+SteamAPI_ISteamTimeline_SetGamePhaseAttribute_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8936]
+SteamAPI_ISteamTimeline_SetGamePhaseAttribute_proxy ENDP
+SteamAPI_ISteamTimeline_SetGamePhaseID_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8944]
+SteamAPI_ISteamTimeline_SetGamePhaseID_proxy ENDP
+SteamAPI_ISteamTimeline_SetTimelineGameMode_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8952]
+SteamAPI_ISteamTimeline_SetTimelineGameMode_proxy ENDP
+SteamAPI_ISteamTimeline_SetTimelineTooltip_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8960]
+SteamAPI_ISteamTimeline_SetTimelineTooltip_proxy ENDP
+SteamAPI_ISteamTimeline_StartGamePhase_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8968]
+SteamAPI_ISteamTimeline_StartGamePhase_proxy ENDP
+SteamAPI_ISteamTimeline_StartRangeTimelineEvent_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8976]
+SteamAPI_ISteamTimeline_StartRangeTimelineEvent_proxy ENDP
+SteamAPI_ISteamTimeline_UpdateRangeTimelineEvent_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8984]
+SteamAPI_ISteamTimeline_UpdateRangeTimelineEvent_proxy ENDP
+SteamAPI_ISteamUGC_AddContentDescriptor_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8992]
+SteamAPI_ISteamUGC_AddContentDescriptor_proxy ENDP
+SteamAPI_ISteamUGC_GetNumSupportedGameVersions_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9000]
+SteamAPI_ISteamUGC_GetNumSupportedGameVersions_proxy ENDP
+SteamAPI_ISteamUGC_GetQueryUGCContentDescriptors_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9008]
+SteamAPI_ISteamUGC_GetQueryUGCContentDescriptors_proxy ENDP
+SteamAPI_ISteamUGC_GetSupportedGameVersionData_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9016]
+SteamAPI_ISteamUGC_GetSupportedGameVersionData_proxy ENDP
+SteamAPI_ISteamUGC_GetUserContentDescriptorPreferences_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9024]
+SteamAPI_ISteamUGC_GetUserContentDescriptorPreferences_proxy ENDP
+SteamAPI_ISteamUGC_RemoveContentDescriptor_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9032]
+SteamAPI_ISteamUGC_RemoveContentDescriptor_proxy ENDP
+SteamAPI_ISteamUGC_SetAdminQuery_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9040]
+SteamAPI_ISteamUGC_SetAdminQuery_proxy ENDP
+SteamAPI_ISteamUGC_SetRequiredGameVersions_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9048]
+SteamAPI_ISteamUGC_SetRequiredGameVersions_proxy ENDP
+SteamAPI_ISteamUtils_DismissGamepadTextInput_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9056]
+SteamAPI_ISteamUtils_DismissGamepadTextInput_proxy ENDP
+SteamAPI_SteamGameServerUGC_v020_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9064]
+SteamAPI_SteamGameServerUGC_v020_proxy ENDP
+SteamAPI_SteamGameServer_v015_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9072]
+SteamAPI_SteamGameServer_v015_proxy ENDP
+SteamAPI_SteamRemotePlay_v002_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9080]
+SteamAPI_SteamRemotePlay_v002_proxy ENDP
+SteamAPI_SteamTimeline_v004_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9088]
+SteamAPI_SteamTimeline_v004_proxy ENDP
+SteamAPI_SteamUGC_v020_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9096]
+SteamAPI_SteamUGC_v020_proxy ENDP
+SteamAPI_SteamUserStats_v013_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9104]
+SteamAPI_SteamUserStats_v013_proxy ENDP
+SteamAPI_SteamUser_v023_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9112]
+SteamAPI_SteamUser_v023_proxy ENDP
+SteamAPI_SteamVideo_v007_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9120]
+SteamAPI_SteamVideo_v007_proxy ENDP
 END
 
