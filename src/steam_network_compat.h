@@ -21,7 +21,10 @@ void NotifySocketsPathDetected();
 // Diagnostic processor for Callback 1221 (SteamNetConnectionStatusChangedCallback_t)
 void ProcessConnectionStatusChanged(void* pubParam, int cubParam);
 
-// Query whether compatibility is currently active
+// Query whether compatibility is currently eligible (conditions met, pending sockets access)
+bool IsEligible();
+
+// Query whether compatibility is currently active (eligible + sockets accessed)
 bool IsActive();
 
 // Query whether verbose logging is enabled

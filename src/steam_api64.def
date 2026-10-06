@@ -2,9 +2,16 @@ LIBRARY steam_api64
 EXPORTS
     ReFix_NotifyLobbyID
     ReFix_NotifyLobbyMemberChange
+    ReFix_Steam_GetCapturedTicketData
     ReFix_RegisterP2PPeer
     ReFix_RegisterP2PPeerStr
     ReFix_GetBoundGamePort
+    UNAE_Initialize
+    UNAE_GetTopology
+    UNAE_GetActiveTier
+    UNAE_IsDirectP2PAllowed
+    UNAE_SetSelectedRegion
+    UNAE_GetSelectedRegion
     GetHSteamPipe=GetHSteamPipe_proxy
     GetHSteamUser=GetHSteamUser_proxy
     SteamAPI_GetHSteamPipe=SteamAPI_GetHSteamPipe_proxy
@@ -1062,10 +1069,6 @@ EXPORTS
     g_pSteamClientGameServer=g_pSteamClientGameServer_proxy
     SteamInternal_SteamAPI_Init
     SteamInternal_GameServer_Init_V2=SteamInternal_GameServer_Init_V2_proxy
-    SteamAPI_Init
-    SteamAPI_InitSafe
-    SteamAPI_InitAnonymousUser
-    SteamAPI_RestartAppIfNecessary
     SteamAPI_ISteamGameServer_EnableHeartbeats=SteamAPI_ISteamGameServer_EnableHeartbeats_proxy
     SteamAPI_ISteamGameServer_ForceHeartbeat=SteamAPI_ISteamGameServer_ForceHeartbeat_proxy
     SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate=SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate_proxy
@@ -1105,3 +1108,7 @@ EXPORTS
     SteamAPI_SteamUserStats_v011=SteamAPI_SteamUserStats_v011_proxy
     SteamAPI_SteamUser_v020=SteamAPI_SteamUser_v020_proxy
     SteamAPI_SteamUtils_v009=SteamAPI_SteamUtils_v009_proxy
+    SteamAPI_Init
+    SteamAPI_InitSafe
+    SteamAPI_InitAnonymousUser
+    SteamAPI_RestartAppIfNecessary

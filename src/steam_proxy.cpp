@@ -3636,6 +3636,41 @@ extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort) {
     }
 }
 
+extern "C" __declspec(dllexport) bool ReFix_Steam_GetCapturedTicketData(uint8_t* outBuf, size_t maxLen, size_t* outLen, uint32_t* outHandle) {
+    std::lock_guard<std::mutex> lg(g_callbackMutex);
+    if (g_lastAuthTicketData.empty()) return false;
+    if (outBuf && maxLen > 0) {
+        size_t copyLen = (g_lastAuthTicketData.size() < maxLen) ? g_lastAuthTicketData.size() : maxLen;
+        memcpy(outBuf, g_lastAuthTicketData.data(), copyLen);
+        if (outLen) *outLen = copyLen;
+        if (outHandle) *outHandle = g_lastAuthTicketHandle;
+        return true;
+    }
+    return false;
+}
+
+// UNAE (Universal Network Arbitration Engine) exports for external consumers
+extern "C" {
+__declspec(dllexport) void UNAE_Initialize() {
+    ReFixLog("[UNAE] UNAE_Initialize called via steam_api64 export");
+}
+__declspec(dllexport) int UNAE_GetTopology() {
+    return 0; // Topology: Auto / Direct P2P
+}
+__declspec(dllexport) int UNAE_GetActiveTier() {
+    return 2; // Tier 2: Steam P2P / SDR
+}
+__declspec(dllexport) bool UNAE_IsDirectP2PAllowed() {
+    return true;
+}
+__declspec(dllexport) void UNAE_SetSelectedRegion(const char* regionStr) {
+    (void)regionStr;
+}
+__declspec(dllexport) const char* UNAE_GetSelectedRegion() {
+    return "sa";
+}
+}
+
 static bool Intercepted_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
     return Hooked_ISteamMatchmaking_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
 }

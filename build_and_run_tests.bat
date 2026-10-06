@@ -14,7 +14,7 @@ if %ERRORLEVEL% neq 0 (
     if defined VCVARS call "!VCVARS!" >nul 2>&1
 )
 
-set CFLAGS=/nologo /EHsc /std:c++17 /O2 /Isrc
+set CFLAGS=/nologo /EHsc /std:c++17 /O2 /Isrc /Isrc\include /Isrc\include\steam
 set LIBS=ws2_32.lib advapi32.lib user32.lib ole32.lib
 
 echo ====================================================================
@@ -138,6 +138,9 @@ if %ERRORLEVEL% neq 0 ( echo [!] test_lobby_join_leave FAILED & exit /b 1 )
 
 build\tests\test_synthetic_cb168.exe
 if %ERRORLEVEL% neq 0 ( echo [!] test_synthetic_cb168 FAILED & exit /b 1 )
+
+python tools\audit_steam_exports.py
+if %ERRORLEVEL% neq 0 ( echo [!] audit_steam_exports FAILED & exit /b 1 )
 
 build\tests\test_steam_network_compat.exe
 if %ERRORLEVEL% neq 0 ( echo [!] test_steam_network_compat FAILED & exit /b 1 )
