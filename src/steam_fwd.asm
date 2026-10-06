@@ -1,7 +1,7 @@
 ; =============================================================================
 ; ReFix - steam_api64.dll x64 Forwarding Trampolines (AUTO-GENERATED)
 ; =============================================================================
-; Forwards 1055 exports to steam_api64_valve.dll via jump table.
+; Forwards 1096 exports to steam_api64_valve.dll via jump table.
 ; 4 functions are intercepted in C++ code: SteamAPI_Init, SteamAPI_InitSafe, SteamAPI_InitAnonymousUser, SteamAPI_RestartAppIfNecessary
 ; =============================================================================
 

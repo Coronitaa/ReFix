@@ -3649,25 +3649,29 @@ extern "C" __declspec(dllexport) bool ReFix_Steam_GetCapturedTicketData(uint8_t*
     return false;
 }
 
-// UNAE (Universal Network Arbitration Engine) exports for external consumers
+// UNAE (Universal Network Arbitration Engine) fallback exports for external consumers
 extern "C" {
+static char s_unaeSelectedRegion[16] = "sa";
+
 __declspec(dllexport) void UNAE_Initialize() {
-    ReFixLog("[UNAE] UNAE_Initialize called via steam_api64 export");
+    ReFixLog("[UNAE] UNAE_Initialize fallback called via steam_api64 export");
 }
 __declspec(dllexport) int UNAE_GetTopology() {
-    return 0; // Topology: Auto / Direct P2P
+    return 0; // Fallback Topology: Auto / Direct P2P
 }
 __declspec(dllexport) int UNAE_GetActiveTier() {
-    return 2; // Tier 2: Steam P2P / SDR
+    return 2; // Fallback Tier 2: Steam P2P / SDR
 }
 __declspec(dllexport) bool UNAE_IsDirectP2PAllowed() {
-    return true;
+    return true; // Fallback: Direct P2P permitted
 }
 __declspec(dllexport) void UNAE_SetSelectedRegion(const char* regionStr) {
-    (void)regionStr;
+    if (regionStr && regionStr[0]) {
+        strncpy_s(s_unaeSelectedRegion, sizeof(s_unaeSelectedRegion), regionStr, _TRUNCATE);
+    }
 }
 __declspec(dllexport) const char* UNAE_GetSelectedRegion() {
-    return "sa";
+    return s_unaeSelectedRegion;
 }
 }
 
