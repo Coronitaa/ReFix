@@ -3180,5 +3180,123 @@ SteamInternal_SteamAPI_Init_proxy ENDP
 SteamInternal_GameServer_Init_V2_proxy PROC
     jmp QWORD PTR [g_steamProcs + 8448]
 SteamInternal_GameServer_Init_V2_proxy ENDP
+
+SteamAPI_ISteamGameServer_EnableHeartbeats_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8456]
+SteamAPI_ISteamGameServer_EnableHeartbeats_proxy ENDP
+SteamAPI_ISteamGameServer_ForceHeartbeat_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8464]
+SteamAPI_ISteamGameServer_ForceHeartbeat_proxy ENDP
+SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8472]
+SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate_proxy ENDP
+SteamAPI_ISteamGameServer_SendUserDisconnect_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8480]
+SteamAPI_ISteamGameServer_SendUserDisconnect_proxy ENDP
+SteamAPI_ISteamGameServer_SetHeartbeatInterval_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8488]
+SteamAPI_ISteamGameServer_SetHeartbeatInterval_proxy ENDP
+SteamAPI_ISteamInput_GetGlyphForActionOrigin_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8496]
+SteamAPI_ISteamInput_GetGlyphForActionOrigin_proxy ENDP
+SteamAPI_ISteamInput_TriggerHapticPulse_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8504]
+SteamAPI_ISteamInput_TriggerHapticPulse_proxy ENDP
+SteamAPI_ISteamInput_TriggerRepeatedHapticPulse_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8512]
+SteamAPI_ISteamInput_TriggerRepeatedHapticPulse_proxy ENDP
+SteamAPI_ISteamNetworkingConnectionCustomSignaling_Release_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8520]
+SteamAPI_ISteamNetworkingConnectionCustomSignaling_Release_proxy ENDP
+SteamAPI_ISteamNetworkingConnectionCustomSignaling_SendSignal_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8528]
+SteamAPI_ISteamNetworkingConnectionCustomSignaling_SendSignal_proxy ENDP
+SteamAPI_ISteamNetworkingCustomSignalingRecvContext_OnConnectRequest_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8536]
+SteamAPI_ISteamNetworkingCustomSignalingRecvContext_OnConnectRequest_proxy ENDP
+SteamAPI_ISteamNetworkingCustomSignalingRecvContext_SendRejectionSignal_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8544]
+SteamAPI_ISteamNetworkingCustomSignalingRecvContext_SendRejectionSignal_proxy ENDP
+SteamAPI_ISteamNetworkingSockets_GetQuickConnectionStatus_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8552]
+SteamAPI_ISteamNetworkingSockets_GetQuickConnectionStatus_proxy ENDP
+SteamAPI_ISteamNetworkingUtils_GetFirstConfigValue_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8560]
+SteamAPI_ISteamNetworkingUtils_GetFirstConfigValue_proxy ENDP
+SteamAPI_ISteamTV_AddBroadcastGameData_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8568]
+SteamAPI_ISteamTV_AddBroadcastGameData_proxy ENDP
+SteamAPI_ISteamTV_AddRegion_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8576]
+SteamAPI_ISteamTV_AddRegion_proxy ENDP
+SteamAPI_ISteamTV_AddTimelineMarker_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8584]
+SteamAPI_ISteamTV_AddTimelineMarker_proxy ENDP
+SteamAPI_ISteamTV_IsBroadcasting_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8592]
+SteamAPI_ISteamTV_IsBroadcasting_proxy ENDP
+SteamAPI_ISteamTV_RemoveBroadcastGameData_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8600]
+SteamAPI_ISteamTV_RemoveBroadcastGameData_proxy ENDP
+SteamAPI_ISteamTV_RemoveRegion_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8608]
+SteamAPI_ISteamTV_RemoveRegion_proxy ENDP
+SteamAPI_ISteamTV_RemoveTimelineMarker_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8616]
+SteamAPI_ISteamTV_RemoveTimelineMarker_proxy ENDP
+SteamAPI_ISteamUser_InitiateGameConnection_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8624]
+SteamAPI_ISteamUser_InitiateGameConnection_proxy ENDP
+SteamAPI_ISteamUser_TerminateGameConnection_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8632]
+SteamAPI_ISteamUser_TerminateGameConnection_proxy ENDP
+SteamAPI_ISteamUtils_GetCSERIPPort_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8640]
+SteamAPI_ISteamUtils_GetCSERIPPort_proxy ENDP
+SteamAPI_SteamController_v007_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8648]
+SteamAPI_SteamController_v007_proxy ENDP
+SteamAPI_SteamGameServerApps_v008_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8656]
+SteamAPI_SteamGameServerApps_v008_proxy ENDP
+SteamAPI_SteamGameServerNetworkingSockets_v008_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8664]
+SteamAPI_SteamGameServerNetworkingSockets_v008_proxy ENDP
+SteamAPI_SteamGameServerUGC_v014_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8672]
+SteamAPI_SteamGameServerUGC_v014_proxy ENDP
+SteamAPI_SteamGameServerUtils_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8680]
+SteamAPI_SteamGameServerUtils_v009_proxy ENDP
+SteamAPI_SteamGameServer_v013_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8688]
+SteamAPI_SteamGameServer_v013_proxy ENDP
+SteamAPI_SteamInput_v001_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8696]
+SteamAPI_SteamInput_v001_proxy ENDP
+SteamAPI_SteamNetworkingSockets_v008_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8704]
+SteamAPI_SteamNetworkingSockets_v008_proxy ENDP
+SteamAPI_SteamNetworkingUtils_v003_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8712]
+SteamAPI_SteamNetworkingUtils_v003_proxy ENDP
+SteamAPI_SteamRemoteStorage_v014_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8720]
+SteamAPI_SteamRemoteStorage_v014_proxy ENDP
+SteamAPI_SteamTV_v001_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8728]
+SteamAPI_SteamTV_v001_proxy ENDP
+SteamAPI_SteamUGC_v014_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8736]
+SteamAPI_SteamUGC_v014_proxy ENDP
+SteamAPI_SteamUserStats_v011_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8744]
+SteamAPI_SteamUserStats_v011_proxy ENDP
+SteamAPI_SteamUser_v020_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8752]
+SteamAPI_SteamUser_v020_proxy ENDP
+SteamAPI_SteamUtils_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 8760]
+SteamAPI_SteamUtils_v009_proxy ENDP
 END
 
