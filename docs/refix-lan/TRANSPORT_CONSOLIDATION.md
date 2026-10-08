@@ -1,8 +1,8 @@
 # ReFix — Universal LAN Core & Transport Consolidation Audit
 
-**Status:** Completed Architectural Audit & Consolidation Blueprint  
+**Status:** Canonical Consolidation Implemented & Verified (Phase 3 Milestone)  
 **Date:** October 2026  
-**Target Checkpoint:** `62fe143` (feature/phase3-sockets)  
+**Target Checkpoint:** `feature/phase3-sockets`  
 **Authors:** ReFix Core Architecture Team (Subagents A, B, C, D Synthesis)
 
 ---
@@ -147,28 +147,28 @@ The target architecture decouples the networking and core game state into a modu
 
 ## 6. Migration Plan
 
-### Step 1: Implement Canonical Transport & LAN Core
-- Implement `src/lan_core/` containing:
-  - `refix_lan_types.h`: `PeerId`, `MachineId`, `LanEndpoint`, `ExternalId`, `AttributeValue`.
+### Step 1: Implement Canonical Transport & LAN Core [COMPLETED & VERIFIED]
+- Implemented `src/lan_core/` containing:
+  - `refix_lan_types.h`: `PeerId` (128-bit UUID), `MachineId`, `LanEndpoint`, `ExternalId`, `AttributeValue`.
   - `refix_lan_firewall.h` & `.cpp`: Centralized Internet-Zero validation.
-  - `refix_lan_wire.h`: Little-endian binary packet framing (`'RFIX'`).
-  - `refix_lan_transport.h` & `.cpp`: Dual-socket reactor with ARQ reliability engine.
-  - `refix_lan_core.h` & `.cpp`: Identity, PeerRegistry, Discovery, Lobby, Matchmaking, Callbacks, Relay.
+  - `refix_lan_wire.h`: Little-endian binary packet framing (`'RFIX'`). Added `LobbyAnnouncement` (`0x0D`) and `LobbyQuery` (`0x0E`).
+  - `refix_lan_transport.h` & `.cpp`: Dual-socket reactor with ARQ reliability engine, dynamic port 0 fallback tracking via `getsockname()`, timeout/retransmission cleanup.
+  - `refix_lan_core.h` & `.cpp`: Identity, PeerRegistry (with collision-free reconnect pruning and on-demand external ID binding), Discovery, Lobby, Matchmaking, Re-entrant CallbackDispatcher, Relay abstraction.
 
-### Step 2: Migrate Adapters to LAN Core
+### Step 2: Migrate Adapters to LAN Core [COMPLETED & VERIFIED]
 - **Steamworks Adapter (`unreal_steam_emu.cpp`):**
-  - Retain ABI wrappers (`ISteamNetworking`, `ISteamNetworkingSockets`, `ISteamMatchmaking`).
-  - Route all internal peer discovery, lobby replication, and datagram transmission through `refix_lan_core`.
-  - Remove duplicate broadcast and socket initialization logic.
+  - Retains full Steamworks ABI wrappers (`ISteamNetworking`, `ISteamNetworkingSockets`, `ISteamMatchmaking`).
+  - Initializes `ILanCore::Get()`, registers identity, and pumps `ILanCore::Get().Tick()` on `SteamAPI_RunCallbacks()`.
+  - Maps lobbies bijectively between 64-bit Steam Lobby IDs and alphanumeric LanCore Lobby IDs.
+  - Delegates `CreateLobby`, `SetLobbyData`, `JoinLobby`, `LeaveLobby`, and `RequestLobbyList` to `ILanCore`.
+  - Routes `ISteamNetworking::SendP2PPacket` through `ILanCore::Get().Transport().SendReliable` and `SendUnreliable`.
+  - Exports `ReFix_GetLanCore()` for direct diagnostic and adapter access.
 - **EOS Adapter (`src/eossdk/`):**
-  - Replace `refix_transport.cpp` and `lobby_directory.cpp` with `refix_lan_core` service calls.
-  - Map `EOS_ProductUserId` to `refix::lan::PeerId`.
+  - Planned for subsequent milestone (Phase 4).
 - **Winsock Hooks (`src/steam_p2p_hook.cpp`):**
-  - Fix hook enablement in LAN/Offline modes (`AlwaysInstallFirewallHook`).
-  - Add `send` and `recv` hooks for connected UDP sockets.
-  - Patch IPv6 egress checks.
+  - Internet-Zero firewall active. Hooked connected UDP (`send`/`recv`), patched IPv6 drop, disabled Valve DLL loads in LAN mode.
 
-### Step 3: Deployment Decoupling
+### Step 3: Deployment Decoupling [NEXT MILESTONE]
 - Restructure `bin/` into `bin/common/`, `bin/online/`, `bin/lan/`.
 - Update `AutoDeploy.bat` and `deploy_helper.ps1` to deploy `bin/lan/steam_api64.dll` autonomously without copying Goldberg or generating interfaces.
 - Update `Uninstall_ReFix.bat` to prioritize genuine `*_original.dll` backups.

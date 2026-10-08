@@ -59,7 +59,12 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     if (bind(m_groupSocket, reinterpret_cast<const sockaddr*>(&groupSin), sizeof(groupSin)) == SOCKET_ERROR) {
         // If port 47584 is blocked, try binding to 0 for fallback
         groupSin.sin_port = 0;
-        bind(m_groupSocket, reinterpret_cast<const sockaddr*>(&groupSin), sizeof(groupSin));
+        if (bind(m_groupSocket, reinterpret_cast<const sockaddr*>(&groupSin), sizeof(groupSin)) == 0) {
+            int gSinLen = sizeof(groupSin);
+            if (getsockname(m_groupSocket, reinterpret_cast<sockaddr*>(&groupSin), &gSinLen) == 0) {
+                m_discoveryPort = ntohs(groupSin.sin_port);
+            }
+        }
     }
 
     // Join IPv4 Multicast Group 239.255.71.84
@@ -159,6 +164,11 @@ void LanTransport::ReactorThreadLoop() {
         tv.tv_usec = 25000; // 25ms tick
 
         int sel = select(0, &readSet, nullptr, nullptr, &tv);
+        if (sel < 0) {
+            if (!m_running.load()) break;
+            Sleep(10);
+            continue;
+        }
         if (sel > 0) {
             // Drain Group Socket (Discovery)
             if (m_groupSocket != INVALID_SOCKET && FD_ISSET(m_groupSocket, &readSet)) {
@@ -222,8 +232,9 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
     size_t payloadLen = hdr->payloadLen;
     MsgType type = static_cast<MsgType>(hdr->msgType);
 
-    // 1. Discovery Messages
-    if (type == MsgType::DiscoveryBeacon || type == MsgType::DiscoveryQuery || type == MsgType::DiscoveryResponse) {
+    // 1. Discovery & Lobby Messages
+    if (type == MsgType::DiscoveryBeacon || type == MsgType::DiscoveryQuery || type == MsgType::DiscoveryResponse ||
+        type == MsgType::LobbyAnnouncement || type == MsgType::LobbyQuery) {
         if (m_listener) {
             m_listener->OnDiscoveryPacket(fromEp, type, payload, payloadLen);
         }
@@ -245,69 +256,78 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         bool isReliable = (type == MsgType::DataReliable);
 
         if (isReliable) {
-            std::lock_guard<std::mutex> lock(m_stateMutex);
-            auto& state = m_peerStates[senderPeer];
-            state.lastReceivedTime = std::chrono::steady_clock::now();
+            std::vector<InboundPacket> packetsToNotify;
+            {
+                std::lock_guard<std::mutex> lock(m_stateMutex);
+                auto& state = m_peerStates[senderPeer];
+                state.lastReceivedTime = std::chrono::steady_clock::now();
 
-            uint32_t seq = hdr->sequence;
+                uint32_t seq = hdr->sequence;
 
-            if (seq == state.expectedSequenceIn) {
-                // In-order packet arrived!
-                state.expectedSequenceIn++;
-
-                InboundPacket pkt;
-                pkt.senderPeerId = senderPeer;
-                pkt.senderEndpoint = fromEp;
-                pkt.channel = hdr->channel;
-                pkt.isReliable = true;
-                pkt.sequence = seq;
-                pkt.payload.assign(payload, payload + payloadLen);
-
-                {
-                    std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                    m_inboundQueue.push_back(pkt);
-                }
-                if (m_listener) m_listener->OnInboundData(pkt);
-
-                // Drain any contiguous buffered packets
-                while (!state.outOfOrderInbound.empty() &&
-                       state.outOfOrderInbound.begin()->first == state.expectedSequenceIn) {
-                    InboundPacket ooo = std::move(state.outOfOrderInbound.begin()->second);
-                    state.outOfOrderInbound.erase(state.outOfOrderInbound.begin());
+                if (seq == state.expectedSequenceIn) {
+                    // In-order packet arrived!
                     state.expectedSequenceIn++;
+
+                    InboundPacket pkt;
+                    pkt.senderPeerId = senderPeer;
+                    pkt.senderEndpoint = fromEp;
+                    pkt.channel = hdr->channel;
+                    pkt.isReliable = true;
+                    pkt.sequence = seq;
+                    pkt.payload.assign(payload, payload + payloadLen);
 
                     {
                         std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                        m_inboundQueue.push_back(ooo);
+                        m_inboundQueue.push_back(pkt);
                     }
-                    if (m_listener) m_listener->OnInboundData(ooo);
-                }
-            } else if (seq > state.expectedSequenceIn) {
-                // Out of order packet, buffer it
-                InboundPacket pkt;
-                pkt.senderPeerId = senderPeer;
-                pkt.senderEndpoint = fromEp;
-                pkt.channel = hdr->channel;
-                pkt.isReliable = true;
-                pkt.sequence = seq;
-                pkt.payload.assign(payload, payload + payloadLen);
-                state.outOfOrderInbound[seq] = std::move(pkt);
-            }
-            // If seq < state.expectedSequenceIn, it's a duplicate. We simply re-ACK it below.
+                    packetsToNotify.push_back(pkt);
 
-            // Build SACK bitmask
-            uint32_t sackMask = 0;
-            for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                if (bufferedSeq > state.expectedSequenceIn) {
-                    uint32_t diff = bufferedSeq - state.expectedSequenceIn - 1;
-                    if (diff < 32) {
-                        sackMask |= (1u << diff);
+                    // Drain any contiguous buffered packets
+                    while (!state.outOfOrderInbound.empty() &&
+                           state.outOfOrderInbound.begin()->first == state.expectedSequenceIn) {
+                        InboundPacket ooo = std::move(state.outOfOrderInbound.begin()->second);
+                        state.outOfOrderInbound.erase(state.outOfOrderInbound.begin());
+                        state.expectedSequenceIn++;
+
+                        {
+                            std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                            m_inboundQueue.push_back(ooo);
+                        }
+                        packetsToNotify.push_back(ooo);
+                    }
+                } else if (seq > state.expectedSequenceIn) {
+                    // Out of order packet, buffer it
+                    InboundPacket pkt;
+                    pkt.senderPeerId = senderPeer;
+                    pkt.senderEndpoint = fromEp;
+                    pkt.channel = hdr->channel;
+                    pkt.isReliable = true;
+                    pkt.sequence = seq;
+                    pkt.payload.assign(payload, payload + payloadLen);
+                    state.outOfOrderInbound[seq] = std::move(pkt);
+                }
+                // If seq < state.expectedSequenceIn, it's a duplicate. We simply re-ACK it below.
+
+                // Build SACK bitmask
+                uint32_t sackMask = 0;
+                for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
+                    if (bufferedSeq > state.expectedSequenceIn) {
+                        uint32_t diff = bufferedSeq - state.expectedSequenceIn - 1;
+                        if (diff < 32) {
+                            sackMask |= (1u << diff);
+                        }
                     }
                 }
+
+                // Immediately send ACK back
+                SendAckPacket(fromEp, hdr->channel, state.expectedSequenceIn - 1, sackMask);
             }
 
-            // Immediately send ACK back
-            SendAckPacket(fromEp, hdr->channel, state.expectedSequenceIn - 1, sackMask);
+            if (m_listener) {
+                for (const auto& p : packetsToNotify) {
+                    m_listener->OnInboundData(p);
+                }
+            }
             return;
         }
 
@@ -375,35 +395,46 @@ void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uin
 }
 
 void LanTransport::CheckRetransmissionsAndTimeouts() {
-    std::lock_guard<std::mutex> lock(m_stateMutex);
-    auto now = std::chrono::steady_clock::now();
+    std::vector<std::pair<PeerId, LanEndpoint>> timedOutPeers;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        auto now = std::chrono::steady_clock::now();
 
-    for (auto& [peerId, state] : m_peerStates) {
-        for (auto& r : state.unackedOutbound) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - r.sendTime).count();
-            if (elapsed > 100) { // 100ms retransmission timer
-                r.retries++;
-                if (r.retries > 20) {
-                    if (m_listener) {
-                        m_listener->OnPeerTimeout(peerId, r.target);
+        for (auto& [peerId, state] : m_peerStates) {
+            for (auto it = state.unackedOutbound.begin(); it != state.unackedOutbound.end();) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->sendTime).count();
+                if (elapsed > 100) { // 100ms retransmission timer
+                    it->retries++;
+                    if (it->retries > 20) {
+                        timedOutPeers.emplace_back(peerId, it->target);
+                        it = state.unackedOutbound.erase(it);
+                        continue;
                     }
-                    continue;
-                }
-                r.sendTime = now;
-                sockaddr_in sin{};
-                sin.sin_family = AF_INET;
-                sin.sin_addr.s_addr = htonl(r.target.ipv4);
-                sin.sin_port = htons(r.target.port);
+                    it->sendTime = now;
+                    sockaddr_in sin{};
+                    sin.sin_family = AF_INET;
+                    sin.sin_addr.s_addr = htonl(it->target.ipv4);
+                    sin.sin_port = htons(it->target.port);
 
-                sendto(m_dataSocket, reinterpret_cast<const char*>(r.packetBytes.data()),
-                       static_cast<int>(r.packetBytes.size()), 0,
-                       reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+                    sendto(m_dataSocket, reinterpret_cast<const char*>(it->packetBytes.data()),
+                           static_cast<int>(it->packetBytes.size()), 0,
+                           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+                    ++it;
+                } else {
+                    ++it;
+                }
             }
+        }
+    }
+
+    if (m_listener) {
+        for (const auto& [pId, target] : timedOutPeers) {
+            m_listener->OnPeerTimeout(pId, target);
         }
     }
 }
 
-bool LanTransport::BroadcastDiscovery(const void* data, size_t len, uint16_t targetPort) {
+bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort) {
     if (m_dataSocket == INVALID_SOCKET) return false;
 
     uint16_t port = targetPort != 0 ? targetPort : m_discoveryPort;
@@ -412,7 +443,7 @@ bool LanTransport::BroadcastDiscovery(const void* data, size_t len, uint16_t tar
     auto* hdr = reinterpret_cast<WireHeader*>(buffer.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
-    hdr->msgType = static_cast<uint8_t>(MsgType::DiscoveryBeacon);
+    hdr->msgType = static_cast<uint8_t>(type);
     hdr->flags = 0;
     hdr->SetSenderPeerId(m_localPeerId);
     hdr->sessionId = 0;
@@ -441,6 +472,50 @@ bool LanTransport::BroadcastDiscovery(const void* data, size_t len, uint16_t tar
     sendToTarget(0x7F000001);
 
     return true;
+}
+
+bool LanTransport::BroadcastDiscovery(const void* data, size_t len, uint16_t targetPort) {
+    return BroadcastDiscoveryPacket(MsgType::DiscoveryBeacon, data, len, targetPort);
+}
+
+bool LanTransport::BroadcastDiscoveryQuery(const void* data, size_t len, uint16_t targetPort) {
+    return BroadcastDiscoveryPacket(MsgType::DiscoveryQuery, data, len, targetPort);
+}
+
+bool LanTransport::BroadcastLobbyAnnouncement(const void* data, size_t len, uint16_t targetPort) {
+    return BroadcastDiscoveryPacket(MsgType::LobbyAnnouncement, data, len, targetPort);
+}
+
+bool LanTransport::BroadcastLobbyQuery(const void* data, size_t len, uint16_t targetPort) {
+    return BroadcastDiscoveryPacket(MsgType::LobbyQuery, data, len, targetPort);
+}
+
+bool LanTransport::SendDiscoveryPacket(MsgType type, const LanEndpoint& target, const void* data, size_t len) {
+    if (!LanFirewall::Get().IsAllowedEndpoint(target)) return false;
+
+    std::vector<uint8_t> buffer(sizeof(WireHeader) + len);
+    auto* hdr = reinterpret_cast<WireHeader*>(buffer.data());
+    hdr->magic = REFIX_WIRE_MAGIC;
+    hdr->version = REFIX_WIRE_VERSION;
+    hdr->msgType = static_cast<uint8_t>(type);
+    hdr->flags = 0;
+    hdr->SetSenderPeerId(m_localPeerId);
+    hdr->channel = 0;
+    hdr->payloadLen = static_cast<uint16_t>(len);
+
+    if (len > 0 && data) {
+        std::memcpy(buffer.data() + sizeof(WireHeader), data, len);
+    }
+
+    sockaddr_in sin{};
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(target.ipv4);
+    sin.sin_port = htons(target.port);
+
+    int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
+                      static_cast<int>(buffer.size()), 0,
+                      reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    return sent > 0;
 }
 
 bool LanTransport::SendDiscoveryResponse(const LanEndpoint& target, const void* data, size_t len) {

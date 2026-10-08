@@ -26,7 +26,9 @@ enum class MsgType : uint8_t {
     DataAck           = 0x09,
     Ping              = 0x0A,
     Pong              = 0x0B,
-    RelayWrapper      = 0x0C
+    RelayWrapper      = 0x0C,
+    LobbyAnnouncement = 0x0D,
+    LobbyQuery        = 0x0E
 };
 
 // Flags

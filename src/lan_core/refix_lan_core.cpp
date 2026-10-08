@@ -89,6 +89,12 @@ class PeerRegistryImpl : public IPeerRegistry {
 public:
     void RegisterOrUpdatePeer(const PeerInfo& info) override {
         std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_peers.find(info.peerId);
+        if (it != m_peers.end()) {
+            if (it->second.endpoint != info.endpoint) {
+                m_byEndpoint.erase(it->second.endpoint);
+            }
+        }
         auto& p = m_peers[info.peerId];
         p = info;
         p.lastSeen = std::chrono::steady_clock::now();
@@ -106,12 +112,12 @@ public:
 
     void BindExternalId(const PeerId& peerId, const ExternalId& extId) override {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_peers.find(peerId);
-        if (it != m_peers.end()) {
-            it->second.externalId = extId;
-            if (extId.numericId != 0) m_bySteamId[extId.numericId] = peerId;
-            if (!extId.stringId.empty()) m_byPuid[extId.stringId] = peerId;
-        }
+        auto& p = m_peers[peerId];
+        p.peerId = peerId;
+        p.externalId = extId;
+        p.lastSeen = std::chrono::steady_clock::now();
+        if (extId.numericId != 0) m_bySteamId[extId.numericId] = peerId;
+        if (!extId.stringId.empty()) m_byPuid[extId.stringId] = peerId;
     }
 
     std::optional<PeerInfo> FindByPeerId(const PeerId& peerId) const override {
@@ -170,9 +176,22 @@ public:
         auto now = std::chrono::steady_clock::now();
         for (auto it = m_peers.begin(); it != m_peers.end();) {
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.lastSeen) > maxAge) {
-                m_byEndpoint.erase(it->second.endpoint);
-                if (it->second.externalId.numericId != 0) m_bySteamId.erase(it->second.externalId.numericId);
-                if (!it->second.externalId.stringId.empty()) m_byPuid.erase(it->second.externalId.stringId);
+                auto epIt = m_byEndpoint.find(it->second.endpoint);
+                if (epIt != m_byEndpoint.end() && epIt->second == it->first) {
+                    m_byEndpoint.erase(epIt);
+                }
+                if (it->second.externalId.numericId != 0) {
+                    auto sIt = m_bySteamId.find(it->second.externalId.numericId);
+                    if (sIt != m_bySteamId.end() && sIt->second == it->first) {
+                        m_bySteamId.erase(sIt);
+                    }
+                }
+                if (!it->second.externalId.stringId.empty()) {
+                    auto pIt = m_byPuid.find(it->second.externalId.stringId);
+                    if (pIt != m_byPuid.end() && pIt->second == it->first) {
+                        m_byPuid.erase(pIt);
+                    }
+                }
                 it = m_peers.erase(it);
             } else {
                 ++it;
@@ -216,12 +235,16 @@ public:
         }
 
         for (const auto& ev : toDispatch) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            auto it = m_subscribers.find(ev.type);
-            if (it != m_subscribers.end()) {
-                for (const auto& fn : it->second) {
-                    fn(ev);
+            std::vector<std::function<void(const LanEvent&)>> handlers;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto it = m_subscribers.find(ev.type);
+                if (it != m_subscribers.end()) {
+                    handlers = it->second;
                 }
+            }
+            for (const auto& fn : handlers) {
+                fn(ev);
             }
         }
     }
@@ -237,8 +260,49 @@ private:
 // =============================================================================
 class LobbyServiceImpl : public ILobbyService {
 public:
-    explicit LobbyServiceImpl(ILocalIdentityService& identity, ICallbackDispatcher& callbacks)
-        : m_identity(identity), m_callbacks(callbacks) {}
+    explicit LobbyServiceImpl(ILocalIdentityService& identity, ICallbackDispatcher& callbacks, LanTransport* transport = nullptr)
+        : m_identity(identity), m_callbacks(callbacks), m_transport(transport) {}
+
+    void SetTransport(LanTransport* transport) { m_transport = transport; }
+    void SetAppScope(std::string_view scope) { m_appScope = std::string(scope); }
+
+    void BroadcastLobbyState(const LobbyRecord& lob) {
+        if (!m_transport || m_appScope.empty()) return;
+        ByteWriter w;
+        w.WriteString(m_appScope);
+        w.WriteString(lob.lobbyId);
+        w.WritePeerId(lob.ownerPeerId);
+        w.WriteU32(lob.maxMembers);
+        w.WriteU8(static_cast<uint8_t>(lob.permission));
+        w.WriteBool(lob.joinable);
+        w.WriteU32(lob.revision);
+        w.WriteEndpoint(m_transport->GetLocalDataEndpoint());
+
+        w.WriteU32(static_cast<uint32_t>(lob.attributes.size()));
+        for (const auto& [k, v] : lob.attributes) {
+            w.WriteString(k);
+            w.WriteAttribute(v);
+        }
+
+        w.WriteU32(static_cast<uint32_t>(lob.members.size()));
+        for (const auto& m : lob.members) {
+            w.WritePeerId(m.peerId);
+            w.WriteString(m.displayName);
+            w.WriteEndpoint(m.endpoint);
+            w.WriteBool(m.isOwner);
+        }
+
+        m_transport->BroadcastLobbyAnnouncement(w.Data(), w.Size());
+    }
+
+    void BroadcastHostedLobbies() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& [_, lob] : m_lobbies) {
+            if (lob.ownerPeerId == m_identity.GetLocalPeerId()) {
+                BroadcastLobbyState(lob);
+            }
+        }
+    }
 
     std::string CreateLobby(uint32_t maxMembers, LobbyPermissionLevel permission) override {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -267,6 +331,8 @@ public:
         ev.peerId = m_identity.GetLocalPeerId();
         m_callbacks.PostEvent(ev);
 
+        BroadcastLobbyState(r);
+
         return lobbyId;
     }
 
@@ -294,6 +360,7 @@ public:
             ev.type = LanEvent::Type::LobbyUpdated;
             ev.lobbyId = std::string(lobbyId);
             m_callbacks.PostEvent(ev);
+            BroadcastLobbyState(it->second);
             return true;
         }
         return false;
@@ -305,6 +372,7 @@ public:
         if (it != m_lobbies.end()) {
             it->second.attributes.erase(std::string(key));
             it->second.revision++;
+            BroadcastLobbyState(it->second);
             return true;
         }
         return false;
@@ -459,6 +527,8 @@ private:
     ILocalIdentityService& m_identity;
     ICallbackDispatcher& m_callbacks;
     std::unordered_map<std::string, LobbyRecord> m_lobbies;
+    LanTransport* m_transport = nullptr;
+    std::string m_appScope;
 };
 
 // =============================================================================
@@ -488,10 +558,18 @@ bool SearchFilter::Matches(const LobbyRecord& lobby) const {
 
 class MatchmakingServiceImpl : public IMatchmakingService {
 public:
-    explicit MatchmakingServiceImpl(ILobbyService& lobby) : m_lobby(lobby) {}
+    explicit MatchmakingServiceImpl(ILobbyService& lobby, LanTransport* transport = nullptr)
+        : m_lobby(lobby), m_transport(transport) {}
+
+    void SetTransport(LanTransport* transport) { m_transport = transport; }
+    void SetAppScope(std::string_view scope) { m_appScope = std::string(scope); }
 
     void RefreshLobbyList() override {
-        // Triggered via Discovery queries
+        if (m_transport && !m_appScope.empty()) {
+            ByteWriter w;
+            w.WriteString(m_appScope);
+            m_transport->BroadcastLobbyQuery(w.Data(), w.Size());
+        }
     }
 
     std::vector<LobbyRecord> SearchLobbies(const MatchmakingCriteria& criteria) override {
@@ -519,6 +597,8 @@ public:
 
 private:
     ILobbyService& m_lobby;
+    LanTransport* m_transport = nullptr;
+    std::string m_appScope;
 };
 
 // =============================================================================
@@ -636,8 +716,15 @@ public:
         ByteWriter w;
         w.WriteString(m_appScope);
         w.WritePeerId(m_identity.GetLocalPeerId());
+        w.WriteString(m_identity.GetDisplayName());
         w.WriteEndpoint(m_transport.GetLocalDataEndpoint());
-        m_transport.BroadcastDiscovery(w.Data(), w.Size());
+        uint64_t extSteamId = 0;
+        auto myPeer = m_peers.FindByPeerId(m_identity.GetLocalPeerId());
+        if (myPeer && myPeer->externalId.platform == ExternalPlatform::Steam) {
+            extSteamId = myPeer->externalId.numericId;
+        }
+        w.WriteU64(extSteamId);
+        m_transport.BroadcastDiscoveryQuery(w.Data(), w.Size());
     }
 
     void AnnouncePresence() override {
@@ -646,6 +733,12 @@ public:
         w.WritePeerId(m_identity.GetLocalPeerId());
         w.WriteString(m_identity.GetDisplayName());
         w.WriteEndpoint(m_transport.GetLocalDataEndpoint());
+        uint64_t extSteamId = 0;
+        auto myPeer = m_peers.FindByPeerId(m_identity.GetLocalPeerId());
+        if (myPeer && myPeer->externalId.platform == ExternalPlatform::Steam) {
+            extSteamId = myPeer->externalId.numericId;
+        }
+        w.WriteU64(extSteamId);
         m_transport.BroadcastDiscovery(w.Data(), w.Size());
     }
 
@@ -662,31 +755,127 @@ public:
         PeerId pid = r.ReadPeerId();
         if (pid == m_identity.GetLocalPeerId()) return;
 
-        if (type == MsgType::DiscoveryBeacon || type == MsgType::DiscoveryResponse) {
+        if (type == MsgType::DiscoveryBeacon || type == MsgType::DiscoveryResponse || type == MsgType::DiscoveryQuery) {
             std::string name = r.ReadString();
             LanEndpoint ep = r.ReadEndpoint();
             if (!ep.IsValid()) ep = sender;
 
+            uint64_t extSteamId = 0;
+            if (r.Remaining() >= 8) {
+                extSteamId = r.ReadU64();
+            }
+
+            if (r.HasError()) return;
+
+            bool isNewPeer = !m_peers.FindByPeerId(pid).has_value();
+
             PeerInfo info;
-            info.peerId = pid;
+            auto existing = m_peers.FindByPeerId(pid);
+            if (existing) {
+                info = *existing; // Preserve externalId, verified state, pingMs
+            } else {
+                info.peerId = pid;
+                info.machineId = pid.high;
+                info.state = PeerTransportState::Discovered;
+            }
             info.displayName = name;
             info.endpoint = ep;
-            info.state = PeerTransportState::Discovered;
+            if (extSteamId != 0) {
+                info.externalId.platform = ExternalPlatform::Steam;
+                info.externalId.numericId = extSteamId;
+                info.externalId.stringId = std::to_string(extSteamId);
+            }
             m_peers.RegisterOrUpdatePeer(info);
 
-            LanEvent ev;
-            ev.type = LanEvent::Type::PeerDiscovered;
-            ev.peerId = pid;
-            m_callbacks.PostEvent(ev);
+            if (isNewPeer) {
+                LanEvent ev;
+                ev.type = LanEvent::Type::PeerDiscovered;
+                ev.peerId = pid;
+                m_callbacks.PostEvent(ev);
+            }
 
-            // If we received a query, send a unicast response
+            // If we received a query, send a unicast response back to sender
             if (type == MsgType::DiscoveryQuery) {
                 ByteWriter resp;
                 resp.WriteString(m_appScope);
                 resp.WritePeerId(m_identity.GetLocalPeerId());
                 resp.WriteString(m_identity.GetDisplayName());
                 resp.WriteEndpoint(m_transport.GetLocalDataEndpoint());
-                m_transport.SendDiscoveryResponse(sender, resp.Data(), resp.Size());
+                uint64_t mySteamId = 0;
+                auto myPeer = m_peers.FindByPeerId(m_identity.GetLocalPeerId());
+                if (myPeer && myPeer->externalId.platform == ExternalPlatform::Steam) {
+                    mySteamId = myPeer->externalId.numericId;
+                }
+                resp.WriteU64(mySteamId);
+                m_transport.SendDiscoveryResponse(ep.IsValid() ? ep : sender, resp.Data(), resp.Size());
+            }
+        } else if (type == MsgType::LobbyAnnouncement) {
+            LobbyRecord rec;
+            rec.lobbyId = r.ReadString();
+            rec.ownerPeerId = r.ReadPeerId();
+            rec.maxMembers = r.ReadU32();
+            rec.permission = static_cast<LobbyPermissionLevel>(r.ReadU8());
+            rec.joinable = r.ReadBool();
+            rec.revision = r.ReadU32();
+            rec.hostEndpoint = r.ReadEndpoint();
+            if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
+
+            uint32_t attrCount = r.ReadU32();
+            if (!r.HasError() && attrCount <= 1000) {
+                for (uint32_t i = 0; i < attrCount; ++i) {
+                    std::string k = r.ReadString();
+                    AttributeValue v = r.ReadAttribute();
+                    if (r.HasError()) break;
+                    rec.attributes[k] = v;
+                }
+            }
+
+            uint32_t memberCount = r.ReadU32();
+            if (!r.HasError() && memberCount <= 256) {
+                for (uint32_t i = 0; i < memberCount; ++i) {
+                    LobbyMember m;
+                    m.peerId = r.ReadPeerId();
+                    m.displayName = r.ReadString();
+                    m.endpoint = r.ReadEndpoint();
+                    m.isOwner = r.ReadBool();
+                    if (r.HasError()) break;
+                    rec.members.push_back(m);
+                }
+            }
+
+            if (!r.HasError()) {
+                m_lobby.ImportRemoteLobby(rec);
+            }
+        } else if (type == MsgType::LobbyQuery) {
+            auto all = m_lobby.GetAllKnownLobbies();
+            for (const auto& lob : all) {
+                if (lob.ownerPeerId == m_identity.GetLocalPeerId()) {
+                    ByteWriter w;
+                    w.WriteString(m_appScope);
+                    w.WriteString(lob.lobbyId);
+                    w.WritePeerId(lob.ownerPeerId);
+                    w.WriteU32(lob.maxMembers);
+                    w.WriteU8(static_cast<uint8_t>(lob.permission));
+                    w.WriteBool(lob.joinable);
+                    w.WriteU32(lob.revision);
+                    w.WriteEndpoint(m_transport.GetLocalDataEndpoint());
+
+                    w.WriteU32(static_cast<uint32_t>(lob.attributes.size()));
+                    for (const auto& [k, v] : lob.attributes) {
+                        w.WriteString(k);
+                        w.WriteAttribute(v);
+                    }
+
+                    w.WriteU32(static_cast<uint32_t>(lob.members.size()));
+                    for (const auto& m : lob.members) {
+                        w.WritePeerId(m.peerId);
+                        w.WriteString(m.displayName);
+                        w.WriteEndpoint(m.endpoint);
+                        w.WriteBool(m.isOwner);
+                    }
+
+                    m_transport.SendDiscoveryPacket(MsgType::LobbyAnnouncement, sender, w.Data(), w.Size());
+                }
             }
         }
     }
@@ -695,6 +884,7 @@ public:
         LanEvent ev;
         ev.type = LanEvent::Type::DataPacketReceived;
         ev.peerId = packet.senderPeerId;
+        ev.channel = packet.channel;
         ev.payload = packet.payload;
         m_callbacks.PostEvent(ev);
     }
@@ -724,16 +914,18 @@ public:
         : m_identity(),
           m_peers(),
           m_callbacks(),
-          m_lobby(m_identity, m_callbacks),
-          m_session(m_identity),
-          m_matchmaking(m_lobby),
           m_transport(),
+          m_lobby(m_identity, m_callbacks, &m_transport),
+          m_session(m_identity),
+          m_matchmaking(m_lobby, &m_transport),
           m_relay(m_transport, m_peers),
           m_discovery(m_transport, m_identity, m_peers, m_lobby, m_callbacks) {}
 
     bool Initialize(std::string_view appScope, uint16_t discoveryPort) override {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_initialized) return true;
+        m_lobby.SetAppScope(appScope);
+        m_matchmaking.SetAppScope(appScope);
         m_initialized = m_discovery.Start(appScope, discoveryPort);
         m_lastAnnounce = std::chrono::steady_clock::now();
         m_discovery.AnnouncePresence();
@@ -753,6 +945,7 @@ public:
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastAnnounce).count() > 2000) {
             m_lastAnnounce = now;
             m_discovery.AnnouncePresence();
+            m_lobby.BroadcastHostedLobbies();
         }
 
         // Prune stale peers inactive > 12s

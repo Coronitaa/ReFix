@@ -8,6 +8,7 @@ EXPORTS
     ReFix_GetEnsureOriginalCallCount
     ReFix_GetValveDllLoadCount
     ReFix_ResetEnsureOriginalCallCount
+    ReFix_GetLanCore
     GetHSteamPipe
     GetHSteamUser
     SteamAPI_GetHSteamPipe

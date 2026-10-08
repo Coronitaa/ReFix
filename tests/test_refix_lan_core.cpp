@@ -181,6 +181,79 @@ static bool TestPeerRegistry() {
     return true;
 }
 
+static bool TestDispatcherReentrancy() {
+    std::cout << "[*] Running TestDispatcherReentrancy..." << std::endl;
+    auto& core = ILanCore::Get();
+    auto& cb = core.Callbacks();
+
+    bool reentrantFired = false;
+    cb.Subscribe(LanEvent::Type::LobbyCreated, [&](const LanEvent&) {
+        // Re-entrant PostEvent from inside a callback handler
+        LanEvent ev;
+        ev.type = LanEvent::Type::LobbyUpdated;
+        cb.PostEvent(ev);
+    });
+
+    cb.Subscribe(LanEvent::Type::LobbyUpdated, [&](const LanEvent&) {
+        reentrantFired = true;
+    });
+
+    LanEvent startEv;
+    startEv.type = LanEvent::Type::LobbyCreated;
+    cb.PostEvent(startEv);
+
+    cb.DispatchPending(); // Dispatches LobbyCreated, which posts LobbyUpdated
+    cb.DispatchPending(); // Dispatches LobbyUpdated
+
+    TEST_ASSERT(reentrantFired, "Re-entrant event must fire without deadlock");
+    std::cout << "  [PASS] Dispatcher re-entrancy without deadlock verified." << std::endl;
+    return true;
+}
+
+static bool TestPeerRegistryReconnectPruning() {
+    std::cout << "[*] Running TestPeerRegistryReconnectPruning..." << std::endl;
+    auto& core = ILanCore::Get();
+    auto& peers = core.Peers();
+
+    PeerInfo p1;
+    p1.peerId = {0x111, 0x222};
+    p1.endpoint = {0xC0A80110, 7777};
+    p1.displayName = "Player1_Instance1";
+    p1.externalId = {ExternalPlatform::Steam, 76561198000000099ULL, "puid_99"};
+    peers.RegisterOrUpdatePeer(p1);
+
+    // Sleep 15ms so P1 becomes older than 10ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+
+    // Simulate reconnect: new process/instance with new PeerId, new port, but same SteamID & PUID
+    PeerInfo p2;
+    p2.peerId = {0x111, 0x333};
+    p2.endpoint = {0xC0A80110, 7778};
+    p2.displayName = "Player1_Instance2";
+    p2.externalId = {ExternalPlatform::Steam, 76561198000000099ULL, "puid_99"};
+    peers.RegisterOrUpdatePeer(p2);
+
+    // Verify lookup resolves to the new active instance p2
+    auto steamLookup = peers.FindBySteamId(76561198000000099ULL);
+    TEST_ASSERT(steamLookup.has_value() && steamLookup.value() == p2.peerId, "Active SteamID must map to P2");
+
+    // Prune stale peers with 10ms threshold (P1 is 15ms old, P2 is 0ms old)
+    peers.PruneStalePeers(std::chrono::milliseconds(10));
+
+    // P1 must be pruned, but P2 must remain in registry AND SteamID/PUID lookup must still map to P2!
+    TEST_ASSERT(!peers.FindByPeerId(p1.peerId).has_value(), "P1 must be pruned");
+    TEST_ASSERT(peers.FindByPeerId(p2.peerId).has_value(), "P2 must remain in registry");
+
+    steamLookup = peers.FindBySteamId(76561198000000099ULL);
+    TEST_ASSERT(steamLookup.has_value() && steamLookup.value() == p2.peerId, "SteamID lookup must NOT be wiped by P1 pruning");
+
+    auto puidLookup = peers.FindByPuid("puid_99");
+    TEST_ASSERT(puidLookup.has_value() && puidLookup.value() == p2.peerId, "PUID lookup must NOT be wiped by P1 pruning");
+
+    std::cout << "  [PASS] Stale pruning collision and active reconnect protection verified." << std::endl;
+    return true;
+}
+
 static bool TestTransportLoopback() {
     std::cout << "[*] Running TestTransportLoopback (Dual-Socket & ARQ Reliability)..." << std::endl;
 
@@ -273,6 +346,8 @@ int main() {
     if (!TestWireSerialization()) return 1;
     if (!TestLobbyAndMatchmaking()) return 1;
     if (!TestPeerRegistry()) return 1;
+    if (!TestDispatcherReentrancy()) return 1;
+    if (!TestPeerRegistryReconnectPruning()) return 1;
     if (!TestTransportLoopback()) return 1;
 
     std::cout << "\n============================================================" << std::endl;

@@ -2670,10 +2670,8 @@ static void* eos_LobbyDetails_GetLobbyOwner(void* H, void* O) {
 static HMODULE ResolveSteamApiDll() {
     HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
     if (hSteam) return hSteam;
-    hSteam = LoadLibraryA("steam_api64.dll");
-    if (hSteam) return hSteam;
-    hSteam = LoadLibraryA("steam_api64_valve.dll");
-    if (hSteam) return hSteam;
+    return nullptr;
+}
 
     // Search relative to the executable directory (supports nested Unreal Engine structures)
     char exePath[MAX_PATH];

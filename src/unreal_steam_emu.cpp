@@ -53,6 +53,8 @@
 #include "unreal_detect.h"
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
+#include "lan_core/refix_lan_firewall.h"
+#include "lan_core/refix_lan_core.h"
 
 class CCallbackMgr {
 public:
@@ -500,6 +502,36 @@ namespace UnrealSteamEmu {
 
     static std::map<uint64_t, LobbyInfo> g_lobbies;
 
+    static std::mutex s_steamLobbyMapMutex;
+    static std::unordered_map<std::string, uint64_t> s_coreToSteamLobby;
+    static std::unordered_map<uint64_t, std::string> s_steamToCoreLobby;
+
+    static uint64_t EnsureSteamLobbyID(const std::string& coreLobbyId, uint64_t fallbackId = 0) {
+        std::lock_guard<std::mutex> lock(s_steamLobbyMapMutex);
+        auto it = s_coreToSteamLobby.find(coreLobbyId);
+        if (it != s_coreToSteamLobby.end()) return it->second;
+
+        uint64_t steamLobbyId = fallbackId;
+        if (steamLobbyId == 0) {
+            uint64_t h = 0xCBF29CE484222325ULL;
+            for (char c : coreLobbyId) {
+                h ^= (uint8_t)c;
+                h *= 0x100000001B3ULL;
+            }
+            steamLobbyId = 0x1860000000000000ULL | (h & 0xFFFFFFFFFFFFULL);
+        }
+        s_coreToSteamLobby[coreLobbyId] = steamLobbyId;
+        s_steamToCoreLobby[steamLobbyId] = coreLobbyId;
+        return steamLobbyId;
+    }
+
+    static std::string GetCoreLobbyId(uint64_t steamLobbyId) {
+        std::lock_guard<std::mutex> lock(s_steamLobbyMapMutex);
+        auto it = s_steamToCoreLobby.find(steamLobbyId);
+        if (it != s_steamToCoreLobby.end()) return it->second;
+        return "";
+    }
+
     struct DiscoveredPeer {
         uint64_t steamID;
         std::string personaName;
@@ -603,19 +635,7 @@ namespace UnrealSteamEmu {
         if (addr->sa_family == AF_INET) {
             const sockaddr_in* sin = reinterpret_cast<const sockaddr_in*>(addr);
             uint32_t ip = ntohl(sin->sin_addr.s_addr);
-            if ((ip >= 0x0A000000 && ip <= 0x0AFFFFFF) || // 10.0.0.0/8 (RFC 1918)
-                (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) || // 172.16.0.0/12 (RFC 1918)
-                (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) || // 192.168.0.0/16 (RFC 1918)
-                (ip >= 0xA9FE0000 && ip <= 0xA9FEFFFF) || // 169.254.0.0/16 (APIPA/Link-Local)
-                (ip >= 0x7F000000 && ip <= 0x7FFFFFFF) || // 127.0.0.0/8 (Loopback)
-                (ip >= 0xE0000000 && ip <= 0xE00000FF) || // Multicast: Link-Local Control Block 224.0.0.0/24 (RFC 5771, TTL=1, LAN only)
-                (ip >= 0xEF000000 && ip <= 0xEFFFFFFF) || // Multicast: Administratively Scoped / Org-Local 239.0.0.0/8 (RFC 2365, private LAN)
-                (ip == 0xFFFFFFFF))                       // Limited Broadcast 255.255.255.255 (Discovery only)
-            {
-                return true;
-            }
-            // Note: 224.0.1.0 - 238.255.255.255 are globally routable Internet multicast and are strictly BLOCKED (BLOCKER 7)
-            return false;
+            return refix::lan::LanFirewall::Get().IsAllowedIpv4(ip);
         } else if (addr->sa_family == AF_INET6) {
             // BLOCKER 8: AF_INET6 audit - The ReFix LAN transport currently uses AF_INET sockets exclusively.
             // IPv6 transport is UNVERIFIED / unsupported at Phase 3.6. Disallowed to prevent false claims.
@@ -1480,6 +1500,7 @@ namespace UnrealSteamEmu {
         RecordCall();
         if (!g_bInitialized) return;
 
+        refix::lan::ILanCore::Get().Tick();
         PollNetwork();
 
         auto now = std::chrono::steady_clock::now();
@@ -1577,6 +1598,7 @@ namespace UnrealSteamEmu {
     void GameServer_RunCallbacks() {
         if (!g_bInitialized) return;
 
+        refix::lan::ILanCore::Get().Tick();
         PollNetwork();
         auto now = std::chrono::steady_clock::now();
 
@@ -2174,7 +2196,24 @@ namespace UnrealSteamEmu {
         virtual bool RemoveFavoriteGame(AppId_t nAppID, uint32 nIP, uint16 nConnPort, uint16 nQueryPort, uint32 unFlags) override { return false; }
 
         virtual SteamAPICall_t RequestLobbyList() override {
-            BroadcastNetPacket(3, nullptr, 0); // Query lobbies on LAN
+            refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
+            refix::lan::ILanCore::Get().Discovery().BroadcastQuery();
+            BroadcastNetPacket(3, nullptr, 0); // Query lobbies on LAN (legacy fallback)
+
+            // Sync all known lobbies from LanCore into g_lobbies
+            auto all = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                for (const auto& rec : all) {
+                    uint64_t sId = EnsureSteamLobbyID(rec.lobbyId);
+                    LobbyInfo& lob = g_lobbies[sId];
+                    lob.id = sId;
+                    lob.maxMembers = rec.maxMembers;
+                    lob.joinable = rec.joinable;
+                    lob.lastSeen = std::chrono::steady_clock::now();
+                    for (const auto& [k, v] : rec.attributes) lob.data[k] = v.asString;
+                }
+            }
 
             LobbyMatchList_t resp = {};
             resp.m_nLobbiesMatching = (uint32_t)g_lobbies.size();
@@ -2191,7 +2230,11 @@ namespace UnrealSteamEmu {
         virtual void AddRequestLobbyListCompatibleMembersFilter(CSteamID steamIDLobby) override {}
 
         virtual SteamAPICall_t CreateLobby(ELobbyType eLobbyType, int cMaxMembers) override {
+            std::string coreLobbyId = refix::lan::ILanCore::Get().Lobby().CreateLobby(
+                cMaxMembers, refix::lan::LobbyPermissionLevel::PublicAdvertised);
+
             uint64_t lID = 0x1860000000000000ULL | (uint64_t)(g_localSteamID & 0xFFFFFFFF) | ((uint64_t)(::time(NULL) & 0xFFFF) << 32);
+            EnsureSteamLobbyID(coreLobbyId, lID);
             g_activeLobbyID.store(lID);
 
             LobbyInfo lob = {};
@@ -2202,9 +2245,12 @@ namespace UnrealSteamEmu {
             lob.joinable = true;
             lob.members.push_back(g_localSteamID);
             lob.lastSeen = std::chrono::steady_clock::now();
-            g_lobbies[lID] = lob;
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                g_lobbies[lID] = lob;
+            }
 
-            // Announce on LAN
+            // Announce on LAN (legacy compatibility)
             std::stringstream ss;
             ss << lID << " " << g_localSteamID << " " << cMaxMembers << " " << g_personaName;
             std::string meta = ss.str();
@@ -2223,7 +2269,8 @@ namespace UnrealSteamEmu {
             cbResp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseSuccess;
             PostCallback(LobbyEnter_t::k_iCallback, &cbResp, sizeof(cbResp));
 
-            ReFixLog("[UnrealSteam] CreateLobby: Created Lobby %llu (max=%d, owner=%llu)", lID, cMaxMembers, g_localSteamID);
+            ReFixLog("[UnrealSteam] CreateLobby: Created Lobby %llu (coreId='%s', max=%d, owner=%llu)",
+                     lID, coreLobbyId.c_str(), cMaxMembers, g_localSteamID);
             return hCall;
         }
 
@@ -2231,10 +2278,18 @@ namespace UnrealSteamEmu {
             uint64_t lID = steamIDLobby.ConvertToUint64();
             g_activeLobbyID.store(lID);
 
-            LobbyInfo& lob = g_lobbies[lID];
-            lob.id = lID;
-            if (std::find(lob.members.begin(), lob.members.end(), g_localSteamID) == lob.members.end()) {
-                lob.members.push_back(g_localSteamID);
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                refix::lan::ILanCore::Get().Lobby().RequestJoin(coreLobbyId);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                LobbyInfo& lob = g_lobbies[lID];
+                lob.id = lID;
+                if (std::find(lob.members.begin(), lob.members.end(), g_localSteamID) == lob.members.end()) {
+                    lob.members.push_back(g_localSteamID);
+                }
             }
 
             LobbyEnter_t resp = {};
@@ -2257,10 +2312,17 @@ namespace UnrealSteamEmu {
 
         virtual void LeaveLobby(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
-            auto it = g_lobbies.find(lID);
-            if (it != g_lobbies.end()) {
-                auto mIt = std::find(it->second.members.begin(), it->second.members.end(), g_localSteamID);
-                if (mIt != it->second.members.end()) it->second.members.erase(mIt);
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                refix::lan::ILanCore::Get().Lobby().LeaveLobby(coreLobbyId);
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                if (it != g_lobbies.end()) {
+                    auto mIt = std::find(it->second.members.begin(), it->second.members.end(), g_localSteamID);
+                    if (mIt != it->second.members.end()) it->second.members.erase(mIt);
+                }
             }
             if (g_activeLobbyID.load() == lID) g_activeLobbyID.store(0);
             ReFixLog("[UnrealSteam] LeaveLobby: Left Lobby %llu", lID);
@@ -2284,7 +2346,21 @@ namespace UnrealSteamEmu {
 
         virtual const char *GetLobbyData(CSteamID steamIDLobby, const char *pchKey) override {
             if (!pchKey) return "";
-            auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
+            uint64_t lID = steamIDLobby.ConvertToUint64();
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
+                if (rec) {
+                    auto it = rec->attributes.find(pchKey);
+                    if (it != rec->attributes.end()) {
+                        std::lock_guard<std::mutex> lock(g_emuMutex);
+                        g_lobbies[lID].data[pchKey] = it->second.asString;
+                        return g_lobbies[lID].data[pchKey].c_str();
+                    }
+                }
+            }
+            std::lock_guard<std::mutex> lock(g_emuMutex);
+            auto it = g_lobbies.find(lID);
             if (it != g_lobbies.end()) {
                 auto dIt = it->second.data.find(pchKey);
                 if (dIt != it->second.data.end()) return dIt->second.c_str();
@@ -2295,10 +2371,22 @@ namespace UnrealSteamEmu {
         virtual bool SetLobbyData(CSteamID steamIDLobby, const char *pchKey, const char *pchValue) override {
             if (!pchKey) return false;
             uint64_t lID = steamIDLobby.ConvertToUint64();
-            LobbyInfo& lob = g_lobbies[lID];
-            lob.id = lID;
-            if (pchValue) lob.data[pchKey] = pchValue;
-            else lob.data.erase(pchKey);
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                if (pchValue) {
+                    refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, pchKey, refix::lan::AttributeValue(std::string(pchValue)));
+                } else {
+                    refix::lan::ILanCore::Get().Lobby().DeleteLobbyData(coreLobbyId, pchKey);
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                LobbyInfo& lob = g_lobbies[lID];
+                lob.id = lID;
+                if (pchValue) lob.data[pchKey] = pchValue;
+                else lob.data.erase(pchKey);
+            }
 
             LobbyDataUpdate_t resp = {};
             resp.m_ulSteamIDLobby = lID;
@@ -2307,14 +2395,18 @@ namespace UnrealSteamEmu {
             PostCallback(LobbyDataUpdate_t::k_iCallback, &resp, sizeof(resp));
 
             // Sync metadata to LAN if host (FIND-07)
-            if (lob.owner == g_localSteamID) {
-                std::stringstream ss;
-                ss << lID << " " << lob.owner << " " << lob.maxMembers << " " << g_personaName;
-                for (const auto& kv : lob.data) {
-                    ss << "\n" << kv.first << "=" << kv.second;
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                if (it != g_lobbies.end() && it->second.owner == g_localSteamID) {
+                    std::stringstream ss;
+                    ss << lID << " " << it->second.owner << " " << it->second.maxMembers << " " << g_personaName;
+                    for (const auto& kv : it->second.data) {
+                        ss << "\n" << kv.first << "=" << kv.second;
+                    }
+                    std::string meta = ss.str();
+                    BroadcastNetPacket(2, meta.c_str(), meta.size());
                 }
-                std::string meta = ss.str();
-                BroadcastNetPacket(2, meta.c_str(), meta.size());
             }
 
             ReFixLog("[UnrealSteam] SetLobbyData: Lobby %llu, '%s' = '%s'", lID, pchKey, pchValue ? pchValue : "");
@@ -2717,6 +2809,22 @@ namespace UnrealSteamEmu {
     public:
         virtual bool SendP2PPacket(CSteamID steamIDRemote, const void *pubData, uint32 cubData, EP2PSend eP2PSendType, int nChannel = 0) override {
             if (!pubData || cubData == 0) return false;
+
+            // Route through ReFix Universal LAN Core if remote peer is registered
+            auto peerId = refix::lan::ILanCore::Get().Peers().FindBySteamId(steamIDRemote.ConvertToUint64());
+            if (peerId.has_value()) {
+                auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*peerId);
+                if (pInfo.has_value() && pInfo->endpoint.IsValid()) {
+                    bool reliable = (eP2PSendType == k_EP2PSendReliable || eP2PSendType == k_EP2PSendReliableWithBuffering);
+                    if (reliable) {
+                        return refix::lan::ILanCore::Get().Transport().SendReliable(*peerId, pInfo->endpoint, (uint8_t)nChannel, pubData, cubData);
+                    } else {
+                        return refix::lan::ILanCore::Get().Transport().SendUnreliable(pInfo->endpoint, (uint8_t)nChannel, pubData, cubData);
+                    }
+                }
+            }
+
+            // Fallback path: legacy SendLanPacket / BroadcastNetPacket
             std::vector<uint8_t> payload(4 + cubData);
             *(int*)payload.data() = nChannel;
             memcpy(payload.data() + 4, pubData, cubData);
@@ -4419,6 +4527,137 @@ namespace UnrealSteamEmu {
         LoadConfig();
         InitSockets();
 
+        // 1. Initialize ReFix Universal LAN Core
+        refix::lan::ILanCore& core = refix::lan::ILanCore::Get();
+        core.Initialize("Steam_" + std::to_string(g_appID), 47584);
+        core.Identity().SetDisplayName(g_personaName);
+
+        // Bind local SteamID
+        refix::lan::PeerId localPeer = core.Identity().GetLocalPeerId();
+        refix::lan::ExternalId ext;
+        ext.platform = refix::lan::ExternalPlatform::Steam;
+        ext.numericId = g_localSteamID;
+        ext.stringId = std::to_string(g_localSteamID);
+
+        refix::lan::PeerInfo selfInfo;
+        selfInfo.peerId = localPeer;
+        selfInfo.displayName = g_personaName;
+        selfInfo.endpoint = core.Transport().GetLocalDataEndpoint();
+        selfInfo.externalId = ext;
+        selfInfo.state = refix::lan::PeerTransportState::Connected;
+        core.Peers().RegisterOrUpdatePeer(selfInfo);
+        core.Peers().BindExternalId(localPeer, ext);
+
+        // Subscribe to LanCore events
+        core.Callbacks().Subscribe(refix::lan::LanEvent::Type::PeerDiscovered, [](const refix::lan::LanEvent& ev) {
+            auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
+            if (pInfo && pInfo->externalId.platform == refix::lan::ExternalPlatform::Steam && pInfo->externalId.numericId != 0) {
+                uint64_t sid = pInfo->externalId.numericId;
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                auto it = g_peers.find(sid);
+                if (it != g_peers.end()) {
+                    it->second.personaName = pInfo->displayName;
+                }
+                ReFixLog("[UnrealSteam] LanCore PeerDiscovered: steamID=%llu (%s) at %s",
+                         sid, pInfo->displayName.c_str(), pInfo->endpoint.ToString().c_str());
+            }
+        });
+
+        core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyCreated, [](const refix::lan::LanEvent& ev) {
+            uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            ReFixLog("[UnrealSteam] LanCore LobbyCreated: coreId='%s' -> steamID=%llu", ev.lobbyId.c_str(), steamLobbyId);
+        });
+
+        core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyUpdated, [](const refix::lan::LanEvent& ev) {
+            auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(ev.lobbyId);
+            if (!rec) return;
+
+            uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                LobbyInfo& lob = g_lobbies[steamLobbyId];
+                lob.id = steamLobbyId;
+                lob.maxMembers = rec->maxMembers;
+                lob.joinable = rec->joinable;
+                lob.lastSeen = std::chrono::steady_clock::now();
+
+                auto ownerInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(rec->ownerPeerId);
+                if (ownerInfo && ownerInfo->externalId.numericId != 0) {
+                    lob.owner = ownerInfo->externalId.numericId;
+                }
+
+                lob.members.clear();
+                for (const auto& m : rec->members) {
+                    auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(m.peerId);
+                    if (mInfo && mInfo->externalId.numericId != 0) {
+                        lob.members.push_back(mInfo->externalId.numericId);
+                    }
+                }
+
+                for (const auto& [k, v] : rec->attributes) {
+                    lob.data[k] = v.asString;
+                }
+            }
+
+            LobbyDataUpdate_t dataUpd = {};
+            dataUpd.m_ulSteamIDLobby = steamLobbyId;
+            dataUpd.m_ulSteamIDMember = steamLobbyId;
+            dataUpd.m_bSuccess = 1;
+            PostCallback(LobbyDataUpdate_t::k_iCallback, &dataUpd, sizeof(dataUpd));
+        });
+
+        core.Callbacks().Subscribe(refix::lan::LanEvent::Type::MemberJoined, [](const refix::lan::LanEvent& ev) {
+            uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            uint64_t memberSteamId = 0;
+            auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
+            if (mInfo && mInfo->externalId.numericId != 0) memberSteamId = mInfo->externalId.numericId;
+
+            if (memberSteamId != 0) {
+                LobbyChatUpdate_t cu = {};
+                cu.m_ulSteamIDLobby = steamLobbyId;
+                cu.m_ulSteamIDUserChanged = memberSteamId;
+                cu.m_ulSteamIDMakingChange = memberSteamId;
+                cu.m_rgfChatMemberStateChange = 0x0001; // k_EChatMemberStateChangeEntered
+                PostCallback(LobbyChatUpdate_t::k_iCallback, &cu, sizeof(cu));
+            }
+        });
+
+        core.Callbacks().Subscribe(refix::lan::LanEvent::Type::MemberLeft, [](const refix::lan::LanEvent& ev) {
+            uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            uint64_t memberSteamId = 0;
+            auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
+            if (mInfo && mInfo->externalId.numericId != 0) memberSteamId = mInfo->externalId.numericId;
+
+            if (memberSteamId != 0) {
+                LobbyChatUpdate_t cu = {};
+                cu.m_ulSteamIDLobby = steamLobbyId;
+                cu.m_ulSteamIDUserChanged = memberSteamId;
+                cu.m_ulSteamIDMakingChange = memberSteamId;
+                cu.m_rgfChatMemberStateChange = (ev.leaveReason == refix::lan::MemberLeaveReason::Kicked) ? 0x0008 : 0x0002;
+                PostCallback(LobbyChatUpdate_t::k_iCallback, &cu, sizeof(cu));
+            }
+        });
+
+        core.Callbacks().Subscribe(refix::lan::LanEvent::Type::DataPacketReceived, [](const refix::lan::LanEvent& ev) {
+            uint64_t senderSteamId = 0;
+            auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
+            if (pInfo && pInfo->externalId.numericId != 0) {
+                senderSteamId = pInfo->externalId.numericId;
+            } else {
+                senderSteamId = ev.peerId.low != 0 ? ev.peerId.low : ev.peerId.high;
+            }
+
+            P2PPacket pkt;
+            pkt.senderID = senderSteamId;
+            pkt.channel = ev.channel;
+            pkt.data = ev.payload;
+
+            std::lock_guard<std::mutex> lock(g_emuMutex);
+            g_p2pIncoming[ev.channel].push(pkt);
+            ReFixLog("[UnrealSteam] LanCore DataPacketReceived: channel=%u sender=%llu bytes=%zu",
+                     ev.channel, senderSteamId, ev.payload.size());
+        });
+
         g_contextCounter.fetch_add(1);
 
         // Queue SteamServersConnected_t on startup (outside state lock)
@@ -4438,6 +4677,8 @@ namespace UnrealSteamEmu {
     }
 
     void Shutdown() {
+        refix::lan::ILanCore::Get().Shutdown();
+
         std::lock_guard<std::mutex> lock(g_emuMutex);
         if (!g_bInitialized) return;
 

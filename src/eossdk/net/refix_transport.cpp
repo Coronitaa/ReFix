@@ -180,6 +180,10 @@ bool Transport::SendToGroup(const void* data, size_t len) {
     if (!m_running) return false;
 
     auto blast = [&](uint32_t addr) {
+        if (!refix::lan::LanFirewall::Get().IsAllowedIpv4(ntohl(addr))) {
+            refix::lan::LanFirewall::Get().RecordBlockedEgress();
+            return false;
+        }
         sockaddr_in a{};
         a.sin_family = AF_INET;
         a.sin_addr.s_addr = addr;

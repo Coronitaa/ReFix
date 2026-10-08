@@ -72,6 +72,8 @@ typedef int (WSAAPI* fn_select_t)(int nfds, fd_set* readfds, fd_set* writefds,
     fd_set* exceptfds, const struct timeval* timeout);
 typedef int (WSAAPI* fn_bind_t)(SOCKET s, const struct sockaddr* name, int namelen);
 typedef int (WSAAPI* fn_closesocket_t)(SOCKET s);
+typedef int (WSAAPI* fn_send_t)(SOCKET s, const char* buf, int len, int flags);
+typedef int (WSAAPI* fn_recv_t)(SOCKET s, char* buf, int len, int flags);
 
 static fn_sendto_t      g_orig_sendto      = nullptr;
 static fn_recvfrom_t    g_orig_recvfrom    = nullptr;
@@ -79,6 +81,8 @@ static fn_connect_t     g_orig_connect     = nullptr;
 static fn_select_t      g_orig_select      = nullptr;
 static fn_bind_t        g_orig_bind        = nullptr;
 static fn_closesocket_t g_orig_closesocket = nullptr;
+static fn_send_t        g_orig_send        = nullptr;
+static fn_recv_t        g_orig_recv        = nullptr;
 
 extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort);
 
@@ -539,8 +543,13 @@ void SteamP2PHook::FlushHoldBuffer() {
             SteamP2PHook::Log("[HoldBuffer] TTL expired (%u ms) for packet destined to port %u -> releasing to raw Winsock",
                 k_holdBufferTtlMs, it->destPort);
             if (g_orig_sendto && it->s != INVALID_SOCKET) {
-                g_orig_sendto(it->s, (const char*)it->data.data(), (int)it->data.size(), it->flags,
-                    (const sockaddr*)&it->destAddr, sizeof(it->destAddr));
+                if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() &&
+                    !IsAllowedLanEndpoint((const sockaddr*)&it->destAddr)) {
+                    refix::lan::LanFirewall::Get().RecordBlockedEgress();
+                } else {
+                    g_orig_sendto(it->s, (const char*)it->data.data(), (int)it->data.size(), it->flags,
+                        (const sockaddr*)&it->destAddr, sizeof(it->destAddr));
+                }
             }
             it = g_holdBuffer.erase(it);
         } else {
@@ -650,6 +659,15 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen)
 {
+    sockaddr_storage connectedPeer{};
+    int peerLen = sizeof(connectedPeer);
+    if (!to && s != INVALID_SOCKET) {
+        if (getpeername(s, (sockaddr*)&connectedPeer, &peerLen) == 0) {
+            to = (const sockaddr*)&connectedPeer;
+            tolen = peerLen;
+        }
+    }
+
     if (to && to->sa_family == AF_INET && len > 0) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(to);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
@@ -700,6 +718,12 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
             return SOCKET_ERROR;
         }
 
+        // Enforce Internet-Zero BEFORE buffering into Pre-Lobby Hold Buffer
+        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to)) {
+            refix::lan::LanFirewall::Get().RecordBlockedEgress();
+            return len; // Synthetic success: drop packet under Internet-Zero
+        }
+
         // If no peer is known yet, but it's a Game or Voice port, buffer in Pre-Lobby Hold Buffer (V-02)
         // for P2P correlation. Returns len immediately to eliminate double-send.
         // FlushHoldBuffer will dispatch via P2P on correlation, or release to Winsock on TTL expiration.
@@ -729,6 +753,17 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         }
     }
     return g_orig_sendto(s, buf, len, flags, to, tolen);
+}
+
+// ------ send -----------------------------------------------------------------
+static int WSAAPI Hook_send(SOCKET s, const char* buf, int len, int flags) {
+    sockaddr_storage peerAddr{};
+    int peerLen = sizeof(peerAddr);
+    if (getpeername(s, (sockaddr*)&peerAddr, &peerLen) == 0) {
+        return Hook_sendto(s, buf, len, flags, (const sockaddr*)&peerAddr, peerLen);
+    }
+    if (g_orig_send) return g_orig_send(s, buf, len, flags);
+    return SOCKET_ERROR;
 }
 
 // ------ recvfrom -------------------------------------------------------------
@@ -833,6 +868,11 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
 
     // Fall through to real Winsock for raw packets
     return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
+}
+
+// ------ recv -----------------------------------------------------------------
+static int WSAAPI Hook_recv(SOCKET s, char* buf, int len, int flags) {
+    return Hook_recvfrom(s, buf, len, flags, nullptr, nullptr);
 }
 
 // ------ connect --------------------------------------------------------------
@@ -1086,6 +1126,22 @@ void Install(void* hSteamOriginal) {
         if (MH_CreateHook(target, (void*)Hook_closesocket, (void**)&g_orig_closesocket) == MH_OK)
             MH_EnableHook(target);
         Log("closesocket hook: %s", g_orig_closesocket ? "OK" : "FAIL");
+    }
+
+    // Hook send
+    {
+        void* target = GetProcAddress(hWs2, "send");
+        if (MH_CreateHook(target, (void*)Hook_send, (void**)&g_orig_send) == MH_OK)
+            MH_EnableHook(target);
+        Log("send hook: %s", g_orig_send ? "OK" : "FAIL");
+    }
+
+    // Hook recv
+    {
+        void* target = GetProcAddress(hWs2, "recv");
+        if (MH_CreateHook(target, (void*)Hook_recv, (void**)&g_orig_recv) == MH_OK)
+            MH_EnableHook(target);
+        Log("recv hook: %s", g_orig_recv ? "OK" : "FAIL");
     }
 
     g_hooksInstalled = true;

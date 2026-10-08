@@ -54,7 +54,11 @@ public:
 
     // Transmission APIs
     bool BroadcastDiscovery(const void* data, size_t len, uint16_t targetPort = 0);
+    bool BroadcastDiscoveryQuery(const void* data, size_t len, uint16_t targetPort = 0);
+    bool BroadcastLobbyAnnouncement(const void* data, size_t len, uint16_t targetPort = 0);
+    bool BroadcastLobbyQuery(const void* data, size_t len, uint16_t targetPort = 0);
     bool SendDiscoveryResponse(const LanEndpoint& target, const void* data, size_t len);
+    bool SendDiscoveryPacket(MsgType type, const LanEndpoint& target, const void* data, size_t len);
 
     bool SendUnreliable(const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
     bool SendReliable(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
@@ -99,6 +103,7 @@ private:
     void ProcessReliableAck(PeerReliabilityState& state, uint32_t ackSeq, uint32_t sackMask);
     void SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask);
     void CheckRetransmissionsAndTimeouts();
+    bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);
 
     std::atomic<bool> m_running{false};
     uint16_t m_discoveryPort = 47584;

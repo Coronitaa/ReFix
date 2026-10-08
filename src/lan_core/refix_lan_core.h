@@ -215,6 +215,7 @@ struct LanEvent {
     PeerId peerId;
     std::string lobbyId;
     MemberLeaveReason leaveReason = MemberLeaveReason::LeftGracefully;
+    uint8_t channel = 0;
     std::vector<uint8_t> payload;
 };
 

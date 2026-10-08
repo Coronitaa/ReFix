@@ -89,3 +89,8 @@ echo [*] Building test_refix_lan_core.exe (Universal LAN Core and Transport test
 cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Fobuild\ tests\test_refix_lan_core.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp /Febin\test_refix_lan_core.exe ws2_32.lib advapi32.lib
 if %ERRORLEVEL% neq 0 ( echo [!] Error building test_refix_lan_core.exe & exit /b 1 )
 echo [OK] test_refix_lan_core.exe built and placed in bin\
+
+echo [*] Building test_steam_lancore_adapter.exe (Steamworks to LanCore Adapter tester)...
+cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_steam_lancore_adapter.cpp /Febin\test_steam_lancore_adapter.exe user32.lib
+if %ERRORLEVEL% neq 0 ( echo [!] Error building test_steam_lancore_adapter.exe & exit /b 1 )
+echo [OK] test_steam_lancore_adapter.exe built and placed in bin\

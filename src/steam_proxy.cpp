@@ -31,6 +31,7 @@
 #include "steam_network_compat.h"
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
+#include "lan_core/refix_lan_core.h"
 
 #define STEAM_FORWARD_COUNT 1141
 
@@ -3756,6 +3757,10 @@ extern "C" void ReFix_NotifyLobbyMemberChange(uint64_t lobbyID) {
         if (lobbyID != g_activeLobbyID) g_activeLobbyID = lobbyID;
         UpdateP2PPeers(lobbyID);
     }
+}
+
+extern "C" __declspec(dllexport) void* ReFix_GetLanCore() {
+    return &refix::lan::ILanCore::Get();
 }
 
 extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort) {
