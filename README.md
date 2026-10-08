@@ -28,31 +28,6 @@ Whether you want to play online with friends over Steam (using Spacewar AppID 48
 | **Clean Zero-Trace Uninstaller & Game Restorer** | ✅ **Yes (1-Click)** | ❌ No | ❌ No | ❌ No | ❌ No |
 | **Digitally Signed Binaries** | ✅ **Yes (BlueStar Developers)** | ❌ No | ❌ No | ❌ No | ❌ No |
 
----
-
-## 🔥 What's New in v1.3.3 (The Good Stuff)
-
-* **Universal AutoDeploy Path Robustness:**  
-  * Fixed CMD delayed expansion stripping exclamation marks `!` from folder paths (resolving issues on titles like *BOMBANANA!*).
-  * Enforced PowerShell literal path binding (`-LiteralPath`) across all helper scripts, adding native support for folder paths containing `!`, `&`, `()`, `[]`, `^`, `%`, and Unicode characters.
-  * AutoDeploy now safely deploys to any standard or unconventional Windows folder path without requiring game renaming or relocation.
-
-* **Physical Post-Deployment Verification & Strict Error Handling:**  
-  * Added mandatory post-deployment verification checks: target paths, game executables, architecture, proxy DLLs, configuration files, and backup integrity are physically validated on disk.
-  * Strict failure detection: Any failure in copying core binaries or writing configs immediately halts execution and returns a non-zero exit code (`exit 1`), eliminating false-positive success reports.
-
-* **Steamworks SDK 1.60+ & Extended Export Table (1,141 Exports):**  
-  * Expanded export coverage from 1,096 to 1,141 exports across DEF, MASM, C++ stubs, and PE export tables.
-  * Added missing forwarders for modern Steamworks SDK 1.58–1.60 interfaces (including `SteamAPI_SteamUGC_v020`), resolving `SteamAPI_Init` failures in newly released games.
-
-* **Nested Executable & Ancestor Config Discovery:**  
-  * Implemented recursive ancestor directory lookup for `ReFix.ini` and configuration files (e.g. `..\ReFix.ini`), resolving initialization and AppID detection issues in games with deeply nested subfolder structures (such as `Game\Game\Game.exe`).
-
-* **Battle-Tested Networking & Zero Regressions:**  
-  * Preserved rock-solid multiplayer functionality across SteamNetworkingSockets / SDR, Facepunch.Steamworks, Epic Online Services (EOS / RedboneEOS), Mirror, and Godot (*Lethal Company*, *Meccha Chameleon*, *Machine Party*, *Shift at Midnight*, *BOMBANANA!*, *How to Fish*).
-
-* **Digitally Signed Binaries:**  
-  * Every release binary (`steam_api64.dll`, `winmm.dll`, `EOSSDK-Win64-Shipping.dll`, `RedboneEOS.dll`, `ReFixSync.dll`) is digitally signed with the official **Corøna (BlueStar Developers)** Authenticode certificate. This keeps Windows Defender and other security software from flagging false positives.
 
 ---
 
