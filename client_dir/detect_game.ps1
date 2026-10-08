@@ -1,10 +1,19 @@
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$TargetDir
+    [Parameter(Mandatory=$false)]
+    [string]$TargetDir = ""
 )
 
-$target = $TargetDir.TrimEnd('\').Trim('"')
-if (-not (Test-Path $target)) {
+if (-not $TargetDir -and $env:REFIX_TARGET_DIR) {
+    $TargetDir = $env:REFIX_TARGET_DIR
+}
+
+if (-not $TargetDir) {
+    Write-Output "ERROR=Target directory parameter is missing"
+    exit 1
+}
+
+$target = $TargetDir.Trim().Trim('"').TrimEnd('\').TrimEnd('/')
+if (-not (Test-Path -LiteralPath $target)) {
     Write-Output "ERROR=Directory not found: $target"
     exit 1
 }
@@ -27,33 +36,33 @@ $deprioritizePatterns = @(
 $engineType = "Native"
 
 # Unity detection
-$unityData = Get-ChildItem -Path $target -Directory -Filter "*_Data" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-$unityDll = Get-ChildItem -Path $target -File -Filter "UnityPlayer.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+$unityData = Get-ChildItem -LiteralPath $target -Directory -Filter "*_Data" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+$unityDll = Get-ChildItem -LiteralPath $target -File -Filter "UnityPlayer.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($unityData -or $unityDll) {
     $engineType = "Unity"
 }
 
 # Unreal detection
-if (Test-Path (Join-Path $target "Engine")) {
+if (Test-Path -LiteralPath (Join-Path $target "Engine")) {
     $engineType = "Unreal"
 }
-$unrealShipping = Get-ChildItem -Path $target -File -Filter "*-Win64-Shipping.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+$unrealShipping = Get-ChildItem -LiteralPath $target -File -Filter "*-Win64-Shipping.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($unrealShipping) {
     $engineType = "Unreal"
 }
 
 # Godot detection
-$pck = Get-ChildItem -Path $target -Filter "*.pck" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-$godotDll = Get-ChildItem -Path $target -Filter "libgodot*.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+$pck = Get-ChildItem -LiteralPath $target -Filter "*.pck" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+$godotDll = Get-ChildItem -LiteralPath $target -Filter "libgodot*.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($pck -or $godotDll) {
     $engineType = "Godot"
 }
 
 # 2. Find all steam_api64.dll or steam_api.dll locations
-$steamDlls = Get-ChildItem -Path $target -Filter "steam_api*.dll" -Recurse -File -ErrorAction SilentlyContinue |
+$steamDlls = Get-ChildItem -LiteralPath $target -Filter "steam_api*.dll" -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -notlike "*valve*" -and $_.Name -notlike "*goldberg*" -and $_.Name -notlike "*_o.dll*" }
 
-$allExes = Get-ChildItem -Path $target -Filter "*.exe" -Recurse -File -ErrorAction SilentlyContinue
+$allExes = Get-ChildItem -LiteralPath $target -Filter "*.exe" -Recurse -File -ErrorAction SilentlyContinue
 $validExes = @()
 
 foreach ($e in $allExes) {
@@ -69,7 +78,7 @@ foreach ($e in $allExes) {
 # Score executables to find the primary game executable:
 # Higher score = higher priority
 $scoredExes = @()
-$targetFolderItem = Get-Item $target
+$targetFolderItem = Get-Item -LiteralPath $target
 $targetFolderName = $targetFolderItem.Name.ToLower().Replace(" ", "").Replace("'", "").Replace("-", "").Replace("_", "")
 
 foreach ($exe in $validExes) {
@@ -110,7 +119,7 @@ foreach ($exe in $validExes) {
     }
 
     # Bonus if steam_api64.dll or steam_api.dll is in the same directory
-    if ((Test-Path (Join-Path $exe.DirectoryName "steam_api64.dll")) -or (Test-Path (Join-Path $exe.DirectoryName "steam_api.dll"))) {
+    if ((Test-Path -LiteralPath (Join-Path $exe.DirectoryName "steam_api64.dll")) -or (Test-Path -LiteralPath (Join-Path $exe.DirectoryName "steam_api.dll"))) {
         $score += 60
     }
 
@@ -120,14 +129,14 @@ foreach ($exe in $validExes) {
     }
 }
 
-$sortedExes = $scoredExes | Sort-Object -Property Score -Descending
+$sortedExes = @($scoredExes | Sort-Object -Property Score -Descending)
 
 $chosenExe = if ($sortedExes.Count -gt 0) { $sortedExes[0].Exe } else { $null }
 
 # Determine EXE_DIR and GAME_NAME
 $exeDir = $target
 $gameExePath = ""
-$gameName = (Get-Item $target).Name
+$gameName = (Get-Item -LiteralPath $target).Name
 
 if ($chosenExe) {
     $gameExePath = $chosenExe.FullName
@@ -152,9 +161,9 @@ if ($gameName -like "*_Windows") {
 $detectedAppId = ""
 
 # A. Scan for steam_appid.txt
-$appIdFiles = Get-ChildItem -Path $target -Filter "steam_appid.txt" -Recurse -File -ErrorAction SilentlyContinue
+$appIdFiles = Get-ChildItem -LiteralPath $target -Filter "steam_appid.txt" -Recurse -File -ErrorAction SilentlyContinue
 foreach ($f in $appIdFiles) {
-    $content = (Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue)
+    $content = (Get-Content -LiteralPath $f.FullName -Raw -ErrorAction SilentlyContinue)
     if ($content -match "([0-9]{3,9})") {
         $found = $Matches[1].Trim()
         if ($found -ne "480" -or -not $detectedAppId) {
@@ -166,9 +175,9 @@ foreach ($f in $appIdFiles) {
 
 # B. Scan for ReFix.ini RealAppId
 if (-not $detectedAppId -or $detectedAppId -eq "480") {
-    $reFixInis = Get-ChildItem -Path $target -Filter "ReFix.ini" -Recurse -File -ErrorAction SilentlyContinue
+    $reFixInis = Get-ChildItem -LiteralPath $target -Filter "ReFix.ini" -Recurse -File -ErrorAction SilentlyContinue
     foreach ($ini in $reFixInis) {
-        $lines = Get-Content $ini.FullName -ErrorAction SilentlyContinue
+        $lines = Get-Content -LiteralPath $ini.FullName -ErrorAction SilentlyContinue
         foreach ($line in $lines) {
             if ($line -match "^\s*RealAppId\s*=\s*([0-9]+)") {
                 $found = $Matches[1].Trim()
@@ -184,9 +193,9 @@ if (-not $detectedAppId -or $detectedAppId -eq "480") {
 
 # C. Scan for steam_settings\configs.app.ini
 if (-not $detectedAppId -or $detectedAppId -eq "480") {
-    $appInis = Get-ChildItem -Path $target -Filter "configs.app.ini" -Recurse -File -ErrorAction SilentlyContinue
+    $appInis = Get-ChildItem -LiteralPath $target -Filter "configs.app.ini" -Recurse -File -ErrorAction SilentlyContinue
     foreach ($ini in $appInis) {
-        $lines = Get-Content $ini.FullName -ErrorAction SilentlyContinue
+        $lines = Get-Content -LiteralPath $ini.FullName -ErrorAction SilentlyContinue
         foreach ($line in $lines) {
             if ($line -match "^\s*appid\s*=\s*([0-9]+)") {
                 $found = $Matches[1].Trim()
@@ -205,20 +214,20 @@ $hasSteam = $false
 if ($steamDlls.Count -gt 0) { $hasSteam = $true }
 
 $hasEos = $false
-$eosFiles = Get-ChildItem -Path $target -Filter "*EOSSDK*" -Recurse -File -ErrorAction SilentlyContinue
+$eosFiles = Get-ChildItem -LiteralPath $target -Filter "*EOSSDK*" -Recurse -File -ErrorAction SilentlyContinue
 if ($eosFiles.Count -gt 0) { $hasEos = $true }
-$redpointFolders = Get-ChildItem -Path $target -Filter "*Redpoint*" -Recurse -Directory -ErrorAction SilentlyContinue
+$redpointFolders = Get-ChildItem -LiteralPath $target -Filter "*Redpoint*" -Recurse -Directory -ErrorAction SilentlyContinue
 if ($redpointFolders.Count -gt 0) { $hasEos = $true }
 
 # 5. Architecture detection (x86 vs x64)
 # A game is flagged as x86 when it ships steam_api.dll (32-bit) without steam_api64.dll,
 # or when Unity Plugins\x86 subfolder is present.
 $isX86 = $false
-$steamApi32s = Get-ChildItem -Path $target -Filter "steam_api.dll" -Recurse -File -ErrorAction SilentlyContinue |
+$steamApi32s = Get-ChildItem -LiteralPath $target -Filter "steam_api.dll" -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -eq "steam_api.dll" }
-$steamApi64s = Get-ChildItem -Path $target -Filter "steam_api64.dll" -Recurse -File -ErrorAction SilentlyContinue |
+$steamApi64s = Get-ChildItem -LiteralPath $target -Filter "steam_api64.dll" -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -notlike "*valve*" -and $_.Name -notlike "*_o.dll*" }
-$pluginsX86Dirs = Get-ChildItem -Path $target -Directory -Filter "x86" -Recurse -ErrorAction SilentlyContinue |
+$pluginsX86Dirs = Get-ChildItem -LiteralPath $target -Directory -Filter "x86" -Recurse -ErrorAction SilentlyContinue |
     Where-Object { $_.Parent.Name -eq "Plugins" }
 
 if ($steamApi32s.Count -gt 0 -and $steamApi64s.Count -eq 0) { $isX86 = $true }

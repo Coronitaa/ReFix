@@ -9,7 +9,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 
 $commands = @()
 
-if ($GameExe -and (Test-Path $GameExe)) {
+if ($GameExe -and (Test-Path -LiteralPath $GameExe)) {
     $commands += "netsh advfirewall firewall delete rule name=`"ReFix - $GameName (TCP In)`" >nul 2>&1"
     $commands += "netsh advfirewall firewall delete rule name=`"ReFix - $GameName (UDP In)`" >nul 2>&1"
     $commands += "netsh advfirewall firewall delete rule name=`"ReFix - $GameName (TCP Out)`" >nul 2>&1"

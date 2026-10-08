@@ -28,10 +28,11 @@
 #include "unreal_detect.h"
 #include "unreal_steam_emu.h"
 #include "minhook/MinHook.h"
+#include "steam_network_compat.h"
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
 
-#define STEAM_FORWARD_COUNT 1057
+#define STEAM_FORWARD_COUNT 1141
 
 extern "C" {
     __declspec(dllexport) FARPROC g_steamProcs[STEAM_FORWARD_COUNT] = { 0 };
@@ -1094,7 +1095,91 @@ static const char* g_forwardNames[STEAM_FORWARD_COUNT] = {
     "SteamInternal_GameServer_Init",
     "g_pSteamClientGameServer",
     "SteamInternal_SteamAPI_Init",
-    "SteamInternal_GameServer_Init_V2"
+    "SteamInternal_GameServer_Init_V2",
+    "SteamAPI_ISteamGameServer_EnableHeartbeats",
+    "SteamAPI_ISteamGameServer_ForceHeartbeat",
+    "SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate",
+    "SteamAPI_ISteamGameServer_SendUserDisconnect",
+    "SteamAPI_ISteamGameServer_SetHeartbeatInterval",
+    "SteamAPI_ISteamInput_GetGlyphForActionOrigin",
+    "SteamAPI_ISteamInput_TriggerHapticPulse",
+    "SteamAPI_ISteamInput_TriggerRepeatedHapticPulse",
+    "SteamAPI_ISteamNetworkingConnectionCustomSignaling_Release",
+    "SteamAPI_ISteamNetworkingConnectionCustomSignaling_SendSignal",
+    "SteamAPI_ISteamNetworkingCustomSignalingRecvContext_OnConnectRequest",
+    "SteamAPI_ISteamNetworkingCustomSignalingRecvContext_SendRejectionSignal",
+    "SteamAPI_ISteamNetworkingSockets_GetQuickConnectionStatus",
+    "SteamAPI_ISteamNetworkingUtils_GetFirstConfigValue",
+    "SteamAPI_ISteamTV_AddBroadcastGameData",
+    "SteamAPI_ISteamTV_AddRegion",
+    "SteamAPI_ISteamTV_AddTimelineMarker",
+    "SteamAPI_ISteamTV_IsBroadcasting",
+    "SteamAPI_ISteamTV_RemoveBroadcastGameData",
+    "SteamAPI_ISteamTV_RemoveRegion",
+    "SteamAPI_ISteamTV_RemoveTimelineMarker",
+    "SteamAPI_ISteamUser_InitiateGameConnection",
+    "SteamAPI_ISteamUser_TerminateGameConnection",
+    "SteamAPI_ISteamUtils_GetCSERIPPort",
+    "SteamAPI_SteamController_v007",
+    "SteamAPI_SteamGameServerApps_v008",
+    "SteamAPI_SteamGameServerNetworkingSockets_v008",
+    "SteamAPI_SteamGameServerUGC_v014",
+    "SteamAPI_SteamGameServerUtils_v009",
+    "SteamAPI_SteamGameServer_v013",
+    "SteamAPI_SteamInput_v001",
+    "SteamAPI_SteamNetworkingSockets_v008",
+    "SteamAPI_SteamNetworkingUtils_v003",
+    "SteamAPI_SteamRemoteStorage_v014",
+    "SteamAPI_SteamTV_v001",
+    "SteamAPI_SteamUGC_v014",
+    "SteamAPI_SteamUserStats_v011",
+    "SteamAPI_SteamUser_v020",
+    "SteamAPI_SteamUtils_v009",
+    "SteamAPI_ISteamApps_GetBetaInfo",
+    "SteamAPI_ISteamApps_GetNumBetas",
+    "SteamAPI_ISteamApps_SetActiveBeta",
+    "SteamAPI_ISteamApps_SetDlcContext",
+    "SteamAPI_ISteamFriends_BHasEquippedProfileItem",
+    "SteamAPI_ISteamFriends_GetProfileItemPropertyString",
+    "SteamAPI_ISteamFriends_GetProfileItemPropertyUint",
+    "SteamAPI_ISteamFriends_RequestEquippedProfileItems",
+    "SteamAPI_ISteamInput_SetDualSenseTriggerEffect",
+    "SteamAPI_ISteamRemotePlay_BStartRemotePlayTogether",
+    "SteamAPI_ISteamTimeline_AddGamePhaseTag",
+    "SteamAPI_ISteamTimeline_AddInstantaneousTimelineEvent",
+    "SteamAPI_ISteamTimeline_AddRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_ClearTimelineTooltip",
+    "SteamAPI_ISteamTimeline_DoesEventRecordingExist",
+    "SteamAPI_ISteamTimeline_DoesGamePhaseRecordingExist",
+    "SteamAPI_ISteamTimeline_EndGamePhase",
+    "SteamAPI_ISteamTimeline_EndRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_OpenOverlayToGamePhase",
+    "SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent",
+    "SteamAPI_ISteamTimeline_RemoveTimelineEvent",
+    "SteamAPI_ISteamTimeline_SetGamePhaseAttribute",
+    "SteamAPI_ISteamTimeline_SetGamePhaseID",
+    "SteamAPI_ISteamTimeline_SetTimelineGameMode",
+    "SteamAPI_ISteamTimeline_SetTimelineTooltip",
+    "SteamAPI_ISteamTimeline_StartGamePhase",
+    "SteamAPI_ISteamTimeline_StartRangeTimelineEvent",
+    "SteamAPI_ISteamTimeline_UpdateRangeTimelineEvent",
+    "SteamAPI_ISteamUGC_AddContentDescriptor",
+    "SteamAPI_ISteamUGC_GetNumSupportedGameVersions",
+    "SteamAPI_ISteamUGC_GetQueryUGCContentDescriptors",
+    "SteamAPI_ISteamUGC_GetSupportedGameVersionData",
+    "SteamAPI_ISteamUGC_GetUserContentDescriptorPreferences",
+    "SteamAPI_ISteamUGC_RemoveContentDescriptor",
+    "SteamAPI_ISteamUGC_SetAdminQuery",
+    "SteamAPI_ISteamUGC_SetRequiredGameVersions",
+    "SteamAPI_ISteamUtils_DismissGamepadTextInput",
+    "SteamAPI_SteamGameServerUGC_v020",
+    "SteamAPI_SteamGameServer_v015",
+    "SteamAPI_SteamRemotePlay_v002",
+    "SteamAPI_SteamTimeline_v004",
+    "SteamAPI_SteamUGC_v020",
+    "SteamAPI_SteamUserStats_v013",
+    "SteamAPI_SteamUser_v023",
+    "SteamAPI_SteamVideo_v007"
 };
 
 extern "C" HMODULE g_hOriginalDll = nullptr;
@@ -1606,6 +1691,21 @@ static void LoadConfig() {
     DWORD attrib = GetFileAttributesA(ini.c_str());
     if (attrib == INVALID_FILE_ATTRIBUTES) {
         ini = GetProxyDllDir() + "ReFix.ini";
+        attrib = GetFileAttributesA(ini.c_str());
+    }
+    if (attrib == INVALID_FILE_ATTRIBUTES) {
+        std::string cand = GetExeDir() + "..\\ReFix.ini";
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ini = cand;
+            attrib = 0;
+        }
+    }
+    if (attrib == INVALID_FILE_ATTRIBUTES) {
+        std::string cand = GetExeDir() + "..\\..\\ReFix.ini";
+        if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            ini = cand;
+            attrib = 0;
+        }
     }
 
     ReFix::NetworkModeManager::LoadMode(ini);
@@ -4185,6 +4285,34 @@ static bool EnsureOriginal() {
     // (no slot redirect needed — dllexport takes precedence over the .def passthrough)
 
 
+    // Intercept SteamNetworkingSockets APIs for generic networking compatibility (SteamNetCompat)
+    if (ReFix::NetworkModeManager::IsOnline()) {
+        int idxCreateListen = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P");
+        if (idxCreateListen >= 0) {
+            g_steamProcs[idxCreateListen] = (FARPROC)SteamNetCompat::Intercept_CreateListenSocketP2P;
+        }
+        int idxConnectP2P = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_ConnectP2P");
+        if (idxConnectP2P >= 0) {
+            g_steamProcs[idxConnectP2P] = (FARPROC)SteamNetCompat::Intercept_ConnectP2P;
+        }
+        int idxAcceptConn = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_AcceptConnection");
+        if (idxAcceptConn >= 0) {
+            g_steamProcs[idxAcceptConn] = (FARPROC)SteamNetCompat::Intercept_AcceptConnection;
+        }
+        int idxCloseConn = FindSteamExportIndex("SteamAPI_ISteamNetworkingSockets_CloseConnection");
+        if (idxCloseConn >= 0) {
+            g_steamProcs[idxCloseConn] = (FARPROC)SteamNetCompat::Intercept_CloseConnection;
+        }
+        int idxSocketsV8 = FindSteamExportIndex("SteamAPI_SteamNetworkingSockets_v008");
+        if (idxSocketsV8 >= 0) {
+            g_steamProcs[idxSocketsV8] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingSockets_v008;
+        }
+        int idxUtilsV3 = FindSteamExportIndex("SteamAPI_SteamNetworkingUtils_v003");
+        if (idxUtilsV3 >= 0) {
+            g_steamProcs[idxUtilsV3] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingUtils_v003;
+        }
+    }
+
     // Check engine type for Godot-specific behavior
     g_godotIsEngine = (_stricmp(g_config.engineType.c_str(), "Godot") == 0);
     if (g_godotIsEngine) {
@@ -4253,6 +4381,8 @@ static void ReFixInitializePost(bool success) {
     if (!ReFix::NetworkModeManager::IsOnline()) {
         UnrealSteamEmu::Initialize();
         ReFixLog("ReFixInitializePost: UnrealSteamEmu LAN initialized");
+    } else {
+        SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
     }
 
     InstallVTableHooks();
@@ -4608,6 +4738,7 @@ static void SafeBackendShutdown() {
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+    SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);
     SteamP2PHook::Uninstall();
