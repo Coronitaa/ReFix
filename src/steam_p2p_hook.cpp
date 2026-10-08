@@ -730,7 +730,8 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         }
 
         // If no peer is known yet, but it's a Game or Voice port, buffer in Pre-Lobby Hold Buffer (V-02)
-        // for P2P correlation while continuing raw Winsock transmission.
+        // for P2P correlation. Returns len immediately to eliminate double-send.
+        // FlushHoldBuffer will dispatch via P2P on correlation, or release to Winsock on TTL expiration.
         if (service != SocketServiceType::Unknown || IsGamePort(destPort)) {
             std::lock_guard<std::mutex> lg(g_holdBufferMutex);
             if (g_holdBuffer.size() < k_maxHoldBufferSize) {
@@ -744,6 +745,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
                 hpkt.service = (service != SocketServiceType::Unknown) ? service : SocketServiceType::Game;
                 hpkt.timestampMs = GetTickCount();
                 g_holdBuffer.push_back(std::move(hpkt));
+                return len; // Synthetic success: held in buffer
             }
         }
     }
@@ -991,17 +993,25 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
         }
 
         // Successful normal bind
+        uint16_t actualPort = requestedPort;
+        if (actualPort == 0) {
+            struct sockaddr_in boundAddr = {};
+            int boundLen = sizeof(boundAddr);
+            if (getsockname(s, reinterpret_cast<struct sockaddr*>(&boundAddr), &boundLen) == 0) {
+                actualPort = ntohs(boundAddr.sin_port);
+            }
+        }
         {
             std::lock_guard<std::mutex> lg(g_socketMutex);
             auto& ctx = g_socketContexts[s];
             ctx.socket = s;
-            ctx.localPort = requestedPort;
-            ctx.serviceType = (service != SocketServiceType::Unknown) ? service : ClassifyPort(requestedPort);
+            ctx.localPort = actualPort;
+            ctx.serviceType = (service != SocketServiceType::Unknown) ? service : ClassifyPort(actualPort);
             ctx.lastActivity = GetTickCount();
         }
-        if (service == SocketServiceType::Game || service == SocketServiceType::Voice) {
+        if (service == SocketServiceType::Game || service == SocketServiceType::Voice || actualPort != requestedPort) {
             SteamP2PHook::Log("Hook_bind: Socket %llu bound to port %u (Service: %s)",
-                (uint64_t)s, requestedPort, (service == SocketServiceType::Voice) ? "Voice" : "Game");
+                (uint64_t)s, actualPort, (service == SocketServiceType::Voice) ? "Voice" : "Game");
         }
         return 0;
     }

@@ -4599,7 +4599,11 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
     if (s_manualRunFrameLogged++ < 3) {
         ReFixLog("SteamAPI_ManualDispatch_RunFrame called (pipe=%u, frame=%d)", hSteamPipe, s_manualRunFrameLogged);
     }
-    if (g_pfn_ManualDispatch_RunFrame) g_pfn_ManualDispatch_RunFrame(hSteamPipe);
+    if (g_pfn_ManualDispatch_RunFrame) {
+        g_pfn_ManualDispatch_RunFrame(hSteamPipe);
+    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::ManualDispatch_RunFrame(hSteamPipe);
+    }
     DispatchPendingAuthCallbacks();
 }
 
@@ -4645,6 +4649,12 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
             }
             return true;
         }
+    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+        bool res = UnrealSteamEmu::ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
+        if (res) {
+            s_lastManualCallbackWasSynthetic.store(false);
+            return true;
+        }
     }
     if (g_syntheticRelayPending.exchange(false) && pCallbackMsg) {
         s_lastManualCallbackWasSynthetic.store(true);
@@ -4671,6 +4681,8 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(u
     }
     if (g_pfn_ManualDispatch_FreeLastCallback) {
         g_pfn_ManualDispatch_FreeLastCallback(hSteamPipe);
+    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::ManualDispatch_FreeLastCallback(hSteamPipe);
     }
 }
 
@@ -4685,6 +4697,8 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(
     bool res = false;
     if (g_pfn_ManualDispatch_GetAPICallResult) {
         res = g_pfn_ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
+    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+        res = UnrealSteamEmu::ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
     }
     bool bFailedVal = pbFailed ? *pbFailed : false;
     if (iCallbackExpected == 510) { // LobbyMatchList_t

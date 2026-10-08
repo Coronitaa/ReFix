@@ -43,6 +43,8 @@
 #define STEAM_API_NODLL 1
 #include "include/steam/steam_api.h"
 #include "include/steam/isteamfriends017.h"
+#include "include/steam/isteamuser021.h"
+#include "include/steam/isteamgameserver012.h"
 #include "include/steam/isteamnetworkingsockets.h"
 #include "include/steam/isteamnetworkingutils.h"
 #include "include/steam/isteamnetworkingmessages.h"
@@ -573,8 +575,24 @@ namespace UnrealSteamEmu {
             addr.sin_port = htons(g_listenPort);
 
             if (bind(g_udpSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-                ReFixLog("[UnrealSteam] Warning: Could not bind UDP socket to port %u", g_listenPort);
+                // If binding to requested g_listenPort failed, fall back to ephemeral port 0
+                addr.sin_port = 0;
+                if (bind(g_udpSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+                    ReFixLog("[UnrealSteam] Warning: Could not bind UDP socket to port %u or ephemeral", g_listenPort);
+                } else {
+                    sockaddr_in boundAddr = {};
+                    int boundLen = sizeof(boundAddr);
+                    if (getsockname(g_udpSocket, (sockaddr*)&boundAddr, &boundLen) == 0) {
+                        g_listenPort = ntohs(boundAddr.sin_port);
+                        ReFixLog("[UnrealSteam] Bound UDP socket to ephemeral port %u (fallback from collision)", g_listenPort);
+                    }
+                }
             } else {
+                sockaddr_in boundAddr = {};
+                int boundLen = sizeof(boundAddr);
+                if (getsockname(g_udpSocket, (sockaddr*)&boundAddr, &boundLen) == 0) {
+                    g_listenPort = ntohs(boundAddr.sin_port);
+                }
                 ReFixLog("[UnrealSteam] Bound UDP socket to port %u for LAN discovery & P2P", g_listenPort);
             }
         }
@@ -918,21 +936,43 @@ namespace UnrealSteamEmu {
                         } else if (hdr->msgType == 2 && pLen > 0) { // Lobby Announcement
                             std::string meta((char*)payload, pLen);
                             std::stringstream ss(meta);
-                            uint64_t lID = 0, lOwner = 0;
-                            int lMax = 4;
-                            std::string ownerName;
-                            ss >> lID >> lOwner >> lMax;
-                            if (ss >> ownerName && !ownerName.empty()) {
-                                peer.personaName = ownerName;
-                            }
-                            if (lID != 0) {
-                                LobbyInfo& lob = g_lobbies[lID];
-                                lob.id = lID;
-                                lob.owner = lOwner;
-                                lob.maxMembers = lMax;
-                                lob.lastSeen = std::chrono::steady_clock::now();
-                                if (std::find(lob.members.begin(), lob.members.end(), lOwner) == lob.members.end()) {
-                                    lob.members.push_back(lOwner);
+                            std::string firstLine;
+                            if (std::getline(ss, firstLine)) {
+                                std::stringstream fss(firstLine);
+                                uint64_t lID = 0, lOwner = 0;
+                                int lMax = 4;
+                                std::string ownerName;
+                                fss >> lID >> lOwner >> lMax;
+                                if (fss >> ownerName && !ownerName.empty()) {
+                                    peer.personaName = ownerName;
+                                }
+                                if (lID != 0) {
+                                    LobbyInfo& lob = g_lobbies[lID];
+                                    lob.id = lID;
+                                    lob.owner = lOwner;
+                                    lob.maxMembers = lMax;
+                                    lob.lastSeen = std::chrono::steady_clock::now();
+                                    if (std::find(lob.members.begin(), lob.members.end(), lOwner) == lob.members.end()) {
+                                        lob.members.push_back(lOwner);
+                                    }
+                                    std::string line;
+                                    bool hasUpdates = false;
+                                    while (std::getline(ss, line)) {
+                                        size_t eqPos = line.find('=');
+                                        if (eqPos != std::string::npos && eqPos > 0) {
+                                            std::string k = line.substr(0, eqPos);
+                                            std::string v = line.substr(eqPos + 1);
+                                            lob.data[k] = v;
+                                            hasUpdates = true;
+                                        }
+                                    }
+                                    if (hasUpdates) {
+                                        LobbyDataUpdate_t dataUpd = {};
+                                        dataUpd.m_ulSteamIDLobby = lID;
+                                        dataUpd.m_ulSteamIDMember = lID;
+                                        dataUpd.m_bSuccess = 1;
+                                        PostCallback(LobbyDataUpdate_t::k_iCallback, &dataUpd, sizeof(dataUpd));
+                                    }
                                 }
                             }
                         }
@@ -1014,6 +1054,40 @@ namespace UnrealSteamEmu {
                                 rHdr->payloadLen = (uint32_t)reply.size();
                                 memcpy(rBuf.data() + sizeof(NetPacketHeader), reply.data(), reply.size());
                                 sendto(g_udpSocket, (const char*)rBuf.data(), (int)rBuf.size(), 0, (sockaddr*)&replyDest, sizeof(replyDest));
+                            }
+                        }
+                    } else if (hdr->msgType == 3) { // Lobby Query (FIND-06)
+                        uint64_t actLobby = g_activeLobbyID.load();
+                        if (actLobby != 0) {
+                            std::string meta;
+                            {
+                                std::lock_guard<std::mutex> lock(g_emuMutex);
+                                auto it = g_lobbies.find(actLobby);
+                                if (it != g_lobbies.end() && it->second.owner == g_localSteamID) {
+                                    std::stringstream ss;
+                                    ss << it->second.id << " " << it->second.owner << " " << it->second.maxMembers << " " << g_personaName;
+                                    for (const auto& kv : it->second.data) {
+                                        ss << "\n" << kv.first << "=" << kv.second;
+                                    }
+                                    meta = ss.str();
+                                }
+                            }
+                            if (!meta.empty()) {
+                                sockaddr_in replyDest = {};
+                                replyDest.sin_family = AF_INET;
+                                replyDest.sin_port = fromAddr.sin_port;
+                                replyDest.sin_addr = fromAddr.sin_addr;
+                                if (IsAllowedLanAddress((const sockaddr*)&replyDest)) {
+                                    std::vector<uint8_t> rBuf(sizeof(NetPacketHeader) + meta.size());
+                                    NetPacketHeader* rHdr = (NetPacketHeader*)rBuf.data();
+                                    rHdr->magic = 0x52464958;
+                                    rHdr->msgType = 2; // LobbyAnnounce response
+                                    rHdr->senderID = g_localSteamID;
+                                    rHdr->appID = g_appID;
+                                    rHdr->payloadLen = (uint32_t)meta.size();
+                                    memcpy(rBuf.data() + sizeof(NetPacketHeader), meta.data(), meta.size());
+                                    sendto(g_udpSocket, (const char*)rBuf.data(), (int)rBuf.size(), 0, (sockaddr*)&replyDest, sizeof(replyDest));
+                                }
                             }
                         }
                     } else if (hdr->msgType == 7 && pLen >= sizeof(SocketsHandshake)) { // Sockets Handshake
@@ -1340,25 +1414,46 @@ namespace UnrealSteamEmu {
                         }
                     }
                 } else if (conn.state == k_ESteamNetworkingConnectionState_Connected) {
+                    bool connTimedOut = false;
                     for (auto& rOut : conn.unackedOutbound) {
-                        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - rOut.lastSendTime).count() > 100) {
-                            SocketsPayloadHeader head = {};
-                            head.flags = k_nSteamNetworkingSend_Reliable;
-                            head.messageNumber = 0;
-                            head.sequence = rOut.sequence;
-                            head.ack = conn.nextReliableSequenceExpected > 0 ? (conn.nextReliableSequenceExpected - 1) : 0;
+                        if (rOut.retries > 20) {
+                            connTimedOut = true;
+                            break;
+                        }
+                    }
+                    if (connTimedOut) {
+                        conn.state = k_ESteamNetworkingConnectionState_ProblemDetectedLocally;
+                        conn.substate = ReFixConnSubstate::Closed;
+                        ConnectionSnapshot snap = {};
+                        snap.handle = conn.handle;
+                        snap.remoteSteamID = conn.remoteSteamID;
+                        snap.userData = conn.userData;
+                        snap.oldState = k_ESteamNetworkingConnectionState_Connected;
+                        snap.newState = k_ESteamNetworkingConnectionState_ProblemDetectedLocally;
+                        snap.endReason = k_ESteamNetConnectionEnd_Misc_Timeout;
+                        strcpy_s(snap.debugMsg, "Reliable retransmission timeout");
+                        timeoutsToNotify.push_back(snap);
+                    } else {
+                        for (auto& rOut : conn.unackedOutbound) {
+                            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - rOut.lastSendTime).count() > 100) {
+                                SocketsPayloadHeader head = {};
+                                head.flags = k_nSteamNetworkingSend_Reliable;
+                                head.messageNumber = 0;
+                                head.sequence = rOut.sequence;
+                                head.ack = conn.nextReliableSequenceExpected > 0 ? (conn.nextReliableSequenceExpected - 1) : 0;
 
-                            std::vector<uint8_t> payload(sizeof(uint32_t) + sizeof(SocketsPayloadHeader) + rOut.data.size());
-                            uint8_t* ptr = payload.data();
-                            *(uint32_t*)ptr = conn.sessionId; ptr += sizeof(uint32_t);
-                            memcpy(ptr, &head, sizeof(SocketsPayloadHeader)); ptr += sizeof(SocketsPayloadHeader);
-                            memcpy(ptr, rOut.data.data(), rOut.data.size());
+                                std::vector<uint8_t> payload(sizeof(uint32_t) + sizeof(SocketsPayloadHeader) + rOut.data.size());
+                                uint8_t* ptr = payload.data();
+                                *(uint32_t*)ptr = conn.sessionId; ptr += sizeof(uint32_t);
+                                memcpy(ptr, &head, sizeof(SocketsPayloadHeader)); ptr += sizeof(SocketsPayloadHeader);
+                                memcpy(ptr, rOut.data.data(), rOut.data.size());
 
-                            ReFix::PacketDirection dir = conn.isInitiator ? ReFix::PacketDirection::CLIENT_TO_HOST : ReFix::PacketDirection::HOST_TO_CLIENT;
-                            toSend.push_back({ conn.remoteSteamID, 6, std::move(payload), dir });
+                                ReFix::PacketDirection dir = conn.isInitiator ? ReFix::PacketDirection::CLIENT_TO_HOST : ReFix::PacketDirection::HOST_TO_CLIENT;
+                                toSend.push_back({ conn.remoteSteamID, 6, std::move(payload), dir });
 
-                            rOut.lastSendTime = now;
-                            rOut.retries++;
+                                rOut.lastSendTime = now;
+                                rOut.retries++;
+                            }
                         }
                     }
                 }
@@ -1433,6 +1528,23 @@ namespace UnrealSteamEmu {
                     for (auto it = range.first; it != range.second; ++it) {
                         if (it->second) ccToDispatch.push_back({ it->second, cc });
                     }
+
+                    // Enqueue into g_manualCallbackQueue for manual dispatch callers (FIND-03)
+                    QueuedCallbackItem manualItem;
+                    manualItem.iCallback = SteamAPICallCompleted_t::k_iCallback;
+                    manualItem.data.assign((const uint8_t*)&cc, (const uint8_t*)&cc + sizeof(cc));
+                    manualItem.triggerTime = now;
+                    manualItem.isGameServer = false;
+                    g_manualCallbackQueue.push_back(manualItem);
+                }
+            }
+
+            // Prune old completed CallResults older than 30s to prevent unbounded memory growth (FIND-04)
+            for (auto it = g_callResultMap.begin(); it != g_callResultMap.end(); ) {
+                if (it->second.completed && now >= (it->second.triggerTime + std::chrono::seconds(30))) {
+                    it = g_callResultMap.erase(it);
+                } else {
+                    ++it;
                 }
             }
 
@@ -1709,6 +1821,83 @@ namespace UnrealSteamEmu {
     };
     static CSteamUserEmu g_steamUserInstance;
 
+    // --- ISteamUser021 ABI Wrapper (Fixes Slot 14 Shift for Unreal Engine 4.25-4.27) ---
+    class CSteamUser021Emu : public ISteamUser021 {
+    public:
+        virtual HSteamUser GetHSteamUser() override { return g_steamUserInstance.GetHSteamUser(); }
+        virtual bool BLoggedOn() override { return g_steamUserInstance.BLoggedOn(); }
+        virtual CSteamID GetSteamID() override { return g_steamUserInstance.GetSteamID(); }
+        virtual int InitiateGameConnection(void *pAuthBlob, int cbMaxAuthBlob, CSteamID steamIDGameServer, uint32 unIPServer, uint16 usPortServer, bool bSecure) override {
+            return g_steamUserInstance.InitiateGameConnection(pAuthBlob, cbMaxAuthBlob, steamIDGameServer, unIPServer, usPortServer, bSecure);
+        }
+        virtual void TerminateGameConnection(uint32 unIPServer, uint16 usPortServer) override {
+            g_steamUserInstance.TerminateGameConnection(unIPServer, usPortServer);
+        }
+        virtual void TrackAppUsageEvent(CGameID gameID, int eAppUsageEvent, const char *pchExtraInfo = "") override {
+            g_steamUserInstance.TrackAppUsageEvent(gameID, eAppUsageEvent, pchExtraInfo);
+        }
+        virtual bool GetUserDataFolder(char *pchBuffer, int cubBuffer) override {
+            return g_steamUserInstance.GetUserDataFolder(pchBuffer, cubBuffer);
+        }
+        virtual void StartVoiceRecording() override { g_steamUserInstance.StartVoiceRecording(); }
+        virtual void StopVoiceRecording() override { g_steamUserInstance.StopVoiceRecording(); }
+        virtual EVoiceResult GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed_Deprecated = 0, uint32 nUncompressedVoiceDesiredSampleRate_Deprecated = 0) override {
+            return g_steamUserInstance.GetAvailableVoice(pcbCompressed, pcbUncompressed_Deprecated, nUncompressedVoiceDesiredSampleRate_Deprecated);
+        }
+        virtual EVoiceResult GetVoice(bool bWantCompressed, void *pDestBuffer, uint32 cbDestBufferSize, uint32 *nBytesWritten, bool bWantUncompressed_Deprecated = false, void *pUncompressedDestBuffer_Deprecated = 0, uint32 cbUncompressedDestBufferSize_Deprecated = 0, uint32 *nUncompressBytesWritten_Deprecated = 0, uint32 nUncompressedVoiceDesiredSampleRate_Deprecated = 0) override {
+            return g_steamUserInstance.GetVoice(bWantCompressed, pDestBuffer, cbDestBufferSize, nBytesWritten, bWantUncompressed_Deprecated, pUncompressedDestBuffer_Deprecated, cbUncompressedDestBufferSize_Deprecated, nUncompressBytesWritten_Deprecated, nUncompressedVoiceDesiredSampleRate_Deprecated);
+        }
+        virtual EVoiceResult DecompressVoice(const void *pCompressed, uint32 cbCompressed, void *pDestBuffer, uint32 cbDestBufferSize, uint32 *nBytesWritten, uint32 nDesiredSampleRate) override {
+            return g_steamUserInstance.DecompressVoice(pCompressed, cbCompressed, pDestBuffer, cbDestBufferSize, nBytesWritten, nDesiredSampleRate);
+        }
+        virtual uint32 GetVoiceOptimalSampleRate() override { return g_steamUserInstance.GetVoiceOptimalSampleRate(); }
+
+        // Slot 13 in ISteamUser021 (3 parameters)
+        virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket) override {
+            return g_steamUserInstance.GetAuthSessionTicket(pTicket, cbMaxTicket, pcbTicket, nullptr);
+        }
+
+        // Slot 14 in ISteamUser021: BeginAuthSession!
+        virtual EBeginAuthSessionResult BeginAuthSession(const void *pAuthTicket, int cbAuthTicket, CSteamID steamID) override {
+            return g_steamUserInstance.BeginAuthSession(pAuthTicket, cbAuthTicket, steamID);
+        }
+
+        // Slot 15 in ISteamUser021: EndAuthSession!
+        virtual void EndAuthSession(CSteamID steamID) override {
+            g_steamUserInstance.EndAuthSession(steamID);
+        }
+
+        // Slot 16 in ISteamUser021: CancelAuthTicket!
+        virtual void CancelAuthTicket(HAuthTicket hAuthTicket) override {
+            g_steamUserInstance.CancelAuthTicket(hAuthTicket);
+        }
+
+        virtual EUserHasLicenseForAppResult UserHasLicenseForApp(CSteamID steamID, AppId_t appID) override {
+            return g_steamUserInstance.UserHasLicenseForApp(steamID, appID);
+        }
+        virtual bool BIsBehindNAT() override { return g_steamUserInstance.BIsBehindNAT(); }
+        virtual void AdvertiseGame(CSteamID steamIDGameServer, uint32 unIPServer, uint16 usPortServer) override {
+            g_steamUserInstance.AdvertiseGame(steamIDGameServer, unIPServer, usPortServer);
+        }
+        virtual SteamAPICall_t RequestEncryptedAppTicket(void *pDataToInclude, int cbDataToInclude) override {
+            return g_steamUserInstance.RequestEncryptedAppTicket(pDataToInclude, cbDataToInclude);
+        }
+        virtual bool GetEncryptedAppTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket) override {
+            return g_steamUserInstance.GetEncryptedAppTicket(pTicket, cbMaxTicket, pcbTicket);
+        }
+        virtual int GetGameBadgeLevel(int nSeries, bool bFoil) override { return g_steamUserInstance.GetGameBadgeLevel(nSeries, bFoil); }
+        virtual int GetPlayerSteamLevel() override { return g_steamUserInstance.GetPlayerSteamLevel(); }
+        virtual SteamAPICall_t RequestStoreAuthURL(const char *pchRedirectURL) override { return g_steamUserInstance.RequestStoreAuthURL(pchRedirectURL); }
+        virtual bool BIsPhoneVerified() override { return g_steamUserInstance.BIsPhoneVerified(); }
+        virtual bool BIsTwoFactorEnabled() override { return g_steamUserInstance.BIsTwoFactorEnabled(); }
+        virtual bool BIsPhoneIdentifying() override { return g_steamUserInstance.BIsPhoneIdentifying(); }
+        virtual bool BIsPhoneRequiringVerification() override { return g_steamUserInstance.BIsPhoneRequiringVerification(); }
+        virtual SteamAPICall_t GetMarketEligibility() override { return g_steamUserInstance.GetMarketEligibility(); }
+        virtual SteamAPICall_t GetDurationControl() override { return g_steamUserInstance.GetDurationControl(); }
+        virtual bool BSetDurationControlOnlineState(EDurationControlOnlineState eNewState) override { return g_steamUserInstance.BSetDurationControlOnlineState(eNewState); }
+    };
+    static CSteamUser021Emu g_steamUser021Instance;
+
     // --- ISteamFriends ---
     class CSteamFriendsEmu : public ISteamFriends017 {
     private:
@@ -1738,10 +1927,12 @@ namespace UnrealSteamEmu {
         }
 
         virtual int GetFriendCount(int iFriendFlags) override {
+            std::lock_guard<std::mutex> lock(g_emuMutex);
             return (int)g_peers.size();
         }
 
         virtual CSteamID GetFriendByIndex(int iFriend, int iFriendFlags) override {
+            std::lock_guard<std::mutex> lock(g_emuMutex);
             if (iFriend >= 0 && iFriend < (int)g_peers.size()) {
                 auto it = g_peers.begin();
                 std::advance(it, iFriend);
@@ -1762,9 +1953,12 @@ namespace UnrealSteamEmu {
             if (steamIDFriend.ConvertToUint64() == g_localSteamID) {
                 return g_personaName.c_str();
             }
+            std::lock_guard<std::mutex> lock(g_emuMutex);
             auto it = g_peers.find(steamIDFriend.ConvertToUint64());
             if (it != g_peers.end() && !it->second.personaName.empty()) {
-                return it->second.personaName.c_str();
+                thread_local char nameBuf[128];
+                strncpy_s(nameBuf, sizeof(nameBuf), it->second.personaName.c_str(), _TRUNCATE);
+                return nameBuf;
             }
             return "ReFix Peer";
         }
@@ -2012,7 +2206,7 @@ namespace UnrealSteamEmu {
 
             // Announce on LAN
             std::stringstream ss;
-            ss << lID << " " << g_localSteamID << " " << cMaxMembers;
+            ss << lID << " " << g_localSteamID << " " << cMaxMembers << " " << g_personaName;
             std::string meta = ss.str();
             BroadcastNetPacket(2, meta.c_str(), meta.size());
 
@@ -2111,6 +2305,17 @@ namespace UnrealSteamEmu {
             resp.m_ulSteamIDMember = lID;
             resp.m_bSuccess = 1;
             PostCallback(LobbyDataUpdate_t::k_iCallback, &resp, sizeof(resp));
+
+            // Sync metadata to LAN if host (FIND-07)
+            if (lob.owner == g_localSteamID) {
+                std::stringstream ss;
+                ss << lID << " " << lob.owner << " " << lob.maxMembers << " " << g_personaName;
+                for (const auto& kv : lob.data) {
+                    ss << "\n" << kv.first << "=" << kv.second;
+                }
+                std::string meta = ss.str();
+                BroadcastNetPacket(2, meta.c_str(), meta.size());
+            }
 
             ReFixLog("[UnrealSteam] SetLobbyData: Lobby %llu, '%s' = '%s'", lID, pchKey, pchValue ? pchValue : "");
             return true;
@@ -2515,7 +2720,21 @@ namespace UnrealSteamEmu {
             std::vector<uint8_t> payload(4 + cubData);
             *(int*)payload.data() = nChannel;
             memcpy(payload.data() + 4, pubData, cubData);
-            BroadcastNetPacket(5, payload.data(), payload.size());
+
+            bool hasEndpoint = false;
+            {
+                std::lock_guard<std::mutex> lock(g_emuMutex);
+                auto it = g_peers.find(steamIDRemote.ConvertToUint64());
+                if (it != g_peers.end() && it->second.ip != 0 && it->second.port != 0) {
+                    hasEndpoint = true;
+                }
+            }
+
+            if (hasEndpoint) {
+                SendLanPacket(steamIDRemote, 5, payload.data(), payload.size());
+            } else {
+                BroadcastNetPacket(5, payload.data(), payload.size());
+            }
             return true;
         }
 
@@ -3057,9 +3276,13 @@ namespace UnrealSteamEmu {
         virtual ESteamNetworkingAvailability GetRelayNetworkStatus(SteamRelayNetworkStatus_t *pDetails) override {
             if (pDetails) {
                 memset(pDetails, 0, sizeof(SteamRelayNetworkStatus_t));
-                pDetails->m_eAvail = k_ESteamNetworkingAvailability_CannotTry;
+                pDetails->m_eAvail = k_ESteamNetworkingAvailability_Current; // 100
+                pDetails->m_bPingMeasurementInProgress = 0;
+                pDetails->m_eAvailNetworkConfig = k_ESteamNetworkingAvailability_Current; // 100
+                pDetails->m_eAvailAnyRelay = k_ESteamNetworkingAvailability_Current; // 100
+                strncpy_s(pDetails->m_debugMsg, sizeof(pDetails->m_debugMsg), "OK (ReFix LAN)", _TRUNCATE);
             }
-            return k_ESteamNetworkingAvailability_CannotTry;
+            return k_ESteamNetworkingAvailability_Current;
         }
         virtual float GetLocalPingLocation(SteamNetworkPingLocation_t &result) override {
             memset(&result, 0, sizeof(result));
@@ -3627,6 +3850,85 @@ namespace UnrealSteamEmu {
     };
     static CSteamGameServerEmu g_steamGameServerInstance;
 
+    // --- ISteamGameServer012 ABI Wrapper (Slot 24 = SendUserConnectAndAuthenticate) ---
+    class CSteamGameServer012Emu : public ISteamGameServer012 {
+    public:
+        virtual bool InitGameServer(uint32 unIP, uint16 usGamePort, uint16 usQueryPort, uint32 unFlags, AppId_t nGameAppId, const char *pchVersion) override {
+            return g_steamGameServerInstance.InitGameServer(unIP, usGamePort, usQueryPort, unFlags, nGameAppId, pchVersion);
+        }
+        virtual void SetProduct(const char *pszProduct) override { g_steamGameServerInstance.SetProduct(pszProduct); }
+        virtual void SetGameDescription(const char *pszGameDescription) override { g_steamGameServerInstance.SetGameDescription(pszGameDescription); }
+        virtual void SetModDir(const char *pszModDir) override { g_steamGameServerInstance.SetModDir(pszModDir); }
+        virtual void SetDedicatedServer(bool bDedicated) override { g_steamGameServerInstance.SetDedicatedServer(bDedicated); }
+        virtual void LogOn(const char *pszToken) override { g_steamGameServerInstance.LogOn(pszToken); }
+        virtual void LogOnAnonymous() override { g_steamGameServerInstance.LogOnAnonymous(); }
+        virtual void LogOff() override { g_steamGameServerInstance.LogOff(); }
+        virtual bool BLoggedOn() override { return g_steamGameServerInstance.BLoggedOn(); }
+        virtual bool BSecure() override { return g_steamGameServerInstance.BSecure(); }
+        virtual CSteamID GetSteamID() override { return g_steamGameServerInstance.GetSteamID(); }
+        virtual bool WasRestartRequested() override { return g_steamGameServerInstance.WasRestartRequested(); }
+        virtual void SetMaxPlayerCount(int cPlayersMax) override { g_steamGameServerInstance.SetMaxPlayerCount(cPlayersMax); }
+        virtual void SetBotPlayerCount(int cBotplayers) override { g_steamGameServerInstance.SetBotPlayerCount(cBotplayers); }
+        virtual void SetServerName(const char *pszServerName) override { g_steamGameServerInstance.SetServerName(pszServerName); }
+        virtual void SetMapName(const char *pszMapName) override { g_steamGameServerInstance.SetMapName(pszMapName); }
+        virtual void SetPasswordProtected(bool bPasswordProtected) override { g_steamGameServerInstance.SetPasswordProtected(bPasswordProtected); }
+        virtual void SetSpectatorPort(uint16 unSpectatorPort) override { g_steamGameServerInstance.SetSpectatorPort(unSpectatorPort); }
+        virtual void SetSpectatorServerName(const char *pszSpectatorServerName) override { g_steamGameServerInstance.SetSpectatorServerName(pszSpectatorServerName); }
+        virtual void ClearAllKeyValues() override { g_steamGameServerInstance.ClearAllKeyValues(); }
+        virtual void SetKeyValue(const char *pKey, const char *pValue) override { g_steamGameServerInstance.SetKeyValue(pKey, pValue); }
+        virtual void SetGameTags(const char *m_szGameTags) override { g_steamGameServerInstance.SetGameTags(m_szGameTags); }
+        virtual void SetGameData(const char *m_szGameData) override { g_steamGameServerInstance.SetGameData(m_szGameData); }
+        virtual void SetRegion(const char *pszRegion) override { g_steamGameServerInstance.SetRegion(pszRegion); }
+
+        // Slot 24 in ISteamGameServer012!
+        virtual bool SendUserConnectAndAuthenticate(uint32 unIPClient, const void *pvAuthBlob, uint32 cubAuthBlobSize, CSteamID *pSteamIDUser) override {
+            return g_steamGameServerInstance.SendUserConnectAndAuthenticate(unIPClient, pvAuthBlob, cubAuthBlobSize, pSteamIDUser);
+        }
+        virtual CSteamID CreateUnauthenticatedUserConnection() override {
+            return g_steamGameServerInstance.CreateUnauthenticatedUserConnection();
+        }
+        virtual void SendUserDisconnect(CSteamID steamIDUser) override {
+            g_steamGameServerInstance.SendUserDisconnect(steamIDUser);
+        }
+        virtual bool BUpdateUserData(CSteamID steamIDUser, const char *pchPlayerName, uint32 uScore) override {
+            return g_steamGameServerInstance.BUpdateUserData(steamIDUser, pchPlayerName, uScore);
+        }
+
+        virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket) override {
+            return g_steamGameServerInstance.GetAuthSessionTicket(pTicket, cbMaxTicket, pcbTicket, nullptr);
+        }
+        virtual EBeginAuthSessionResult BeginAuthSession(const void *pAuthTicket, int cbAuthTicket, CSteamID steamID) override {
+            return g_steamGameServerInstance.BeginAuthSession(pAuthTicket, cbAuthTicket, steamID);
+        }
+        virtual void EndAuthSession(CSteamID steamID) override {
+            g_steamGameServerInstance.EndAuthSession(steamID);
+        }
+        virtual void CancelAuthTicket(HAuthTicket hAuthTicket) override {
+            g_steamGameServerInstance.CancelAuthTicket(hAuthTicket);
+        }
+        virtual EUserHasLicenseForAppResult UserHasLicenseForApp(CSteamID steamID, AppId_t appID) override {
+            return g_steamGameServerInstance.UserHasLicenseForApp(steamID, appID);
+        }
+        virtual bool RequestUserGroupStatus(CSteamID steamIDUser, CSteamID steamIDGroup) override {
+            return g_steamGameServerInstance.RequestUserGroupStatus(steamIDUser, steamIDGroup);
+        }
+        virtual void GetGameplayStats() override { g_steamGameServerInstance.GetGameplayStats(); }
+        virtual SteamAPICall_t GetServerReputation() override { return g_steamGameServerInstance.GetServerReputation(); }
+        virtual uint32 GetPublicIP_old() override { return 0x7F000001; }
+        virtual bool HandleIncomingPacket(const void *pData, int cbData, uint32 srcIP, uint16 srcPort) override {
+            return g_steamGameServerInstance.HandleIncomingPacket(pData, cbData, srcIP, srcPort);
+        }
+        virtual int GetNextOutgoingPacket(void *pOut, int cbMaxOut, uint32 *pNetAdr, uint16 *pPort) override {
+            return g_steamGameServerInstance.GetNextOutgoingPacket(pOut, cbMaxOut, pNetAdr, pPort);
+        }
+        virtual void EnableHeartbeats(bool bActive) override { g_steamGameServerInstance.SetAdvertiseServerActive(bActive); }
+        virtual void SetHeartbeatInterval(int iHeartbeatInterval) override {}
+        virtual void ForceHeartbeat() override {}
+        virtual SteamAPICall_t AssociateWithClan(CSteamID steamIDClan) override { return g_steamGameServerInstance.AssociateWithClan(steamIDClan); }
+        virtual SteamAPICall_t ComputeNewPlayerCompatibility(CSteamID steamIDNewPlayer) override { return g_steamGameServerInstance.ComputeNewPlayerCompatibility(steamIDNewPlayer); }
+    };
+    static CSteamGameServer012Emu g_steamGameServer012Instance;
+
     // --- ISteamGameServerStats ---
     class CSteamGameServerStatsEmu : public ISteamGameServerStats {
     public:
@@ -3873,9 +4175,23 @@ namespace UnrealSteamEmu {
         virtual void ReleaseUser(HSteamPipe hSteamPipe, HSteamUser hUser) override {}
 
         virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "SteamUser021") || strstr(pchVersion, "SteamUser020") ||
+                strstr(pchVersion, "SteamUser019") || strstr(pchVersion, "SteamUser018") ||
+                strstr(pchVersion, "SteamUser017") || strstr(pchVersion, "SteamUser016") ||
+                strstr(pchVersion, "SteamUser015") || strstr(pchVersion, "SteamUser014") ||
+                strstr(pchVersion, "SteamUser013") || strstr(pchVersion, "SteamUser012") ||
+                strstr(pchVersion, "SteamUser011") || strstr(pchVersion, "SteamUser010") ||
+                strstr(pchVersion, "SteamUser009") || strstr(pchVersion, "SteamUser008"))) {
+                return (ISteamUser*)&g_steamUser021Instance;
+            }
             return &g_steamUserInstance;
         }
         virtual ISteamGameServer *GetISteamGameServer(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "SteamGameServer012") || strstr(pchVersion, "SteamGameServer011") ||
+                strstr(pchVersion, "SteamGameServer010") || strstr(pchVersion, "SteamGameServer009") ||
+                strstr(pchVersion, "SteamGameServer008"))) {
+                return (ISteamGameServer*)&g_steamGameServer012Instance;
+            }
             return &g_steamGameServerInstance;
         }
         virtual void SetLocalIPBinding(const SteamIPAddress_t &unIP, uint16 usPort) override {}
@@ -3955,6 +4271,14 @@ namespace UnrealSteamEmu {
 
         if (strstr(pchVersion, "SteamClient") || strstr(pchVersion, "STEAMCLIENT"))
             return &g_steamClientInstance;
+        if (strstr(pchVersion, "SteamUser021") || strstr(pchVersion, "SteamUser020") ||
+            strstr(pchVersion, "SteamUser019") || strstr(pchVersion, "SteamUser018") ||
+            strstr(pchVersion, "SteamUser017") || strstr(pchVersion, "SteamUser016") ||
+            strstr(pchVersion, "SteamUser015") || strstr(pchVersion, "SteamUser014") ||
+            strstr(pchVersion, "SteamUser013") || strstr(pchVersion, "SteamUser012") ||
+            strstr(pchVersion, "SteamUser011") || strstr(pchVersion, "SteamUser010") ||
+            strstr(pchVersion, "SteamUser009") || strstr(pchVersion, "SteamUser008"))
+            return &g_steamUser021Instance;
         if (strstr(pchVersion, "SteamUser0") || strstr(pchVersion, "STEAMUSER"))
             return &g_steamUserInstance;
         if (strstr(pchVersion, "SteamFriends") || strstr(pchVersion, "STEAMFRIENDS"))
@@ -3983,6 +4307,10 @@ namespace UnrealSteamEmu {
             return &g_steamUGCInstance;
         if (strstr(pchVersion, "SteamGameServerStats") || strstr(pchVersion, "STEAMGAMESERVERSTATS"))
             return &g_steamGameServerStatsInstance;
+        if (strstr(pchVersion, "SteamGameServer012") || strstr(pchVersion, "SteamGameServer011") ||
+            strstr(pchVersion, "SteamGameServer010") || strstr(pchVersion, "SteamGameServer009") ||
+            strstr(pchVersion, "SteamGameServer008"))
+            return &g_steamGameServer012Instance;
         if (strstr(pchVersion, "SteamGameServer") || strstr(pchVersion, "STEAMGAMESERVER"))
             return &g_steamGameServerInstance;
         if (strstr(pchVersion, "STEAMHTTP") || strstr(pchVersion, "SteamHTTP"))
@@ -4043,7 +4371,7 @@ namespace UnrealSteamEmu {
     uint32_t GetAppID() { return g_appID; }
 
     void* GetSteamClient() { return &g_steamClientInstance; }
-    void* GetSteamUser() { return &g_steamUserInstance; }
+    void* GetSteamUser() { return &g_steamUser021Instance; }
     void* GetSteamFriends() { return &g_steamFriendsInstance; }
     void* GetSteamUtils() { return &g_steamUtilsInstance; }
     void* GetSteamMatchmaking() { return &g_steamMatchmakingInstance; }
@@ -4056,7 +4384,7 @@ namespace UnrealSteamEmu {
     void* GetSteamNetworkingMessages() { RecordCall(); return &g_steamNetworkingMessagesInstance; }
     void* GetSteamRemoteStorage() { return &g_steamRemoteStorageInstance; }
     void* GetSteamUGC() { return &g_steamUGCInstance; }
-    void* GetSteamGameServer() { return &g_steamGameServerInstance; }
+    void* GetSteamGameServer() { return &g_steamGameServer012Instance; }
     void* GetSteamGameServerStats() { return &g_steamGameServerStatsInstance; }
     void* GetSteamGameServerNetworking() { return &g_steamNetworkingInstance; }
     void* GetSteamHTTP() { return &g_steamHTTPInstance; }

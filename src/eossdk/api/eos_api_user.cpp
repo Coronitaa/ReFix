@@ -7,6 +7,7 @@
 // carries its "join this session" payload in the presence join info, so it has
 // to round-trip exactly.
 #include "../core/refix_common.h"
+#include "../sdk/eos_auth.h"
 #include "../core/refix_log.h"
 #include "../core/eos_handles.h"
 #include "../core/eos_platform.h"
@@ -74,15 +75,14 @@ const FriendEntry* FindFriendByEaid(EOS_EpicAccountId id) {
 // Auth - Epic accounts
 // ===========================================================================
 EOS_DECLARE_FUNC(void) EOS_Auth_Login(EOS_HAuth Handle, const EOS_Auth_LoginOptions* Options, void* ClientData, const EOS_Auth_OnLoginCallback CompletionDelegate) {
-    // There is no Epic account service in the loop. Reporting the failure the
-    // real SDK would report keeps titles on their platform-credential path
-    // instead of leaving them waiting on a login that can never complete.
-    RFLOG(Auth, "EOS_Auth_Login: no Epic account service available -> EOS_InvalidAuth");
+    RFLOG(Auth, "EOS_Auth_Login: emulating local offline Epic Account login -> EOS_Success");
     if (!CompletionDelegate) return;
-    Dispatcher::Get().Post([CompletionDelegate, ClientData]() {
+    EOS_EpicAccountId local = Identity::Get().LocalEaid();
+    Dispatcher::Get().Post([CompletionDelegate, ClientData, local]() {
         EOS_Auth_LoginCallbackInfo info{};
-        info.ResultCode = ER::EOS_InvalidAuth;
-        info.ClientData = ClientData;
+        info.ResultCode  = ER::EOS_Success;
+        info.ClientData  = ClientData;
+        info.LocalUserId = local;
         CompletionDelegate(&info);
     });
 }
@@ -99,12 +99,147 @@ EOS_DECLARE_FUNC(void) EOS_Auth_Logout(EOS_HAuth Handle, const EOS_Auth_LogoutOp
     });
 }
 
-EOS_DECLARE_FUNC(int32_t) EOS_Auth_GetLoggedInAccountsCount(EOS_HAuth Handle) { return 0; }
-EOS_DECLARE_FUNC(EOS_EpicAccountId) EOS_Auth_GetLoggedInAccountByIndex(EOS_HAuth Handle, int32_t Index) { return nullptr; }
-EOS_DECLARE_FUNC(EOS_ELoginStatus) EOS_Auth_GetLoginStatus(EOS_HAuth Handle, EOS_EpicAccountId LocalUserId) { return ELS::EOS_LS_NotLoggedIn; }
-EOS_DECLARE_FUNC(EOS_EpicAccountId) EOS_Auth_GetSelectedAccountId(EOS_HAuth Handle, const EOS_EpicAccountId LocalUserId, EOS_EpicAccountId* OutSelectedAccountId) {
-    if (OutSelectedAccountId) *OutSelectedAccountId = nullptr;
+EOS_DECLARE_FUNC(int32_t) EOS_Auth_GetLoggedInAccountsCount(EOS_HAuth Handle) {
+    return Identity::Get().HasLocalUser() || Identity::Get().LocalEaid() != nullptr ? 1 : 0;
+}
+
+EOS_DECLARE_FUNC(EOS_EpicAccountId) EOS_Auth_GetLoggedInAccountByIndex(EOS_HAuth Handle, int32_t Index) {
+    if (Index == 0) return Identity::Get().LocalEaid();
     return nullptr;
+}
+
+EOS_DECLARE_FUNC(EOS_ELoginStatus) EOS_Auth_GetLoginStatus(EOS_HAuth Handle, EOS_EpicAccountId LocalUserId) {
+    if (!LocalUserId || LocalUserId == Identity::Get().LocalEaid()) {
+        return ELS::EOS_LS_LoggedIn;
+    }
+    return ELS::EOS_LS_NotLoggedIn;
+}
+
+EOS_DECLARE_FUNC(EOS_EResult) EOS_Auth_GetSelectedAccountId(EOS_HAuth Handle, const EOS_EpicAccountId LocalUserId, EOS_EpicAccountId* OutSelectedAccountId) {
+    if (!OutSelectedAccountId) return ER::EOS_InvalidParameters;
+    *OutSelectedAccountId = Identity::Get().LocalEaid();
+    return ER::EOS_Success;
+}
+
+namespace {
+struct AuthTokenBlock {
+    EOS_Auth_Token Info;
+    std::string App;
+    std::string ClientId;
+    std::string AccessToken;
+    std::string ExpiresAt;
+    std::string RefreshToken;
+    std::string RefreshExpiresAt;
+};
+std::mutex g_authTokenMutex;
+std::map<EOS_Auth_Token*, AuthTokenBlock*> g_authTokenBlocks;
+
+struct IdTokenBlock {
+    EOS_Auth_IdToken Info;
+    std::string Jwt;
+};
+std::mutex g_idTokenMutex;
+std::map<EOS_Auth_IdToken*, IdTokenBlock*> g_idTokenBlocks;
+} // namespace
+
+EOS_DECLARE_FUNC(EOS_EResult) EOS_Auth_CopyUserAuthToken(EOS_HAuth Handle, const EOS_Auth_CopyUserAuthTokenOptions* Options, EOS_EpicAccountId LocalUserId, EOS_Auth_Token** OutUserAuthToken) {
+    if (!Options || !OutUserAuthToken) return ER::EOS_InvalidParameters;
+    *OutUserAuthToken = nullptr;
+
+    EOS_EpicAccountId localId = Identity::Get().LocalEaid();
+    if (LocalUserId && LocalUserId != localId) {
+        return ER::EOS_NotFound;
+    }
+
+    auto* block = new AuthTokenBlock();
+    block->App = "ReFix";
+    block->ClientId = "refix_local_client";
+    block->AccessToken = "refix_offline_eas_access_token";
+    block->ExpiresAt = "2099-01-01T00:00:00.000Z";
+    block->RefreshToken = "refix_offline_eas_refresh_token";
+    block->RefreshExpiresAt = "2099-01-01T00:00:00.000Z";
+
+    std::memset(&block->Info, 0, sizeof(block->Info));
+    block->Info.ApiVersion = EOS_AUTH_TOKEN_API_LATEST;
+    block->Info.App = block->App.c_str();
+    block->Info.ClientId = block->ClientId.c_str();
+    block->Info.AccountId = localId;
+    block->Info.AccessToken = block->AccessToken.c_str();
+    block->Info.ExpiresIn = 86400.0 * 365.0;
+    block->Info.ExpiresAt = block->ExpiresAt.c_str();
+    block->Info.AuthType = EOS_EAuthTokenType::EOS_ATT_User;
+    block->Info.RefreshToken = block->RefreshToken.c_str();
+    block->Info.RefreshExpiresIn = 86400.0 * 365.0;
+    block->Info.RefreshExpiresAt = block->RefreshExpiresAt.c_str();
+
+    {
+        std::lock_guard<std::mutex> lock(g_authTokenMutex);
+        g_authTokenBlocks[&block->Info] = block;
+    }
+    *OutUserAuthToken = &block->Info;
+    RFLOG(Auth, "EOS_Auth_CopyUserAuthToken -> synthetic offline token");
+    return ER::EOS_Success;
+}
+
+EOS_DECLARE_FUNC(void) EOS_Auth_Token_Release(EOS_Auth_Token* AuthToken) {
+    if (!AuthToken) return;
+    AuthTokenBlock* block = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_authTokenMutex);
+        auto it = g_authTokenBlocks.find(AuthToken);
+        if (it == g_authTokenBlocks.end()) return;
+        block = it->second;
+        g_authTokenBlocks.erase(it);
+    }
+    delete block;
+}
+
+EOS_DECLARE_FUNC(EOS_EResult) EOS_Auth_CopyIdToken(EOS_HAuth Handle, const EOS_Auth_CopyIdTokenOptions* Options, EOS_Auth_IdToken** OutIdToken) {
+    if (!Options || !OutIdToken) return ER::EOS_InvalidParameters;
+    *OutIdToken = nullptr;
+
+    EOS_EpicAccountId localId = Identity::Get().LocalEaid();
+    if (Options->AccountId && Options->AccountId != localId) {
+        return ER::EOS_NotFound;
+    }
+
+    auto* block = new IdTokenBlock();
+    block->Jwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.e30.";
+    std::memset(&block->Info, 0, sizeof(block->Info));
+    block->Info.ApiVersion = EOS_AUTH_IDTOKEN_API_LATEST;
+    block->Info.AccountId = localId;
+    block->Info.JsonWebToken = block->Jwt.c_str();
+
+    {
+        std::lock_guard<std::mutex> lock(g_idTokenMutex);
+        g_idTokenBlocks[&block->Info] = block;
+    }
+    *OutIdToken = &block->Info;
+    RFLOG(Auth, "EOS_Auth_CopyIdToken -> synthetic offline JWT");
+    return ER::EOS_Success;
+}
+
+EOS_DECLARE_FUNC(void) EOS_Auth_IdToken_Release(EOS_Auth_IdToken* IdToken) {
+    if (!IdToken) return;
+    IdTokenBlock* block = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_idTokenMutex);
+        auto it = g_idTokenBlocks.find(IdToken);
+        if (it == g_idTokenBlocks.end()) return;
+        block = it->second;
+        g_idTokenBlocks.erase(it);
+    }
+    delete block;
+}
+
+EOS_DECLARE_FUNC(void) EOS_Auth_VerifyUserAuth(EOS_HAuth Handle, const EOS_Auth_VerifyUserAuthOptions* Options, void* ClientData, const EOS_Auth_OnVerifyUserAuthCallback CompletionDelegate) {
+    if (!CompletionDelegate) return;
+    Dispatcher::Get().Post([CompletionDelegate, ClientData]() {
+        EOS_Auth_VerifyUserAuthCallbackInfo info{};
+        info.ResultCode = ER::EOS_Success;
+        info.ClientData = ClientData;
+        CompletionDelegate(&info);
+    });
 }
 
 EOS_DECLARE_FUNC(EOS_NotificationId) EOS_Auth_AddNotifyLoginStatusChanged(EOS_HAuth Handle, const EOS_Auth_AddNotifyLoginStatusChangedOptions* Options, void* ClientData, const EOS_Auth_OnLoginStatusChangedCallback Notification) {
@@ -349,6 +484,11 @@ void RegisterAuthApi(Registrar& reg) {
     REFIX_BIND(reg, EOS_Auth_GetLoggedInAccountByIndex);
     REFIX_BIND(reg, EOS_Auth_GetLoginStatus);
     REFIX_BIND(reg, EOS_Auth_GetSelectedAccountId);
+    REFIX_BIND(reg, EOS_Auth_CopyUserAuthToken);
+    REFIX_BIND(reg, EOS_Auth_Token_Release);
+    REFIX_BIND(reg, EOS_Auth_CopyIdToken);
+    REFIX_BIND(reg, EOS_Auth_IdToken_Release);
+    REFIX_BIND(reg, EOS_Auth_VerifyUserAuth);
     REFIX_BIND(reg, EOS_Auth_AddNotifyLoginStatusChanged);
     REFIX_BIND(reg, EOS_Auth_RemoveNotifyLoginStatusChanged);
 }
