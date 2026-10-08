@@ -1,6 +1,7 @@
 #include "refix_transport.h"
 #include "../core/refix_config.h"
 #include "../core/refix_log.h"
+#include "../../lan_core/refix_lan_firewall.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -145,14 +146,28 @@ bool Transport::Start() {
 void Transport::Stop() {
     if (!m_running) return;
     m_running = false;
+    // Wake up ReceiveLoop thread gracefully
+    if (m_socket != (uintptr_t)-1 && m_local.Port != 0) {
+        sockaddr_in loopSin{};
+        loopSin.sin_family = AF_INET;
+        loopSin.sin_addr.s_addr = htonl(0x7F000001);
+        loopSin.sin_port = htons(m_local.Port);
+        char wake = 0;
+        sendto((SOCKET)m_socket, &wake, 1, 0, (sockaddr*)&loopSin, sizeof(loopSin));
+    }
+    if (m_thread.joinable()) m_thread.join();
     if (m_socket != (uintptr_t)-1)      closesocket((SOCKET)m_socket);
     if (m_groupSocket != (uintptr_t)-1) closesocket((SOCKET)m_groupSocket);
     m_socket = m_groupSocket = (uintptr_t)-1;
-    if (m_thread.joinable()) m_thread.join();
 }
 
 bool Transport::SendTo(const Endpoint& to, const void* data, size_t len) {
     if (!m_running || !to.Valid()) return false;
+    uint32_t ipHost = ntohl(to.Ipv4);
+    if (!refix::lan::LanFirewall::Get().IsAllowedIpv4(ipHost)) {
+        refix::lan::LanFirewall::Get().RecordBlockedEgress();
+        return false;
+    }
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = to.Ipv4;

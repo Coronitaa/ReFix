@@ -35,41 +35,12 @@
 #include "network/network_mode.h"
 
 // Helper to determine if an IP is local/LAN
+#include "lan_core/refix_lan_firewall.h"
+
+// Helper to determine if an IP is local/LAN
 static bool IsAllowedLanEndpoint(const sockaddr* addr) {
     if (!addr) return false;
-
-    if (addr->sa_family == AF_INET) {
-        const sockaddr_in* sin = reinterpret_cast<const sockaddr_in*>(addr);
-        uint32_t ip = ntohl(sin->sin_addr.S_un.S_addr);
-        if ((ip >= 0x0A000000 && ip <= 0x0AFFFFFF) || // 10.0.0.0/8
-            (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) || // 172.16.0.0/12
-            (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) || // 192.168.0.0/16
-            (ip >= 0xA9FE0000 && ip <= 0xA9FEFFFF) || // 169.254.0.0/16
-            (ip >= 0x7F000000 && ip <= 0x7FFFFFFF) || // 127.0.0.0/8
-            (ip >= 0xE0000000 && ip <= 0xEFFFFFFF) || // Multicast 224.0.0.0/4
-            (ip == 0xFFFFFFFF))                       // Broadcast 255.255.255.255
-        {
-            return true;
-        }
-        return false;
-    } else if (addr->sa_family == AF_INET6) {
-        const sockaddr_in6* sin6 = reinterpret_cast<const sockaddr_in6*>(addr);
-        const uint8_t* b = sin6->sin6_addr.u.Byte;
-        
-        // Loopback ::1
-        bool isLoopback = true;
-        for (int i=0; i<15; i++) if (b[i] != 0) isLoopback = false;
-        if (isLoopback && b[15] == 1) return true;
-        
-        if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true; // Link-local fe80::/10
-        if ((b[0] & 0xFE) == 0xFC) return true;                 // ULA fc00::/7
-        if (b[0] == 0xFF) return true;                          // Multicast ff00::/8
-        
-        return false;
-    }
-    
-    // Allow non-IP families by default (like AF_UNIX) or drop? We only care about blocking WAN
-    return true;
+    return refix::lan::LanFirewall::Get().IsAllowedSockaddr(addr);
 }
 
 // =============================================================================
@@ -751,10 +722,10 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     }
 
     // Fall through to real Winsock for raw packets
-    if (to && to->sa_family == AF_INET) {
+    if (to) {
         if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to)) {
-            // Drop packet
-            return len; // Pretend it was sent
+            refix::lan::LanFirewall::Get().RecordBlockedEgress();
+            return len; // Synthetic success: drop packet under Internet-Zero
         }
     }
     return g_orig_sendto(s, buf, len, flags, to, tolen);
@@ -892,8 +863,11 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
             ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, steamID);
             SteamP2PHook::Log("Hook_connect: P2P session accepted for SteamID=%llu", steamID);
         }
+    }
 
+    if (name) {
         if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(name)) {
+            refix::lan::LanFirewall::Get().RecordBlockedEgress();
             WSASetLastError(WSAEHOSTUNREACH);
             return SOCKET_ERROR;
         }

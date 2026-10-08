@@ -3791,6 +3791,10 @@ static std::atomic<uint64_t> g_valveDllLoadCount{ 0 };
 
 static bool EnsureOriginal() {
     g_ensureOriginalCallCount.fetch_add(1, std::memory_order_relaxed);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        InitializeLanForwardTable();
+        return true;
+    }
     if (g_hOriginalDll) return true;
 
     std::string proxyDir = GetProxyDllDir();
@@ -3798,7 +3802,6 @@ static bool EnsureOriginal() {
 
     const char* candNames[] = {
         "steam_api64_valve.dll",
-        "steam_api64_goldberg.dll",
         "steam_api64_o.dll",
         "steam_api64_original.dll",
         "steam_api64.dll.valve"
@@ -4370,12 +4373,11 @@ static void ReFixInitializePost(bool success) {
     CapturePersonaName();
     TriggerSyntheticRelayCallback();
     
+    // Always install Winsock hooks for Internet-Zero egress protection and port virtualization
+    SteamP2PHook::Install(g_hOriginalDll);
+    ReFixLog("ReFixInitializePost: Winsock hooks active (mode=%d)", (int)ReFix::NetworkModeManager::GetMode());
     if (g_unrealIsEngine && !ReFix::NetworkModeManager::IsLanOnly() && !ReFix::NetworkModeManager::IsOffline()) {
-        SteamP2PHook::Install(g_hOriginalDll);
-        ReFixLog("ReFixInitializePost: Steam P2P Winsock hooks installed");
         SteamP2PHook_ForceResolve();
-    } else {
-        ReFixLog("ReFixInitializePost: Winsock P2P hook skipped (mode=%d)", (int)ReFix::NetworkModeManager::GetMode());
     }
 
     if (!ReFix::NetworkModeManager::IsOnline()) {

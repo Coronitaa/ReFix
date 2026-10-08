@@ -50,16 +50,16 @@ if "%ENABLE_EOS_LEGACY%"=="1" (
     cl /nologo /O2 /EHsc /LD /Fobuild\ src\eos_proxy.cpp src\upnp_firewall.cpp build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll user32.lib kernel32.lib advapi32.lib ws2_32.lib wininet.lib ole32.lib oleaut32.lib /link /DEF:src\eos_proxy.def
 ) else (
     echo [*] Building EOSSDK-Win64-Shipping.dll and RedboneEOS.dll [ReFix EOS v3 emulator]...
-    cl /nologo /O2 /Zi /EHsc /std:c++17 /DEOS_MONOLITHIC=1 /Fobuild\ /Isrc\eossdk /Isrc\include /Isrc\include\steam src\eossdk\eos_module.cpp src\eossdk\core\refix_common.cpp src\eossdk\core\refix_config.cpp src\eossdk\core\refix_log.cpp src\eossdk\core\refix_hash.cpp src\eossdk\core\eos_ids.cpp src\eossdk\core\eos_identity.cpp src\eossdk\core\eos_dispatch.cpp src\eossdk\core\lobby_model.cpp src\eossdk\core\eos_online.cpp src\eossdk\net\refix_transport.cpp src\eossdk\net\lobby_directory.cpp src\eossdk\net\steam_backend.cpp src\eossdk\api\eos_api_platform.cpp src\eossdk\api\eos_api_connect.cpp src\eossdk\api\eos_api_user.cpp src\eossdk\api\eos_api_lobby.cpp src\eossdk\api\eos_api_sessions.cpp src\eossdk\api\eos_api_p2p.cpp src\eossdk\api\eos_api_storage.cpp src\eossdk\api\eos_api_passthrough.cpp /LD build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll /Fdbuild\eos.pdb user32.lib kernel32.lib advapi32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib version.lib /link /DEF:src\eos_proxy.def /DEBUG /MAP:build\eos.map
+    cl /nologo /O2 /Zi /EHsc /std:c++17 /DEOS_MONOLITHIC=1 /Fobuild\ /Isrc /Isrc\lan_core /Isrc\eossdk /Isrc\include /Isrc\include\steam src\eossdk\eos_module.cpp src\eossdk\core\refix_common.cpp src\eossdk\core\refix_config.cpp src\eossdk\core\refix_log.cpp src\eossdk\core\refix_hash.cpp src\eossdk\core\eos_ids.cpp src\eossdk\core\eos_identity.cpp src\eossdk\core\eos_dispatch.cpp src\eossdk\core\lobby_model.cpp src\eossdk\core\eos_online.cpp src\eossdk\net\refix_transport.cpp src\eossdk\net\lobby_directory.cpp src\eossdk\net\steam_backend.cpp src\eossdk\api\eos_api_platform.cpp src\eossdk\api\eos_api_connect.cpp src\eossdk\api\eos_api_user.cpp src\eossdk\api\eos_api_lobby.cpp src\eossdk\api\eos_api_sessions.cpp src\eossdk\api\eos_api_p2p.cpp src\eossdk\api\eos_api_storage.cpp src\eossdk\api\eos_api_passthrough.cpp src\lan_core\refix_lan_firewall.cpp /LD build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll /Fdbuild\eos.pdb user32.lib kernel32.lib advapi32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib version.lib /link /DEF:src\eos_proxy.def /DEBUG /MAP:build\eos.map
 )
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling EOSSDK-Win64-Shipping.dll & exit /b 1 )
 copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
 
-set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp src\network\fault_injector.cpp src\network\message_tracker.cpp"
-
+set "LAN_CORE_SRC=src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp"
+set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp src\network\fault_injector.cpp src\network\message_tracker.cpp !LAN_CORE_SRC!"
 
 echo [*] Building steam_api64.dll proxy...
-cl /nologo /O2 /Zi /EHsc /std:c++17 /LD /Fobuild\ /Isrc\include /Isrc\include\steam src\steam_proxy.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
+cl /nologo /O2 /Zi /EHsc /std:c++17 /LD /Fobuild\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64.dll & exit /b 1 )
 
 echo.
@@ -84,3 +84,8 @@ echo [*] Building refix_net_test.exe (Phase 3.6 loopback tester)...
 cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ src\network\refix_net_test.cpp /Febin\refix_net_test.exe
 if %ERRORLEVEL% neq 0 ( echo [!] Error building refix_net_test.exe & exit /b 1 )
 echo [OK] refix_net_test.exe built and placed in bin\
+
+echo [*] Building test_refix_lan_core.exe (Universal LAN Core and Transport tester)...
+cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Fobuild\ tests\test_refix_lan_core.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp /Febin\test_refix_lan_core.exe ws2_32.lib advapi32.lib
+if %ERRORLEVEL% neq 0 ( echo [!] Error building test_refix_lan_core.exe & exit /b 1 )
+echo [OK] test_refix_lan_core.exe built and placed in bin\
