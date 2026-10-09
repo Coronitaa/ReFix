@@ -86,7 +86,7 @@ if %ERRORLEVEL% neq 0 ( echo [!] Error building refix_net_test.exe & exit /b 1 )
 echo [OK] refix_net_test.exe built and placed in bin\
 
 echo [*] Building test_refix_lan_core.exe (Universal LAN Core and Transport tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Fobuild\ tests\test_refix_lan_core.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp /Febin\test_refix_lan_core.exe ws2_32.lib advapi32.lib
+cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_refix_lan_core.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp /Febin\test_refix_lan_core.exe ws2_32.lib advapi32.lib iphlpapi.lib
 if %ERRORLEVEL% neq 0 ( echo [!] Error building test_refix_lan_core.exe & exit /b 1 )
 echo [OK] test_refix_lan_core.exe built and placed in bin\
 

@@ -122,6 +122,12 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
 
     CSteamID steamLobbyId = pMatchmaking->GetLobbyByIndex(0);
     TEST_ASSERT(steamLobbyId.ConvertToUint64() != 0, "GetLobbyByIndex returned 0");
+    TEST_ASSERT(steamLobbyId.IsValid(), "Created lobby CSteamID must return IsValid() == true");
+    TEST_ASSERT(steamLobbyId.IsLobby(), "Created lobby CSteamID must return IsLobby() == true");
+    TEST_ASSERT(steamLobbyId.GetEUniverse() == k_EUniversePublic, "Lobby universe must equal k_EUniversePublic (1)");
+    TEST_ASSERT(steamLobbyId.GetEAccountType() == k_EAccountTypeChat, "Lobby account type must equal k_EAccountTypeChat (8)");
+    TEST_ASSERT((steamLobbyId.GetUnAccountInstance() & k_EChatInstanceFlagLobby) != 0, "Lobby instance must have k_EChatInstanceFlagLobby flag set");
+    TEST_ASSERT(static_cast<uint32_t>(steamLobbyId.ConvertToUint64() >> 32) == 0x01840000, "Upper 32-bits of lobby ID must be canonical 0x01840000");
 
     pMatchmaking->SetLobbyData(steamLobbyId, "MapName", "de_dust2");
     pfnRunCallbacks();
@@ -130,7 +136,7 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     TEST_ASSERT(strcmp(mapVal, "de_dust2") == 0, "GetLobbyData('MapName') must equal 'de_dust2'");
 
     pfnShutdown();
-    std::cout << "  [PASS] Standalone Adapter Unit Tests certified." << std::endl;
+    std::cout << "  [PASS] Standalone Adapter Unit Tests & Canonical CSteamID certified." << std::endl;
     return true;
 }
 
@@ -168,6 +174,11 @@ static int RunHostRole(HMODULE hSteam) {
     pfnRunCallbacks();
 
     CSteamID lobbySteamId = pMatchmaking->GetLobbyByIndex(0);
+    if (!lobbySteamId.IsValid() || !lobbySteamId.IsLobby()) {
+        std::cerr << "[HOST_FAIL] Created lobby SteamID " << lobbySteamId.ConvertToUint64() << " is not a valid CSteamID lobby!" << std::endl;
+        pfnShutdown();
+        return 1;
+    }
     pMatchmaking->SetLobbyData(lobbySteamId, "GameName", "ReFix_E2E_Test");
     pMatchmaking->SetLobbyData(lobbySteamId, "MapName", "de_dust2");
     std::cout << "[HOST_READY] Created Lobby ID: " << lobbySteamId.ConvertToUint64() << std::endl;
@@ -358,6 +369,11 @@ static int RunClientRole(HMODULE hSteam) {
         pfnRunCallbacks();
         CSteamID lId = pMatchmaking->GetLobbyByIndex(0);
         if (lId.ConvertToUint64() != 0) {
+            if (!lId.IsValid() || !lId.IsLobby()) {
+                std::cerr << "[CLIENT_FAIL] Discovered lobby SteamID " << lId.ConvertToUint64() << " is not a valid CSteamID lobby!" << std::endl;
+                pfnShutdown();
+                return 1;
+            }
             discoveredLobbyId = lId;
             lobbyFound = true;
             break;

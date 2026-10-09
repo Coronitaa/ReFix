@@ -1,10 +1,167 @@
 #include "refix_lan_transport.h"
 #include <iostream>
 #include <algorithm>
+#include <vector>
+#include <string>
+#include <cstdio>
+#include <iphlpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
 
 namespace refix::lan {
 
-static uint32_t ResolveLocalIpv4() {
+uint32_t ResolveLocalIpv4(std::string* outReason) {
+    // 1. Explicit configuration via environment variable (absolute user priority)
+    char envBuf[128] = {0};
+    if (GetEnvironmentVariableA("REFIX_LAN_INTERFACE_IP", envBuf, sizeof(envBuf)) > 0 ||
+        GetEnvironmentVariableA("REFIX_BIND_IP", envBuf, sizeof(envBuf)) > 0) {
+        in_addr parsedAddr{};
+        if (inet_pton(AF_INET, envBuf, &parsedAddr) == 1 && parsedAddr.s_addr != INADDR_NONE && parsedAddr.s_addr != 0) {
+            uint32_t ip = ntohl(parsedAddr.s_addr);
+            std::string reason = std::string("Explicitly configured via environment: ") + envBuf;
+            if (outReason) *outReason = reason;
+            printf("[LanTransport] Interface selected: %s (Reason: %s)\n", envBuf, reason.c_str());
+            return ip;
+        }
+    }
+
+    // 2. Windows IP Helper API (GetAdaptersAddresses) enumeration
+    ULONG outBufLen = 15000;
+    std::vector<uint8_t> buffer(outBufLen);
+    PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    DWORD ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &outBufLen);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(outBufLen);
+        pAddresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+        ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &outBufLen);
+    }
+
+    struct Candidate {
+        uint32_t ip = 0;
+        int score = 0;
+        std::string name;
+        std::string desc;
+        std::string reason;
+    };
+    std::vector<Candidate> candidates;
+
+    if (ret == NO_ERROR && pAddresses != nullptr) {
+        for (PIP_ADAPTER_ADDRESSES curr = pAddresses; curr != nullptr; curr = curr->Next) {
+            if (curr->OperStatus != IfOperStatusUp) continue;
+            if (curr->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+
+            std::string name;
+            if (curr->FriendlyName) {
+                int len = WideCharToMultiByte(CP_UTF8, 0, curr->FriendlyName, -1, nullptr, 0, nullptr, nullptr);
+                if (len > 0) {
+                    name.resize(len - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, curr->FriendlyName, -1, &name[0], len, nullptr, nullptr);
+                }
+            }
+            std::string desc;
+            if (curr->Description) {
+                int len = WideCharToMultiByte(CP_UTF8, 0, curr->Description, -1, nullptr, 0, nullptr, nullptr);
+                if (len > 0) {
+                    desc.resize(len - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, curr->Description, -1, &desc[0], len, nullptr, nullptr);
+                }
+            }
+
+            std::string nameLower = name;
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+            std::string descLower = desc;
+            std::transform(descLower.begin(), descLower.end(), descLower.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+
+            bool isVirtual = false;
+            const char* vKeywords[] = {
+                "virtual", "vbox", "vmware", "hyper-v", "wsl", "docker",
+                "tap", "tun", "tailscale", "zerotier", "wireguard", "vpn", "host-only"
+            };
+            for (const char* kw : vKeywords) {
+                if (nameLower.find(kw) != std::string::npos || descLower.find(kw) != std::string::npos) {
+                    isVirtual = true;
+                    break;
+                }
+            }
+
+            bool hasGateway = (curr->FirstGatewayAddress != nullptr);
+
+            for (PIP_ADAPTER_UNICAST_ADDRESS u = curr->FirstUnicastAddress; u != nullptr; u = u->Next) {
+                if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+                auto* sin = reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);
+                uint32_t ip = ntohl(sin->sin_addr.s_addr);
+
+                if ((ip & 0xFF000000) == 0x7F000000) continue; // Loopback
+
+                bool isRfc1918 = ((ip & 0xFF000000) == 0x0A000000) ||   // 10.0.0.0/8
+                                 ((ip & 0xFFF00000) == 0xAC100000) ||   // 172.16.0.0/12
+                                 ((ip & 0xFFFF0000) == 0xC0A80000);     // 192.168.0.0/16
+                bool isApipa = ((ip & 0xFFFF0000) == 0xA9FE0000);       // 169.254.0.0/16
+                bool isVBoxDefault = ((ip & 0xFFFFFF00) == 0xC0A83800); // 192.168.56.0/24
+
+                int score = 0;
+                std::string reason;
+
+                if (curr->IfType == IF_TYPE_ETHERNET_CSMACD && !isVirtual) {
+                    score += 100;
+                    reason = "Physical Ethernet";
+                } else if (curr->IfType == IF_TYPE_IEEE80211 && !isVirtual) {
+                    score += 90;
+                    reason = "Physical Wi-Fi";
+                } else if (!isVirtual) {
+                    score += 50;
+                    reason = "Physical Adapter";
+                } else {
+                    score -= 100;
+                    reason = "Virtual Adapter";
+                }
+
+                if (hasGateway) {
+                    score += 40;
+                    reason += " (Gateway Present)";
+                }
+                if (isRfc1918) {
+                    score += 30;
+                }
+                if (isApipa) {
+                    score -= 50;
+                    reason += " (APIPA Link-Local)";
+                }
+                if (isVBoxDefault) {
+                    score -= 150;
+                    reason += " (VirtualBox Subnet)";
+                }
+
+                Candidate cand;
+                cand.ip = ip;
+                cand.score = score;
+                cand.name = name;
+                cand.desc = desc;
+                cand.reason = reason;
+                candidates.push_back(cand);
+            }
+        }
+    }
+
+    if (!candidates.empty()) {
+        std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+            return a.score > b.score;
+        });
+
+        const auto& best = candidates.front();
+        char ipStr[32];
+        snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
+                 (best.ip >> 24) & 0xFF, (best.ip >> 16) & 0xFF,
+                 (best.ip >> 8) & 0xFF, best.ip & 0xFF);
+
+        std::string finalReason = best.reason + " [" + best.name + " (" + best.desc + ")] (score=" + std::to_string(best.score) + ")";
+        if (outReason) *outReason = finalReason;
+        printf("[LanTransport] Interface selected: %s (Reason: %s)\n", ipStr, finalReason.c_str());
+        return best.ip;
+    }
+
+    // 3. Fallback to gethostname / gethostbyname
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) == 0) {
         struct hostent* he = gethostbyname(hostname);
@@ -13,27 +170,33 @@ static uint32_t ResolveLocalIpv4() {
             for (int i = 0; he->h_addr_list[i] != nullptr; ++i) {
                 auto* in = reinterpret_cast<struct in_addr*>(he->h_addr_list[i]);
                 uint32_t ip = ntohl(in->s_addr);
-                // Pick first valid RFC1918 / private address
                 if ((ip & 0xFF000000) == 0x0A000000 ||
                     (ip & 0xFFF00000) == 0xAC100000 ||
                     (ip & 0xFFFF0000) == 0xC0A80000) {
-                    // Avoid VirtualBox host-only default network (192.168.56.0/24) if another private IP is available
                     if ((ip & 0xFFFFFF00) == 0xC0A83800) {
                         if (fallbackIp == 0) fallbackIp = ip;
                     } else {
+                        if (outReason) *outReason = "RFC1918 private IP from hostname lookup";
+                        printf("[LanTransport] Interface selected: %u.%u.%u.%u (Reason: RFC1918 Hostname Fallback)\n",
+                               (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
                         return ip;
                     }
                 }
             }
-            if (fallbackIp != 0) return fallbackIp;
+            if (fallbackIp != 0) {
+                if (outReason) *outReason = "Fallback private IP from hostname lookup";
+                return fallbackIp;
+            }
         }
     }
+
+    if (outReason) *outReason = "Fallback to localhost loopback (127.0.0.1)";
+    printf("[LanTransport] Interface selected: 127.0.0.1 (Reason: Fallback loopback)\n");
     return 0x7F000001; // 127.0.0.1 fallback
 }
 
 constexpr uint16_t REFIX_DEFAULT_DISCOVERY_PORT = 47584;
 constexpr uint16_t REFIX_FALLBACK_DISCOVERY_PORTS[] = { 47584, 47585, 47586 };
-constexpr size_t REFIX_MAX_MESSAGE_SIZE = 256 * 1024; // 256 KB safety limit
 
 LanTransport::LanTransport() = default;
 
@@ -133,6 +296,11 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
         m_localDataEndpoint.port = ntohs(dataSin.sin_port);
     }
     m_localDataEndpoint.ipv4 = ResolveLocalIpv4();
+
+    struct in_addr mcastIf{};
+    mcastIf.s_addr = htonl(m_localDataEndpoint.ipv4);
+    setsockopt(m_dataSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
+    setsockopt(m_groupSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
 
     ioctlsocket(m_dataSocket, FIONBIO, &nonblock);
 
@@ -354,52 +522,124 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                         }
                         packetsToNotify.push_back(std::move(rawPkt));
                     } else {
-                        // Fragmented message
+                        // Fragmented message validation:
+                        // 1. Validate fragTotal and fragIndex before allocating memory
+                        if (rawPkt.fragTotal == 0 || rawPkt.fragIndex >= rawPkt.fragTotal) {
+                            continue;
+                        }
+                        // 2. Reject payload exceeding protocol limit
+                        if (rawPkt.payload.size() > REFIX_MAX_FRAGMENT_PAYLOAD) {
+                            continue;
+                        }
+                        // 3. Reject if total size would exceed REFIX_MAX_MESSAGE_SIZE
+                        if (static_cast<size_t>(rawPkt.fragTotal) * REFIX_MAX_FRAGMENT_PAYLOAD > REFIX_MAX_MESSAGE_SIZE + REFIX_MAX_FRAGMENT_PAYLOAD) {
+                            continue;
+                        }
+
+                        auto now = std::chrono::steady_clock::now();
+                        PruneExpiredFragmentsLocked(now);
+
                         auto fragKey = std::make_pair(rawPkt.senderPeerId, rawPkt.sessionId);
                         auto it = m_fragmentMap.find(fragKey);
                         if (it == m_fragmentMap.end()) {
-                            // Enforce memory limit: max 64 concurrent reassembly contexts
-                            if (m_fragmentMap.size() >= 64) {
-                                m_fragmentMap.erase(m_fragmentMap.begin());
+                            // Check per-peer context count
+                            size_t peerContextCount = 0;
+                            for (const auto& kv : m_fragmentMap) {
+                                if (kv.first.first == rawPkt.senderPeerId) peerContextCount++;
                             }
+                            if (peerContextCount >= REFIX_MAX_PEER_REASSEMBLY_CONTEXTS) {
+                                EvictOldestReassemblyContextLocked(&rawPkt.senderPeerId);
+                            }
+
+                            // Check global context count
+                            if (m_fragmentMap.size() >= REFIX_MAX_REASSEMBLY_CONTEXTS) {
+                                EvictOldestReassemblyContextLocked(nullptr);
+                            }
+
+                            // Check global and per-peer memory budgets
+                            size_t chunkLen = rawPkt.payload.size();
+                            if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
+                                m_peerReassemblyBytes[rawPkt.senderPeerId] + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                                continue;
+                            }
+
                             FragmentAssembler fa;
                             fa.totalFragments = rawPkt.fragTotal;
                             fa.channel = rawPkt.channel;
                             fa.isReliable = rawPkt.isReliable;
+                            fa.sessionId = rawPkt.sessionId;
+                            fa.senderPeerId = rawPkt.senderPeerId;
+                            fa.allocatedBytes = 0;
                             fa.fragments.resize(rawPkt.fragTotal);
                             fa.received.resize(rawPkt.fragTotal, false);
-                            fa.startTime = std::chrono::steady_clock::now();
+                            fa.startTime = now;
+                            fa.lastActivityTime = now;
                             it = m_fragmentMap.emplace(fragKey, std::move(fa)).first;
                         }
 
                         auto& fa = it->second;
-                        if (rawPkt.fragIndex < fa.totalFragments && !fa.received[rawPkt.fragIndex]) {
-                            fa.fragments[rawPkt.fragIndex] = std::move(rawPkt.payload);
-                            fa.received[rawPkt.fragIndex] = true;
 
-                            bool allReceived = true;
-                            for (bool r : fa.received) {
-                                if (!r) { allReceived = false; break; }
+                        // Verify metadata consistency across all fragments of session
+                        if (rawPkt.fragTotal != fa.totalFragments ||
+                            rawPkt.channel != fa.channel ||
+                            rawPkt.isReliable != fa.isReliable) {
+                            continue;
+                        }
+
+                        // Duplicate fragment check
+                        if (fa.received[rawPkt.fragIndex]) {
+                            fa.lastActivityTime = now;
+                            continue;
+                        }
+
+                        // Check message reconstructed byte limit (256 KB)
+                        size_t chunkLen = rawPkt.payload.size();
+                        if (fa.allocatedBytes + chunkLen > REFIX_MAX_MESSAGE_SIZE) {
+                            // Abort context exceeding message limit
+                            m_globalReassemblyBytes -= fa.allocatedBytes;
+                            m_peerReassemblyBytes[rawPkt.senderPeerId] -= fa.allocatedBytes;
+                            m_fragmentMap.erase(it);
+                            continue;
+                        }
+
+                        // Check global and per-peer memory budgets
+                        if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
+                            m_peerReassemblyBytes[rawPkt.senderPeerId] + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                            continue;
+                        }
+
+                        fa.fragments[rawPkt.fragIndex] = std::move(rawPkt.payload);
+                        fa.received[rawPkt.fragIndex] = true;
+                        fa.allocatedBytes += chunkLen;
+                        m_globalReassemblyBytes += chunkLen;
+                        m_peerReassemblyBytes[rawPkt.senderPeerId] += chunkLen;
+                        fa.lastActivityTime = now;
+
+                        bool allReceived = true;
+                        for (bool r : fa.received) {
+                            if (!r) { allReceived = false; break; }
+                        }
+
+                        if (allReceived) {
+                            InboundPacket fullMsg;
+                            fullMsg.senderPeerId = rawPkt.senderPeerId;
+                            fullMsg.senderEndpoint = rawPkt.senderEndpoint;
+                            fullMsg.channel = fa.channel;
+                            fullMsg.isReliable = fa.isReliable;
+                            fullMsg.sequence = rawPkt.sequence;
+                            fullMsg.payload.reserve(fa.allocatedBytes);
+                            for (auto& chunk : fa.fragments) {
+                                fullMsg.payload.insert(fullMsg.payload.end(), chunk.begin(), chunk.end());
                             }
+                            m_globalReassemblyBytes -= fa.allocatedBytes;
+                            m_peerReassemblyBytes[rawPkt.senderPeerId] -= fa.allocatedBytes;
+                            m_fragmentMap.erase(it);
 
-                            if (allReceived) {
-                                InboundPacket fullMsg;
-                                fullMsg.senderPeerId = rawPkt.senderPeerId;
-                                fullMsg.senderEndpoint = rawPkt.senderEndpoint;
-                                fullMsg.channel = fa.channel;
-                                fullMsg.isReliable = fa.isReliable;
-                                fullMsg.sequence = rawPkt.sequence;
-                                for (auto& chunk : fa.fragments) {
-                                    fullMsg.payload.insert(fullMsg.payload.end(), chunk.begin(), chunk.end());
-                                }
-                                m_fragmentMap.erase(it);
-
-                                {
-                                    std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                                    m_inboundQueue.push_back(fullMsg);
-                                }
-                                packetsToNotify.push_back(std::move(fullMsg));
+                            {
+                                std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                                m_inboundQueue.push_back(fullMsg);
                             }
+                            packetsToNotify.push_back(std::move(fullMsg));
                         }
                     }
                 }
@@ -414,6 +654,9 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         }
 
         // Unreliable data packet
+        if (payloadLen > REFIX_MAX_UNRELIABLE_PAYLOAD) {
+            return;
+        }
         InboundPacket pkt;
         pkt.senderPeerId = senderPeer;
         pkt.senderEndpoint = fromEp;
@@ -667,7 +910,13 @@ bool LanTransport::SendUnreliable(const LanEndpoint& target, uint8_t channel, co
         return false;
     }
 
-    if (len > REFIX_MAX_MESSAGE_SIZE) {
+    // Contract: Unreliable messages are strictly single-datagram MTU-safe.
+    // Payloads exceeding REFIX_MAX_UNRELIABLE_PAYLOAD are unequivocally rejected.
+    if (len > REFIX_MAX_UNRELIABLE_PAYLOAD) {
+        return false;
+    }
+
+    if (len > 0 && data == nullptr) {
         return false;
     }
 
@@ -835,9 +1084,61 @@ bool LanTransport::PollInbound(InboundPacket& outPacket) {
     return true;
 }
 
+void LanTransport::PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now) {
+    for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end(); ) {
+        if (now - it->second.lastActivityTime > std::chrono::seconds(REFIX_REASSEMBLY_TIMEOUT_SEC)) {
+            m_globalReassemblyBytes -= it->second.allocatedBytes;
+            m_peerReassemblyBytes[it->second.senderPeerId] -= it->second.allocatedBytes;
+            it = m_fragmentMap.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void LanTransport::EvictOldestReassemblyContextLocked(const PeerId* preferredPeer) {
+    auto oldestIt = m_fragmentMap.end();
+    std::chrono::steady_clock::time_point oldestTime = (std::chrono::steady_clock::time_point::max)();
+
+    for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end(); ++it) {
+        if (preferredPeer && it->first.first != *preferredPeer) continue;
+        if (it->second.lastActivityTime < oldestTime) {
+            oldestTime = it->second.lastActivityTime;
+            oldestIt = it;
+        }
+    }
+
+    if (oldestIt != m_fragmentMap.end()) {
+        m_globalReassemblyBytes -= oldestIt->second.allocatedBytes;
+        m_peerReassemblyBytes[oldestIt->second.senderPeerId] -= oldestIt->second.allocatedBytes;
+        m_fragmentMap.erase(oldestIt);
+    }
+}
+
+size_t LanTransport::GetGlobalReassemblyBytes() const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    return m_globalReassemblyBytes;
+}
+
+size_t LanTransport::GetReassemblyContextCount() const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    return m_fragmentMap.size();
+}
+
 void LanTransport::ResetPeerState(const PeerId& peerId) {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     m_peerStates.erase(peerId);
+
+    for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end(); ) {
+        if (it->first.first == peerId) {
+            m_globalReassemblyBytes -= it->second.allocatedBytes;
+            m_peerReassemblyBytes[peerId] -= it->second.allocatedBytes;
+            it = m_fragmentMap.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    m_peerReassemblyBytes.erase(peerId);
 }
 
 } // namespace refix::lan

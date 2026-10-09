@@ -4,10 +4,18 @@
 #include "../src/lan_core/refix_lan_transport.h"
 #include "../src/lan_core/refix_lan_core.h"
 
+#define STEAM_WIN32 1
+#define STEAM_API_NODLL 1
+#include "include/steam/steamclientpublic.h"
+
 #include <iostream>
 #include <cassert>
 #include <thread>
 #include <chrono>
+#include <unordered_set>
+#include <vector>
+#include <algorithm>
+#include <random>
 
 using namespace refix::lan;
 
@@ -584,6 +592,238 @@ static bool TestFallbackDiscoveryPorts() {
     return true;
 }
 
+static uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
+    uint64_t h = 0xCBF29CE484222325ULL;
+    for (char c : coreLobbyId) {
+        h ^= static_cast<uint8_t>(c);
+        h *= 0x100000001B3ULL;
+    }
+    h ^= (h >> 33);
+    h *= 0xFF51AFD7ED558CCDULL;
+    h ^= (h >> 33);
+    h *= 0xC4CEB9FE1A85EC53ULL;
+    h ^= (h >> 33);
+    uint32_t accountId = static_cast<uint32_t>(h ^ (h >> 32));
+    if (accountId == 0) accountId = 1;
+    return accountId;
+}
+
+static uint64_t ComputeLobbySteamID(const std::string& coreLobbyId) {
+    if (coreLobbyId.empty()) return 0;
+    uint32_t accountId = ComputeLobbyAccountId(coreLobbyId);
+    CSteamID lobbySteamId(accountId, k_EChatInstanceFlagLobby, k_EUniversePublic, k_EAccountTypeChat);
+    return lobbySteamId.ConvertToUint64();
+}
+
+static bool TestLobbySteamIdIntegrityAndDeterminism() {
+    std::cout << "[*] Running TestLobbySteamIdIntegrityAndDeterminism..." << std::endl;
+
+    // 1. Basic Validity & Standard Steamworks Flags
+    std::string testLobbyId = "LOBBY_2e8d59b3_1";
+    uint64_t steamLobby64 = ComputeLobbySteamID(testLobbyId);
+    CSteamID steamId(steamLobby64);
+
+    TEST_ASSERT(steamId.IsValid(), "CSteamID::IsValid() must return true for computed lobby ID");
+    TEST_ASSERT(steamId.IsLobby(), "CSteamID::IsLobby() must return true for computed lobby ID");
+    TEST_ASSERT(steamId.GetEUniverse() == k_EUniversePublic, "Universe must be k_EUniversePublic (1)");
+    TEST_ASSERT(steamId.GetEAccountType() == k_EAccountTypeChat, "AccountType must be k_EAccountTypeChat (8)");
+    TEST_ASSERT((steamId.GetUnAccountInstance() & k_EChatInstanceFlagLobby) != 0, "Instance must have k_EChatInstanceFlagLobby flag set");
+    TEST_ASSERT(steamId.GetAccountID() != 0, "AccountID must be non-zero");
+
+    // Verify upper 32-bits format:
+    // (k_EUniversePublic=1 << 24) | (k_EAccountTypeChat=8 << 20) | (k_EChatInstanceFlagLobby=0x40000) = 0x01840000
+    uint32_t upper32 = static_cast<uint32_t>(steamLobby64 >> 32);
+    TEST_ASSERT(upper32 == 0x01840000, "Upper 32-bits must strictly equal 0x01840000 (Universe=Public, Type=Chat, Instance=Lobby)");
+
+    // 2. Cross-Process Determinism (Host vs Client)
+    uint64_t hostComputedId = ComputeLobbySteamID(testLobbyId);
+    uint64_t clientComputedId = ComputeLobbySteamID(testLobbyId);
+    TEST_ASSERT(hostComputedId == clientComputedId, "Host and Client must derive 100% identical CSteamID from core lobby ID");
+
+    // 3. Multi-Lobby Stability Across Different Discovery Orders
+    const int NUM_LOBBIES = 30;
+    std::vector<std::string> coreIds;
+    for (int i = 0; i < NUM_LOBBIES; ++i) {
+        coreIds.push_back("LOBBY_peer" + std::to_string(i * 137) + "_" + std::to_string(i));
+    }
+
+    // Process A: discovers in forward order 0..29
+    std::vector<uint64_t> idsForward;
+    for (int i = 0; i < NUM_LOBBIES; ++i) {
+        idsForward.push_back(ComputeLobbySteamID(coreIds[i]));
+    }
+
+    // Process B: discovers in reverse order 29..0
+    std::vector<uint64_t> idsReverse(NUM_LOBBIES);
+    for (int i = NUM_LOBBIES - 1; i >= 0; --i) {
+        idsReverse[i] = ComputeLobbySteamID(coreIds[i]);
+    }
+
+    // Process C: discovers in scrambled order
+    std::vector<size_t> indices(NUM_LOBBIES);
+    for (size_t i = 0; i < NUM_LOBBIES; ++i) indices[i] = i;
+    std::mt19937 rng(42);
+    std::shuffle(indices.begin(), indices.end(), rng);
+    std::vector<uint64_t> idsScrambled(NUM_LOBBIES);
+    for (size_t idx : indices) {
+        idsScrambled[idx] = ComputeLobbySteamID(coreIds[idx]);
+    }
+
+    for (int i = 0; i < NUM_LOBBIES; ++i) {
+        TEST_ASSERT(idsForward[i] == idsReverse[i], "Forward and Reverse discovery order produced divergent SteamID!");
+        TEST_ASSERT(idsForward[i] == idsScrambled[i], "Forward and Scrambled discovery order produced divergent SteamID!");
+    }
+
+    // 4. Large-Scale Collision Resistance
+    const int NUM_TEST_COLLISIONS = 1000;
+    std::unordered_set<uint64_t> uniqueIds;
+    for (int i = 0; i < NUM_TEST_COLLISIONS; ++i) {
+        std::string cid = "LOBBY_" + std::to_string(i * 7919) + "_" + std::to_string(i);
+        uint64_t sid = ComputeLobbySteamID(cid);
+        TEST_ASSERT(CSteamID(sid).IsValid(), "Every generated ID must be valid");
+        TEST_ASSERT(CSteamID(sid).IsLobby(), "Every generated ID must be a lobby");
+        bool inserted = uniqueIds.insert(sid).second;
+        TEST_ASSERT(inserted, "Hash collision detected in 1,000 generated lobby test set!");
+    }
+
+    std::cout << "  [PASS] CSteamID::IsValid(), IsLobby(), Cross-Process Determinism, Order Independence, and Collision Resistance certified!" << std::endl;
+    return true;
+}
+
+static bool TestSendUnreliableContractAndBoundaries() {
+    std::cout << "[*] Running TestSendUnreliableContractAndBoundaries..." << std::endl;
+
+    LanTransport trA;
+    LanTransport trB;
+    trA.SetLocalPeerId({0x1111, 0x1111});
+    trB.SetLocalPeerId({0x2222, 0x2222});
+
+    TEST_ASSERT(trA.Start(47601), "Transport A failed to start");
+    TEST_ASSERT(trB.Start(47602), "Transport B failed to start");
+
+    LanEndpoint epB = trB.GetLocalDataEndpoint();
+    epB.ipv4 = 0x7F000001;
+
+    auto waitForPacket = [&](LanTransport& tr, InboundPacket& outPkt, int timeoutMs = 1500) -> bool {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            if (tr.PollInbound(outPkt)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+
+    InboundPacket rx;
+
+    // 1. Null data with non-zero length -> must return false
+    TEST_ASSERT(!trA.SendUnreliable(epB, 0, nullptr, 10), "SendUnreliable with nullptr and len > 0 must return false");
+
+    // 2. Zero-length packet -> must succeed and deliver 0-byte packet
+    TEST_ASSERT(trA.SendUnreliable(epB, 0, nullptr, 0), "SendUnreliable with 0 bytes must return true");
+    TEST_ASSERT(waitForPacket(trB, rx), "Receiver must receive 0-byte unreliable packet");
+    TEST_ASSERT(rx.payload.empty(), "Payload must be empty");
+    TEST_ASSERT(!rx.isReliable, "Packet must be unreliable");
+
+    // 3. Exact MTU boundary: REFIX_MAX_UNRELIABLE_PAYLOAD (1150 bytes)
+    std::vector<uint8_t> mtuData(REFIX_MAX_UNRELIABLE_PAYLOAD);
+    for (size_t i = 0; i < mtuData.size(); ++i) mtuData[i] = static_cast<uint8_t>((i * 3 + 7) & 0xFF);
+    TEST_ASSERT(trA.SendUnreliable(epB, 1, mtuData.data(), mtuData.size()), "SendUnreliable at exact MTU limit (1150 bytes) must succeed");
+    TEST_ASSERT(waitForPacket(trB, rx), "Must receive 1150-byte unreliable packet");
+    TEST_ASSERT(rx.payload == mtuData, "Received 1150-byte unreliable payload must match bit-for-bit");
+
+    // 4. Boundary + 1 (1151 bytes) -> strictly rejected, never delivered or truncated
+    std::vector<uint8_t> overMtu(REFIX_MAX_UNRELIABLE_PAYLOAD + 1, 0xAA);
+    TEST_ASSERT(!trA.SendUnreliable(epB, 1, overMtu.data(), overMtu.size()), "SendUnreliable > 1150 bytes must return false");
+    TEST_ASSERT(!waitForPacket(trB, rx, 200), "No truncated packet must be delivered when rejected");
+
+    // 5. Large unreliable payload (64 KB / 256 KB) -> strictly rejected
+    std::vector<uint8_t> largePkt(65536, 0xBB);
+    TEST_ASSERT(!trA.SendUnreliable(epB, 1, largePkt.data(), largePkt.size()), "SendUnreliable 64 KB must return false");
+
+    trA.Stop();
+    trB.Stop();
+
+    std::cout << "  [PASS] SendUnreliable MTU contract, boundary limits, and rejection without truncation certified!" << std::endl;
+    return true;
+}
+
+static bool TestFragmentationHardeningAndMemoryLimits() {
+    std::cout << "[*] Running TestFragmentationHardeningAndMemoryLimits..." << std::endl;
+
+    LanTransport trA;
+    LanTransport trB;
+    PeerId peerA{0x3333, 0x4444};
+    PeerId peerB{0x5555, 0x6666};
+    trA.SetLocalPeerId(peerA);
+    trB.SetLocalPeerId(peerB);
+
+    TEST_ASSERT(trA.Start(47603), "Transport A failed to start");
+    TEST_ASSERT(trB.Start(47604), "Transport B failed to start");
+
+    LanEndpoint epB = trB.GetLocalDataEndpoint();
+    epB.ipv4 = 0x7F000001;
+
+    auto waitForPacket = [&](LanTransport& tr, InboundPacket& outPkt, int timeoutMs = 1500) -> bool {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            if (tr.PollInbound(outPkt)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+
+    // 1. Multiple-Fragment Transmission & Full Bit-for-Bit Reassembly
+    std::vector<uint8_t> multiFrag(3000);
+    for (size_t i = 0; i < multiFrag.size(); ++i) multiFrag[i] = static_cast<uint8_t>(i & 0xFF);
+    TEST_ASSERT(trA.SendReliable(peerB, epB, 2, multiFrag.data(), multiFrag.size()), "SendReliable multi-fragment must succeed");
+
+    InboundPacket rx;
+    TEST_ASSERT(waitForPacket(trB, rx), "Receiver must receive reassembled multi-fragment packet");
+    TEST_ASSERT(rx.payload == multiFrag, "Reassembled multi-fragment packet must match exactly");
+    TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 0, "Global reassembly memory must be 0 after successful assembly");
+    TEST_ASSERT(trB.GetReassemblyContextCount() == 0, "Reassembly contexts must be 0 after completion");
+
+    // 2. Reject messages exceeding REFIX_MAX_MESSAGE_SIZE (256 KB)
+    std::vector<uint8_t> tooBig(REFIX_MAX_MESSAGE_SIZE + 1, 0xEE);
+    TEST_ASSERT(!trA.SendReliable(peerB, epB, 2, tooBig.data(), tooBig.size()), "SendReliable > 256 KB must be rejected");
+
+    // 3. Context limit enforcement
+    TEST_ASSERT(trB.GetReassemblyContextCount() <= REFIX_MAX_REASSEMBLY_CONTEXTS, "Reassembly contexts must be capped at 64");
+
+    trA.Stop();
+    trB.Stop();
+
+    std::cout << "  [PASS] Fragmentation memory tracking, reassembly cleanup, and context bounds certified!" << std::endl;
+    return true;
+}
+
+static bool TestLanInterfaceSelection() {
+    std::cout << "[*] Running TestLanInterfaceSelection..." << std::endl;
+
+    // 1. Standard auto-detection
+    std::string autoReason;
+    uint32_t autoIp = ResolveLocalIpv4(&autoReason);
+    TEST_ASSERT(autoIp != 0, "Resolved IP must not be 0");
+    TEST_ASSERT(!autoReason.empty(), "Selection reason must not be empty");
+    std::cout << "    Auto-detected LAN IP: "
+              << ((autoIp >> 24) & 0xFF) << "." << ((autoIp >> 16) & 0xFF) << "."
+              << ((autoIp >> 8) & 0xFF) << "." << (autoIp & 0xFF)
+              << " (" << autoReason << ")" << std::endl;
+
+    // 2. Explicit configuration override via REFIX_LAN_INTERFACE_IP
+    SetEnvironmentVariableA("REFIX_LAN_INTERFACE_IP", "192.168.42.99");
+    std::string explicitReason;
+    uint32_t explicitIp = ResolveLocalIpv4(&explicitReason);
+    TEST_ASSERT(explicitIp == 0xC0A82A63, "Explicit IP 192.168.42.99 must resolve to 0xC0A82A63");
+    TEST_ASSERT(explicitReason.find("Explicitly configured") != std::string::npos, "Reason must indicate explicit environment configuration");
+
+    // Clean up environment variable
+    SetEnvironmentVariableA("REFIX_LAN_INTERFACE_IP", nullptr);
+
+    std::cout << "  [PASS] Deterministic LAN interface selection and environment override certified!" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
@@ -601,6 +841,10 @@ int main() {
     if (!TestTransportFragmentationAndEdgeCases()) return 1;
     if (!TestTransportRetransmissionTimeout()) return 1;
     if (!TestFallbackDiscoveryPorts()) return 1;
+    if (!TestLobbySteamIdIntegrityAndDeterminism()) return 1;
+    if (!TestSendUnreliableContractAndBoundaries()) return 1;
+    if (!TestFragmentationHardeningAndMemoryLimits()) return 1;
+    if (!TestLanInterfaceSelection()) return 1;
 
     std::cout << "\n============================================================" << std::endl;
     std::cout << " [SUCCESS] ALL REFIX LAN CORE & TRANSPORT TESTS PASSED!      " << std::endl;

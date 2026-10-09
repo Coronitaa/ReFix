@@ -523,26 +523,55 @@ namespace UnrealSteamEmu {
     static refix::lan::MatchmakingCriteria g_pendingSearchCriteria;
     static std::vector<uint64_t> g_lastMatchmakingResults;
 
-    static uint64_t ComputeLobbySteamID(const std::string& coreLobbyId) {
+    static bool ShouldUseLegacyFallback() {
+        static int s_legacyDisabled = -1;
+        if (s_legacyDisabled == -1) {
+            char buf[16] = {0};
+            if (GetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", buf, sizeof(buf)) > 0) {
+                s_legacyDisabled = (buf[0] == '1' || buf[0] == 't' || buf[0] == 'T' || buf[0] == 'y' || buf[0] == 'Y') ? 1 : 0;
+            } else {
+                s_legacyDisabled = 0;
+            }
+        }
+        return s_legacyDisabled == 0;
+    }
+
+    static uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
+        // Deterministic high-avalanche 64-bit FNV-1a hash followed by Murmur3/SplitMix64 finalizer
         uint64_t h = 0xCBF29CE484222325ULL;
         for (char c : coreLobbyId) {
             h ^= static_cast<uint8_t>(c);
             h *= 0x100000001B3ULL;
         }
-        return 0x1860000000000000ULL | (h & 0x0000FFFFFFFFFFFFULL);
+        h ^= (h >> 33);
+        h *= 0xFF51AFD7ED558CCDULL;
+        h ^= (h >> 33);
+        h *= 0xC4CEB9FE1A85EC53ULL;
+        h ^= (h >> 33);
+        uint32_t accountId = static_cast<uint32_t>(h ^ (h >> 32));
+        if (accountId == 0) accountId = 1;
+        return accountId;
+    }
+
+    static uint64_t ComputeLobbySteamID(const std::string& coreLobbyId) {
+        if (coreLobbyId.empty()) return 0;
+        uint32_t accountId = ComputeLobbyAccountId(coreLobbyId);
+        // Canonical Steamworks Lobby CSteamID:
+        // - Universe: k_EUniversePublic (1)
+        // - AccountType: k_EAccountTypeChat (8)
+        // - Instance: k_EChatInstanceFlagLobby (0x40000)
+        // - AccountID: deterministic 32-bit ID derived from LanCore Lobby ID
+        CSteamID lobbySteamId(accountId, k_EChatInstanceFlagLobby, k_EUniversePublic, k_EAccountTypeChat);
+        return lobbySteamId.ConvertToUint64();
     }
 
     static uint64_t EnsureSteamLobbyID(const std::string& coreLobbyId, uint64_t fallbackId = 0) {
+        if (coreLobbyId.empty()) return (fallbackId != 0) ? fallbackId : 0;
         std::lock_guard<std::mutex> lock(s_steamLobbyMapMutex);
         auto it = s_coreToSteamLobby.find(coreLobbyId);
         if (it != s_coreToSteamLobby.end()) return it->second;
 
         uint64_t steamLobbyId = (fallbackId != 0) ? fallbackId : ComputeLobbySteamID(coreLobbyId);
-        while (s_steamToCoreLobby.find(steamLobbyId) != s_steamToCoreLobby.end() &&
-               s_steamToCoreLobby[steamLobbyId] != coreLobbyId) {
-            steamLobbyId = 0x1860000000000000ULL | ((steamLobbyId + 1) & 0x0000FFFFFFFFFFFFULL);
-        }
-
         s_coreToSteamLobby[coreLobbyId] = steamLobbyId;
         s_steamToCoreLobby[steamLobbyId] = coreLobbyId;
         return steamLobbyId;
@@ -2323,7 +2352,9 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t RequestLobbyList() override {
             refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
             refix::lan::ILanCore::Get().Discovery().BroadcastQuery();
-            BroadcastNetPacket(3, nullptr, 0); // Query lobbies on LAN (legacy fallback)
+            if (ShouldUseLegacyFallback()) {
+                BroadcastNetPacket(3, nullptr, 0); // Query lobbies on LAN (legacy fallback)
+            }
 
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             uint64_t hCall = ++g_nextAPICall;
@@ -2411,10 +2442,12 @@ namespace UnrealSteamEmu {
             }
 
             // Announce on LAN (legacy compatibility)
-            std::stringstream ss;
-            ss << lID << " " << g_localSteamID << " " << cMaxMembers << " " << g_personaName;
-            std::string meta = ss.str();
-            BroadcastNetPacket(2, meta.c_str(), meta.size());
+            if (ShouldUseLegacyFallback()) {
+                std::stringstream ss;
+                ss << lID << " " << g_localSteamID << " " << cMaxMembers << " " << g_personaName;
+                std::string meta = ss.str();
+                BroadcastNetPacket(2, meta.c_str(), meta.size());
+            }
 
             // Post CallResult and Callback
             LobbyCreated_t crResp = {};
@@ -2613,7 +2646,7 @@ namespace UnrealSteamEmu {
             PostCallback(LobbyDataUpdate_t::k_iCallback, &resp, sizeof(resp));
 
             // Sync metadata to LAN if host (FIND-07)
-            {
+            if (ShouldUseLegacyFallback()) {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 auto it = g_lobbies.find(lID);
                 if (it != g_lobbies.end() && it->second.owner == g_localSteamID) {
@@ -3054,6 +3087,10 @@ namespace UnrealSteamEmu {
                 printf("[P2P_ROUTE_FALLBACK] Remote=%llu Chan=%d Bytes=%u\n",
                        (unsigned long long)steamIDRemote.ConvertToUint64(), (int)nChannel, (unsigned int)cubData);
                 fflush(stdout);
+            }
+
+            if (!ShouldUseLegacyFallback()) {
+                return false;
             }
 
             // Fallback path: legacy SendLanPacket / BroadcastNetPacket

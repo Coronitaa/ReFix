@@ -11,7 +11,14 @@ namespace refix::lan {
 
 constexpr uint32_t REFIX_WIRE_MAGIC = 0x52464958; // 'RFIX' in little endian
 constexpr uint8_t  REFIX_WIRE_VERSION = 1;
-constexpr uint16_t REFIX_MAX_FRAGMENT_PAYLOAD = 1150; // MTU-safe chunk size
+constexpr uint16_t REFIX_MAX_FRAGMENT_PAYLOAD      = 1150; // MTU-safe chunk size
+constexpr uint16_t REFIX_MAX_UNRELIABLE_PAYLOAD    = 1150; // MTU-safe single-datagram payload limit for unreliable
+constexpr size_t   REFIX_MAX_MESSAGE_SIZE          = 256 * 1024; // 256 KB safety limit for reconstructed messages
+constexpr size_t   REFIX_MAX_GLOBAL_REASSEMBLY_MEM = 4 * 1024 * 1024; // 4 MB global aggregate reassembly memory budget
+constexpr size_t   REFIX_MAX_PEER_REASSEMBLY_MEM   = 1 * 1024 * 1024; // 1 MB per-peer reassembly memory limit
+constexpr size_t   REFIX_MAX_REASSEMBLY_CONTEXTS   = 64; // Max concurrent reassembly contexts
+constexpr size_t   REFIX_MAX_PEER_REASSEMBLY_CONTEXTS = 16; // Max concurrent reassembly contexts per peer
+constexpr uint32_t REFIX_REASSEMBLY_TIMEOUT_SEC    = 10; // Expiration timeout for incomplete messages (seconds)
 
 // Message Types
 enum class MsgType : uint8_t {

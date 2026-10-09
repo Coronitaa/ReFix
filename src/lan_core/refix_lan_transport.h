@@ -39,6 +39,9 @@ public:
     virtual void OnPeerTimeout(const PeerId& peerId, const LanEndpoint& endpoint) = 0;
 };
 
+// Deterministic LAN network interface selection
+uint32_t ResolveLocalIpv4(std::string* outReason = nullptr);
+
 class LanTransport {
 public:
     LanTransport();
@@ -73,6 +76,10 @@ public:
     // Peer Connection Management
     void ResetPeerState(const PeerId& peerId);
 
+    // Diagnostics & Test Inspection
+    size_t GetGlobalReassemblyBytes() const;
+    size_t GetReassemblyContextCount() const;
+
 private:
     struct OutboundReliable {
         uint32_t sequence = 0;
@@ -99,9 +106,13 @@ private:
         uint8_t totalFragments = 0;
         uint8_t channel = 0;
         bool isReliable = false;
+        uint32_t sessionId = 0;
+        PeerId senderPeerId;
+        size_t allocatedBytes = 0;
         std::vector<std::vector<uint8_t>> fragments;
         std::vector<bool> received;
         std::chrono::steady_clock::time_point startTime;
+        std::chrono::steady_clock::time_point lastActivityTime;
     };
 
     void ReactorThreadLoop();
@@ -112,6 +123,8 @@ private:
     void SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask);
     void CheckRetransmissionsAndTimeouts();
     bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);
+    void PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now);
+    void EvictOldestReassemblyContextLocked(const PeerId* preferredPeer = nullptr);
 
     std::atomic<bool> m_running{false};
     uint16_t m_discoveryPort = 47584;
@@ -123,9 +136,11 @@ private:
     SOCKET m_dataSocket = INVALID_SOCKET;
     std::thread m_reactorThread;
 
-    std::mutex m_stateMutex;
+    mutable std::mutex m_stateMutex;
     std::unordered_map<PeerId, PeerReliabilityState> m_peerStates;
     std::map<std::pair<PeerId, uint32_t>, FragmentAssembler> m_fragmentMap;
+    size_t m_globalReassemblyBytes = 0;
+    std::unordered_map<PeerId, size_t> m_peerReassemblyBytes;
 
     std::mutex m_inboundQueueMutex;
     std::deque<InboundPacket> m_inboundQueue;

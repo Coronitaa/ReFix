@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$BinPath = "",
     [Parameter(Mandatory = $false)]
-    [int]$TimeoutSeconds = 30
+    [int]$TimeoutSeconds = 30,
+    [Parameter(Mandatory = $false)]
+    [switch]$DisableFallbacks = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,8 +24,9 @@ if (-not (Test-Path -LiteralPath $resolvedBin)) {
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "   REFIX STEAMWORKS ADAPTER MULTIPROCESS HARNESS (LAN)    " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "[*] Target Binary: $resolvedBin"
-Write-Host "[*] Timeout:       $TimeoutSeconds seconds"
+Write-Host "[*] Target Binary:    $resolvedBin"
+Write-Host "[*] Timeout:          $TimeoutSeconds seconds"
+Write-Host "[*] Canonical Only:   $DisableFallbacks (REFIX_DISABLE_LEGACY_FALLBACKS)"
 
 $hostLogOut = Join-Path -Path $PSScriptRoot -ChildPath "adapter_host.log"
 $hostLogErr = Join-Path -Path $PSScriptRoot -ChildPath "adapter_host_err.log"
@@ -39,7 +42,8 @@ function Start-AdapterProcess {
     param([string]$Mode, [string]$LogOut, [string]$LogErr)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "cmd.exe"
-    $psi.Arguments = "/c `"`"$resolvedBin`" --mode $Mode > `"$LogOut`" 2> `"$LogErr`"`""
+    $envPrefix = if ($DisableFallbacks) { "set REFIX_DISABLE_LEGACY_FALLBACKS=1 && " } else { "" }
+    $psi.Arguments = "/c `"$envPrefix`"$resolvedBin`" --mode $Mode > `"$LogOut`" 2> `"$LogErr`"`""
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     return [System.Diagnostics.Process]::Start($psi)
@@ -98,6 +102,32 @@ Write-Host "==========================================================" -Foregro
 Write-Host "Host Exit Code:   $hostExit" -ForegroundColor $(if ($hostExit -eq 0) { "Green" } else { "Red" })
 Write-Host "Client Exit Code: $clientExit" -ForegroundColor $(if ($clientExit -eq 0) { "Green" } else { "Red" })
 
+$hostLobbyId = ""
+$clientLobbyId = ""
+$lobbyIdValid = $false
+
+if ($hostOutput -match 'Created Lobby ID:\s+(\d+)') {
+    $hostLobbyId = $matches[1]
+    [uint64]$hId = [uint64]$hostLobbyId
+    $upper32 = ($hId -shr 32)
+    if ($upper32 -eq 0x01840000) {
+        $lobbyIdValid = $true
+        Write-Host "[PASS] Verified canonical CSteamID format for Host Lobby ID: $hostLobbyId (Upper 32-bits = 0x01840000: Universe=Public, AccountType=Chat, Instance=Lobby)" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] Non-canonical CSteamID format: Upper 32-bits is 0x$($upper32.ToString('X8')), expected 0x01840000!" -ForegroundColor Red
+    }
+}
+
+if ($clientOutput -match 'Found Lobby ID:\s+(\d+)') {
+    $clientLobbyId = $matches[1]
+    if ($clientLobbyId -eq $hostLobbyId) {
+        Write-Host "[PASS] Host and Client derived 100% IDENTICAL CSteamID: $clientLobbyId" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] Lobby ID mismatch: Host=$hostLobbyId, Client=$clientLobbyId" -ForegroundColor Red
+        $lobbyIdValid = $false
+    }
+}
+
 $hostSuccess = ($hostExit -eq 0) -and
                $hostOutput.Contains("[HOST_READY]") -and
                $hostOutput.Contains("[HOST_CLIENT_JOINED]") -and
@@ -113,7 +143,7 @@ $clientSuccess = ($clientExit -eq 0) -and
                  $clientOutput.Contains("[CLIENT_FRAGMENT_VERIFIED]") -and
                  $clientOutput.Contains("[CLIENT_SUCCESS]")
 
-if ($hostSuccess -and $clientSuccess) {
+if ($hostSuccess -and $clientSuccess -and $lobbyIdValid) {
     Write-Host "`n[PASS] E2E DUAL-PROCESS STEAMWORKS LAN INTEGRATION VERIFIED!" -ForegroundColor Green
     exit 0
 } else {
