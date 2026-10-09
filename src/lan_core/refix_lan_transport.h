@@ -29,6 +29,7 @@ struct InboundPacket {
     uint8_t fragIndex = 0;
     uint8_t fragTotal = 1;
     uint32_t generationId = 0;
+    bool wasSacked = false;
     std::vector<uint8_t> payload;
 };
 
@@ -115,6 +116,9 @@ public:
     uint32_t GetPeerNextSequenceOut(const PeerId& peerId) const;
     size_t GetPeerOutOfOrderCount(const PeerId& peerId) const;
 
+    void SetPeerEndpointValidator(std::function<bool(const PeerId&, const LanEndpoint&)> validator) { m_endpointValidator = std::move(validator); }
+    bool AuthorizePeerMigration(const PeerId& peerId, const LanEndpoint& newEndpoint);
+
 private:
     struct OutboundReliable {
         uint32_t sequence = 0;
@@ -139,6 +143,7 @@ private:
         std::map<uint32_t, InboundPacket> outOfOrderInbound;
         std::vector<OutboundReliable> unackedOutbound;
         LanEndpoint lastEndpoint;
+        LanEndpoint authorizedMigrationEndpoint;
         std::chrono::steady_clock::time_point lastReceivedTime; // Maintained for backwards compatibility
         std::chrono::steady_clock::time_point lastDataRecvTime;
         std::chrono::steady_clock::time_point lastAckRecvTime;
@@ -187,6 +192,7 @@ private:
     LanEndpoint m_localDataEndpoint;
     ILanTransportListener* m_listener = nullptr;
     std::function<bool(const PeerId&)> m_admissionFilter;
+    std::function<bool(const PeerId&, const LanEndpoint&)> m_endpointValidator;
 
     SOCKET m_groupSocket = INVALID_SOCKET;
     SOCKET m_dataSocket = INVALID_SOCKET;

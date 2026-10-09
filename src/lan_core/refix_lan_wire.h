@@ -58,7 +58,7 @@ struct WireHeader {
     uint16_t flags;          // FLAG_*
     uint64_t senderPeerHigh; // Peer identity
     uint64_t senderPeerLow;  // Peer identity
-    uint32_t generationId;   // ARQ stream session generation identifier (32-bit: wrap-proof)
+    uint32_t generationId;   // ARQ stream session generation identifier (32-bit modular RFC 1982 serial number)
     union {
         uint32_t fragmentMsgId; // Fragmented message identifier (independent of peer and generation)
         uint32_t sessionId;     // Backwards-compatible field alias

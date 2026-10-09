@@ -1289,6 +1289,10 @@ public:
         m_transport.SetPeerAdmissionFilter([this](const PeerId& pid) -> bool {
             return m_peers.FindByPeerId(pid).has_value();
         });
+        m_transport.SetPeerEndpointValidator([this](const PeerId& pid, const LanEndpoint& ep) -> bool {
+            auto pInfo = m_peers.FindByPeerId(pid);
+            return pInfo.has_value() && pInfo->endpoint == ep;
+        });
         m_initialized = m_discovery.Start(appScope, discoveryPort);
         if (!m_initialized) {
             return false;
