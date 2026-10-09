@@ -28,6 +28,7 @@
 #include <csignal>
 #include <DbgHelp.h>
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 #define STEAM_WIN32 1
 #define STEAM_API_NODLL 1
@@ -70,6 +71,10 @@ typedef bool (*fn_ReFix_Test_HasLobby)(uint64_t steamLobbyId);
 typedef uint64_t (*fn_ReFix_Test_GetActiveLobbyID)();
 typedef uint64_t (*fn_ReFix_Test_GetBroadcastNetPacketCount)();
 typedef void (*fn_ReFix_Test_ResetBroadcastNetPacketCount)();
+typedef uint64_t (*fn_ReFix_Test_GetLegacySendToCount)();
+typedef uint64_t (*fn_ReFix_Test_GetLegacyRecvFromCount)();
+typedef bool (*fn_ReFix_Test_IsLegacySocketInitialized)();
+typedef void (*fn_ReFix_Test_ResetLegacyCounters)();
 typedef bool (*fn_SteamAPI_IsAPICallCompleted)(uint64_t hAPICall, bool* pbFailed);
 
 static HMODULE LoadSteamDll() {
@@ -96,6 +101,7 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     auto pfnShutdown = (fn_SteamAPI_Shutdown)GetProcAddress(hSteam, "SteamAPI_Shutdown");
     auto pfnRunCallbacks = (fn_SteamAPI_RunCallbacks)GetProcAddress(hSteam, "SteamAPI_RunCallbacks");
     auto pfnGetMatchmaking = (fn_SteamAPI_SteamMatchmaking_v009)GetProcAddress(hSteam, "SteamAPI_SteamMatchmaking_v009");
+    auto pfnGetNetworking = (fn_SteamAPI_SteamNetworking_v006)GetProcAddress(hSteam, "SteamAPI_SteamNetworking_v006");
     auto pfnGetUtils = (fn_SteamAPI_SteamUtils_v010)GetProcAddress(hSteam, "SteamAPI_SteamUtils_v010");
     auto pfnGetLanCore = (fn_ReFix_GetLanCore)GetProcAddress(hSteam, "ReFix_GetLanCore");
     auto pfnEnsureLobby = (fn_ReFix_Test_EnsureSteamLobbyID)GetProcAddress(hSteam, "ReFix_Test_EnsureSteamLobbyID");
@@ -105,10 +111,15 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     auto pfnGetActiveLobby = (fn_ReFix_Test_GetActiveLobbyID)GetProcAddress(hSteam, "ReFix_Test_GetActiveLobbyID");
     auto pfnGetBcastCount = (fn_ReFix_Test_GetBroadcastNetPacketCount)GetProcAddress(hSteam, "ReFix_Test_GetBroadcastNetPacketCount");
     auto pfnResetBcastCount = (fn_ReFix_Test_ResetBroadcastNetPacketCount)GetProcAddress(hSteam, "ReFix_Test_ResetBroadcastNetPacketCount");
+    auto pfnGetLegacySendToCount = (fn_ReFix_Test_GetLegacySendToCount)GetProcAddress(hSteam, "ReFix_Test_GetLegacySendToCount");
+    auto pfnGetLegacyRecvFromCount = (fn_ReFix_Test_GetLegacyRecvFromCount)GetProcAddress(hSteam, "ReFix_Test_GetLegacyRecvFromCount");
+    auto pfnIsLegacySocketInit = (fn_ReFix_Test_IsLegacySocketInitialized)GetProcAddress(hSteam, "ReFix_Test_IsLegacySocketInitialized");
+    auto pfnResetLegacyCounters = (fn_ReFix_Test_ResetLegacyCounters)GetProcAddress(hSteam, "ReFix_Test_ResetLegacyCounters");
 
     if (!pfnInit || !pfnShutdown || !pfnRunCallbacks || !pfnGetLanCore ||
         !pfnGetUtils || !pfnEnsureLobby || !pfnResetMappings || !pfnGetMappingCount || !pfnHasLobby ||
-        !pfnGetActiveLobby || !pfnGetBcastCount || !pfnResetBcastCount) {
+        !pfnGetActiveLobby || !pfnGetBcastCount || !pfnResetBcastCount ||
+        !pfnGetLegacySendToCount || !pfnGetLegacyRecvFromCount || !pfnIsLegacySocketInit || !pfnResetLegacyCounters) {
         std::cerr << "[FAIL] Required test exports missing from steam_api64_test.dll" << std::endl;
         return false;
     }
@@ -222,12 +233,42 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     TEST_ASSERT(survivingLobby == steamLobbyId, "Original lobby must remain intact at index 0");
     TEST_ASSERT(pfnGetActiveLobby() == steamLobbyId.ConvertToUint64(), "g_activeLobbyID must retain original active lobby after failed CreateLobby rollback");
 
-    // 3. Test Canonical Mode: Zero Legacy BroadcastNetPacket Invocations
+    // 3. Test Canonical Mode: Zero Legacy Socket Initialization, Zero Legacy sendto, Zero Legacy recvfrom
     SetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", "1");
-    pfnResetBcastCount();
-    pMatchmaking->RequestLobbyList();
+    pfnShutdown();
+    pfnResetLegacyCounters();
+
+    TEST_ASSERT(pfnInit(), "SteamAPI_Init in canonical mode must succeed");
+    TEST_ASSERT(!pfnIsLegacySocketInit(), "Legacy UDP socket must NOT be initialized when REFIX_DISABLE_LEGACY_FALLBACKS=1");
+
+    auto* pMatchmakingCan = static_cast<ISteamMatchmaking*>(pfnGetMatchmaking());
+    auto* pNetworkingCan = static_cast<ISteamNetworking*>(pfnGetNetworking());
+    auto* pUtilsCan = static_cast<ISteamUtils*>(pfnGetUtils());
+    TEST_ASSERT(pMatchmakingCan && pNetworkingCan && pUtilsCan, "Interfaces must be valid in canonical mode");
+
+    // Canonical operations: RequestLobbyList, RunCallbacks
+    pMatchmakingCan->RequestLobbyList();
     pfnRunCallbacks();
+
     TEST_ASSERT(pfnGetBcastCount() == 0, "Canonical mode RequestLobbyList must not invoke legacy BroadcastNetPacket");
+    TEST_ASSERT(pfnGetLegacySendToCount() == 0, "Canonical mode must have ZERO legacy sendto calls");
+    TEST_ASSERT(pfnGetLegacyRecvFromCount() == 0, "Canonical mode must have ZERO legacy recvfrom calls");
+
+    // Ingest a legacy packet to port 47584 from an external socket and verify PollNetwork does not process or reply
+    SOCKET rawExtSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (rawExtSock != INVALID_SOCKET) {
+        sockaddr_in dest{};
+        dest.sin_family = AF_INET;
+        dest.sin_addr.s_addr = htonl(0x7F000001);
+        dest.sin_port = htons(47584);
+        std::string dummyPing = "LEGACY_PING";
+        sendto(rawExtSock, dummyPing.data(), (int)dummyPing.size(), 0, (sockaddr*)&dest, sizeof(dest));
+        closesocket(rawExtSock);
+    }
+    pfnRunCallbacks();
+
+    TEST_ASSERT(pfnGetLegacyRecvFromCount() == 0, "Incoming legacy packet must not be received or processed by PollNetwork in canonical mode");
+    TEST_ASSERT(pfnGetLegacySendToCount() == 0, "No legacy reply sendto must occur in canonical mode");
 
     pfnShutdown();
 
@@ -245,6 +286,14 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
                     "Production DLL must NOT export ReFix_Test_HasLobby");
         TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_GetActiveLobbyID") == nullptr,
                     "Production DLL must NOT export ReFix_Test_GetActiveLobbyID");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_GetLegacySendToCount") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_GetLegacySendToCount");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_GetLegacyRecvFromCount") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_GetLegacyRecvFromCount");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_IsLegacySocketInitialized") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_IsLegacySocketInitialized");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_ResetLegacyCounters") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_ResetLegacyCounters");
         FreeLibrary(hProd);
         std::cout << "  [PASS] Production export table isolation verified (no ReFix_Test_* hooks in production DLL)." << std::endl;
     }

@@ -55,6 +55,7 @@ public:
     void SetListener(ILanTransportListener* listener) { m_listener = listener; }
     void SetLocalPeerId(const PeerId& id) { m_localPeerId = id; }
     PeerId GetLocalPeerId() const { return m_localPeerId; }
+    void SetPeerAdmissionFilter(std::function<bool(const PeerId&)> filter) { m_admissionFilter = std::move(filter); }
 
     LanEndpoint GetLocalDataEndpoint() const { return m_localDataEndpoint; }
     uint16_t GetDiscoveryPort() const { return m_discoveryPort; }
@@ -68,6 +69,21 @@ public:
     bool SendDiscoveryPacket(MsgType type, const LanEndpoint& target, const void* data, size_t len);
 
     bool SendUnreliable(const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
+
+    /**
+     * Send reliable message.
+     *
+     * Contract:
+     * - Returns true if the message was successfully formatted, initially transmitted over the socket,
+     *   and enqueued in the local ARQ tracking buffer (unackedOutbound).
+     * - Does NOT guarantee immediate delivery to the remote application. Delivery is guaranteed via
+     *   ARQ retransmissions upon receiving remote DataAck or until retry exhaustion triggers OnPeerTimeout().
+     * - Link ACK (DataAck) acknowledges datagram receipt by the peer transport layer.
+     * - API Consumer Acceptance: Messages are delivered via ILanTransportListener::OnInboundData, or
+     *   buffered in m_inboundQueue (capped at 512). If the inbound queue is full in polling mode,
+     *   backpressure is asserted (datagram is NOT acknowledged), forcing sender ARQ retransmissions
+     *   until queue capacity is freed or connection times out.
+     */
     bool SendReliable(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
 
     // Queue Polling (if caller wants to drain synchronously)
@@ -104,9 +120,15 @@ private:
         uint32_t nextMessageIdOut = 1;
         uint32_t expectedSequenceIn = 1;
         bool timedOut = false;
+        bool isRegisteredPeer = false;
         std::map<uint32_t, InboundPacket> outOfOrderInbound;
         std::vector<OutboundReliable> unackedOutbound;
-        std::chrono::steady_clock::time_point lastReceivedTime;
+        LanEndpoint lastEndpoint;
+        std::chrono::steady_clock::time_point lastReceivedTime; // Maintained for backwards compatibility
+        std::chrono::steady_clock::time_point lastDataRecvTime;
+        std::chrono::steady_clock::time_point lastAckRecvTime;
+        std::chrono::steady_clock::time_point lastSendTime;
+        std::chrono::steady_clock::time_point lastActivityTime;
         uint32_t lastMeasuredRttMs = 20;
     };
 
@@ -133,6 +155,8 @@ private:
     bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);
     void PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now);
     void PruneInactivePeerStatesLocked(std::chrono::steady_clock::time_point now);
+    std::unordered_map<PeerId, PeerReliabilityState>::iterator TryAdmitPeerStateLocked(
+        const PeerId& peerId, bool isLocalSend, std::chrono::steady_clock::time_point now);
     void EvictOldestReassemblyContextLocked(const PeerId* preferredPeer = nullptr);
     void ReleaseReassemblyContextLocked(std::map<std::pair<PeerId, uint32_t>, FragmentAssembler>::iterator it);
     void ReleaseReassemblyMemoryLocked(const PeerId& peerId, size_t bytes);
@@ -144,6 +168,7 @@ private:
     PeerId m_localPeerId;
     LanEndpoint m_localDataEndpoint;
     ILanTransportListener* m_listener = nullptr;
+    std::function<bool(const PeerId&)> m_admissionFilter;
 
     SOCKET m_groupSocket = INVALID_SOCKET;
     SOCKET m_dataSocket = INVALID_SOCKET;

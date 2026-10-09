@@ -114,6 +114,9 @@ namespace UnrealSteamEmu {
     static std::atomic<uint32_t> g_nextAuthTicket{ 1 };
     static std::atomic<uint64_t> g_activeLobbyID{ 0 };
     static std::atomic<uint64_t> g_broadcastNetPacketCount{ 0 };
+    static std::atomic<uint64_t> g_legacySendToCount{ 0 };
+    static std::atomic<uint64_t> g_legacyRecvFromCount{ 0 };
+    static std::atomic<bool> g_legacySocketInitialized{ false };
 
     static int32_t g_hSteamPipe = 1;
     static int32_t g_hSteamUser = 1;
@@ -621,6 +624,7 @@ namespace UnrealSteamEmu {
     #pragma pack(pop)
 
     static void InitSockets() {
+        if (!ShouldUseLegacyFallback()) return;
         if (g_udpSocket != INVALID_SOCKET) return;
 
         WSADATA wsa;
@@ -628,6 +632,7 @@ namespace UnrealSteamEmu {
 
         g_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (g_udpSocket != INVALID_SOCKET) {
+            g_legacySocketInitialized.store(true);
             BOOL bOpt = TRUE;
             setsockopt(g_udpSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&bOpt, sizeof(bOpt));
             setsockopt(g_udpSocket, SOL_SOCKET, SO_BROADCAST, (const char*)&bOpt, sizeof(bOpt));
@@ -721,12 +726,16 @@ namespace UnrealSteamEmu {
                     continue;
                 }
 
+                g_legacySendToCount.fetch_add(1);
                 sendto(g_udpSocket, (const char*)buf.data(), (int)buf.size(), 0, (sockaddr*)&dest, sizeof(dest));
             }
         }
     }
 
     static void SendLanPacket(CSteamID remoteID, uint8_t msgType, const void* payload, size_t payloadLen, ReFix::PacketDirection dir = ReFix::PacketDirection::ANY) {
+        if (!ShouldUseLegacyFallback()) return;
+        if (g_udpSocket == INVALID_SOCKET) return;
+
         sockaddr_in dest = {};
         bool hasEndpoint = false;
         {
@@ -758,8 +767,6 @@ namespace UnrealSteamEmu {
             return;
         }
 
-        if (g_udpSocket == INVALID_SOCKET) return;
-
         NetPacketHeader hdr;
         hdr.magic = 0x52464958;
         hdr.msgType = msgType;
@@ -781,6 +788,7 @@ namespace UnrealSteamEmu {
         }
 
         auto sendFn = [dest, msgType, remoteID](const uint8_t* sendData, size_t sendLen) {
+            g_legacySendToCount.fetch_add(1);
             int ret = sendto(g_udpSocket, (const char*)sendData, (int)sendLen, 0, (const sockaddr*)&dest, sizeof(dest));
             if (ret != SOCKET_ERROR) {
                 ReFixLog("[SendLanPacket] Sent unicast msgType=%d to=%llu len=%zu",
@@ -952,6 +960,7 @@ namespace UnrealSteamEmu {
     }
 
     static void PollNetwork() {
+        if (!ShouldUseLegacyFallback()) return;
         if (g_udpSocket == INVALID_SOCKET) return;
 
         char recvBuf[65536];
@@ -962,6 +971,7 @@ namespace UnrealSteamEmu {
             fromLen = sizeof(fromAddr);
             int ret = recvfrom(g_udpSocket, recvBuf, sizeof(recvBuf), 0, (sockaddr*)&fromAddr, &fromLen);
             if (ret <= 0) break;
+            g_legacyRecvFromCount.fetch_add(1);
 
             if (ret >= (int)sizeof(NetPacketHeader)) {
                 NetPacketHeader* hdr = (NetPacketHeader*)recvBuf;
@@ -1114,6 +1124,7 @@ namespace UnrealSteamEmu {
                                 rHdr->appID = g_appID;
                                 rHdr->payloadLen = (uint32_t)reply.size();
                                 memcpy(rBuf.data() + sizeof(NetPacketHeader), reply.data(), reply.size());
+                                g_legacySendToCount.fetch_add(1);
                                 sendto(g_udpSocket, (const char*)rBuf.data(), (int)rBuf.size(), 0, (sockaddr*)&replyDest, sizeof(replyDest));
                             }
                         }
@@ -1147,6 +1158,7 @@ namespace UnrealSteamEmu {
                                     rHdr->appID = g_appID;
                                     rHdr->payloadLen = (uint32_t)meta.size();
                                     memcpy(rBuf.data() + sizeof(NetPacketHeader), meta.data(), meta.size());
+                                    g_legacySendToCount.fetch_add(1);
                                     sendto(g_udpSocket, (const char*)rBuf.data(), (int)rBuf.size(), 0, (sockaddr*)&replyDest, sizeof(replyDest));
                                 }
                             }
@@ -3857,6 +3869,7 @@ namespace UnrealSteamEmu {
                 hdr->payloadLen = (uint32_t)payload.size();
                 memcpy(netBuf.data() + sizeof(NetPacketHeader), payload.data(), payload.size());
 
+                g_legacySendToCount.fetch_add(1);
                 sendto(g_udpSocket, (const char*)netBuf.data(), (int)netBuf.size(), 0, (sockaddr*)&dest, sizeof(dest));
             } else {
                 BroadcastNetPacket(5, payload.data(), payload.size());
@@ -4826,7 +4839,9 @@ namespace UnrealSteamEmu {
         }
 
         LoadConfig();
-        InitSockets();
+        if (ShouldUseLegacyFallback()) {
+            InitSockets();
+        }
 
         // 1. Initialize ReFix Universal LAN Core
         refix::lan::ILanCore& core = refix::lan::ILanCore::Get();
@@ -5133,6 +5148,7 @@ namespace UnrealSteamEmu {
             closesocket(g_udpSocket);
             g_udpSocket = INVALID_SOCKET;
         }
+        g_legacySocketInitialized.store(false);
 
         g_clientCallbacks.clear();
         g_serverCallbacks.clear();
@@ -5245,6 +5261,24 @@ extern "C" __declspec(dllexport) uint64_t ReFix_Test_GetBroadcastNetPacketCount(
 }
 
 extern "C" __declspec(dllexport) void ReFix_Test_ResetBroadcastNetPacketCount() {
+    UnrealSteamEmu::g_broadcastNetPacketCount.store(0);
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_Test_GetLegacySendToCount() {
+    return UnrealSteamEmu::g_legacySendToCount.load();
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_Test_GetLegacyRecvFromCount() {
+    return UnrealSteamEmu::g_legacyRecvFromCount.load();
+}
+
+extern "C" __declspec(dllexport) bool ReFix_Test_IsLegacySocketInitialized() {
+    return UnrealSteamEmu::g_legacySocketInitialized.load();
+}
+
+extern "C" __declspec(dllexport) void ReFix_Test_ResetLegacyCounters() {
+    UnrealSteamEmu::g_legacySendToCount.store(0);
+    UnrealSteamEmu::g_legacyRecvFromCount.store(0);
     UnrealSteamEmu::g_broadcastNetPacketCount.store(0);
 }
 #endif

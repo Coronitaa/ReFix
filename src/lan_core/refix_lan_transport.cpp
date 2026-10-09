@@ -472,44 +472,136 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         return;
     }
 
-    // 2. Data ACKs
+    // 2. Explicit Disconnect
+    if (type == MsgType::Disconnect) {
+        if (payloadLen > 0) return; // Strict framing: Disconnect has no payload
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_peerStates.erase(senderPeer);
+        for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end(); ) {
+            if (it->first.first == senderPeer) {
+                auto toErase = it++;
+                ReleaseReassemblyContextLocked(toErase);
+            } else {
+                ++it;
+            }
+        }
+        m_peerReassemblyBytes.erase(senderPeer);
+        return;
+    }
+
+    // 3. Data ACKs
     if (type == MsgType::DataAck) {
+        if (payloadLen > 0) return; // Strict framing: DataAck has no payload
         std::lock_guard<std::mutex> lock(m_stateMutex);
         auto it = m_peerStates.find(senderPeer);
         if (it != m_peerStates.end()) {
+            auto now = std::chrono::steady_clock::now();
+            it->second.lastAckRecvTime = now;
+            it->second.lastActivityTime = now;
+            it->second.lastReceivedTime = now;
+            it->second.lastEndpoint = fromEp;
             ProcessReliableAck(it->second, hdr->ack, hdr->sackMask);
         }
         return;
     }
 
-    // 3. Reliable / Unreliable Data Packets
-    if (type == MsgType::DataReliable || type == MsgType::DataUnreliable) {
-        bool isReliable = (type == MsgType::DataReliable);
+    // 4. Reliable Data Packets
+    if (type == MsgType::DataReliable) {
+        // Strict framing and metadata validation
+        if ((hdr->flags & FLAG_RELIABLE) == 0) {
+            return;
+        }
+        if (payloadLen > REFIX_MAX_FRAGMENT_PAYLOAD) {
+            return; // Individual payload exceeds MTU chunk limit
+        }
 
-        if (isReliable) {
-            std::vector<InboundPacket> packetsToNotify;
-            {
-                std::lock_guard<std::mutex> lock(m_stateMutex);
-                auto now = std::chrono::steady_clock::now();
-                auto it = m_peerStates.find(senderPeer);
-                if (it == m_peerStates.end()) {
-                    PruneInactivePeerStatesLocked(now);
-                    if (m_peerStates.size() >= REFIX_MAX_CONCURRENT_PEER_STATES) {
-                        return; // Reject: peer state capacity reached
-                    }
-                    it = m_peerStates.emplace(senderPeer, PeerReliabilityState{}).first;
-                    it->second.lastReceivedTime = now;
+        bool isFrag = ((hdr->flags & FLAG_FRAGMENT) != 0);
+        if (!isFrag) {
+            if (hdr->fragTotal > 1 || hdr->fragIndex != 0 || (hdr->flags & FLAG_LAST_FRAGMENT) != 0) {
+                return; // Inconsistent unfragmented metadata
+            }
+        } else {
+            if (hdr->fragTotal == 0 || hdr->fragIndex >= hdr->fragTotal) {
+                return; // Inconsistent fragmented metadata
+            }
+            if (hdr->fragIndex == hdr->fragTotal - 1) {
+                if ((hdr->flags & FLAG_LAST_FRAGMENT) == 0) return;
+            } else {
+                if ((hdr->flags & FLAG_LAST_FRAGMENT) != 0) return;
+            }
+            if (static_cast<size_t>(hdr->fragTotal) * REFIX_MAX_FRAGMENT_PAYLOAD > REFIX_MAX_MESSAGE_SIZE + REFIX_MAX_FRAGMENT_PAYLOAD) {
+                return; // Total message reconstruction limit exceeded
+            }
+        }
+
+        std::vector<InboundPacket> packetsToNotify;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            auto now = std::chrono::steady_clock::now();
+            auto it = TryAdmitPeerStateLocked(senderPeer, false, now);
+            if (it == m_peerStates.end()) {
+                return; // Peer admission rejected under capacity limit
+            }
+            auto& state = it->second;
+            state.lastDataRecvTime = now;
+            state.lastActivityTime = now;
+            state.lastReceivedTime = now;
+            state.lastEndpoint = fromEp;
+            state.timedOut = false;
+
+            // Process piggybacked ACK if present
+            if (hdr->ack > 0) {
+                ProcessReliableAck(state, hdr->ack, 0);
+            }
+
+            uint32_t seq = hdr->sequence;
+
+            // Remote sequence stream restart detection (peer reconnected / reset)
+            if (seq == 1 && state.expectedSequenceIn > 1 &&
+                state.unackedOutbound.empty() && state.outOfOrderInbound.empty()) {
+                state.expectedSequenceIn = 1;
+            }
+
+            // In polling mode (!m_listener), apply backpressure on unfragmented messages if inbound queue is full:
+            // do not accept the packet, do not increment expectedSequenceIn, and do not ACK it.
+            if (!m_listener && !isFrag) {
+                std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                    m_inboundQueueDroppedPackets.fetch_add(1);
+                    SendAckPacket(fromEp, hdr->channel, state.expectedSequenceIn - 1, 0);
+                    return;
                 }
-                auto& state = it->second;
-                state.lastReceivedTime = now;
-                state.timedOut = false;
+            }
 
-                uint32_t seq = hdr->sequence;
-                std::vector<InboundPacket> readyToProcess;
+            std::vector<InboundPacket> readyToProcess;
 
-                if (seq == state.expectedSequenceIn) {
+            if (seq == state.expectedSequenceIn) {
+                state.expectedSequenceIn++;
+
+                InboundPacket pkt;
+                pkt.senderPeerId = senderPeer;
+                pkt.senderEndpoint = fromEp;
+                pkt.channel = hdr->channel;
+                pkt.isReliable = true;
+                pkt.sequence = seq;
+                pkt.flags = hdr->flags;
+                pkt.sessionId = hdr->sessionId;
+                pkt.fragIndex = hdr->fragIndex;
+                pkt.fragTotal = hdr->fragTotal;
+                pkt.payload.assign(payload, payload + payloadLen);
+
+                readyToProcess.push_back(std::move(pkt));
+
+                // Drain contiguous buffered out-of-order packets
+                while (!state.outOfOrderInbound.empty() &&
+                       state.outOfOrderInbound.begin()->first == state.expectedSequenceIn) {
+                    readyToProcess.push_back(std::move(state.outOfOrderInbound.begin()->second));
+                    state.outOfOrderInbound.erase(state.outOfOrderInbound.begin());
                     state.expectedSequenceIn++;
-
+                }
+            } else if (seq > state.expectedSequenceIn) {
+                // Out of order packet, buffer it (capped at 64 packets to avoid unbounded memory growth)
+                if (state.outOfOrderInbound.size() < 64) {
                     InboundPacket pkt;
                     pkt.senderPeerId = senderPeer;
                     pkt.senderEndpoint = fromEp;
@@ -521,200 +613,165 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     pkt.fragIndex = hdr->fragIndex;
                     pkt.fragTotal = hdr->fragTotal;
                     pkt.payload.assign(payload, payload + payloadLen);
+                    state.outOfOrderInbound[seq] = std::move(pkt);
+                }
+            }
 
-                    readyToProcess.push_back(std::move(pkt));
-
-                    // Drain contiguous buffered out-of-order packets
-                    while (!state.outOfOrderInbound.empty() &&
-                           state.outOfOrderInbound.begin()->first == state.expectedSequenceIn) {
-                        readyToProcess.push_back(std::move(state.outOfOrderInbound.begin()->second));
-                        state.outOfOrderInbound.erase(state.outOfOrderInbound.begin());
-                        state.expectedSequenceIn++;
-                    }
-                } else if (seq > state.expectedSequenceIn) {
-                    // Out of order packet, buffer it (capped at 64 packets to avoid unbounded memory growth)
-                    if (state.outOfOrderInbound.size() < 64) {
-                        InboundPacket pkt;
-                        pkt.senderPeerId = senderPeer;
-                        pkt.senderEndpoint = fromEp;
-                        pkt.channel = hdr->channel;
-                        pkt.isReliable = true;
-                        pkt.sequence = seq;
-                        pkt.flags = hdr->flags;
-                        pkt.sessionId = hdr->sessionId;
-                        pkt.fragIndex = hdr->fragIndex;
-                        pkt.fragTotal = hdr->fragTotal;
-                        pkt.payload.assign(payload, payload + payloadLen);
-                        state.outOfOrderInbound[seq] = std::move(pkt);
+            // Build SACK bitmask: bit k corresponds to sequence (ackSeq + 1 + k)
+            uint32_t sackMask = 0;
+            uint32_t ackSeq = state.expectedSequenceIn - 1;
+            for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
+                if (bufferedSeq > ackSeq + 1) {
+                    uint32_t diff = bufferedSeq - ackSeq - 1;
+                    if (diff < 32) {
+                        sackMask |= (1u << diff);
                     }
                 }
+            }
 
-                // Build SACK bitmask
-                uint32_t sackMask = 0;
-                for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                    if (bufferedSeq > state.expectedSequenceIn) {
-                        uint32_t diff = bufferedSeq - state.expectedSequenceIn - 1;
-                        if (diff < 32) {
-                            sackMask |= (1u << diff);
+            // Immediately send ACK back
+            SendAckPacket(fromEp, hdr->channel, ackSeq, sackMask);
+
+            // Process all consecutive packets (assemble fragments if needed)
+            for (auto& rawPkt : readyToProcess) {
+                if ((rawPkt.flags & FLAG_FRAGMENT) == 0) {
+                    // Unfragmented complete message
+                    if (!m_listener) {
+                        std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                        if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                            m_inboundQueue.push_back(rawPkt);
+                        } else {
+                            m_inboundQueueDroppedPackets.fetch_add(1);
                         }
                     }
-                }
-
-                // Immediately send ACK back
-                SendAckPacket(fromEp, hdr->channel, state.expectedSequenceIn - 1, sackMask);
-
-                // Process all consecutive packets (assemble fragments if needed)
-                for (auto& rawPkt : readyToProcess) {
-                    if ((rawPkt.flags & FLAG_FRAGMENT) == 0) {
-                        // Unfragmented complete message
-                        if (!m_listener) {
-                            std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                            if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
-                                m_inboundQueue.push_back(rawPkt);
-                            } else {
-                                m_inboundQueueDroppedPackets.fetch_add(1);
-                            }
+                    packetsToNotify.push_back(std::move(rawPkt));
+                } else {
+                    auto fragKey = std::make_pair(rawPkt.senderPeerId, rawPkt.sessionId);
+                    auto itFrag = m_fragmentMap.find(fragKey);
+                    if (itFrag == m_fragmentMap.end()) {
+                        // Check per-peer context count limit (16) and evict oldest if saturated
+                        size_t peerContextCount = 0;
+                        for (const auto& kv : m_fragmentMap) {
+                            if (kv.first.first == rawPkt.senderPeerId) peerContextCount++;
                         }
-                        packetsToNotify.push_back(std::move(rawPkt));
-                    } else {
-                        // Fragmented message validation:
-                        // 1. Validate fragTotal and fragIndex before allocating memory
-                        if (rawPkt.fragTotal == 0 || rawPkt.fragIndex >= rawPkt.fragTotal) {
-                            continue;
-                        }
-                        // 2. Reject payload exceeding protocol limit
-                        if (rawPkt.payload.size() > REFIX_MAX_FRAGMENT_PAYLOAD) {
-                            continue;
-                        }
-                        // 3. Reject if total size would exceed REFIX_MAX_MESSAGE_SIZE
-                        if (static_cast<size_t>(rawPkt.fragTotal) * REFIX_MAX_FRAGMENT_PAYLOAD > REFIX_MAX_MESSAGE_SIZE + REFIX_MAX_FRAGMENT_PAYLOAD) {
-                            continue;
+                        if (peerContextCount >= REFIX_MAX_PEER_REASSEMBLY_CONTEXTS) {
+                            EvictOldestReassemblyContextLocked(&rawPkt.senderPeerId);
                         }
 
-                        auto now = std::chrono::steady_clock::now();
-                        PruneExpiredFragmentsLocked(now);
-
-                        auto fragKey = std::make_pair(rawPkt.senderPeerId, rawPkt.sessionId);
-                        auto it = m_fragmentMap.find(fragKey);
-                        if (it == m_fragmentMap.end()) {
-                            // Check per-peer context count limit (16) and evict oldest if saturated
-                            size_t peerContextCount = 0;
-                            for (const auto& kv : m_fragmentMap) {
-                                if (kv.first.first == rawPkt.senderPeerId) peerContextCount++;
-                            }
-                            if (peerContextCount >= REFIX_MAX_PEER_REASSEMBLY_CONTEXTS) {
-                                EvictOldestReassemblyContextLocked(&rawPkt.senderPeerId);
-                            }
-
-                            // Check global context count limit (64) and evict oldest if saturated
-                            if (m_fragmentMap.size() >= REFIX_MAX_REASSEMBLY_CONTEXTS) {
-                                EvictOldestReassemblyContextLocked(nullptr);
-                            }
-
-                            // Check global and per-peer memory budgets
-                            size_t chunkLen = rawPkt.payload.size();
-                            auto pIt = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
-                            size_t currentPeerBytes = (pIt != m_peerReassemblyBytes.end()) ? pIt->second : 0;
-                            if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
-                                currentPeerBytes + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
-                                continue;
-                            }
-
-                            FragmentAssembler fa;
-                            fa.totalFragments = rawPkt.fragTotal;
-                            fa.channel = rawPkt.channel;
-                            fa.isReliable = rawPkt.isReliable;
-                            fa.sessionId = rawPkt.sessionId;
-                            fa.senderPeerId = rawPkt.senderPeerId;
-                            fa.allocatedBytes = 0;
-                            fa.fragments.resize(rawPkt.fragTotal);
-                            fa.received.resize(rawPkt.fragTotal, false);
-                            fa.startTime = now;
-                            fa.lastActivityTime = now;
-                            it = m_fragmentMap.emplace(fragKey, std::move(fa)).first;
-                        }
-
-                        auto& fa = it->second;
-
-                        // Verify metadata consistency across all fragments of session
-                        if (rawPkt.fragTotal != fa.totalFragments ||
-                            rawPkt.channel != fa.channel ||
-                            rawPkt.isReliable != fa.isReliable) {
-                            // Inconsistent metadata: drop the invalid fragment to prevent corrupting
-                            // or aborting the ongoing legitimate reassembly session.
-                            continue;
-                        }
-
-                        // Duplicate fragment check
-                        if (fa.received[rawPkt.fragIndex]) {
-                            fa.lastActivityTime = now;
-                            continue;
-                        }
-
-                        // Check message reconstructed byte limit (256 KB)
-                        size_t chunkLen = rawPkt.payload.size();
-                        if (fa.allocatedBytes + chunkLen > REFIX_MAX_MESSAGE_SIZE) {
-                            // Abort context exceeding message limit
-                            ReleaseReassemblyContextLocked(it);
-                            continue;
+                        // Check global context count limit (64) and evict oldest if saturated
+                        if (m_fragmentMap.size() >= REFIX_MAX_REASSEMBLY_CONTEXTS) {
+                            EvictOldestReassemblyContextLocked(nullptr);
                         }
 
                         // Check global and per-peer memory budgets
-                        auto pIt2 = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
-                        size_t currentPeerBytes2 = (pIt2 != m_peerReassemblyBytes.end()) ? pIt2->second : 0;
+                        size_t chunkLen = rawPkt.payload.size();
+                        auto pIt = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
+                        size_t currentPeerBytes = (pIt != m_peerReassemblyBytes.end()) ? pIt->second : 0;
                         if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
-                            currentPeerBytes2 + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                            currentPeerBytes + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
                             continue;
                         }
 
-                        fa.fragments[rawPkt.fragIndex] = std::move(rawPkt.payload);
-                        fa.received[rawPkt.fragIndex] = true;
-                        fa.allocatedBytes += chunkLen;
-                        m_globalReassemblyBytes += chunkLen;
-                        m_peerReassemblyBytes[rawPkt.senderPeerId] += chunkLen;
+                        FragmentAssembler fa;
+                        fa.totalFragments = rawPkt.fragTotal;
+                        fa.channel = rawPkt.channel;
+                        fa.isReliable = rawPkt.isReliable;
+                        fa.sessionId = rawPkt.sessionId;
+                        fa.senderPeerId = rawPkt.senderPeerId;
+                        fa.allocatedBytes = 0;
+                        fa.fragments.resize(rawPkt.fragTotal);
+                        fa.received.resize(rawPkt.fragTotal, false);
+                        fa.startTime = now;
                         fa.lastActivityTime = now;
+                        itFrag = m_fragmentMap.emplace(fragKey, std::move(fa)).first;
+                    }
 
-                        bool allReceived = true;
-                        for (bool r : fa.received) {
-                            if (!r) { allReceived = false; break; }
+                    auto& fa = itFrag->second;
+
+                    // Verify metadata consistency across all fragments of session
+                    if (rawPkt.fragTotal != fa.totalFragments ||
+                        rawPkt.channel != fa.channel ||
+                        rawPkt.isReliable != fa.isReliable) {
+                        continue;
+                    }
+
+                    // Duplicate fragment check
+                    if (fa.received[rawPkt.fragIndex]) {
+                        fa.lastActivityTime = now;
+                        continue;
+                    }
+
+                    // Check message reconstructed byte limit (256 KB)
+                    size_t chunkLen = rawPkt.payload.size();
+                    if (fa.allocatedBytes + chunkLen > REFIX_MAX_MESSAGE_SIZE) {
+                        ReleaseReassemblyContextLocked(itFrag);
+                        continue;
+                    }
+
+                    // Check global and per-peer memory budgets
+                    auto pIt2 = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
+                    size_t currentPeerBytes2 = (pIt2 != m_peerReassemblyBytes.end()) ? pIt2->second : 0;
+                    if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
+                        currentPeerBytes2 + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                        continue;
+                    }
+
+                    fa.fragments[rawPkt.fragIndex] = std::move(rawPkt.payload);
+                    fa.received[rawPkt.fragIndex] = true;
+                    fa.allocatedBytes += chunkLen;
+                    m_globalReassemblyBytes += chunkLen;
+                    m_peerReassemblyBytes[rawPkt.senderPeerId] += chunkLen;
+                    fa.lastActivityTime = now;
+
+                    bool allReceived = true;
+                    for (bool r : fa.received) {
+                        if (!r) { allReceived = false; break; }
+                    }
+
+                    if (allReceived) {
+                        InboundPacket fullMsg;
+                        fullMsg.senderPeerId = rawPkt.senderPeerId;
+                        fullMsg.senderEndpoint = rawPkt.senderEndpoint;
+                        fullMsg.channel = fa.channel;
+                        fullMsg.isReliable = fa.isReliable;
+                        fullMsg.sequence = rawPkt.sequence;
+                        fullMsg.payload.reserve(fa.allocatedBytes);
+                        for (auto& chunk : fa.fragments) {
+                            fullMsg.payload.insert(fullMsg.payload.end(), chunk.begin(), chunk.end());
                         }
 
-                        if (allReceived) {
-                            InboundPacket fullMsg;
-                            fullMsg.senderPeerId = rawPkt.senderPeerId;
-                            fullMsg.senderEndpoint = rawPkt.senderEndpoint;
-                            fullMsg.channel = fa.channel;
-                            fullMsg.isReliable = fa.isReliable;
-                            fullMsg.sequence = rawPkt.sequence;
-                            fullMsg.payload.reserve(fa.allocatedBytes);
-                            for (auto& chunk : fa.fragments) {
-                                fullMsg.payload.insert(fullMsg.payload.end(), chunk.begin(), chunk.end());
+                        if (!m_listener) {
+                            std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                            if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                                m_inboundQueue.push_back(fullMsg);
+                                ReleaseReassemblyContextLocked(itFrag);
+                                packetsToNotify.push_back(std::move(fullMsg));
+                            } else {
+                                // Inbound queue full: backpressure by retaining assembler context
+                                m_inboundQueueDroppedPackets.fetch_add(1);
                             }
-                            ReleaseReassemblyContextLocked(it);
-
-                            if (!m_listener) {
-                                std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                                if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
-                                    m_inboundQueue.push_back(fullMsg);
-                                } else {
-                                    m_inboundQueueDroppedPackets.fetch_add(1);
-                                }
-                            }
+                        } else {
+                            ReleaseReassemblyContextLocked(itFrag);
                             packetsToNotify.push_back(std::move(fullMsg));
                         }
                     }
                 }
             }
-
-            if (m_listener) {
-                for (const auto& p : packetsToNotify) {
-                    m_listener->OnInboundData(p);
-                }
-            }
-            return;
         }
 
-        // Unreliable data packet
+        if (m_listener) {
+            for (const auto& p : packetsToNotify) {
+                m_listener->OnInboundData(p);
+            }
+        }
+        return;
+    }
+
+    // 5. Unreliable Data Packets
+    if (type == MsgType::DataUnreliable) {
+        if ((hdr->flags & (FLAG_RELIABLE | FLAG_FRAGMENT | FLAG_LAST_FRAGMENT)) != 0) {
+            return; // Inconsistent flags on unreliable packet
+        }
         if (payloadLen > REFIX_MAX_UNRELIABLE_PAYLOAD) {
             return;
         }
@@ -739,6 +796,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             }
         }
         if (m_listener) m_listener->OnInboundData(pkt);
+        return;
     }
 }
 
@@ -1044,16 +1102,16 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
 
     std::lock_guard<std::mutex> lock(m_stateMutex);
     auto now = std::chrono::steady_clock::now();
-    auto it = m_peerStates.find(targetPeer);
+    auto it = TryAdmitPeerStateLocked(targetPeer, true, now);
     if (it == m_peerStates.end()) {
-        PruneInactivePeerStatesLocked(now);
-        if (m_peerStates.size() >= REFIX_MAX_CONCURRENT_PEER_STATES) {
-            return false;
-        }
-        it = m_peerStates.emplace(targetPeer, PeerReliabilityState{}).first;
-        it->second.lastReceivedTime = now;
+        return false;
     }
     auto& state = it->second;
+    state.lastSendTime = now;
+    state.lastActivityTime = now;
+    state.lastReceivedTime = now;
+    state.lastEndpoint = target;
+    state.timedOut = false;
 
     sockaddr_in sin{};
     sin.sin_family = AF_INET;
@@ -1285,14 +1343,40 @@ std::string LanTransport::GetDiscoveryStatus() const {
 
 void LanTransport::ResetPeerState(const PeerId& peerId) {
     std::lock_guard<std::mutex> lock(m_stateMutex);
-    m_peerStates.erase(peerId);
+    auto it = m_peerStates.find(peerId);
+    if (it != m_peerStates.end()) {
+        if (it->second.lastEndpoint.IsValid() && m_dataSocket != INVALID_SOCKET) {
+            WireHeader dHdr{};
+            dHdr.magic = REFIX_WIRE_MAGIC;
+            dHdr.version = REFIX_WIRE_VERSION;
+            dHdr.msgType = static_cast<uint8_t>(MsgType::Disconnect);
+            dHdr.flags = 0;
+            dHdr.SetSenderPeerId(m_localPeerId);
+            dHdr.sessionId = 0;
+            dHdr.channel = 0;
+            dHdr.fragIndex = 0;
+            dHdr.fragTotal = 1;
+            dHdr.reserved = 0;
+            dHdr.sequence = 0;
+            dHdr.ack = 0;
+            dHdr.sackMask = 0;
+            dHdr.payloadLen = 0;
+            sockaddr_in sin{};
+            sin.sin_family = AF_INET;
+            sin.sin_addr.s_addr = htonl(it->second.lastEndpoint.ipv4);
+            sin.sin_port = htons(it->second.lastEndpoint.port);
+            sendto(m_dataSocket, reinterpret_cast<const char*>(&dHdr), sizeof(dHdr), 0,
+                   reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+        }
+        m_peerStates.erase(it);
+    }
 
-    for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end(); ) {
-        if (it->first.first == peerId) {
-            auto toErase = it++;
+    for (auto fIt = m_fragmentMap.begin(); fIt != m_fragmentMap.end(); ) {
+        if (fIt->first.first == peerId) {
+            auto toErase = fIt++;
             ReleaseReassemblyContextLocked(toErase);
         } else {
-            ++it;
+            ++fIt;
         }
     }
     m_peerReassemblyBytes.erase(peerId);
@@ -1310,6 +1394,82 @@ size_t LanTransport::GetInboundQueueSize() const {
 
 uint64_t LanTransport::GetInboundQueueDroppedCount() const {
     return m_inboundQueueDroppedPackets.load();
+}
+
+std::unordered_map<PeerId, LanTransport::PeerReliabilityState>::iterator LanTransport::TryAdmitPeerStateLocked(
+    const PeerId& peerId, bool isLocalSend, std::chrono::steady_clock::time_point now) {
+    auto it = m_peerStates.find(peerId);
+    if (it != m_peerStates.end()) {
+        return it;
+    }
+
+    PruneInactivePeerStatesLocked(now);
+
+    bool isLegitimate = isLocalSend || (m_admissionFilter && m_admissionFilter(peerId));
+
+    if (m_peerStates.size() < REFIX_MAX_CONCURRENT_PEER_STATES) {
+        auto ins = m_peerStates.emplace(peerId, PeerReliabilityState{}).first;
+        ins->second.isRegisteredPeer = isLegitimate;
+        ins->second.lastActivityTime = now;
+        ins->second.lastReceivedTime = now;
+        return ins;
+    }
+
+    // Capacity reached (128 concurrent states)
+    if (!isLegitimate) {
+        return m_peerStates.end(); // Reject untrusted/unregistered incoming peer
+    }
+
+    // For legitimate peer, find an unregistered quiescent peer to evict (LRU)
+    auto oldestCandidate = m_peerStates.end();
+    for (auto candidateIt = m_peerStates.begin(); candidateIt != m_peerStates.end(); ++candidateIt) {
+        const auto& candState = candidateIt->second;
+        bool candIsLegit = candState.isRegisteredPeer || (m_admissionFilter && m_admissionFilter(candidateIt->first));
+        if (candIsLegit) continue;
+
+        // Never evict states with in-flight unacked packets or out-of-order buffers
+        if (!candState.unackedOutbound.empty() || !candState.outOfOrderInbound.empty()) continue;
+        if (m_peerReassemblyBytes.find(candidateIt->first) != m_peerReassemblyBytes.end()) continue;
+
+        if (oldestCandidate == m_peerStates.end() || candState.lastActivityTime < oldestCandidate->second.lastActivityTime) {
+            oldestCandidate = candidateIt;
+        }
+    }
+
+    if (oldestCandidate != m_peerStates.end()) {
+        if (oldestCandidate->second.lastEndpoint.IsValid() && m_dataSocket != INVALID_SOCKET) {
+            WireHeader dHdr{};
+            dHdr.magic = REFIX_WIRE_MAGIC;
+            dHdr.version = REFIX_WIRE_VERSION;
+            dHdr.msgType = static_cast<uint8_t>(MsgType::Disconnect);
+            dHdr.flags = 0;
+            dHdr.SetSenderPeerId(m_localPeerId);
+            dHdr.sessionId = 0;
+            dHdr.channel = 0;
+            dHdr.fragIndex = 0;
+            dHdr.fragTotal = 1;
+            dHdr.reserved = 0;
+            dHdr.sequence = 0;
+            dHdr.ack = 0;
+            dHdr.sackMask = 0;
+            dHdr.payloadLen = 0;
+            sockaddr_in sin{};
+            sin.sin_family = AF_INET;
+            sin.sin_addr.s_addr = htonl(oldestCandidate->second.lastEndpoint.ipv4);
+            sin.sin_port = htons(oldestCandidate->second.lastEndpoint.port);
+            sendto(m_dataSocket, reinterpret_cast<const char*>(&dHdr), sizeof(dHdr), 0,
+                   reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+        }
+        m_peerStates.erase(oldestCandidate);
+
+        auto ins = m_peerStates.emplace(peerId, PeerReliabilityState{}).first;
+        ins->second.isRegisteredPeer = true;
+        ins->second.lastActivityTime = now;
+        ins->second.lastReceivedTime = now;
+        return ins;
+    }
+
+    return m_peerStates.end();
 }
 
 void LanTransport::PruneInactivePeerStatesLocked(std::chrono::steady_clock::time_point now) {
@@ -1337,7 +1497,7 @@ void LanTransport::PruneInactivePeerStatesLocked(std::chrono::steady_clock::time
 
         // Condition 4: Termination condition: timed out or idle beyond timeout threshold
         bool isTimedOut = state.timedOut;
-        bool isIdle = (std::chrono::duration_cast<std::chrono::seconds>(now - state.lastReceivedTime).count() >= static_cast<int64_t>(REFIX_PEER_STATE_IDLE_TIMEOUT_SEC));
+        bool isIdle = (std::chrono::duration_cast<std::chrono::seconds>(now - state.lastActivityTime).count() >= static_cast<int64_t>(REFIX_PEER_STATE_IDLE_TIMEOUT_SEC));
 
         if (isTimedOut || isIdle) {
             it = m_peerStates.erase(it);
