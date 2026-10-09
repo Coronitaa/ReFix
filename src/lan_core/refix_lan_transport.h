@@ -23,6 +23,10 @@ struct InboundPacket {
     uint8_t channel = 0;
     bool isReliable = false;
     uint32_t sequence = 0;
+    uint16_t flags = 0;
+    uint32_t sessionId = 0;
+    uint8_t fragIndex = 0;
+    uint8_t fragTotal = 1;
     std::vector<uint8_t> payload;
 };
 
@@ -82,7 +86,9 @@ private:
 
     struct PeerReliabilityState {
         uint32_t nextSequenceOut = 1;
+        uint32_t nextMessageIdOut = 1;
         uint32_t expectedSequenceIn = 1;
+        bool timedOut = false;
         std::map<uint32_t, InboundPacket> outOfOrderInbound;
         std::vector<OutboundReliable> unackedOutbound;
         std::chrono::steady_clock::time_point lastReceivedTime;
@@ -91,6 +97,8 @@ private:
 
     struct FragmentAssembler {
         uint8_t totalFragments = 0;
+        uint8_t channel = 0;
+        bool isReliable = false;
         std::vector<std::vector<uint8_t>> fragments;
         std::vector<bool> received;
         std::chrono::steady_clock::time_point startTime;
@@ -117,7 +125,7 @@ private:
 
     std::mutex m_stateMutex;
     std::unordered_map<PeerId, PeerReliabilityState> m_peerStates;
-    std::unordered_map<uint32_t, FragmentAssembler> m_fragmentMap; // Key: (senderLow ^ sequence)
+    std::map<std::pair<PeerId, uint32_t>, FragmentAssembler> m_fragmentMap;
 
     std::mutex m_inboundQueueMutex;
     std::deque<InboundPacket> m_inboundQueue;

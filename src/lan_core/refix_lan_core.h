@@ -209,7 +209,8 @@ struct LanEvent {
         MemberJoined,
         MemberLeft,
         SessionStateChanged,
-        DataPacketReceived
+        DataPacketReceived,
+        LobbyJoinResult
     } type;
 
     PeerId peerId;
@@ -217,6 +218,8 @@ struct LanEvent {
     MemberLeaveReason leaveReason = MemberLeaveReason::LeftGracefully;
     uint8_t channel = 0;
     std::vector<uint8_t> payload;
+    bool success = false;
+    uint8_t joinResponseCode = 0; // 0=Success, 1=Full, 2=NotJoinable, 3=DoesNotExist
 };
 
 class ICallbackDispatcher {

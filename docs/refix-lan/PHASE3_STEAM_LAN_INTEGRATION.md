@@ -206,56 +206,48 @@ Every test result is certified according to the strict classification schema: `P
 | **Lobby & Matchmaking Lifecycle** | `test_refix_lan_core.exe` | **PASS** | Create, update attributes, query with filters, join, leave, replicate revisions. |
 | **PeerRegistry Multi-Index Mapping**| `test_refix_lan_core.exe` | **PASS** | Indexing by `PeerId`, `Endpoint`, `SteamID`, and `EOS PUID`. Reconnect preserves bindings. |
 | **CallbackDispatcher Re-entrancy**  | `test_refix_lan_core.exe` | **PASS** | Dispatches nested callbacks without deadlock via snapshot queue copying. |
-| **PeerRegistry Reconnect Pruning**  | `test_refix_lan_core.exe` | **PASS** | Destructive pruning eliminated; endpoint updates safely transfer without dropping external IDs. |
-| **Transport Loopback & ARQ**       | `test_refix_lan_core.exe` | **PASS** | Dual-socket ephemeral communication, cumulative ACK + SACK, zero packet drop in loopback. |
-| **Steamworks -> LanCore Adapter**   | `test_steam_lancore_adapter.exe` | **PASS** | `SteamAPI_Init` initializes `ILanCore`, `CreateLobby` updates LanCore, `SendP2PPacket` routes over transport. |
-| **Multi-Threaded Locking Stress**   | `refix_net_test.exe` Suite 9 | **PASS** | 10,000 concurrent API operations without deadlock. Data races marked UNVERIFIED (no TSan on MSVC). |
+| **PeerRegistry Advanced Guarantees** | `test_refix_lan_core.exe` | **PASS** | Endpoint migration preserving identity, reassignment collision safety, non-existent peer rejection in `BindExternalId`. |
+| **Transport Fragmentation & ARQ**  | `test_refix_lan_core.exe` | **PASS** | Application-level chunking (>1150B up to 256KB), bit-for-bit integrity across 8KB and 64KB, 0-byte/1-byte/1201-byte edge cases, single retry timeout event. |
+| **Fallback Discovery Ports**        | `test_refix_lan_core.exe` | **PASS** | Discovery across ports 47584..47586 coordinated without blind broadcast dependency. |
+| **Steamworks -> LanCore Adapter**   | `test_steam_lancore_adapter.exe --standalone` | **PASS** | `SteamAPI_Init` initializes `ILanCore`, `CreateLobby` updates LanCore, `SendP2PPacket` routes over transport. |
+| **Multiprocess E2E Host-Client**   | `test_steam_adapter_multiprocess.ps1` & native orchestrator | **PASS** | Separate Host & Client processes: shared `CSteamID`, true join/leave, bidirectional P2P ping-pong, 8192-byte fragmented message exchange certified with exit code 0. |
+| **Multi-Threaded Locking Stress**   | `refix_net_test.exe` Suite 9 | **PASS** | 10,000 concurrent API operations without deadlock under `std::recursive_mutex`. Data races marked UNVERIFIED (no TSan on MSVC). |
 | **Fault Injection Tolerance (ARQ)**| `refix_net_test.exe` Suite 11 | **PASS** | Handled dropped packets, dropped ACKs, reordered delivery, duplicated payloads with zero loss. |
 | **Steamworks Bootstrap & Routing**  | `refix_net_test.exe` Suite 13 | **PASS** | Complete C++ vtable & flat interface compatibility, zero Valve DLL loads in LAN mode. |
-| **Multi-Process Localhost Execution**| `test_lan_multiprocess.ps1` | **PASS** | Two separate OS processes exchange packets on localhost without port contention. |
-| **Path Robustness & Spaces**        | `test_path_robustness.ps1` | **PASS** | 8/8 path test cases passed across directory structures with spaces and special characters. |
-| **Physical 2-PC LAN Verification**  | 2 Physical PCs over Ethernet/Wi-Fi | **UNVERIFIED** | Requires execution on two physically distinct PC endpoints (see protocol in Section 6). |
+| **Physical 2-PC LAN Verification**  | 2 Physical PCs over Ethernet/Wi-Fi | **UNVERIFIED** | Ready for hardware test. Automated test bench verified on localhost; requires physical multi-machine execution (see protocol in Section 6). |
 
 ---
 
 ## 6. Physical 2-PC LAN Verification Protocol
 
-Because automated test harnesses run on a single machine (localhost/virtual adapters), final physical validation must be performed between two independent machines connected over a local network.
+Because automated test harnesses run on a single workstation (localhost/virtual loopback sockets), final physical validation across separate hardware must be performed between two independent machines connected over a local network.
 
 ### Equipment & Environment Prerequisites
 - **PC 1 (Host):** Windows 10/11 x64, assigned static or DHCP IPv4 (e.g., `192.168.1.50`).
 - **PC 2 (Client):** Windows 10/11 x64, assigned static or DHCP IPv4 (e.g., `192.168.1.51`).
-- **Physical Network:** Direct Ethernet cable or unmanaged LAN switch/router.
-- **Firewall:** Windows Defender Firewall configured to allow UDP inbound on port `47584` and game ports.
+- **Physical Network:** Direct Ethernet cable or unmanaged LAN switch/router on the same subnet (`255.255.255.0`).
+- **Firewall:** Windows Defender Firewall configured to allow UDP inbound on ports `47584..47586` and ephemeral UDP range.
+- **Steam Client:** Terminated on both machines (`taskkill /F /IM steam.exe`). No internet connection required.
 
 ### Execution Checklist
 1. **Deployment:**
-   - Copy compiled `bin/steam_api64.dll` to target game folder on both PC 1 and PC 2.
-   - Ensure NO Steam client process is running on either machine (`taskkill /F /IM steam.exe`).
-   - Disconnect WAN/Internet gateway (unplug WAN cable or disable router upstream) to enforce zero-Internet conditions.
-2. **Host Launch (PC 1):**
-   - Launch target Unreal Engine game or test runner on PC 1.
-   - Verify logs:
-     ```
-     [ReFix LAN] Initializing ReFix LAN Core...
-     [ReFix LAN] Local PeerId: <UUID_1> (DisplayName: HostPC)
-     [ReFix LAN] Bound discovery socket to UDP port 47584.
-     [ReFix LAN] Bound data socket to UDP port <Ephemeral_1>.
-     ```
-   - In-game: Host a lobby/match.
-3. **Client Launch (PC 2):**
-   - Launch target game on PC 2.
-   - Verify logs:
-     ```
-     [ReFix LAN] Initializing ReFix LAN Core...
-     [ReFix LAN] Local PeerId: <UUID_2> (DisplayName: ClientPC)
-     [ReFix LAN] Bound discovery socket to UDP port 47584 (SO_REUSEADDR).
-     [ReFix LAN] Bound data socket to UDP port <Ephemeral_2>.
-     ```
-   - In-game: Search for LAN matches / Browse lobbies.
+   - Copy `bin/test_steam_lancore_adapter.exe` and `bin/steam_api64.dll` to both PC 1 and PC 2.
+2. **PC 1 (Host Execution):**
+   ```cmd
+   test_steam_lancore_adapter.exe --mode host
+   ```
+   - Logs `[HOST_READY] Created Lobby ID: 1756672202558924272`.
+3. **PC 2 (Client Execution):**
+   ```cmd
+   test_steam_lancore_adapter.exe --mode client
+   ```
+   - Logs `[CLIENT_DISCOVERED_LOBBY] Found Lobby ID: 1756672202558924272`.
+   - Sends join request, exchanges bidirectional P2P Ping/Pong on channel 0.
+   - Exchanges bidirectional 8192-byte application fragmented message on channel 1.
+   - Leaves lobby and exits cleanly with exit code 0.
 4. **Validation Points:**
-   - [ ] **Lobby Discovery:** Client displays Host's lobby within 2 seconds of broadcast.
-   - [ ] **Handshake & Session:** Client joins lobby; Host logs `PeerDiscovered` and `MemberJoined` for Client's `PeerId`.
-   - [ ] **Gameplay P2P Traffic:** High-frequency game datagrams flow between PC 1 and PC 2 via ephemeral UDP sockets.
-   - [ ] **Graceful Disconnect:** Client exits match; Host logs `MemberLeft` and updates lobby member list.
-   - [ ] **Reconnect:** Client rejoins match; session re-establishes without restarting host process.
+   - [ ] **Lobby Discovery:** Client discovers Host's lobby with identical `CSteamID 1756672202558924272` and MapName `de_dust2`.
+   - [ ] **Handshake & Session:** Client joins lobby; Host logs `[HOST_CLIENT_JOINED] Remote Client joined: 76561198000000002`.
+   - [ ] **P2P Unicast Routing:** Direct UDP traffic routed to physical IP (`192.168.1.x`) via ephemeral port discovered during handshake.
+   - [ ] **Application Fragmentation:** Bit-for-bit integrity of 8192-byte payload reassembled without relying on IP fragmentation.
+   - [ ] **Graceful Disconnect:** Client exits; Host verifies member count drops back to 1 (`[HOST_CLIENT_LEFT]`).

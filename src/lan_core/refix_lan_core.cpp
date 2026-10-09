@@ -91,33 +91,115 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_peers.find(info.peerId);
         if (it != m_peers.end()) {
-            if (it->second.endpoint != info.endpoint) {
-                m_byEndpoint.erase(it->second.endpoint);
+            if (it->second.endpoint != info.endpoint && it->second.endpoint.IsValid()) {
+                auto epIt = m_byEndpoint.find(it->second.endpoint);
+                if (epIt != m_byEndpoint.end() && epIt->second == info.peerId) {
+                    m_byEndpoint.erase(epIt);
+                }
+            }
+            if (it->second.externalId.numericId != info.externalId.numericId && it->second.externalId.numericId != 0) {
+                auto sIt = m_bySteamId.find(it->second.externalId.numericId);
+                if (sIt != m_bySteamId.end() && sIt->second == info.peerId) {
+                    m_bySteamId.erase(sIt);
+                }
+            }
+            if (it->second.externalId.stringId != info.externalId.stringId && !it->second.externalId.stringId.empty()) {
+                auto pIt = m_byPuid.find(it->second.externalId.stringId);
+                if (pIt != m_byPuid.end() && pIt->second == info.peerId) {
+                    m_byPuid.erase(pIt);
+                }
             }
         }
+
+        // Collision resolution for new endpoint: if another peer held it, disassociate it
+        if (info.endpoint.IsValid()) {
+            auto collEp = m_byEndpoint.find(info.endpoint);
+            if (collEp != m_byEndpoint.end() && collEp->second != info.peerId) {
+                auto otherIt = m_peers.find(collEp->second);
+                if (otherIt != m_peers.end()) {
+                    otherIt->second.endpoint = LanEndpoint();
+                }
+            }
+            m_byEndpoint[info.endpoint] = info.peerId;
+        }
+
+        // Collision resolution for new SteamID: if another peer held it, disassociate it
+        if (info.externalId.numericId != 0) {
+            auto collSteam = m_bySteamId.find(info.externalId.numericId);
+            if (collSteam != m_bySteamId.end() && collSteam->second != info.peerId) {
+                auto otherIt = m_peers.find(collSteam->second);
+                if (otherIt != m_peers.end()) {
+                    otherIt->second.externalId.numericId = 0;
+                }
+            }
+            m_bySteamId[info.externalId.numericId] = info.peerId;
+        }
+
+        // Collision resolution for new PUID: if another peer held it, disassociate it
+        if (!info.externalId.stringId.empty()) {
+            auto collPuid = m_byPuid.find(info.externalId.stringId);
+            if (collPuid != m_byPuid.end() && collPuid->second != info.peerId) {
+                auto otherIt = m_peers.find(collPuid->second);
+                if (otherIt != m_peers.end()) {
+                    otherIt->second.externalId.stringId.clear();
+                }
+            }
+            m_byPuid[info.externalId.stringId] = info.peerId;
+        }
+
         auto& p = m_peers[info.peerId];
         p = info;
         p.lastSeen = std::chrono::steady_clock::now();
-
-        if (info.endpoint.IsValid()) {
-            m_byEndpoint[info.endpoint] = info.peerId;
-        }
-        if (info.externalId.numericId != 0) {
-            m_bySteamId[info.externalId.numericId] = info.peerId;
-        }
-        if (!info.externalId.stringId.empty()) {
-            m_byPuid[info.externalId.stringId] = info.peerId;
-        }
     }
 
     void BindExternalId(const PeerId& peerId, const ExternalId& extId) override {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto& p = m_peers[peerId];
-        p.peerId = peerId;
-        p.externalId = extId;
-        p.lastSeen = std::chrono::steady_clock::now();
-        if (extId.numericId != 0) m_bySteamId[extId.numericId] = peerId;
-        if (!extId.stringId.empty()) m_byPuid[extId.stringId] = peerId;
+        auto it = m_peers.find(peerId);
+        if (it == m_peers.end()) {
+            // Must not accidentally create partial peer if internal identifier does not exist!
+            return;
+        }
+
+        // Disassociate old mappings belonging to this peer
+        if (it->second.externalId.numericId != extId.numericId && it->second.externalId.numericId != 0) {
+            auto sIt = m_bySteamId.find(it->second.externalId.numericId);
+            if (sIt != m_bySteamId.end() && sIt->second == peerId) {
+                m_bySteamId.erase(sIt);
+            }
+        }
+        if (it->second.externalId.stringId != extId.stringId && !it->second.externalId.stringId.empty()) {
+            auto pIt = m_byPuid.find(it->second.externalId.stringId);
+            if (pIt != m_byPuid.end() && pIt->second == peerId) {
+                m_byPuid.erase(pIt);
+            }
+        }
+
+        // Collision handling for SteamID
+        if (extId.numericId != 0) {
+            auto collSteam = m_bySteamId.find(extId.numericId);
+            if (collSteam != m_bySteamId.end() && collSteam->second != peerId) {
+                auto otherIt = m_peers.find(collSteam->second);
+                if (otherIt != m_peers.end()) {
+                    otherIt->second.externalId.numericId = 0;
+                }
+            }
+            m_bySteamId[extId.numericId] = peerId;
+        }
+
+        // Collision handling for PUID
+        if (!extId.stringId.empty()) {
+            auto collPuid = m_byPuid.find(extId.stringId);
+            if (collPuid != m_byPuid.end() && collPuid->second != peerId) {
+                auto otherIt = m_peers.find(collPuid->second);
+                if (otherIt != m_peers.end()) {
+                    otherIt->second.externalId.stringId.clear();
+                }
+            }
+            m_byPuid[extId.stringId] = peerId;
+        }
+
+        it->second.externalId = extId;
+        it->second.lastSeen = std::chrono::steady_clock::now();
     }
 
     std::optional<PeerInfo> FindByPeerId(const PeerId& peerId) const override {
@@ -260,16 +342,18 @@ private:
 // =============================================================================
 class LobbyServiceImpl : public ILobbyService {
 public:
-    explicit LobbyServiceImpl(ILocalIdentityService& identity, ICallbackDispatcher& callbacks, LanTransport* transport = nullptr)
-        : m_identity(identity), m_callbacks(callbacks), m_transport(transport) {}
+    explicit LobbyServiceImpl(ILocalIdentityService& identity, ICallbackDispatcher& callbacks, LanTransport* transport = nullptr, IPeerRegistry* peers = nullptr)
+        : m_identity(identity), m_callbacks(callbacks), m_transport(transport), m_peers(peers) {}
 
     void SetTransport(LanTransport* transport) { m_transport = transport; }
+    void SetPeers(IPeerRegistry* peers) { m_peers = peers; }
     void SetAppScope(std::string_view scope) { m_appScope = std::string(scope); }
 
     void BroadcastLobbyState(const LobbyRecord& lob) {
         if (!m_transport || m_appScope.empty()) return;
         ByteWriter w;
         w.WriteString(m_appScope);
+        w.WritePeerId(m_identity.GetLocalPeerId());
         w.WriteString(lob.lobbyId);
         w.WritePeerId(lob.ownerPeerId);
         w.WriteU32(lob.maxMembers);
@@ -393,26 +477,89 @@ public:
         return false;
     }
 
-    bool RequestJoin(std::string_view lobbyId) override {
+    bool AddRemoteMember(std::string_view lobbyId, const PeerId& memberPid, const std::string& name, const LanEndpoint& ep) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_lobbies.find(std::string(lobbyId));
         if (it != m_lobbies.end()) {
-            if (it->second.AvailableSlots() > 0 && it->second.joinable) {
-                LobbyMember me;
-                me.peerId = m_identity.GetLocalPeerId();
-                me.displayName = m_identity.GetDisplayName();
-                me.isOwner = false;
-                it->second.members.push_back(me);
+            for (const auto& m : it->second.members) {
+                if (m.peerId == memberPid) return true; // Already member
+            }
+            LobbyMember m;
+            m.peerId = memberPid;
+            m.displayName = name;
+            m.endpoint = ep;
+            m.isOwner = false;
+            it->second.members.push_back(m);
+            it->second.revision++;
+
+            LanEvent ev;
+            ev.type = LanEvent::Type::MemberJoined;
+            ev.lobbyId = std::string(lobbyId);
+            ev.peerId = memberPid;
+            m_callbacks.PostEvent(ev);
+            return true;
+        }
+        return false;
+    }
+
+    bool RemoveRemoteMember(std::string_view lobbyId, const PeerId& memberPid) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it != m_lobbies.end()) {
+            auto& members = it->second.members;
+            auto mit = std::remove_if(members.begin(), members.end(), [&](const LobbyMember& m) {
+                return m.peerId == memberPid;
+            });
+            if (mit != members.end()) {
+                members.erase(mit, members.end());
                 it->second.revision++;
 
                 LanEvent ev;
-                ev.type = LanEvent::Type::MemberJoined;
+                ev.type = LanEvent::Type::MemberLeft;
                 ev.lobbyId = std::string(lobbyId);
-                ev.peerId = me.peerId;
+                ev.peerId = memberPid;
+                ev.leaveReason = MemberLeaveReason::LeftGracefully;
                 m_callbacks.PostEvent(ev);
+                BroadcastLobbyState(it->second);
                 return true;
             }
         }
+        return false;
+    }
+
+    bool RequestJoin(std::string_view lobbyId) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it == m_lobbies.end()) return false;
+
+        if (it->second.ownerPeerId == m_identity.GetLocalPeerId()) {
+            return true; // Already hosting and member
+        }
+
+        // Send LobbyJoinReq to host
+            LanEndpoint localDataEp = m_transport->GetLocalDataEndpoint();
+            uint64_t mySteamId = 0;
+            if (m_peers) {
+                auto myPeer = m_peers->FindByPeerId(m_identity.GetLocalPeerId());
+                if (myPeer && myPeer->externalId.platform == ExternalPlatform::Steam) {
+                    mySteamId = myPeer->externalId.numericId;
+                }
+            }
+
+            ByteWriter w;
+            w.WriteString(m_appScope);
+            w.WritePeerId(m_identity.GetLocalPeerId());
+            w.WriteString(std::string(lobbyId));
+            w.WritePeerId(m_identity.GetLocalPeerId());
+            w.WriteString(m_identity.GetDisplayName());
+            w.WriteEndpoint(localDataEp);
+            w.WriteU64(mySteamId);
+
+            LanEndpoint hostEp = it->second.hostEndpoint;
+            if (hostEp.IsValid()) {
+                m_transport->SendDiscoveryPacket(MsgType::LobbyJoinReq, hostEp, w.Data(), w.Size());
+                return true;
+            }
         return false;
     }
 
@@ -420,6 +567,27 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_lobbies.find(std::string(lobbyId));
         if (it != m_lobbies.end()) {
+            if (it->second.ownerPeerId != m_identity.GetLocalPeerId()) {
+                // Client leaving remote lobby
+                if (m_transport && !m_appScope.empty() && it->second.hostEndpoint.IsValid()) {
+                    ByteWriter w;
+                    w.WriteString(m_appScope);
+                    w.WritePeerId(m_identity.GetLocalPeerId());
+                    w.WriteString(std::string(lobbyId));
+                    w.WritePeerId(m_identity.GetLocalPeerId());
+                    m_transport->SendDiscoveryPacket(MsgType::LobbyLeaveReq, it->second.hostEndpoint, w.Data(), w.Size());
+                }
+                m_lobbies.erase(it);
+                LanEvent ev;
+                ev.type = LanEvent::Type::MemberLeft;
+                ev.lobbyId = std::string(lobbyId);
+                ev.peerId = m_identity.GetLocalPeerId();
+                ev.leaveReason = MemberLeaveReason::LeftGracefully;
+                m_callbacks.PostEvent(ev);
+                return true;
+            }
+
+            // Host leaving: destroy or migrate
             auto& members = it->second.members;
             auto mit = std::remove_if(members.begin(), members.end(), [&](const LobbyMember& m) {
                 return m.peerId == m_identity.GetLocalPeerId();
@@ -435,14 +603,12 @@ public:
                 ev.leaveReason = MemberLeaveReason::LeftGracefully;
                 m_callbacks.PostEvent(ev);
 
-                // If owner left, migrate or destroy
-                if (it->second.ownerPeerId == m_identity.GetLocalPeerId()) {
-                    if (members.empty()) {
-                        m_lobbies.erase(it);
-                    } else {
-                        it->second.ownerPeerId = members.front().peerId;
-                        members.front().isOwner = true;
-                    }
+                if (members.empty()) {
+                    m_lobbies.erase(it);
+                } else {
+                    it->second.ownerPeerId = members.front().peerId;
+                    members.front().isOwner = true;
+                    BroadcastLobbyState(it->second);
                 }
                 return true;
             }
@@ -528,6 +694,7 @@ private:
     ICallbackDispatcher& m_callbacks;
     std::unordered_map<std::string, LobbyRecord> m_lobbies;
     LanTransport* m_transport = nullptr;
+    IPeerRegistry* m_peers = nullptr;
     std::string m_appScope;
 };
 
@@ -558,16 +725,18 @@ bool SearchFilter::Matches(const LobbyRecord& lobby) const {
 
 class MatchmakingServiceImpl : public IMatchmakingService {
 public:
-    explicit MatchmakingServiceImpl(ILobbyService& lobby, LanTransport* transport = nullptr)
-        : m_lobby(lobby), m_transport(transport) {}
+    explicit MatchmakingServiceImpl(ILobbyService& lobby, LanTransport* transport = nullptr, ILocalIdentityService* identity = nullptr)
+        : m_lobby(lobby), m_transport(transport), m_identity(identity) {}
 
     void SetTransport(LanTransport* transport) { m_transport = transport; }
+    void SetIdentity(ILocalIdentityService* identity) { m_identity = identity; }
     void SetAppScope(std::string_view scope) { m_appScope = std::string(scope); }
 
     void RefreshLobbyList() override {
         if (m_transport && !m_appScope.empty()) {
             ByteWriter w;
             w.WriteString(m_appScope);
+            w.WritePeerId(m_identity ? m_identity->GetLocalPeerId() : PeerId{});
             m_transport->BroadcastLobbyQuery(w.Data(), w.Size());
         }
     }
@@ -598,6 +767,7 @@ public:
 private:
     ILobbyService& m_lobby;
     LanTransport* m_transport = nullptr;
+    ILocalIdentityService* m_identity = nullptr;
     std::string m_appScope;
 };
 
@@ -819,6 +989,7 @@ public:
             rec.revision = r.ReadU32();
             rec.hostEndpoint = r.ReadEndpoint();
             if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
+            if (sender.ipv4 == 0x7F000001) rec.hostEndpoint.ipv4 = 0x7F000001;
 
             uint32_t attrCount = r.ReadU32();
             if (!r.HasError() && attrCount <= 1000) {
@@ -852,6 +1023,7 @@ public:
                 if (lob.ownerPeerId == m_identity.GetLocalPeerId()) {
                     ByteWriter w;
                     w.WriteString(m_appScope);
+                    w.WritePeerId(m_identity.GetLocalPeerId());
                     w.WriteString(lob.lobbyId);
                     w.WritePeerId(lob.ownerPeerId);
                     w.WriteU32(lob.maxMembers);
@@ -876,6 +1048,160 @@ public:
 
                     m_transport.SendDiscoveryPacket(MsgType::LobbyAnnouncement, sender, w.Data(), w.Size());
                 }
+            }
+        } else if (type == MsgType::LobbyJoinReq) {
+            std::string lobbyId = r.ReadString();
+            PeerId clientPid = r.ReadPeerId();
+            std::string clientName = r.ReadString();
+            LanEndpoint clientEp = r.ReadEndpoint();
+            uint64_t clientSteamId = 0;
+            if (r.Remaining() >= 8) clientSteamId = r.ReadU64();
+            if (r.HasError()) return;
+
+            LanEndpoint replyEp = clientEp.IsValid() ? clientEp : sender;
+            if (sender.ipv4 == 0x7F000001) replyEp.ipv4 = 0x7F000001;
+
+            auto lobOpt = m_lobby.GetLobby(lobbyId);
+            if (!lobOpt || !m_lobby.IsHosting(lobbyId)) {
+                ByteWriter resp;
+                resp.WriteString(m_appScope);
+                resp.WritePeerId(m_identity.GetLocalPeerId());
+                resp.WriteString(lobbyId);
+                resp.WriteU8(3); // DoesNotExist
+                m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
+                return;
+            }
+
+            if (!lobOpt->joinable) {
+                ByteWriter resp;
+                resp.WriteString(m_appScope);
+                resp.WritePeerId(m_identity.GetLocalPeerId());
+                resp.WriteString(lobbyId);
+                resp.WriteU8(2); // NotJoinable
+                m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
+                return;
+            }
+
+            if (lobOpt->AvailableSlots() == 0) {
+                ByteWriter resp;
+                resp.WriteString(m_appScope);
+                resp.WritePeerId(m_identity.GetLocalPeerId());
+                resp.WriteString(lobbyId);
+                resp.WriteU8(1); // Full
+                m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
+                return;
+            }
+
+            // Accept and register client peer
+            PeerInfo clientInfo;
+            auto existing = m_peers.FindByPeerId(clientPid);
+            if (existing) {
+                clientInfo = *existing;
+            } else {
+                clientInfo.peerId = clientPid;
+                clientInfo.machineId = clientPid.high;
+                clientInfo.state = PeerTransportState::Connected;
+            }
+            clientInfo.displayName = clientName;
+            clientInfo.endpoint = replyEp;
+            if (clientSteamId != 0) {
+                clientInfo.externalId.platform = ExternalPlatform::Steam;
+                clientInfo.externalId.numericId = clientSteamId;
+                clientInfo.externalId.stringId = std::to_string(clientSteamId);
+            }
+            m_peers.RegisterOrUpdatePeer(clientInfo);
+
+            m_lobby.AddRemoteMember(lobbyId, clientPid, clientName, replyEp);
+
+            auto updatedLob = m_lobby.GetLobby(lobbyId);
+            if (!updatedLob) return;
+
+            ByteWriter resp;
+            resp.WriteString(m_appScope);
+            resp.WritePeerId(m_identity.GetLocalPeerId());
+            resp.WriteString(lobbyId);
+            resp.WriteU8(0); // Success
+
+            resp.WritePeerId(updatedLob->ownerPeerId);
+            resp.WriteU32(updatedLob->maxMembers);
+            resp.WriteU8(static_cast<uint8_t>(updatedLob->permission));
+            resp.WriteBool(updatedLob->joinable);
+            resp.WriteU32(updatedLob->revision);
+            resp.WriteEndpoint(m_transport.GetLocalDataEndpoint());
+
+            resp.WriteU32(static_cast<uint32_t>(updatedLob->attributes.size()));
+            for (const auto& [k, v] : updatedLob->attributes) {
+                resp.WriteString(k);
+                resp.WriteAttribute(v);
+            }
+
+            resp.WriteU32(static_cast<uint32_t>(updatedLob->members.size()));
+            for (const auto& m : updatedLob->members) {
+                resp.WritePeerId(m.peerId);
+                resp.WriteString(m.displayName);
+                resp.WriteEndpoint(m.endpoint);
+                resp.WriteBool(m.isOwner);
+            }
+
+            m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
+            m_lobby.BroadcastLobbyState(*updatedLob);
+        } else if (type == MsgType::LobbyJoinResp) {
+            std::string lobbyId = r.ReadString();
+            uint8_t status = r.ReadU8();
+
+            LanEvent ev;
+            ev.type = LanEvent::Type::LobbyJoinResult;
+            ev.lobbyId = lobbyId;
+            ev.peerId = pid;
+            ev.success = (status == 0);
+            ev.joinResponseCode = status;
+
+            if (status == 0 && !r.HasError()) {
+                LobbyRecord rec;
+                rec.lobbyId = lobbyId;
+                rec.ownerPeerId = r.ReadPeerId();
+                rec.maxMembers = r.ReadU32();
+                rec.permission = static_cast<LobbyPermissionLevel>(r.ReadU8());
+                rec.joinable = r.ReadBool();
+                rec.revision = r.ReadU32();
+                rec.hostEndpoint = r.ReadEndpoint();
+                if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
+                if (sender.ipv4 == 0x7F000001) rec.hostEndpoint.ipv4 = 0x7F000001;
+
+                uint32_t attrCount = r.ReadU32();
+                if (!r.HasError() && attrCount <= 1000) {
+                    for (uint32_t i = 0; i < attrCount; ++i) {
+                        std::string k = r.ReadString();
+                        AttributeValue v = r.ReadAttribute();
+                        if (r.HasError()) break;
+                        rec.attributes[k] = v;
+                    }
+                }
+
+                uint32_t memberCount = r.ReadU32();
+                if (!r.HasError() && memberCount <= 256) {
+                    for (uint32_t i = 0; i < memberCount; ++i) {
+                        LobbyMember m;
+                        m.peerId = r.ReadPeerId();
+                        m.displayName = r.ReadString();
+                        m.endpoint = r.ReadEndpoint();
+                        m.isOwner = r.ReadBool();
+                        if (r.HasError()) break;
+                        rec.members.push_back(m);
+                    }
+                }
+
+                if (!r.HasError()) {
+                    m_lobby.ImportRemoteLobby(rec);
+                }
+            }
+
+            m_callbacks.PostEvent(ev);
+        } else if (type == MsgType::LobbyLeaveReq) {
+            std::string lobbyId = r.ReadString();
+            PeerId leavingPid = r.ReadPeerId();
+            if (m_lobby.IsHosting(lobbyId)) {
+                m_lobby.RemoveRemoteMember(lobbyId, leavingPid);
             }
         }
     }
@@ -915,9 +1241,9 @@ public:
           m_peers(),
           m_callbacks(),
           m_transport(),
-          m_lobby(m_identity, m_callbacks, &m_transport),
+          m_lobby(m_identity, m_callbacks, &m_transport, &m_peers),
           m_session(m_identity),
-          m_matchmaking(m_lobby, &m_transport),
+          m_matchmaking(m_lobby, &m_transport, &m_identity),
           m_relay(m_transport, m_peers),
           m_discovery(m_transport, m_identity, m_peers, m_lobby, m_callbacks) {}
 
@@ -925,8 +1251,13 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_initialized) return true;
         m_lobby.SetAppScope(appScope);
+        m_lobby.SetPeers(&m_peers);
         m_matchmaking.SetAppScope(appScope);
+        m_matchmaking.SetIdentity(&m_identity);
         m_initialized = m_discovery.Start(appScope, discoveryPort);
+        if (!m_initialized) {
+            return false;
+        }
         m_lastAnnounce = std::chrono::steady_clock::now();
         m_discovery.AnnouncePresence();
         return m_initialized;

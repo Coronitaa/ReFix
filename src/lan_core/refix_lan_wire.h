@@ -28,7 +28,10 @@ enum class MsgType : uint8_t {
     Pong              = 0x0B,
     RelayWrapper      = 0x0C,
     LobbyAnnouncement = 0x0D,
-    LobbyQuery        = 0x0E
+    LobbyQuery        = 0x0E,
+    LobbyJoinReq      = 0x0F,
+    LobbyJoinResp     = 0x10,
+    LobbyLeaveReq     = 0x11
 };
 
 // Flags

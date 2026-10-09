@@ -336,6 +336,254 @@ static bool TestTransportLoopback() {
     return true;
 }
 
+static bool TestPeerRegistryAdvanced() {
+    std::cout << "[*] Running TestPeerRegistryAdvanced..." << std::endl;
+    auto& core = ILanCore::Get();
+    auto& peers = core.Peers();
+
+    PeerId peerA{0xAAAA, 0x0001};
+    PeerId peerB{0xBBBB, 0x0002};
+
+    // 1. Rejection of non-existent peer in BindExternalId
+    PeerId nonExistent{0x9999, 0x9999};
+    ExternalId ghostExt{ExternalPlatform::Steam, 76561198999999999ULL, "ghost_puid"};
+    peers.BindExternalId(nonExistent, ghostExt);
+    TEST_ASSERT(!peers.FindByPeerId(nonExistent).has_value(), "Must not create partial peer for non-existent PeerId");
+    TEST_ASSERT(!peers.FindBySteamId(ghostExt.numericId).has_value(), "Must not index ghost external ID");
+
+    // 2. Register Peer A
+    LanEndpoint ep1{0x7F000001, 11111};
+    PeerInfo infoA;
+    infoA.peerId = peerA;
+    infoA.endpoint = ep1;
+    infoA.displayName = "PeerA_Initial";
+    infoA.externalId = {ExternalPlatform::Steam, 76561198000000010ULL, "puid_a1"};
+    peers.RegisterOrUpdatePeer(infoA);
+
+    TEST_ASSERT(peers.FindByEndpoint(ep1).value() == peerA, "Ep1 must map to peerA");
+    TEST_ASSERT(peers.FindBySteamId(infoA.externalId.numericId).value() == peerA, "SteamID must map to peerA");
+    TEST_ASSERT(peers.FindByPuid("puid_a1").value() == peerA, "PUID must map to peerA");
+
+    // 3. Change endpoint while conserving identity
+    LanEndpoint ep2{0x7F000001, 22222};
+    infoA.endpoint = ep2;
+    peers.RegisterOrUpdatePeer(infoA);
+
+    TEST_ASSERT(!peers.FindByEndpoint(ep1).has_value(), "Old Ep1 must no longer map to peerA");
+    TEST_ASSERT(peers.FindByEndpoint(ep2).value() == peerA, "New Ep2 must map to peerA");
+    TEST_ASSERT(peers.FindByPeerId(peerA)->endpoint == ep2, "PeerA record must have Ep2");
+
+    // 4. Change SteamID and PUID
+    ExternalId extA2{ExternalPlatform::Steam, 76561198000000020ULL, "puid_a2"};
+    peers.BindExternalId(peerA, extA2);
+
+    TEST_ASSERT(!peers.FindBySteamId(76561198000000010ULL).has_value(), "Old SteamID must be unmapped");
+    TEST_ASSERT(!peers.FindByPuid("puid_a1").has_value(), "Old PUID must be unmapped");
+    TEST_ASSERT(peers.FindBySteamId(76561198000000020ULL).value() == peerA, "New SteamID must map to peerA");
+    TEST_ASSERT(peers.FindByPuid("puid_a2").value() == peerA, "New PUID must map to peerA");
+
+    // 5. Reassign identifier that belonged to another peer (Collision resolution)
+    PeerInfo infoB;
+    infoB.peerId = peerB;
+    infoB.endpoint = {0x7F000001, 33333};
+    infoB.displayName = "PeerB";
+    infoB.externalId = {ExternalPlatform::Steam, 76561198000000030ULL, "puid_b"};
+    peers.RegisterOrUpdatePeer(infoB);
+
+    // Reassign PeerB's SteamID to PeerA
+    ExternalId stolenExt{ExternalPlatform::Steam, 76561198000000030ULL, "puid_a_stolen"};
+    peers.BindExternalId(peerA, stolenExt);
+
+    TEST_ASSERT(peers.FindBySteamId(76561198000000030ULL).value() == peerA, "Stolen SteamID must resolve to peerA");
+    auto pB = peers.FindByPeerId(peerB);
+    TEST_ASSERT(pB.has_value() && pB->externalId.numericId != 76561198000000030ULL, "PeerB's colliding SteamID must be disassociated");
+
+    std::cout << "  [PASS] Advanced PeerRegistry operations (reassignment, migration, collision safety) certified!" << std::endl;
+    return true;
+}
+
+static bool TestTransportFragmentationAndEdgeCases() {
+    std::cout << "[*] Running TestTransportFragmentationAndEdgeCases..." << std::endl;
+
+    LanTransport transportA;
+    LanTransport transportB;
+    PeerId peerA{0xA1A1, 0xA2A2};
+    PeerId peerB{0xB1B1, 0xB2B2};
+
+    transportA.SetLocalPeerId(peerA);
+    transportB.SetLocalPeerId(peerB);
+
+    TEST_ASSERT(transportA.Start(47592), "Transport A start failed");
+    TEST_ASSERT(transportB.Start(47593), "Transport B start failed");
+
+    LanEndpoint epB = transportB.GetLocalDataEndpoint();
+    epB.ipv4 = 0x7F000001;
+
+    auto waitForPacket = [&](LanTransport& tr, InboundPacket& outPkt, int timeoutMs = 2000) -> bool {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            if (tr.PollInbound(outPkt)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+
+    InboundPacket rx;
+
+    // Case 1: 0-byte packet
+    bool s0 = transportA.SendReliable(peerB, epB, 2, nullptr, 0);
+    TEST_ASSERT(s0, "SendReliable(0-byte) must return true");
+    TEST_ASSERT(waitForPacket(transportB, rx), "Must receive 0-byte reliable packet");
+    TEST_ASSERT(rx.payload.empty(), "Payload of 0-byte packet must be empty");
+    TEST_ASSERT(rx.channel == 2, "Channel must match");
+
+    // Case 2: 1-byte packet
+    uint8_t oneByte = 0x7E;
+    bool s1 = transportA.SendReliable(peerB, epB, 2, &oneByte, 1);
+    TEST_ASSERT(s1, "SendReliable(1-byte) must return true");
+    TEST_ASSERT(waitForPacket(transportB, rx), "Must receive 1-byte packet");
+    TEST_ASSERT(rx.payload.size() == 1 && rx.payload[0] == 0x7E, "Payload content mismatch");
+
+    // Case 3: 1200-byte packet (near fragment boundary)
+    std::vector<uint8_t> data1200(1200);
+    for (size_t i = 0; i < data1200.size(); ++i) data1200[i] = static_cast<uint8_t>(i & 0xFF);
+    bool s1200 = transportA.SendReliable(peerB, epB, 3, data1200.data(), data1200.size());
+    TEST_ASSERT(s1200, "SendReliable(1200 bytes) must succeed");
+    TEST_ASSERT(waitForPacket(transportB, rx), "Must receive reassembled 1200-byte packet");
+    TEST_ASSERT(rx.payload.size() == 1200, "1200-byte payload size mismatch");
+    TEST_ASSERT(rx.payload == data1200, "1200-byte payload corruption");
+    TEST_ASSERT(rx.channel == 3, "Channel boundary must be preserved");
+
+    // Case 4: 1201-byte packet (triggers fragmentation)
+    std::vector<uint8_t> data1201(1201);
+    for (size_t i = 0; i < data1201.size(); ++i) data1201[i] = static_cast<uint8_t>((i * 7) & 0xFF);
+    bool s1201 = transportA.SendReliable(peerB, epB, 3, data1201.data(), data1201.size());
+    TEST_ASSERT(s1201, "SendReliable(1201 bytes) must succeed");
+    TEST_ASSERT(waitForPacket(transportB, rx), "Must receive reassembled 1201-byte packet");
+    TEST_ASSERT(rx.payload.size() == 1201, "1201-byte payload size mismatch");
+    TEST_ASSERT(rx.payload == data1201, "1201-byte payload corruption");
+
+    // Case 5: 64 KB Large message
+    std::vector<uint8_t> largeData(65536);
+    for (size_t i = 0; i < largeData.size(); ++i) {
+        largeData[i] = static_cast<uint8_t>((i ^ (i >> 8)) & 0xFF);
+    }
+    bool sLarge = transportA.SendReliable(peerB, epB, 5, largeData.data(), largeData.size());
+    TEST_ASSERT(sLarge, "SendReliable(64 KB) must succeed");
+    TEST_ASSERT(waitForPacket(transportB, rx, 4000), "Must receive reassembled 64 KB packet");
+    TEST_ASSERT(rx.payload.size() == 65536, "64 KB payload size mismatch");
+    TEST_ASSERT(rx.payload == largeData, "64 KB reassembled payload corruption");
+    TEST_ASSERT(rx.channel == 5, "Channel 5 must be preserved");
+
+    // Case 6: Reject oversized message (> 256 KB)
+    std::vector<uint8_t> overSized(262145);
+    bool sOverRel = transportA.SendReliable(peerB, epB, 1, overSized.data(), overSized.size());
+    TEST_ASSERT(!sOverRel, "SendReliable must cleanly reject > 256 KB payload");
+    bool sOverUnrel = transportA.SendUnreliable(epB, 1, overSized.data(), overSized.size());
+    TEST_ASSERT(!sOverUnrel, "SendUnreliable must cleanly reject > 256 KB payload");
+
+    transportA.Stop();
+    transportB.Stop();
+
+    std::cout << "  [PASS] Application fragmentation, 0-byte, 1-byte, 1201-byte, 64KB, and limit enforcement verified!" << std::endl;
+    return true;
+}
+
+class MockTransportListener : public ILanTransportListener {
+public:
+    std::atomic<int> timeoutCount{0};
+    PeerId lastTimedOutPeer;
+
+    void OnDiscoveryPacket(const LanEndpoint&, MsgType, const uint8_t*, size_t) override {}
+    void OnInboundData(const InboundPacket&) override {}
+    void OnPeerTimeout(const PeerId& peerId, const LanEndpoint&) override {
+        timeoutCount.fetch_add(1);
+        lastTimedOutPeer = peerId;
+    }
+};
+
+static bool TestTransportRetransmissionTimeout() {
+    std::cout << "[*] Running TestTransportRetransmissionTimeout..." << std::endl;
+
+    MockTransportListener listener;
+    LanTransport transport;
+    PeerId localPeer{0x1234, 0x5678};
+    PeerId ghostPeer{0x9999, 0x8888};
+    transport.SetLocalPeerId(localPeer);
+
+    TEST_ASSERT(transport.Start(47594, &listener), "Transport start failed");
+
+    // Send reliable packet to dead endpoint
+    LanEndpoint deadEndpoint{0x7F000001, 47599};
+    const char data[] = "Timeout test packet";
+    transport.SendReliable(ghostPeer, deadEndpoint, 0, data, sizeof(data));
+
+    // Wait until retry exhaustion (8 retries * ~200ms = ~1.6s)
+    auto start = std::chrono::steady_clock::now();
+    while (listener.timeoutCount.load() == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+        if (elapsed > 4) break;
+    }
+
+    TEST_ASSERT(listener.timeoutCount.load() == 1, "OnPeerTimeout must be called exactly once upon retry exhaustion");
+    TEST_ASSERT(listener.lastTimedOutPeer == ghostPeer, "Timed out peer must match ghostPeer");
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    TEST_ASSERT(listener.timeoutCount.load() == 1, "No duplicate OnPeerTimeout events must fire after exhaustion");
+
+    transport.Stop();
+    std::cout << "  [PASS] Single-event retry exhaustion and queue purge verified!" << std::endl;
+    return true;
+}
+
+class MockDiscoveryListener : public ILanTransportListener {
+public:
+    std::atomic<bool> receivedBeacon{false};
+    void OnDiscoveryPacket(const LanEndpoint&, MsgType type, const uint8_t*, size_t) override {
+        if (type == MsgType::DiscoveryBeacon) {
+            receivedBeacon.store(true);
+        }
+    }
+    void OnInboundData(const InboundPacket&) override {}
+    void OnPeerTimeout(const PeerId&, const LanEndpoint&) override {}
+};
+
+static bool TestFallbackDiscoveryPorts() {
+    std::cout << "[*] Running TestFallbackDiscoveryPorts..." << std::endl;
+
+    MockDiscoveryListener listener2;
+    LanTransport tr1;
+    tr1.SetLocalPeerId({0x1111, 0x1111});
+    LanTransport tr2;
+    tr2.SetLocalPeerId({0x2222, 0x2222});
+
+    TEST_ASSERT(tr1.Start(47584), "Transport 1 start failed");
+    // Explicitly start tr2 on fallback discovery port 47585
+    TEST_ASSERT(tr2.Start(47585, &listener2), "Transport 2 start on 47585 failed");
+
+    TEST_ASSERT(tr1.GetDiscoveryPort() != tr2.GetDiscoveryPort(), "Instances must have distinct discovery ports");
+    std::cout << "    Instance 1 bound discovery port: " << tr1.GetDiscoveryPort() << std::endl;
+    std::cout << "    Instance 2 bound discovery port: " << tr2.GetDiscoveryPort() << std::endl;
+
+    const char beaconMsg[] = "DISCOVERY_ACROSS_PORTS";
+    tr1.BroadcastDiscovery(beaconMsg, sizeof(beaconMsg));
+
+    auto start = std::chrono::steady_clock::now();
+    while (!listener2.receivedBeacon.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        if (elapsed > 2000) break;
+    }
+
+    TEST_ASSERT(listener2.receivedBeacon.load(), "Instance 2 on fallback port must receive discovery broadcast from Instance 1");
+
+    tr1.Stop();
+    tr2.Stop();
+    std::cout << "  [PASS] Cross-port fallback discovery verified!" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
@@ -349,6 +597,10 @@ int main() {
     if (!TestDispatcherReentrancy()) return 1;
     if (!TestPeerRegistryReconnectPruning()) return 1;
     if (!TestTransportLoopback()) return 1;
+    if (!TestPeerRegistryAdvanced()) return 1;
+    if (!TestTransportFragmentationAndEdgeCases()) return 1;
+    if (!TestTransportRetransmissionTimeout()) return 1;
+    if (!TestFallbackDiscoveryPorts()) return 1;
 
     std::cout << "\n============================================================" << std::endl;
     std::cout << " [SUCCESS] ALL REFIX LAN CORE & TRANSPORT TESTS PASSED!      " << std::endl;
