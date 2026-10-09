@@ -10,7 +10,7 @@
 namespace refix::lan {
 
 constexpr uint32_t REFIX_WIRE_MAGIC = 0x52464958; // 'RFIX' in little endian
-constexpr uint8_t  REFIX_WIRE_VERSION = 1;
+constexpr uint8_t  REFIX_WIRE_VERSION = 2;
 constexpr uint16_t REFIX_MAX_FRAGMENT_PAYLOAD      = 1150; // MTU-safe chunk size
 constexpr uint16_t REFIX_MAX_UNRELIABLE_PAYLOAD    = 1150; // MTU-safe single-datagram payload limit for unreliable
 constexpr size_t   REFIX_MAX_MESSAGE_SIZE          = 256 * 1024; // 256 KB safety limit for reconstructed messages
@@ -53,16 +53,20 @@ constexpr uint16_t FLAG_LAST_FRAGMENT = 0x0008;
 #pragma pack(push, 1)
 struct WireHeader {
     uint32_t magic;          // 0x52464958
-    uint8_t  version;        // 1
+    uint8_t  version;        // 2 (bumped for 32-bit generation & separate fragmentMsgId)
     uint8_t  msgType;        // MsgType enum
     uint16_t flags;          // FLAG_*
-    uint64_t senderPeerHigh;
-    uint64_t senderPeerLow;
-    uint32_t sessionId;      // Session or conversation ID
+    uint64_t senderPeerHigh; // Peer identity
+    uint64_t senderPeerLow;  // Peer identity
+    uint32_t generationId;   // ARQ stream session generation identifier (32-bit: wrap-proof)
+    union {
+        uint32_t fragmentMsgId; // Fragmented message identifier (independent of peer and generation)
+        uint32_t sessionId;     // Backwards-compatible field alias
+    };
     uint8_t  channel;        // 0: Signaling, 1: Game, 2: Voice, etc.
     uint8_t  fragIndex;      // 0-indexed fragment
     uint8_t  fragTotal;      // Total fragments (1 if unfragmented)
-    uint8_t  generationId;   // Generation / session incarnation identifier (was reserved)
+    uint8_t  reserved;       // Alignment / reserved
     uint32_t sequence;       // Sequence number for reliable data
     uint32_t ack;            // Cumulative acknowledged sequence
     uint32_t sackMask;       // 32-bit Selective ACK bitmask
@@ -82,7 +86,7 @@ struct WireHeader {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(WireHeader) == 46, "WireHeader must be exactly 46 bytes packed");
+static_assert(sizeof(WireHeader) == 50, "WireHeader must be exactly 50 bytes packed");
 
 // =============================================================================
 // Binary Serialization Helpers (Explicit Little-Endian)

@@ -813,7 +813,7 @@ static bool TestLanInterfaceSelection() {
 }
 
 static void SendRawFragment(SOCKET s, const LanEndpoint& target, const PeerId& sender, uint32_t sessionId, uint8_t fragIndex, uint8_t fragTotal, uint32_t seq, const std::vector<uint8_t>& payload) {
-    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size());
+    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size(), 0);
     auto* hdr = reinterpret_cast<WireHeader*>(buf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
@@ -821,10 +821,12 @@ static void SendRawFragment(SOCKET s, const LanEndpoint& target, const PeerId& s
     hdr->flags = FLAG_RELIABLE | FLAG_FRAGMENT;
     if (fragIndex == fragTotal - 1) hdr->flags |= FLAG_LAST_FRAGMENT;
     hdr->SetSenderPeerId(sender);
-    hdr->sessionId = sessionId;
+    hdr->generationId = 1;
+    hdr->fragmentMsgId = sessionId;
     hdr->channel = 1;
     hdr->fragIndex = fragIndex;
     hdr->fragTotal = fragTotal;
+    hdr->reserved = 0;
     hdr->sequence = seq;
     hdr->ack = 0;
     hdr->sackMask = 0;
@@ -841,17 +843,19 @@ static void SendRawFragment(SOCKET s, const LanEndpoint& target, const PeerId& s
 }
 
 static void SendRawReliableWirePacket(SOCKET s, const LanEndpoint& target, const PeerId& sender, uint32_t seq, uint8_t channel, const std::vector<uint8_t>& payload) {
-    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size());
+    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size(), 0);
     auto* hdr = reinterpret_cast<WireHeader*>(buf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
     hdr->flags = FLAG_RELIABLE;
     hdr->SetSenderPeerId(sender);
-    hdr->sessionId = 0;
+    hdr->generationId = 1;
+    hdr->fragmentMsgId = 0;
     hdr->channel = channel;
     hdr->fragIndex = 0;
     hdr->fragTotal = 1;
+    hdr->reserved = 0;
     hdr->sequence = seq;
     hdr->ack = 0;
     hdr->sackMask = 0;
@@ -868,17 +872,19 @@ static void SendRawReliableWirePacket(SOCKET s, const LanEndpoint& target, const
 }
 
 static void SendRawUnreliableWirePacket(SOCKET s, const LanEndpoint& target, const PeerId& sender, const std::vector<uint8_t>& payload) {
-    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size());
+    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size(), 0);
     auto* hdr = reinterpret_cast<WireHeader*>(buf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataUnreliable);
     hdr->flags = 0;
     hdr->SetSenderPeerId(sender);
-    hdr->sessionId = 0;
+    hdr->generationId = 0;
+    hdr->fragmentMsgId = 0;
     hdr->channel = 1;
     hdr->fragIndex = 0;
     hdr->fragTotal = 1;
+    hdr->reserved = 0;
     hdr->sequence = 0;
     hdr->ack = 0;
     hdr->sackMask = 0;
@@ -1016,9 +1022,9 @@ static bool TestReassemblyExpirationAndPeerAccountingStress() {
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 4000, "Incompatible metadata must be rejected without memory change");
 
-    // 4. Complete message for peer 1 (fragIndex = 1, fragTotal = 2, seq = 3)
+    // 4. Complete message for peer 1 (fragIndex = 1, fragTotal = 2, seq = 2: bad datagram was rejected without sequence advance)
     std::vector<uint8_t> secondChunk(400, 0x43);
-    SendRawFragment(rawSock, epB, testPeers[0], 101, 1, 2, 3, secondChunk);
+    SendRawFragment(rawSock, epB, testPeers[0], 101, 1, 2, 2, secondChunk);
 
     InboundPacket fullPkt;
     TEST_ASSERT(waitForPacket(trB, fullPkt), "Must receive completed reassembled message for peer 1");
@@ -1027,8 +1033,8 @@ static bool TestReassemblyExpirationAndPeerAccountingStress() {
     TEST_ASSERT(trB.GetTrackedPeerReassemblyCount() == 9, "Tracked peer count must decrement to 9 when peer 1 has no contexts");
     TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 3600, "Global memory must decrement to 3600");
 
-    // 5. Subsequent valid transmission from peer 1 after previous completion (seq = 4)
-    SendRawFragment(rawSock, epB, testPeers[0], 201, 0, 1, 4, fragChunk); // Single fragment complete
+    // 5. Subsequent valid transmission from peer 1 after previous completion (seq = 3)
+    SendRawFragment(rawSock, epB, testPeers[0], 201, 0, 1, 3, fragChunk); // Single fragment complete
     TEST_ASSERT(waitForPacket(trB, fullPkt), "Must receive subsequent valid message from peer 1");
     TEST_ASSERT(trB.GetPeerReassemblyBytes(testPeers[0]) == 0, "Peer 1 accounting must remain 0");
 
@@ -1288,8 +1294,8 @@ static bool TestMemoryLimitsRealBudgetsAndEviction() {
     // Must reject the invalid fragment without corrupting ongoing context or changing memory
     TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 500, "Incompatible metadata must be rejected without altering peer memory");
 
-    // Send valid second fragment (fragIndex = 1, fragTotal = 2) for session 999 (seq = 3)
-    SendRawFragment(rawSock, ep, peer5, 999, 1, 2, 3, frag500);
+    // Send valid second fragment (fragIndex = 1, fragTotal = 2) for session 999 (seq = 2: bad datagram was rejected without sequence advance)
+    SendRawFragment(rawSock, ep, peer5, 999, 1, 2, 2, frag500);
     InboundPacket session999Pkt;
     TEST_ASSERT(waitForPacket(tr, session999Pkt), "Session 999 must complete successfully after bad fragment rejection");
     TEST_ASSERT(session999Pkt.payload.size() == 1000, "Reassembled size must be 1000 bytes");
@@ -1771,13 +1777,14 @@ static bool TestSymmetricDatagramFramingAndValidation() {
     TEST_ASSERT(pkt.payload.size() == 1150, "Payload length must match 1150");
 
     // 2. Oversized unfragmented payload (1151 bytes, exceeds MTU chunk limit)
-    std::vector<uint8_t> overBuf(sizeof(WireHeader) + 1151);
+    std::vector<uint8_t> overBuf(sizeof(WireHeader) + 1151, 0);
     auto* hdr = reinterpret_cast<WireHeader*>(overBuf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
     hdr->flags = FLAG_RELIABLE;
     hdr->SetSenderPeerId(testPeer);
+    hdr->generationId = 1;
     hdr->sessionId = 0;
     hdr->channel = 1;
     hdr->fragIndex = 0;
@@ -1790,13 +1797,14 @@ static bool TestSymmetricDatagramFramingAndValidation() {
     TEST_ASSERT(!tr.PollInbound(pkt), "Oversized 1151-byte unfragmented payload must be strictly rejected");
 
     // 3. Inconsistent fragmented metadata: fragTotal = 0
-    std::vector<uint8_t> badFragBuf(sizeof(WireHeader) + 100);
+    std::vector<uint8_t> badFragBuf(sizeof(WireHeader) + 100, 0);
     hdr = reinterpret_cast<WireHeader*>(badFragBuf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
     hdr->flags = FLAG_RELIABLE | FLAG_FRAGMENT;
     hdr->SetSenderPeerId(testPeer);
+    hdr->generationId = 1;
     hdr->sessionId = 5;
     hdr->channel = 1;
     hdr->fragIndex = 0;
@@ -1825,13 +1833,14 @@ static bool TestSymmetricDatagramFramingAndValidation() {
     TEST_ASSERT(!tr.PollInbound(pkt), "Last fragment without FLAG_LAST_FRAGMENT must be rejected");
 
     // 6. Truncated datagram: declared payloadLen > actual datagram size
-    std::vector<uint8_t> truncBuf(sizeof(WireHeader) + 50);
+    std::vector<uint8_t> truncBuf(sizeof(WireHeader) + 50, 0);
     hdr = reinterpret_cast<WireHeader*>(truncBuf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
     hdr->flags = FLAG_RELIABLE;
     hdr->SetSenderPeerId(testPeer);
+    hdr->generationId = 1;
     hdr->sequence = 6;
     hdr->payloadLen = 500; // Declares 500 but datagram only has 50 bytes!
     sendRawBuf(truncBuf.data(), truncBuf.size());
@@ -1839,19 +1848,20 @@ static bool TestSymmetricDatagramFramingAndValidation() {
     TEST_ASSERT(!tr.PollInbound(pkt), "Truncated datagram must be rejected");
 
     // 7. DataAck with appended payload must be rejected
-    std::vector<uint8_t> ackWithPayload(sizeof(WireHeader) + 20);
+    std::vector<uint8_t> ackWithPayload(sizeof(WireHeader) + 20, 0);
     hdr = reinterpret_cast<WireHeader*>(ackWithPayload.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataAck);
     hdr->flags = 0;
     hdr->SetSenderPeerId(testPeer);
+    hdr->generationId = 1;
     hdr->payloadLen = 20; // Spurious payload on ACK!
     sendRawBuf(ackWithPayload.data(), ackWithPayload.size());
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
     // 8. DataUnreliable with FLAG_RELIABLE must be rejected
-    std::vector<uint8_t> badUnrelBuf(sizeof(WireHeader) + 50);
+    std::vector<uint8_t> badUnrelBuf(sizeof(WireHeader) + 50, 0);
     hdr = reinterpret_cast<WireHeader*>(badUnrelBuf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
@@ -2134,7 +2144,7 @@ static bool TestSessionResetVsOldDuplicatesAndDisconnectLoss() {
     TEST_ASSERT(rawSock != INVALID_SOCKET, "Socket creation failed");
 
     // 1. Establish session: send sequences 1..5
-    uint8_t sessionGen = 0;
+    uint32_t sessionGen = 0;
     for (int i = 1; i <= 5; ++i) {
         std::string msg = "SESSION_MSG_" + std::to_string(i);
         TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, msg.data(), msg.size()), "SendReliable failed");
@@ -2151,18 +2161,19 @@ static bool TestSessionResetVsOldDuplicatesAndDisconnectLoss() {
 
     // 2. Inject duplicate of sequence 1 from the CURRENT session
     // Must NOT reset expectedSequenceIn (which is currently 6)!
-    std::vector<uint8_t> dupBuf(sizeof(WireHeader) + 16);
+    std::vector<uint8_t> dupBuf(sizeof(WireHeader) + 16, 0);
     auto* hdr = reinterpret_cast<WireHeader*>(dupBuf.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
     hdr->flags = FLAG_RELIABLE;
     hdr->SetSenderPeerId(peerSender);
-    hdr->sessionId = 0;
+    hdr->generationId = sessionGen; // Generation of current session
+    hdr->fragmentMsgId = 0;
     hdr->channel = 1;
     hdr->fragIndex = 0;
     hdr->fragTotal = 1;
-    hdr->generationId = sessionGen; // Generation of current session
+    hdr->reserved = 0;
     hdr->sequence = 1; // Duplicate of initial sequence!
     hdr->payloadLen = 16;
     sockaddr_in sinRecv{};
@@ -2206,7 +2217,7 @@ static bool TestSessionResetVsOldDuplicatesAndDisconnectLoss() {
 
     // 4. Test delayed Disconnect from older generation
     // Send Disconnect with mismatched generation
-    spoofDispHdr.generationId = static_cast<uint8_t>(sessionGen + 99);
+    spoofDispHdr.generationId = sessionGen + 99;
     sendto(rawSock, reinterpret_cast<const char*>(&spoofDispHdr), sizeof(spoofDispHdr), 0,
            reinterpret_cast<const sockaddr*>(&sinRecv), sizeof(sinRecv));
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -2347,6 +2358,463 @@ static bool TestPeerAdmissionEvictionLifecycle() {
     return true;
 }
 
+static bool TestP0_DualTransportRealOOOAndQueueRecovery() {
+    std::cout << "[*] Running TestP0_DualTransportRealOOOAndQueueRecovery (Dual Transports, OOO, SACK, Queue Saturated, Drain on PollInbound)..." << std::endl;
+
+    LanTransport trSender;
+    LanTransport trReceiver;
+
+    PeerId peerSender{0x55550001, 0x66660002};
+    PeerId peerReceiver{0x77770003, 0x88880004};
+
+    trSender.SetLocalPeerId(peerSender);
+    trReceiver.SetLocalPeerId(peerReceiver);
+
+    TEST_ASSERT(trSender.Start(47710), "trSender start failed on 47710");
+    TEST_ASSERT(trReceiver.Start(47711), "trReceiver start failed on 47711");
+
+    LanEndpoint epReceiver = trReceiver.GetLocalDataEndpoint();
+    epReceiver.ipv4 = 0x7F000001;
+    LanEndpoint epSender = trSender.GetLocalDataEndpoint();
+    epSender.ipv4 = 0x7F000001;
+
+    // UDP Relay / Interceptor socket on port 47712 to reorder packets and test true E2E SACK & ARQ
+    SOCKET fwdSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(fwdSock != INVALID_SOCKET, "Forwarder socket creation failed");
+
+    sockaddr_in sinFwd{};
+    sinFwd.sin_family = AF_INET;
+    sinFwd.sin_addr.s_addr = htonl(0x7F000001);
+    sinFwd.sin_port = htons(47712);
+    TEST_ASSERT(bind(fwdSock, reinterpret_cast<const sockaddr*>(&sinFwd), sizeof(sinFwd)) == 0, "Forwarder bind failed on 47712");
+
+    u_long nonblock = 1;
+    ioctlsocket(fwdSock, FIONBIO, &nonblock);
+
+    LanEndpoint epForwarder{0x7F000001, 47712};
+
+    // Thread running forwarder that captures seq 1 and passes seq 2, 3, 4 first
+    std::atomic<bool> fwdRunning{true};
+    std::atomic<bool> releaseSeq1{false};
+    std::vector<uint8_t> delayedSeq1;
+    sockaddr_in senderSin{};
+    std::mutex fwdMutex;
+
+    std::thread fwdThread([&]() {
+        uint8_t buf[65536];
+        sockaddr_in fromSin{};
+        int fromLen = sizeof(fromSin);
+
+        while (fwdRunning.load()) {
+            fromLen = sizeof(fromSin);
+            int r = recvfrom(fwdSock, reinterpret_cast<char*>(buf), sizeof(buf), 0,
+                             reinterpret_cast<sockaddr*>(&fromSin), &fromLen);
+            if (r > 0 && r >= static_cast<int>(sizeof(WireHeader))) {
+                auto* hdr = reinterpret_cast<WireHeader*>(buf);
+                uint16_t fromPort = ntohs(fromSin.sin_port);
+
+                if (fromPort == epSender.port) {
+                    // Packet coming from sender -> destined to receiver
+                    senderSin = fromSin;
+                    if (hdr->msgType == static_cast<uint8_t>(MsgType::DataReliable) && hdr->sequence == 1 && !releaseSeq1.load()) {
+                        std::lock_guard<std::mutex> lk(fwdMutex);
+                        delayedSeq1.assign(buf, buf + r);
+                    } else {
+                        // Forward directly to receiver
+                        sockaddr_in toRecvSin{};
+                        toRecvSin.sin_family = AF_INET;
+                        toRecvSin.sin_addr.s_addr = htonl(epReceiver.ipv4);
+                        toRecvSin.sin_port = htons(epReceiver.port);
+                        sendto(fwdSock, reinterpret_cast<const char*>(buf), r, 0,
+                               reinterpret_cast<const sockaddr*>(&toRecvSin), sizeof(toRecvSin));
+                    }
+                } else if (fromPort == epReceiver.port) {
+                    // ACK packet coming from receiver -> forward to sender
+                    sendto(fwdSock, reinterpret_cast<const char*>(buf), r, 0,
+                           reinterpret_cast<const sockaddr*>(&senderSin), sizeof(senderSin));
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+    });
+
+    // 1. Sender transmits seq 1, 2, 3, 4 through forwarder
+    std::string m1 = "E2E_MSG_1";
+    std::string m2 = "E2E_MSG_2";
+    std::string m3 = "E2E_MSG_3";
+    std::string m4 = "E2E_MSG_4";
+
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epForwarder, 1, m1.data(), m1.size()), "Send m1 failed");
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epForwarder, 1, m2.data(), m2.size()), "Send m2 failed");
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epForwarder, 1, m3.data(), m3.size()), "Send m3 failed");
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epForwarder, 1, m4.data(), m4.size()), "Send m4 failed");
+
+    // Wait for receiver to process 2, 3, 4 and send real SACKs back to sender
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+    // 2. Verify sender processed real SACK bits!
+    TEST_ASSERT(trSender.IsSequenceSacked(peerReceiver, 2), "Sender must recognize SACK for seq 2");
+    TEST_ASSERT(trSender.IsSequenceSacked(peerReceiver, 3), "Sender must recognize SACK for seq 3");
+    TEST_ASSERT(trSender.IsSequenceSacked(peerReceiver, 4), "Sender must recognize SACK for seq 4");
+
+    // 3. Fill receiver's inbound queue to 511 items (leaving exactly 1 slot before 512 capacity)
+    SOCKET rawFiller = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    PeerId fillerPeer{0x99991111, 0x88882222};
+    std::vector<uint8_t> dummy(16, 0x55);
+    for (int i = 0; i < 511; ++i) {
+        SendRawUnreliableWirePacket(rawFiller, epReceiver, fillerPeer, dummy);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 511, "Receiver queue must be at 511 items");
+
+    // 4. Release delayed packet 1
+    {
+        std::lock_guard<std::mutex> lk(fwdMutex);
+        releaseSeq1.store(true);
+        TEST_ASSERT(!delayedSeq1.empty(), "delayedSeq1 must have been captured");
+        sockaddr_in toRecvSin{};
+        toRecvSin.sin_family = AF_INET;
+        toRecvSin.sin_addr.s_addr = htonl(epReceiver.ipv4);
+        toRecvSin.sin_port = htons(epReceiver.port);
+        sendto(fwdSock, reinterpret_cast<const char*>(delayedSeq1.data()), static_cast<int>(delayedSeq1.size()), 0,
+               reinterpret_cast<const sockaddr*>(&toRecvSin), sizeof(toRecvSin));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Receiver admits packet 1, filling queue to 512!
+    // Remaining contiguous candidates (seq 2, 3, 4) cannot fit in queue, so they are retained in outOfOrderInbound!
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 512, "Receiver queue must be full at 512");
+    TEST_ASSERT(trReceiver.GetPeerOutOfOrderCount(peerSender) >= 2, "Retained candidates must remain buffered in outOfOrderInbound");
+
+    // 5. Drain items using PollInbound() - verifies automatic draining without manual re-injections!
+    InboundPacket drained;
+    // Drain 20 items to open queue capacity
+    for (int i = 0; i < 20; ++i) {
+        TEST_ASSERT(trReceiver.PollInbound(drained), "Must drain item from queue");
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+    // Now all remaining messages from peerSender must be delivered cleanly in exact order!
+    std::vector<std::string> deliveredMsgs;
+    while (trReceiver.PollInbound(drained)) {
+        if (drained.senderPeerId == peerSender) {
+            std::string s(reinterpret_cast<const char*>(drained.payload.data()), drained.payload.size());
+            deliveredMsgs.push_back(s);
+        }
+    }
+
+    TEST_ASSERT(deliveredMsgs.size() >= 3, "All messages must be delivered after queue capacity freed");
+    TEST_ASSERT(trReceiver.GetPeerOutOfOrderCount(peerSender) == 0, "outOfOrderInbound must be fully drained without manual re-injection");
+
+    fwdRunning.store(false);
+    if (fwdThread.joinable()) fwdThread.join();
+    closesocket(fwdSock);
+    closesocket(rawFiller);
+    trSender.Stop();
+    trReceiver.Stop();
+
+    std::cout << "  [PASS] Dual-transport real OOO, SACK processing, and automatic queue recovery on PollInbound certified!" << std::endl;
+    return true;
+}
+
+static bool TestP0_AckEndpointAndSessionValidation() {
+    std::cout << "[*] Running TestP0_AckEndpointAndSessionValidation (Spoofed ACKs, SACKs, Disconnects & Duplicate Reliables)..." << std::endl;
+
+    LanTransport trSender;
+
+    PeerId peerSender{0xAAAA0001, 0xBBBB0002};
+    PeerId peerReceiver{0xCCCC0003, 0xDDDD0004};
+
+    trSender.SetLocalPeerId(peerSender);
+
+    TEST_ASSERT(trSender.Start(47720), "trSender start failed");
+
+    LanEndpoint epSender = trSender.GetLocalDataEndpoint();
+    epSender.ipv4 = 0x7F000001;
+
+    // Legitimate receiver raw socket on port 47721 (does not auto-ACK until authentic step)
+    SOCKET sockReceiver = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(sockReceiver != INVALID_SOCKET, "Receiver socket creation failed");
+
+    sockaddr_in sinRecvBind{};
+    sinRecvBind.sin_family = AF_INET;
+    sinRecvBind.sin_addr.s_addr = htonl(0x7F000001);
+    sinRecvBind.sin_port = htons(47721);
+    TEST_ASSERT(bind(sockReceiver, reinterpret_cast<const sockaddr*>(&sinRecvBind), sizeof(sinRecvBind)) == 0, "Receiver bind failed");
+
+    LanEndpoint epReceiver{0x7F000001, 47721};
+
+    // Attacker raw UDP socket on separate port 47725
+    SOCKET sockAttacker = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(sockAttacker != INVALID_SOCKET, "Attacker socket creation failed");
+
+    sockaddr_in sinSender{};
+    sinSender.sin_family = AF_INET;
+    sinSender.sin_addr.s_addr = htonl(epSender.ipv4);
+    sinSender.sin_port = htons(epSender.port);
+
+    // 1. Establish session from sender to receiver
+    std::string legitimateMsg = "AUTHENTIC_SESSION_PACKET";
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, legitimateMsg.data(), legitimateMsg.size()), "SendReliable failed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerReceiver) == 1, "Sender must hold 1 unacked packet");
+    TEST_ASSERT(trSender.GetPeerLastEndpoint(peerReceiver).port == 47721, "lastEndpoint must be legitimate receiver port 47721");
+    uint32_t sessionGen = trSender.GetPeerLocalGeneration(peerReceiver);
+
+    // 2. Attack A: Spoofed ACK with ack sequence higher than sent sequences (e.g. ack = 999) from attacker endpoint
+    WireHeader fakeAck{};
+    fakeAck.magic = REFIX_WIRE_MAGIC;
+    fakeAck.version = REFIX_WIRE_VERSION;
+    fakeAck.msgType = static_cast<uint8_t>(MsgType::DataAck);
+    fakeAck.flags = FLAG_HAS_ACK;
+    fakeAck.SetSenderPeerId(peerReceiver); // Spoof peer identity
+    fakeAck.generationId = sessionGen;
+    fakeAck.ack = 999; // Arbitrarily high ACK
+    fakeAck.sackMask = 0;
+    sendto(sockAttacker, reinterpret_cast<const char*>(&fakeAck), sizeof(fakeAck), 0,
+           reinterpret_cast<const sockaddr*>(&sinSender), sizeof(sinSender));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerReceiver) == 1, "Unacked outbound must NOT be cleared by spoofed excessive ACK");
+    TEST_ASSERT(trSender.GetPeerLastEndpoint(peerReceiver).port == 47721, "lastEndpoint must NOT be mutated by spoofed ACK endpoint");
+
+    // 3. Attack B: Spoofed ACK with manipulated SACK bitmask from unauthorized endpoint
+    fakeAck.ack = 0;
+    fakeAck.sackMask = 0xFFFFFFFF; // Manipulated SACK mask
+    sendto(sockAttacker, reinterpret_cast<const char*>(&fakeAck), sizeof(fakeAck), 0,
+           reinterpret_cast<const sockaddr*>(&sinSender), sizeof(sinSender));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(!trSender.IsSequenceSacked(peerReceiver, 1), "Outbound sequence 1 must NOT be marked isSacked by unauthorized endpoint");
+    TEST_ASSERT(trSender.GetPeerLastEndpoint(peerReceiver).port == 47721, "lastEndpoint must remain legitimate");
+
+    // 4. Attack C: Spoofed Disconnect from attacker endpoint
+    WireHeader fakeDisc{};
+    fakeDisc.magic = REFIX_WIRE_MAGIC;
+    fakeDisc.version = REFIX_WIRE_VERSION;
+    fakeDisc.msgType = static_cast<uint8_t>(MsgType::Disconnect);
+    fakeDisc.SetSenderPeerId(peerReceiver);
+    fakeDisc.generationId = sessionGen;
+    sendto(sockAttacker, reinterpret_cast<const char*>(&fakeDisc), sizeof(fakeDisc), 0,
+           reinterpret_cast<const sockaddr*>(&sinSender), sizeof(sinSender));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(trSender.GetPeerStateCount() == 1, "Peer state must NOT be erased by spoofed Disconnect from foreign endpoint");
+
+    // 5. Attack D: Spoofed duplicate DataReliable from foreign endpoint
+    std::vector<uint8_t> fakeRelBuf(sizeof(WireHeader) + 16, 0);
+    auto* fakeRelHdr = reinterpret_cast<WireHeader*>(fakeRelBuf.data());
+    fakeRelHdr->magic = REFIX_WIRE_MAGIC;
+    fakeRelHdr->version = REFIX_WIRE_VERSION;
+    fakeRelHdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
+    fakeRelHdr->flags = FLAG_RELIABLE;
+    fakeRelHdr->SetSenderPeerId(peerReceiver);
+    fakeRelHdr->generationId = sessionGen;
+    fakeRelHdr->sequence = 1; // Duplicate of initial sequence
+    fakeRelHdr->payloadLen = 16;
+    sendto(sockAttacker, reinterpret_cast<const char*>(fakeRelBuf.data()), static_cast<int>(fakeRelBuf.size()), 0,
+           reinterpret_cast<const sockaddr*>(&sinSender), sizeof(sinSender));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(trSender.GetPeerLastEndpoint(peerReceiver).port == 47721, "lastEndpoint must NOT be stolen by duplicate DataReliable from foreign endpoint");
+
+    // 6. Authentic traffic: legitimate receiver sends authentic ACK from port 47721
+    WireHeader legitAck{};
+    legitAck.magic = REFIX_WIRE_MAGIC;
+    legitAck.version = REFIX_WIRE_VERSION;
+    legitAck.msgType = static_cast<uint8_t>(MsgType::DataAck);
+    legitAck.flags = FLAG_HAS_ACK;
+    legitAck.SetSenderPeerId(peerReceiver);
+    legitAck.generationId = sessionGen;
+    legitAck.channel = 1;
+    legitAck.ack = 1;
+    legitAck.sackMask = 0;
+    sendto(sockReceiver, reinterpret_cast<const char*>(&legitAck), sizeof(legitAck), 0,
+           reinterpret_cast<const sockaddr*>(&sinSender), sizeof(sinSender));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Authentic ACK from legitimate receiver cleans up unacked packet!
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerReceiver) == 0, "Authentic ACK from legitimate receiver must cleanly retire unacked packet");
+
+    closesocket(sockAttacker);
+    closesocket(sockReceiver);
+    trSender.Stop();
+
+    std::cout << "  [PASS] DataAck, SACK mask, Disconnect, and duplicate DataReliable endpoint validation certified!" << std::endl;
+    return true;
+}
+
+static bool TestP1_SessionGeneration32BitRangeAndChurn() {
+    std::cout << "[*] Running TestP1_SessionGeneration32BitRangeAndChurn (>256 sessions, >128 diff, delayed packet rejection)..." << std::endl;
+
+    LanTransport trSender;
+    LanTransport trReceiver;
+
+    PeerId peerSender{0xCAFE0001, 0xFEED0002};
+    PeerId peerReceiver{0xFACE0003, 0xDEAD0004};
+
+    trSender.SetLocalPeerId(peerSender);
+    trReceiver.SetLocalPeerId(peerReceiver);
+
+    TEST_ASSERT(trSender.Start(47730), "trSender start failed on 47730");
+    TEST_ASSERT(trReceiver.Start(47731), "trReceiver start failed on 47731");
+
+    LanEndpoint epReceiver = trReceiver.GetLocalDataEndpoint();
+    epReceiver.ipv4 = 0x7F000001;
+    LanEndpoint epSender = trSender.GetLocalDataEndpoint();
+    epSender.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "rawSock creation failed");
+
+    sockaddr_in sinReceiver{};
+    sinReceiver.sin_family = AF_INET;
+    sinReceiver.sin_addr.s_addr = htonl(epReceiver.ipv4);
+    sinReceiver.sin_port = htons(epReceiver.port);
+
+    // 1. Churn more than 256 local sessions on trSender (advancing 32-bit generation counter past 256)
+    for (uint64_t c = 1; c <= 300; ++c) {
+        PeerId dummyPeer{0x99990000 | c, 0x88880000 | c};
+        trSender.ResetPeerState(dummyPeer);
+    }
+
+    // 2. Establish valid session with trReceiver
+    std::string msgGen = "MSG_SESSION_HIGH_GEN";
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, msgGen.data(), msgGen.size()), "SendReliable failed");
+
+    InboundPacket inPkt;
+    bool gotMsg = false;
+    for (int r = 0; r < 50; ++r) {
+        if (trReceiver.PollInbound(inPkt)) { gotMsg = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    TEST_ASSERT(gotMsg, "Message must be received");
+    uint32_t activeGen = inPkt.generationId;
+    TEST_ASSERT(activeGen > 256, "32-bit generation ID must exceed 256 without 8-bit wrap or modular truncation");
+    std::cout << "    [INFO] Verified active 32-bit session generation ID: " << activeGen << std::endl;
+
+    // 3. Inject delayed stale packet from an ancient session with generationId = 1
+    // Difference is: activeGen - 1 >= 300 > 128!
+    std::vector<uint8_t> staleBuf(sizeof(WireHeader) + 16, 0);
+    auto* staleHdr = reinterpret_cast<WireHeader*>(staleBuf.data());
+    staleHdr->magic = REFIX_WIRE_MAGIC;
+    staleHdr->version = REFIX_WIRE_VERSION;
+    staleHdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
+    staleHdr->flags = FLAG_RELIABLE;
+    staleHdr->SetSenderPeerId(peerSender);
+    staleHdr->generationId = 1; // Ancient generation!
+    staleHdr->sequence = 1;
+    staleHdr->payloadLen = 16;
+    sendto(rawSock, reinterpret_cast<const char*>(staleBuf.data()), static_cast<int>(staleBuf.size()), 0,
+           reinterpret_cast<const sockaddr*>(&sinReceiver), sizeof(sinReceiver));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    InboundPacket staleCheck;
+    TEST_ASSERT(!trReceiver.PollInbound(staleCheck), "Ancient generation packet must be strictly rejected");
+    TEST_ASSERT(trReceiver.GetPeerRemoteGeneration(peerSender) == activeGen, "Receiver remote generation must remain activeGen");
+
+    // 4. Verify subsequent transmission on active session delivers cleanly
+    std::string msgNext = "MSG_SESSION_HIGH_GEN_2";
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, msgNext.data(), msgNext.size()), "Second send failed");
+    bool gotNext = false;
+    for (int r = 0; r < 50; ++r) {
+        if (trReceiver.PollInbound(inPkt)) {
+            if (inPkt.sequence == 2) { gotNext = true; break; }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    TEST_ASSERT(gotNext, "Active session message must deliver without disruption from ancient packet");
+
+    closesocket(rawSock);
+    trSender.Stop();
+    trReceiver.Stop();
+
+    std::cout << "  [PASS] 32-bit generation range (>256 churn, >128 distance, stale packet drop) certified!" << std::endl;
+    return true;
+}
+
+static bool TestP1_IncompatibleFragmentMetadataRejection() {
+    std::cout << "[*] Running TestP1_IncompatibleFragmentMetadataRejection (Reject datagram without advancing sequence or fake ACKs)..." << std::endl;
+
+    LanTransport trReceiver;
+    PeerId localPeer{0x11112222, 0x33334444};
+    PeerId remoteClient{0x55556666, 0x77778888};
+
+    trReceiver.SetLocalPeerId(localPeer);
+    TEST_ASSERT(trReceiver.Start(47740), "trReceiver start failed on 47740");
+
+    LanEndpoint ep = trReceiver.GetLocalDataEndpoint();
+    ep.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "rawSock creation failed");
+
+    // 1. Send fragment 0 of 2 (channel 1, reliable, payload 500B, seq 1, fragmentMsgId 50)
+    std::vector<uint8_t> chunk500(500, 0x42);
+    SendRawFragment(rawSock, ep, remoteClient, 50, 0, 2, 1, chunk500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(trReceiver.GetGlobalReassemblyBytes() == 500, "Global reassembly memory must be exactly 500 bytes");
+    TEST_ASSERT(trReceiver.GetPeerExpectedSequenceIn(remoteClient) == 2, "Sequence must advance to 2 for valid fragment");
+
+    // 2. Send fragment with incompatible fragTotal = 5 (expected 2) on sequence 2
+    SendRawFragment(rawSock, ep, remoteClient, 50, 1, 5, 2, chunk500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Policy check: datagram rejected without confirming sequence or corrupting valid context
+    TEST_ASSERT(trReceiver.GetGlobalReassemblyBytes() == 500, "Memory must NOT increase for incompatible fragTotal");
+    TEST_ASSERT(trReceiver.GetPeerExpectedSequenceIn(remoteClient) == 2, "Sequence must NOT advance for incompatible datagram");
+
+    // 3. Send fragment with incompatible channel = 2 (expected 1) on sequence 2
+    std::vector<uint8_t> badChanBuf(sizeof(WireHeader) + chunk500.size(), 0);
+    auto* hdrBad = reinterpret_cast<WireHeader*>(badChanBuf.data());
+    hdrBad->magic = REFIX_WIRE_MAGIC;
+    hdrBad->version = REFIX_WIRE_VERSION;
+    hdrBad->msgType = static_cast<uint8_t>(MsgType::DataReliable);
+    hdrBad->flags = FLAG_RELIABLE | FLAG_FRAGMENT;
+    hdrBad->SetSenderPeerId(remoteClient);
+    hdrBad->generationId = 1;
+    hdrBad->fragmentMsgId = 50;
+    hdrBad->channel = 2; // Incompatible channel!
+    hdrBad->fragIndex = 1;
+    hdrBad->fragTotal = 2;
+    hdrBad->sequence = 2;
+    hdrBad->payloadLen = static_cast<uint16_t>(chunk500.size());
+    std::memcpy(badChanBuf.data() + sizeof(WireHeader), chunk500.data(), chunk500.size());
+
+    sockaddr_in sin{};
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(ep.ipv4);
+    sin.sin_port = htons(ep.port);
+    sendto(rawSock, reinterpret_cast<const char*>(badChanBuf.data()), static_cast<int>(badChanBuf.size()), 0,
+           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(trReceiver.GetGlobalReassemblyBytes() == 500, "Memory must NOT increase for incompatible channel");
+    TEST_ASSERT(trReceiver.GetPeerExpectedSequenceIn(remoteClient) == 2, "Sequence must NOT advance for incompatible channel");
+
+    // 4. Now send the authentic legitimate fragment 1 of 2 (seq 2, channel 1, fragTotal 2)
+    SendRawFragment(rawSock, ep, remoteClient, 50, 1, 2, 2, chunk500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Message must complete cleanly!
+    InboundPacket fullMsg;
+    TEST_ASSERT(trReceiver.PollInbound(fullMsg), "Message must be delivered cleanly upon authentic fragment arrival");
+    TEST_ASSERT(fullMsg.payload.size() == 1000, "Reassembled payload size must be 1000 bytes");
+    TEST_ASSERT(trReceiver.GetGlobalReassemblyBytes() == 0, "Global reassembly memory must cleanly return to 0");
+    TEST_ASSERT(trReceiver.GetReassemblyContextCount() == 0, "Reassembly context count must return to 0");
+
+    closesocket(rawSock);
+    trReceiver.Stop();
+
+    std::cout << "  [PASS] Incompatible fragment metadata strict rejection and context protection certified!" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
@@ -2383,6 +2851,10 @@ int main() {
     if (!TestRealDualTransportE2EBackpressure()) return 1;
     if (!TestSessionResetVsOldDuplicatesAndDisconnectLoss()) return 1;
     if (!TestPeerAdmissionEvictionLifecycle()) return 1;
+    if (!TestP0_DualTransportRealOOOAndQueueRecovery()) return 1;
+    if (!TestP0_AckEndpointAndSessionValidation()) return 1;
+    if (!TestP1_SessionGeneration32BitRangeAndChurn()) return 1;
+    if (!TestP1_IncompatibleFragmentMetadataRejection()) return 1;
 
     std::cout << "\n============================================================" << std::endl;
     std::cout << " [SUCCESS] ALL REFIX LAN CORE & TRANSPORT TESTS PASSED!      " << std::endl;

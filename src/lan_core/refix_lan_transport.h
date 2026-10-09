@@ -24,10 +24,11 @@ struct InboundPacket {
     bool isReliable = false;
     uint32_t sequence = 0;
     uint16_t flags = 0;
+    uint32_t fragmentMsgId = 0;
     uint32_t sessionId = 0;
     uint8_t fragIndex = 0;
     uint8_t fragTotal = 1;
-    uint8_t generationId = 0;
+    uint32_t generationId = 0;
     std::vector<uint8_t> payload;
 };
 
@@ -105,6 +106,15 @@ public:
     std::string GetDiscoveryStatus() const;
     void SetSimulateMulticastFailure(bool fail) { m_simulateMulticastFailure = fail; }
 
+    size_t GetUnackedOutboundCount(const PeerId& peerId) const;
+    bool IsSequenceSacked(const PeerId& peerId, uint32_t seq) const;
+    LanEndpoint GetPeerLastEndpoint(const PeerId& peerId) const;
+    uint32_t GetPeerLocalGeneration(const PeerId& peerId) const;
+    uint32_t GetPeerRemoteGeneration(const PeerId& peerId) const;
+    uint32_t GetPeerExpectedSequenceIn(const PeerId& peerId) const;
+    uint32_t GetPeerNextSequenceOut(const PeerId& peerId) const;
+    size_t GetPeerOutOfOrderCount(const PeerId& peerId) const;
+
 private:
     struct OutboundReliable {
         uint32_t sequence = 0;
@@ -114,14 +124,15 @@ private:
         std::vector<uint8_t> packetBytes; // Formatted wire packet
         std::chrono::steady_clock::time_point sendTime;
         int retries = 0;
+        bool isSacked = false; // Advisory selective ACK: kept in send buffer until cumulative ACK
     };
 
     struct PeerReliabilityState {
         uint32_t nextSequenceOut = 1;
         uint32_t nextMessageIdOut = 1;
         uint32_t expectedSequenceIn = 1;
-        uint8_t  localGeneration = 1;
-        uint8_t  remoteGeneration = 0;
+        uint32_t localGeneration = 1;
+        uint32_t remoteGeneration = 0;
         bool     hasRemoteGeneration = false;
         bool timedOut = false;
         bool isRegisteredPeer = false;
@@ -154,7 +165,8 @@ private:
     void HandleDataSocketRead();
     void ProcessInboundWirePacket(const uint8_t* buf, size_t len, const LanEndpoint& fromEp);
     void ProcessReliableAck(PeerReliabilityState& state, uint32_t ackSeq, uint32_t sackMask);
-    void SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask);
+    void SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask, uint32_t generationId = 0);
+    void DrainRetainedInboundLocked(PeerReliabilityState* targetPeer = nullptr);
     void CheckRetransmissionsAndTimeouts();
     bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);
     void PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now);
@@ -167,7 +179,7 @@ private:
     void CleanupPeerReassemblyLocked(const PeerId& peerId);
 
     std::atomic<bool> m_running{false};
-    std::atomic<uint8_t> m_localGenerationCounter{1};
+    std::atomic<uint32_t> m_localGenerationCounter{1};
     bool m_multicastJoined = false;
     bool m_simulateMulticastFailure = false;
     uint16_t m_discoveryPort = 47584;

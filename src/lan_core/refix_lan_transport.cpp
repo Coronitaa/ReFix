@@ -200,10 +200,10 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
 constexpr uint16_t REFIX_DEFAULT_DISCOVERY_PORT = 47584;
 constexpr uint16_t REFIX_FALLBACK_DISCOVERY_PORTS[] = { 47584, 47585, 47586 };
 
-static std::atomic<uint8_t> g_globalGenerationSeed{1};
+static std::atomic<uint32_t> g_globalGenerationSeed{1};
 
 LanTransport::LanTransport() {
-    uint8_t gen = g_globalGenerationSeed.fetch_add(1);
+    uint32_t gen = g_globalGenerationSeed.fetch_add(1);
     if (gen == 0) gen = g_globalGenerationSeed.fetch_add(1);
     m_localGenerationCounter.store(gen);
 }
@@ -491,8 +491,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         }
 
         // Verify generation: delayed Disconnect from older session must NOT wipe current state
-        if (it->second.hasRemoteGeneration && hdr->generationId != 0 &&
-            hdr->generationId != it->second.remoteGeneration) {
+        if (it->second.hasRemoteGeneration && hdr->generationId != it->second.remoteGeneration) {
             return;
         }
 
@@ -506,14 +505,42 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         if (payloadLen > 0) return; // Strict framing: DataAck has no payload
         std::lock_guard<std::mutex> lock(m_stateMutex);
         auto it = m_peerStates.find(senderPeer);
-        if (it != m_peerStates.end()) {
-            auto now = std::chrono::steady_clock::now();
-            it->second.lastAckRecvTime = now;
-            it->second.lastActivityTime = now;
-            it->second.lastReceivedTime = now;
-            it->second.lastEndpoint = fromEp;
-            ProcessReliableAck(it->second, hdr->ack, hdr->sackMask);
+        if (it == m_peerStates.end()) return;
+        auto& state = it->second;
+
+        // P0 Validation 1: Verify source endpoint against registered session endpoint
+        if (state.lastEndpoint.IsValid() && fromEp != state.lastEndpoint) {
+            return; // Reject spoofed ACK from unauthorized endpoint without mutating state
         }
+
+        // P0 Validation 2: Verify generation correlation
+        if (hdr->generationId != 0 && hdr->generationId != state.localGeneration) {
+            return; // Mismatched session generation
+        }
+
+        // P0 Validation 3: Cumulative ACK must not exceed next sequence out
+        if (hdr->ack >= state.nextSequenceOut) {
+            return; // Future / falsified cumulative ACK
+        }
+
+        // P0 Validation 4: SACK mask must not reference sequences >= nextSequenceOut
+        if (hdr->sackMask != 0) {
+            for (uint32_t i = 0; i < 32; ++i) {
+                if ((hdr->sackMask & (1u << i)) != 0) {
+                    uint32_t sackSeq = hdr->ack + 1 + i;
+                    if (sackSeq >= state.nextSequenceOut) {
+                        return; // Manipulated SACK referencing untransmitted future sequence
+                    }
+                }
+            }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        state.lastAckRecvTime = now;
+        state.lastActivityTime = now;
+        state.lastReceivedTime = now;
+        // Do NOT update state.lastEndpoint on ACK! Prevents unauthorized endpoint mutation.
+        ProcessReliableAck(state, hdr->ack, hdr->sackMask);
         return;
     }
 
@@ -546,7 +573,6 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             }
         }
 
-        std::vector<InboundPacket> packetsToNotify;
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
             auto now = std::chrono::steady_clock::now();
@@ -558,7 +584,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
 
             uint32_t seq = hdr->sequence;
 
-            int8_t genDiff = state.hasRemoteGeneration ? static_cast<int8_t>(hdr->generationId - state.remoteGeneration) : 1;
+            int32_t genDiff = state.hasRemoteGeneration ? static_cast<int32_t>(hdr->generationId - state.remoteGeneration) : 1;
 
             // Reject obsolete generation from a prior session
             if (state.hasRemoteGeneration && hdr->generationId != 0 && genDiff < 0) {
@@ -570,16 +596,12 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 return;
             }
 
-            // Validated packet belonging to current or authentically new session
-            state.lastDataRecvTime = now;
-            state.lastActivityTime = now;
-            state.lastReceivedTime = now;
-            state.lastEndpoint = fromEp;
-            state.timedOut = false;
-
-            // Process piggybacked ACK if present
-            if (hdr->ack > 0) {
-                ProcessReliableAck(state, hdr->ack, 0);
+            // Active session endpoint hijacking protection:
+            // Packets belonging to current active session or pending connection MUST come from state.lastEndpoint!
+            if (state.lastEndpoint.IsValid() && fromEp != state.lastEndpoint) {
+                if (!state.hasRemoteGeneration || genDiff == 0) {
+                    return; // Reject packet from foreign endpoint attempting to inject into active session
+                }
             }
 
             // Remote sequence stream restart detection vs old duplicates
@@ -588,8 +610,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     // Same generation!
                     if (state.expectedSequenceIn > 1) {
                         // Delayed duplicate of packet 1 within current active session.
-                        // Discard it and acknowledge the latest expected sequence.
-                        SendAckPacket(fromEp, hdr->channel, state.expectedSequenceIn - 1, 0);
+                        // Discard it and acknowledge the latest expected sequence to settle the sender.
+                        SendAckPacket(state.lastEndpoint, hdr->channel, state.expectedSequenceIn - 1, 0, state.remoteGeneration);
                         return;
                     }
                 } else if (state.hasRemoteGeneration && genDiff > 0 && hdr->generationId != 0) {
@@ -597,23 +619,42 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     state.remoteGeneration = hdr->generationId;
                     state.expectedSequenceIn = 1;
                     state.outOfOrderInbound.clear();
+                    state.lastEndpoint = fromEp;
                     CleanupPeerReassemblyLocked(senderPeer);
                 } else if (!state.hasRemoteGeneration) {
+                    if (state.lastEndpoint.IsValid() && fromEp != state.lastEndpoint) {
+                        return;
+                    }
                     if (hdr->generationId != 0) {
                         state.remoteGeneration = hdr->generationId;
                         state.hasRemoteGeneration = true;
+                        state.lastEndpoint = fromEp;
                     }
                 }
             }
 
-            // Old duplicate packet
+            // Old duplicate packet: reject before updating endpoint or processing stale piggybacked ACK
             if (seq < state.expectedSequenceIn) {
-                SendAckPacket(fromEp, hdr->channel, state.expectedSequenceIn - 1, 0);
+                SendAckPacket(state.lastEndpoint, hdr->channel, state.expectedSequenceIn - 1, 0, state.remoteGeneration);
                 return;
             }
 
-            // Out-of-order packet (future sequence)
+            // Validated packet belonging to current or authentically new session
+            state.lastDataRecvTime = now;
+            state.lastActivityTime = now;
+            state.lastReceivedTime = now;
+            if (!state.lastEndpoint.IsValid()) {
+                state.lastEndpoint = fromEp;
+            }
+            state.timedOut = false;
+
+            // Process piggybacked ACK if present and strictly valid
+            if (hdr->ack > 0 && hdr->ack < state.nextSequenceOut) {
+                ProcessReliableAck(state, hdr->ack, 0);
+            }
+
             if (seq > state.expectedSequenceIn) {
+                // Out-of-order packet: buffer in outOfOrderInbound and send immediate advisory SACK
                 if (state.outOfOrderInbound.size() < 64) {
                     InboundPacket pkt;
                     pkt.senderPeerId = senderPeer;
@@ -622,6 +663,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     pkt.isReliable = true;
                     pkt.sequence = seq;
                     pkt.flags = hdr->flags;
+                    pkt.fragmentMsgId = hdr->fragmentMsgId;
                     pkt.sessionId = hdr->sessionId;
                     pkt.fragIndex = hdr->fragIndex;
                     pkt.fragTotal = hdr->fragTotal;
@@ -633,219 +675,109 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 uint32_t sackMask = 0;
                 uint32_t ackSeq = state.expectedSequenceIn - 1;
                 for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                    if (bufferedSeq > ackSeq + 1) {
+                    if (bufferedSeq > ackSeq) {
                         uint32_t diff = bufferedSeq - ackSeq - 1;
                         if (diff < 32) sackMask |= (1u << diff);
                     }
                 }
-                SendAckPacket(fromEp, hdr->channel, ackSeq, sackMask);
+                SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
                 return;
             }
 
-            // In-order packet arrival (seq == state.expectedSequenceIn)
-            std::vector<InboundPacket> candidates;
-            {
-                InboundPacket pkt0;
-                pkt0.senderPeerId = senderPeer;
-                pkt0.senderEndpoint = fromEp;
-                pkt0.channel = hdr->channel;
-                pkt0.isReliable = true;
-                pkt0.sequence = seq;
-                pkt0.flags = hdr->flags;
-                pkt0.sessionId = hdr->sessionId;
-                pkt0.fragIndex = hdr->fragIndex;
-                pkt0.fragTotal = hdr->fragTotal;
-                pkt0.generationId = hdr->generationId;
-                pkt0.payload.assign(payload, payload + payloadLen);
-                candidates.push_back(std::move(pkt0));
-            }
-
-            while (!state.outOfOrderInbound.empty() && state.outOfOrderInbound.begin()->first <= seq) {
-                state.outOfOrderInbound.erase(state.outOfOrderInbound.begin());
-            }
-
-            uint32_t nextExpected = seq + 1;
-            while (!state.outOfOrderInbound.empty() && state.outOfOrderInbound.begin()->first == nextExpected) {
-                candidates.push_back(std::move(state.outOfOrderInbound.begin()->second));
-                state.outOfOrderInbound.erase(state.outOfOrderInbound.begin());
-                nextExpected++;
-            }
-
-            size_t stagedQueueItems = 0;
-            {
-                std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                size_t currentQueueSize = m_inboundQueue.size();
-
-                size_t candIdx = 0;
-                for (; candIdx < candidates.size(); ++candIdx) {
-                    auto& cand = candidates[candIdx];
-                    bool candIsFrag = ((cand.flags & FLAG_FRAGMENT) != 0);
-
-                    if (!candIsFrag) {
-                        // Unfragmented complete message
-                        if (!m_listener && (currentQueueSize + stagedQueueItems >= REFIX_MAX_INBOUND_QUEUE_SIZE)) {
-                            // Queue capacity saturated: backpressure, do not accept or ACK
-                            m_inboundQueueDroppedPackets.fetch_add(1);
-                            break;
-                        }
-
-                        state.expectedSequenceIn++;
-                        stagedQueueItems++;
-                        packetsToNotify.push_back(std::move(cand));
-                    } else {
-                        // Fragmented message
-                        auto fragKey = std::make_pair(cand.senderPeerId, cand.sessionId);
-                        auto itFrag = m_fragmentMap.find(fragKey);
-                        size_t chunkLen = cand.payload.size();
-
-                        if (itFrag == m_fragmentMap.end()) {
-                            // Check per-peer and global context bounds
-                            size_t peerContextCount = 0;
-                            for (const auto& kv : m_fragmentMap) {
-                                if (kv.first.first == cand.senderPeerId) peerContextCount++;
-                            }
-                            if (peerContextCount >= REFIX_MAX_PEER_REASSEMBLY_CONTEXTS) {
-                                EvictOldestReassemblyContextLocked(&cand.senderPeerId);
-                            }
-                            if (m_fragmentMap.size() >= REFIX_MAX_REASSEMBLY_CONTEXTS) {
-                                EvictOldestReassemblyContextLocked(nullptr);
-                            }
-
-                            // Check global and per-peer memory budgets
-                            auto pIt = m_peerReassemblyBytes.find(cand.senderPeerId);
-                            size_t currentPeerBytes = (pIt != m_peerReassemblyBytes.end()) ? pIt->second : 0;
-                            if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
-                                currentPeerBytes + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
-                                break; // Reassembly memory budget saturated
-                            }
-
-                            FragmentAssembler fa;
-                            fa.totalFragments = cand.fragTotal;
-                            fa.channel = cand.channel;
-                            fa.isReliable = cand.isReliable;
-                            fa.sessionId = cand.sessionId;
-                            fa.senderPeerId = cand.senderPeerId;
-                            fa.allocatedBytes = 0;
-                            fa.fragments.resize(cand.fragTotal);
-                            fa.received.resize(cand.fragTotal, false);
-                            fa.startTime = now;
-                            fa.lastActivityTime = now;
-                            itFrag = m_fragmentMap.emplace(fragKey, std::move(fa)).first;
-                        }
-
-                        auto& fa = itFrag->second;
-
-                        // Incompatible metadata validation
-                        if (cand.fragTotal != fa.totalFragments ||
-                            cand.channel != fa.channel ||
-                            cand.isReliable != fa.isReliable) {
-                            state.expectedSequenceIn++;
-                            continue;
-                        }
-
-                        // Duplicate fragment within active context
-                        if (cand.fragIndex < fa.received.size() && fa.received[cand.fragIndex]) {
-                            fa.lastActivityTime = now;
-                            state.expectedSequenceIn++;
-                            continue;
-                        }
-
-                        // Reconstruction size ceiling (256 KB)
-                        if (fa.allocatedBytes + chunkLen > REFIX_MAX_MESSAGE_SIZE) {
-                            ReleaseReassemblyContextLocked(itFrag);
-                            state.expectedSequenceIn++;
-                            continue;
-                        }
-
-                        // Check global and per-peer memory budgets for this chunk
-                        auto pIt2 = m_peerReassemblyBytes.find(cand.senderPeerId);
-                        size_t currentPeerBytes2 = (pIt2 != m_peerReassemblyBytes.end()) ? pIt2->second : 0;
-                        if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
-                            currentPeerBytes2 + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
-                            break; // Memory budget saturated: do not accept or ACK
-                        }
-
-                        // Check if this chunk completes the message
-                        bool willComplete = true;
-                        for (size_t fi = 0; fi < fa.received.size(); ++fi) {
-                            if (fi != cand.fragIndex && !fa.received[fi]) {
-                                willComplete = false;
-                                break;
-                            }
-                        }
-
-                        if (willComplete && !m_listener) {
-                            if (currentQueueSize + stagedQueueItems >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
-                                // Inbound queue full: backpressure, do not accept final completing fragment!
-                                m_inboundQueueDroppedPackets.fetch_add(1);
-                                break;
-                            }
-                        }
-
-                        // Accept fragment into reassembly storage
-                        state.expectedSequenceIn++;
-                        fa.fragments[cand.fragIndex] = std::move(cand.payload);
-                        fa.received[cand.fragIndex] = true;
-                        fa.allocatedBytes += chunkLen;
-                        m_globalReassemblyBytes += chunkLen;
-                        m_peerReassemblyBytes[cand.senderPeerId] += chunkLen;
-                        fa.lastActivityTime = now;
-
-                        if (willComplete) {
-                            InboundPacket fullMsg;
-                            fullMsg.senderPeerId = cand.senderPeerId;
-                            fullMsg.senderEndpoint = cand.senderEndpoint;
-                            fullMsg.channel = fa.channel;
-                            fullMsg.isReliable = fa.isReliable;
-                            fullMsg.sequence = cand.sequence;
-                            fullMsg.sessionId = cand.sessionId;
-                            fullMsg.generationId = cand.generationId;
-                            fullMsg.payload.reserve(fa.allocatedBytes);
-                            for (auto& chunk : fa.fragments) {
-                                fullMsg.payload.insert(fullMsg.payload.end(), chunk.begin(), chunk.end());
-                            }
-                            ReleaseReassemblyContextLocked(itFrag);
-
-                            stagedQueueItems++;
-                            packetsToNotify.push_back(std::move(fullMsg));
-                        }
-                    }
-                }
-
-                // Restore any unaccepted candidate packets that were in outOfOrderInbound
-                for (size_t retIdx = candIdx; retIdx < candidates.size(); ++retIdx) {
-                    if (retIdx > 0) {
-                        state.outOfOrderInbound[candidates[retIdx].sequence] = std::move(candidates[retIdx]);
-                    }
-                }
-
-                // Push accepted complete messages into queue
+            // In-order packet (seq == state.expectedSequenceIn)
+            bool isFrag = ((hdr->flags & FLAG_FRAGMENT) != 0);
+            if (!isFrag) {
                 if (!m_listener) {
-                    for (const auto& pkt : packetsToNotify) {
-                        m_inboundQueue.push_back(pkt);
+                    std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                    if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                        m_inboundQueueDroppedPackets.fetch_add(1);
+                        uint32_t sackMask = 0;
+                        uint32_t ackSeq = state.expectedSequenceIn - 1;
+                        for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
+                            if (bufferedSeq > ackSeq) {
+                                uint32_t diff = bufferedSeq - ackSeq - 1;
+                                if (diff < 32) sackMask |= (1u << diff);
+                            }
+                        }
+                        SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
+                        return;
+                    }
+                    InboundPacket pkt;
+                    pkt.senderPeerId = senderPeer;
+                    pkt.senderEndpoint = fromEp;
+                    pkt.channel = hdr->channel;
+                    pkt.isReliable = true;
+                    pkt.sequence = seq;
+                    pkt.flags = hdr->flags;
+                    pkt.fragmentMsgId = hdr->fragmentMsgId;
+                    pkt.sessionId = hdr->sessionId;
+                    pkt.fragIndex = hdr->fragIndex;
+                    pkt.fragTotal = hdr->fragTotal;
+                    pkt.generationId = hdr->generationId;
+                    pkt.payload.assign(payload, payload + payloadLen);
+                    m_inboundQueue.push_back(std::move(pkt));
+                } else {
+                    InboundPacket pkt;
+                    pkt.senderPeerId = senderPeer;
+                    pkt.senderEndpoint = fromEp;
+                    pkt.channel = hdr->channel;
+                    pkt.isReliable = true;
+                    pkt.sequence = seq;
+                    pkt.flags = hdr->flags;
+                    pkt.fragmentMsgId = hdr->fragmentMsgId;
+                    pkt.sessionId = hdr->sessionId;
+                    pkt.fragIndex = hdr->fragIndex;
+                    pkt.fragTotal = hdr->fragTotal;
+                    pkt.generationId = hdr->generationId;
+                    pkt.payload.assign(payload, payload + payloadLen);
+                    m_listener->OnInboundData(pkt);
+                }
+                state.expectedSequenceIn++;
+                // Drain any contiguous candidates retained in outOfOrderInbound
+                DrainRetainedInboundLocked(&state);
+                uint32_t sackMask = 0;
+                uint32_t ackSeq = state.expectedSequenceIn - 1;
+                for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
+                    if (bufferedSeq > ackSeq) {
+                        uint32_t diff = bufferedSeq - ackSeq - 1;
+                        if (diff < 32) sackMask |= (1u << diff);
                     }
                 }
-            } // release qlock
-
-            // Build SACK bitmask from any remaining entries in outOfOrderInbound
-            uint32_t sackMask = 0;
-            uint32_t ackSeq = state.expectedSequenceIn - 1;
-            for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                if (bufferedSeq > ackSeq + 1) {
-                    uint32_t diff = bufferedSeq - ackSeq - 1;
-                    if (diff < 32) sackMask |= (1u << diff);
+                SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
+                return;
+            } else {
+                // Fragmented in-order candidate
+                if (state.outOfOrderInbound.size() < 64) {
+                    InboundPacket pkt;
+                    pkt.senderPeerId = senderPeer;
+                    pkt.senderEndpoint = fromEp;
+                    pkt.channel = hdr->channel;
+                    pkt.isReliable = true;
+                    pkt.sequence = seq;
+                    pkt.flags = hdr->flags;
+                    pkt.fragmentMsgId = hdr->fragmentMsgId;
+                    pkt.sessionId = hdr->sessionId;
+                    pkt.fragIndex = hdr->fragIndex;
+                    pkt.fragTotal = hdr->fragTotal;
+                    pkt.generationId = hdr->generationId;
+                    pkt.payload.assign(payload, payload + payloadLen);
+                    state.outOfOrderInbound[seq] = std::move(pkt);
+                }
+                uint32_t prevExpected = state.expectedSequenceIn;
+                DrainRetainedInboundLocked(&state);
+                if (state.expectedSequenceIn == prevExpected) {
+                    uint32_t sackMask = 0;
+                    uint32_t ackSeq = state.expectedSequenceIn - 1;
+                    for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
+                        if (bufferedSeq > ackSeq) {
+                            uint32_t diff = bufferedSeq - ackSeq - 1;
+                            if (diff < 32) sackMask |= (1u << diff);
+                        }
+                    }
+                    SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
                 }
             }
-
-            // Immediately send ACK confirming ONLY accepted packets
-            SendAckPacket(fromEp, hdr->channel, ackSeq, sackMask);
         } // release state lock
-
-        if (m_listener) {
-            for (const auto& p : packetsToNotify) {
-                m_listener->OnInboundData(p);
-            }
-        }
         return;
     }
 
@@ -886,7 +818,7 @@ void LanTransport::ProcessReliableAck(PeerReliabilityState& state, uint32_t ackS
     auto& unacked = state.unackedOutbound;
     auto now = std::chrono::steady_clock::now();
 
-    // Remove all acknowledged sequences <= ackSeq
+    // 1. Remove all cumulatively acknowledged sequences <= ackSeq
     auto it = std::remove_if(unacked.begin(), unacked.end(), [&](const OutboundReliable& r) {
         if (r.sequence <= ackSeq) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - r.sendTime).count();
@@ -895,17 +827,24 @@ void LanTransport::ProcessReliableAck(PeerReliabilityState& state, uint32_t ackS
             }
             return true;
         }
-        // SACK mask check
-        uint32_t diff = r.sequence - ackSeq - 1;
-        if (diff < 32 && ((sackMask & (1u << diff)) != 0)) {
-            return true;
-        }
         return false;
     });
     unacked.erase(it, unacked.end());
+
+    // 2. Process selective ACK (SACK): mark advisory reception without discarding from ARQ send buffer
+    if (sackMask != 0) {
+        for (auto& r : unacked) {
+            if (r.sequence > ackSeq) {
+                uint32_t diff = r.sequence - ackSeq - 1;
+                if (diff < 32 && ((sackMask & (1u << diff)) != 0)) {
+                    r.isSacked = true;
+                }
+            }
+        }
+    }
 }
 
-void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask) {
+void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask, uint32_t generationId) {
     if (!LanFirewall::Get().IsAllowedEndpoint(target)) return;
 
     WireHeader hdr{};
@@ -914,6 +853,8 @@ void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uin
     hdr.msgType = static_cast<uint8_t>(MsgType::DataAck);
     hdr.flags = FLAG_HAS_ACK;
     hdr.SetSenderPeerId(m_localPeerId);
+    hdr.generationId = generationId;
+    hdr.fragmentMsgId = 0;
     hdr.channel = channel;
     hdr.ack = ackSeq;
     hdr.sackMask = sackMask;
@@ -928,6 +869,193 @@ void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uin
            reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
 }
 
+void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) {
+    auto drainSingle = [&](const PeerId& peerId, PeerReliabilityState& state) {
+        if (state.outOfOrderInbound.empty()) return;
+        auto now = std::chrono::steady_clock::now();
+        std::vector<InboundPacket> packetsToNotify;
+        bool advanced = false;
+
+        while (!state.outOfOrderInbound.empty() && state.outOfOrderInbound.begin()->first == state.expectedSequenceIn) {
+            auto itCandidate = state.outOfOrderInbound.begin();
+            auto& cand = itCandidate->second;
+            bool candIsFrag = ((cand.flags & FLAG_FRAGMENT) != 0);
+
+            if (!candIsFrag) {
+                if (!m_listener) {
+                    std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                    if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                        m_inboundQueueDroppedPackets.fetch_add(1);
+                        break; // Queue full: hold back in outOfOrderInbound
+                    }
+                    m_inboundQueue.push_back(std::move(cand));
+                } else {
+                    packetsToNotify.push_back(std::move(cand));
+                }
+                state.expectedSequenceIn++;
+                advanced = true;
+                state.outOfOrderInbound.erase(itCandidate);
+            } else {
+                auto fragKey = std::make_pair(cand.senderPeerId, cand.fragmentMsgId);
+                auto itFrag = m_fragmentMap.find(fragKey);
+                size_t chunkLen = cand.payload.size();
+
+                if (itFrag == m_fragmentMap.end()) {
+                    size_t peerContextCount = 0;
+                    for (const auto& kv : m_fragmentMap) {
+                        if (kv.first.first == cand.senderPeerId) peerContextCount++;
+                    }
+                    if (peerContextCount >= REFIX_MAX_PEER_REASSEMBLY_CONTEXTS) {
+                        EvictOldestReassemblyContextLocked(&cand.senderPeerId);
+                    }
+                    if (m_fragmentMap.size() >= REFIX_MAX_REASSEMBLY_CONTEXTS) {
+                        EvictOldestReassemblyContextLocked(nullptr);
+                    }
+
+                    auto pIt = m_peerReassemblyBytes.find(cand.senderPeerId);
+                    size_t currentPeerBytes = (pIt != m_peerReassemblyBytes.end()) ? pIt->second : 0;
+                    if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
+                        currentPeerBytes + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                        state.outOfOrderInbound.erase(itCandidate);
+                        break; // Memory saturated: reject datagram exceeding budget
+                    }
+
+                    FragmentAssembler fa;
+                    fa.totalFragments = cand.fragTotal;
+                    fa.channel = cand.channel;
+                    fa.isReliable = cand.isReliable;
+                    fa.sessionId = cand.fragmentMsgId;
+                    fa.senderPeerId = cand.senderPeerId;
+                    fa.allocatedBytes = 0;
+                    fa.fragments.resize(cand.fragTotal);
+                    fa.received.resize(cand.fragTotal, false);
+                    fa.startTime = now;
+                    fa.lastActivityTime = now;
+                    itFrag = m_fragmentMap.emplace(fragKey, std::move(fa)).first;
+                }
+
+                auto& fa = itFrag->second;
+
+                // Section 6: Incompatible metadata handling policy
+                if (cand.fragIndex >= fa.totalFragments ||
+                    cand.fragTotal != fa.totalFragments ||
+                    cand.channel != fa.channel ||
+                    cand.isReliable != fa.isReliable) {
+                    // Policy: Reject incompatible datagram without confirming sequence or corrupting valid context
+                    state.outOfOrderInbound.erase(itCandidate);
+                    break;
+                }
+
+                // Duplicate fragment within active context
+                if (cand.fragIndex < fa.received.size() && fa.received[cand.fragIndex]) {
+                    fa.lastActivityTime = now;
+                    state.outOfOrderInbound.erase(itCandidate);
+                    state.expectedSequenceIn++;
+                    advanced = true;
+                    continue;
+                }
+
+                // Reconstruction limit (256 KB)
+                if (fa.allocatedBytes + chunkLen > REFIX_MAX_MESSAGE_SIZE) {
+                    ReleaseReassemblyContextLocked(itFrag);
+                    state.outOfOrderInbound.erase(itCandidate);
+                    break;
+                }
+
+                auto pIt2 = m_peerReassemblyBytes.find(cand.senderPeerId);
+                size_t currentPeerBytes2 = (pIt2 != m_peerReassemblyBytes.end()) ? pIt2->second : 0;
+                if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
+                    currentPeerBytes2 + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                    state.outOfOrderInbound.erase(itCandidate);
+                    break;
+                }
+
+                bool willComplete = true;
+                for (size_t fi = 0; fi < fa.received.size(); ++fi) {
+                    if (fi != cand.fragIndex && !fa.received[fi]) {
+                        willComplete = false;
+                        break;
+                    }
+                }
+
+                if (willComplete && !m_listener) {
+                    std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                    if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                        m_inboundQueueDroppedPackets.fetch_add(1);
+                        break; // Queue full: hold back completing fragment
+                    }
+                }
+
+                fa.fragments[cand.fragIndex] = std::move(cand.payload);
+                fa.received[cand.fragIndex] = true;
+                fa.allocatedBytes += chunkLen;
+                m_globalReassemblyBytes += chunkLen;
+                m_peerReassemblyBytes[cand.senderPeerId] += chunkLen;
+                fa.lastActivityTime = now;
+                state.expectedSequenceIn++;
+                advanced = true;
+
+                if (willComplete) {
+                    InboundPacket fullMsg;
+                    fullMsg.senderPeerId = cand.senderPeerId;
+                    fullMsg.senderEndpoint = cand.senderEndpoint;
+                    fullMsg.channel = fa.channel;
+                    fullMsg.isReliable = fa.isReliable;
+                    fullMsg.sequence = cand.sequence;
+                    fullMsg.fragmentMsgId = cand.fragmentMsgId;
+                    fullMsg.sessionId = cand.sessionId;
+                    fullMsg.generationId = cand.generationId;
+                    fullMsg.payload.reserve(fa.allocatedBytes);
+                    for (auto& chunk : fa.fragments) {
+                        fullMsg.payload.insert(fullMsg.payload.end(), chunk.begin(), chunk.end());
+                    }
+                    ReleaseReassemblyContextLocked(itFrag);
+
+                    if (!m_listener) {
+                        std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+                        m_inboundQueue.push_back(std::move(fullMsg));
+                    } else {
+                        packetsToNotify.push_back(std::move(fullMsg));
+                    }
+                }
+
+                state.outOfOrderInbound.erase(itCandidate);
+            }
+        }
+
+        if (advanced) {
+            uint32_t sackMask = 0;
+            uint32_t ackSeq = state.expectedSequenceIn - 1;
+            for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
+                if (bufferedSeq > ackSeq) {
+                    uint32_t diff = bufferedSeq - ackSeq - 1;
+                    if (diff < 32) sackMask |= (1u << diff);
+                }
+            }
+            SendAckPacket(state.lastEndpoint, 0, ackSeq, sackMask, state.remoteGeneration);
+        }
+
+        if (m_listener) {
+            for (const auto& p : packetsToNotify) {
+                m_listener->OnInboundData(p);
+            }
+        }
+    };
+
+    if (targetPeer) {
+        for (auto& [pId, pState] : m_peerStates) {
+            if (&pState == targetPeer) {
+                drainSingle(pId, pState);
+                break;
+            }
+        }
+    } else {
+        for (auto& [pId, pState] : m_peerStates) {
+            drainSingle(pId, pState);
+        }
+    }
+}
+
 void LanTransport::CheckRetransmissionsAndTimeouts() {
     std::vector<std::pair<PeerId, LanEndpoint>> timedOutPeers;
     {
@@ -937,12 +1065,21 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
         // Expire incomplete fragment assemblers using unified 10s sliding inactivity window
         PruneExpiredFragmentsLocked(now);
 
+        // Attempt drain of any retained packets that became processable
+        DrainRetainedInboundLocked(nullptr);
+
         for (auto& [peerId, state] : m_peerStates) {
             if (state.timedOut) continue;
 
             for (auto it = state.unackedOutbound.begin(); it != state.unackedOutbound.end();) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->sendTime).count();
                 if (elapsed > 100) { // 100ms retransmission timer
+                    if (it->isSacked) {
+                        // Advisory selective ACK: remote peer already holds it in outOfOrderInbound.
+                        // Suppress redundant retransmission while awaiting cumulative ACK.
+                        ++it;
+                        continue;
+                    }
                     it->retries++;
                     if (it->retries > 20) {
                         timedOutPeers.emplace_back(peerId, it->target);
@@ -1326,10 +1463,15 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
 }
 
 bool LanTransport::PollInbound(InboundPacket& outPacket) {
-    std::lock_guard<std::mutex> lock(m_inboundQueueMutex);
-    if (m_inboundQueue.empty()) return false;
-    outPacket = std::move(m_inboundQueue.front());
-    m_inboundQueue.pop_front();
+    std::lock_guard<std::mutex> stateLock(m_stateMutex);
+    {
+        std::lock_guard<std::mutex> lock(m_inboundQueueMutex);
+        if (m_inboundQueue.empty()) return false;
+        outPacket = std::move(m_inboundQueue.front());
+        m_inboundQueue.pop_front();
+    }
+    // Freed capacity in m_inboundQueue: drain any retained in-order packets
+    DrainRetainedInboundLocked(nullptr);
     return true;
 }
 
@@ -1602,6 +1744,58 @@ void LanTransport::PruneInactivePeerStatesLocked(std::chrono::steady_clock::time
             ++it;
         }
     }
+}
+
+size_t LanTransport::GetUnackedOutboundCount(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    return (it != m_peerStates.end()) ? it->second.unackedOutbound.size() : 0;
+}
+
+bool LanTransport::IsSequenceSacked(const PeerId& peerId, uint32_t seq) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    if (it == m_peerStates.end()) return false;
+    for (const auto& r : it->second.unackedOutbound) {
+        if (r.sequence == seq) return r.isSacked;
+    }
+    return false;
+}
+
+LanEndpoint LanTransport::GetPeerLastEndpoint(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    return (it != m_peerStates.end()) ? it->second.lastEndpoint : LanEndpoint{};
+}
+
+uint32_t LanTransport::GetPeerLocalGeneration(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    return (it != m_peerStates.end()) ? it->second.localGeneration : 0;
+}
+
+uint32_t LanTransport::GetPeerRemoteGeneration(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    return (it != m_peerStates.end()) ? it->second.remoteGeneration : 0;
+}
+
+uint32_t LanTransport::GetPeerExpectedSequenceIn(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    return (it != m_peerStates.end()) ? it->second.expectedSequenceIn : 0;
+}
+
+uint32_t LanTransport::GetPeerNextSequenceOut(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    return (it != m_peerStates.end()) ? it->second.nextSequenceOut : 0;
+}
+
+size_t LanTransport::GetPeerOutOfOrderCount(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerStates.find(peerId);
+    return (it != m_peerStates.end()) ? it->second.outOfOrderInbound.size() : 0;
 }
 
 } // namespace refix::lan
