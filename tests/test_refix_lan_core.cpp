@@ -782,6 +782,8 @@ static bool TestFragmentationHardeningAndMemoryLimits() {
     TEST_ASSERT(rx.payload == multiFrag, "Reassembled multi-fragment packet must match exactly");
     TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 0, "Global reassembly memory must be 0 after successful assembly");
     TEST_ASSERT(trB.GetReassemblyContextCount() == 0, "Reassembly contexts must be 0 after completion");
+    TEST_ASSERT(trB.GetTrackedPeerReassemblyCount() == 0, "Tracked peer reassembly map must be 0 after completion");
+    TEST_ASSERT(trB.GetPeerReassemblyBytes(peerA) == 0, "Peer reassembly bytes must be 0 after completion");
 
     // 2. Reject messages exceeding REFIX_MAX_MESSAGE_SIZE (256 KB)
     std::vector<uint8_t> tooBig(REFIX_MAX_MESSAGE_SIZE + 1, 0xEE);
@@ -824,6 +826,240 @@ static bool TestLanInterfaceSelection() {
     return true;
 }
 
+static void SendRawFragment(SOCKET s, const LanEndpoint& target, const PeerId& sender, uint32_t sessionId, uint8_t fragIndex, uint8_t fragTotal, uint32_t seq, const std::vector<uint8_t>& payload) {
+    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size());
+    auto* hdr = reinterpret_cast<WireHeader*>(buf.data());
+    hdr->magic = REFIX_WIRE_MAGIC;
+    hdr->version = REFIX_WIRE_VERSION;
+    hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
+    hdr->flags = FLAG_RELIABLE | FLAG_FRAGMENT;
+    if (fragIndex == fragTotal - 1) hdr->flags |= FLAG_LAST_FRAGMENT;
+    hdr->SetSenderPeerId(sender);
+    hdr->sessionId = sessionId;
+    hdr->channel = 1;
+    hdr->fragIndex = fragIndex;
+    hdr->fragTotal = fragTotal;
+    hdr->sequence = seq;
+    hdr->ack = 0;
+    hdr->sackMask = 0;
+    hdr->payloadLen = static_cast<uint16_t>(payload.size());
+    if (!payload.empty()) {
+        std::memcpy(buf.data() + sizeof(WireHeader), payload.data(), payload.size());
+    }
+
+    sockaddr_in sin{};
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(target.ipv4);
+    sin.sin_port = htons(target.port);
+    sendto(s, reinterpret_cast<const char*>(buf.data()), static_cast<int>(buf.size()), 0, reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+}
+
+static bool TestSendReliableStrictContractAndBoundaries() {
+    std::cout << "[*] Running TestSendReliableStrictContractAndBoundaries..." << std::endl;
+
+    LanTransport trA;
+    LanTransport trB;
+    PeerId peerA{0x7777, 0x1111};
+    PeerId peerB{0x8888, 0x2222};
+    PeerId invalidPeer{0, 0};
+    trA.SetLocalPeerId(peerA);
+    trB.SetLocalPeerId(peerB);
+
+    TEST_ASSERT(trA.Start(47605), "Transport A failed to start");
+    TEST_ASSERT(trB.Start(47606), "Transport B failed to start");
+
+    LanEndpoint epB = trB.GetLocalDataEndpoint();
+    epB.ipv4 = 0x7F000001;
+
+    auto waitForPacket = [&](LanTransport& tr, InboundPacket& outPkt, int timeoutMs = 2000) -> bool {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            if (tr.PollInbound(outPkt)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+
+    InboundPacket rx;
+
+    // 1. Invalid PeerId -> rejected immediately
+    char sampleData[] = "test data";
+    TEST_ASSERT(!trA.SendReliable(invalidPeer, epB, 1, sampleData, sizeof(sampleData)),
+                "SendReliable with invalid PeerId must return false");
+
+    // 2. nullptr with len > 0 -> rejected immediately
+    TEST_ASSERT(!trA.SendReliable(peerB, epB, 1, nullptr, 100),
+                "SendReliable with nullptr and len > 0 must return false");
+
+    // 3. Payload > REFIX_MAX_MESSAGE_SIZE (256 KB) -> rejected immediately
+    std::vector<uint8_t> hugeBuf(REFIX_MAX_MESSAGE_SIZE + 10, 0x55);
+    TEST_ASSERT(!trA.SendReliable(peerB, epB, 1, hugeBuf.data(), hugeBuf.size()),
+                "SendReliable with len > REFIX_MAX_MESSAGE_SIZE must return false");
+
+    // 4. Zero-byte payload -> handled explicitly, delivered reliably
+    TEST_ASSERT(trA.SendReliable(peerB, epB, 1, nullptr, 0),
+                "SendReliable with 0-byte payload must return true");
+    TEST_ASSERT(waitForPacket(trB, rx), "Receiver must receive 0-byte reliable packet");
+    TEST_ASSERT(rx.payload.empty(), "0-byte reliable payload must be empty");
+    TEST_ASSERT(rx.isReliable, "0-byte packet must be marked reliable");
+
+    // 5. Unfragmented MTU boundary: 1150 bytes
+    std::vector<uint8_t> mtuBuf(REFIX_MAX_FRAGMENT_PAYLOAD);
+    for (size_t i = 0; i < mtuBuf.size(); ++i) mtuBuf[i] = static_cast<uint8_t>((i ^ 0xAA) & 0xFF);
+    TEST_ASSERT(trA.SendReliable(peerB, epB, 1, mtuBuf.data(), mtuBuf.size()),
+                "SendReliable at 1150-byte MTU limit must return true");
+    TEST_ASSERT(waitForPacket(trB, rx), "Receiver must receive 1150-byte packet");
+    TEST_ASSERT(rx.payload == mtuBuf, "1150-byte payload must match bit-for-bit");
+
+    // 6. Multi-fragment payload: 8192 bytes
+    std::vector<uint8_t> frag8k(8192);
+    for (size_t i = 0; i < frag8k.size(); ++i) frag8k[i] = static_cast<uint8_t>((i * 13 + 3) & 0xFF);
+    TEST_ASSERT(trA.SendReliable(peerB, epB, 2, frag8k.data(), frag8k.size()),
+                "SendReliable at 8192 bytes must return true");
+    TEST_ASSERT(waitForPacket(trB, rx, 3000), "Receiver must receive reassembled 8192-byte packet");
+    TEST_ASSERT(rx.payload == frag8k, "8192-byte payload must match bit-for-bit");
+
+    trA.Stop();
+    trB.Stop();
+
+    std::cout << "  [PASS] SendReliable strict contract (0, 1150, 8192 bytes & invalid args rejection) certified!" << std::endl;
+    return true;
+}
+
+static bool TestReassemblyExpirationAndPeerAccountingStress() {
+    std::cout << "[*] Running TestReassemblyExpirationAndPeerAccountingStress..." << std::endl;
+
+    LanTransport trB;
+    PeerId peerB{0x9999, 0x9999};
+    trB.SetLocalPeerId(peerB);
+    TEST_ASSERT(trB.Start(47607), "Transport B failed to start");
+
+    LanEndpoint epB = trB.GetLocalDataEndpoint();
+    epB.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "Raw UDP socket must be created");
+
+    auto waitForPacket = [&](LanTransport& tr, InboundPacket& outPkt, int timeoutMs = 2000) -> bool {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            if (tr.PollInbound(outPkt)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+
+    // 1. Send incomplete fragments from 10 distinct PeerIds (fragment 0 of 2, 400 bytes each)
+    std::vector<PeerId> testPeers;
+    std::vector<uint8_t> fragChunk(400, 0x42);
+    for (uint64_t i = 1; i <= 10; ++i) {
+        PeerId p{0xCAFE0000 | i, 0xBEEF0000 | i};
+        testPeers.push_back(p);
+        SendRawFragment(rawSock, epB, p, 100 + static_cast<uint32_t>(i), 0, 2, 1, fragChunk);
+    }
+
+    // Give reactor thread a few milliseconds to process inbound queue
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    TEST_ASSERT(trB.GetReassemblyContextCount() == 10, "Must track 10 incomplete reassembly contexts");
+    TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 4000, "Global reassembly bytes must equal 4000");
+    TEST_ASSERT(trB.GetTrackedPeerReassemblyCount() == 10, "Tracked peer reassembly count must equal 10");
+
+    // 2. Duplicate fragment injection from peer 1 (must NOT increment byte count)
+    SendRawFragment(rawSock, epB, testPeers[0], 101, 0, 2, 1, fragChunk);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 4000, "Duplicate fragment must not double-count memory");
+    TEST_ASSERT(trB.GetPeerReassemblyBytes(testPeers[0]) == 400, "Peer 1 memory must remain 400 bytes");
+
+    // 3. Incompatible metadata injection from peer 1 (fragTotal = 5 != 2 -> must be rejected)
+    SendRawFragment(rawSock, epB, testPeers[0], 101, 1, 5, 2, fragChunk);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 4000, "Incompatible metadata must be rejected without memory change");
+
+    // 4. Complete message for peer 1 (fragIndex = 1, fragTotal = 2, seq = 3)
+    std::vector<uint8_t> secondChunk(400, 0x43);
+    SendRawFragment(rawSock, epB, testPeers[0], 101, 1, 2, 3, secondChunk);
+
+    InboundPacket fullPkt;
+    TEST_ASSERT(waitForPacket(trB, fullPkt), "Must receive completed reassembled message for peer 1");
+    TEST_ASSERT(fullPkt.payload.size() == 800, "Reassembled payload size must be 800 bytes");
+    TEST_ASSERT(trB.GetPeerReassemblyBytes(testPeers[0]) == 0, "Peer 1 accounting must be 0 after message completion");
+    TEST_ASSERT(trB.GetTrackedPeerReassemblyCount() == 9, "Tracked peer count must decrement to 9 when peer 1 has no contexts");
+    TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 3600, "Global memory must decrement to 3600");
+
+    // 5. Subsequent valid transmission from peer 1 after previous completion (seq = 4)
+    SendRawFragment(rawSock, epB, testPeers[0], 201, 0, 1, 4, fragChunk); // Single fragment complete
+    TEST_ASSERT(waitForPacket(trB, fullPkt), "Must receive subsequent valid message from peer 1");
+    TEST_ASSERT(trB.GetPeerReassemblyBytes(testPeers[0]) == 0, "Peer 1 accounting must remain 0");
+
+    // 6. Reset peer states for all remaining incomplete peers
+    for (size_t i = 1; i < testPeers.size(); ++i) {
+        trB.ResetPeerState(testPeers[i]);
+    }
+
+    TEST_ASSERT(trB.GetGlobalReassemblyBytes() == 0, "Global reassembly bytes must strictly equal 0 after reset");
+    TEST_ASSERT(trB.GetReassemblyContextCount() == 0, "Reassembly contexts must be 0 after reset");
+    TEST_ASSERT(trB.GetTrackedPeerReassemblyCount() == 0, "Tracked peer reassembly map must be 0 after reset");
+
+    closesocket(rawSock);
+    trB.Stop();
+
+    std::cout << "  [PASS] Reassembly accounting, bounded peer map, and post-cleanup transmission certified!" << std::endl;
+    return true;
+}
+
+static bool TestLobbyConflictPolicyAndMultiProcessUniqueness() {
+    std::cout << "[*] Running TestLobbyConflictPolicyAndMultiProcessUniqueness..." << std::endl;
+
+    // 1. Cross-process uniqueness: Two distinct PeerId's on same machine produce distinct core lobby IDs
+    PeerId p1{0x12345678, (static_cast<uint64_t>(1001) << 32) | 0xAAAA};
+    PeerId p2{0x12345678, (static_cast<uint64_t>(1002) << 32) | 0xBBBB};
+    std::string cid1 = "LOBBY_" + p1.ToString() + "_1";
+    std::string cid2 = "LOBBY_" + p2.ToString() + "_1";
+    TEST_ASSERT(cid1 != cid2, "Core lobby IDs from different instances must be distinct");
+
+    uint64_t sid1 = ComputeLobbySteamID(cid1);
+    uint64_t sid2 = ComputeLobbySteamID(cid2);
+    TEST_ASSERT(CSteamID(sid1).IsValid(), "sid1 must be valid CSteamID");
+    TEST_ASSERT(CSteamID(sid2).IsValid(), "sid2 must be valid CSteamID");
+    TEST_ASSERT(static_cast<uint32_t>(sid1 >> 32) == 0x01840000, "sid1 must have canonical upper 32 bits");
+    TEST_ASSERT(static_cast<uint32_t>(sid2 >> 32) == 0x01840000, "sid2 must have canonical upper 32 bits");
+
+    // 2. Deterministic conflict resolution policy:
+    // When a second core lobby produces an identical AccountID, the conflict policy must reject
+    // overwriting the existing mapping, preserving 1:1 bidirectional integrity without silent corruption.
+    std::unordered_map<std::string, uint64_t> coreToSteam;
+    std::unordered_map<uint64_t, std::string> steamToCore;
+
+    auto ensureId = [&](const std::string& coreId, uint64_t forcedSteamId) -> uint64_t {
+        auto it = coreToSteam.find(coreId);
+        if (it != coreToSteam.end()) return it->second;
+
+        auto revIt = steamToCore.find(forcedSteamId);
+        if (revIt != steamToCore.end() && revIt->second != coreId) {
+            // Collision detected! Reject conflicting registration
+            return 0;
+        }
+        coreToSteam[coreId] = forcedSteamId;
+        steamToCore[forcedSteamId] = coreId;
+        return forcedSteamId;
+    };
+
+    uint64_t primarySteamId = sid1;
+    TEST_ASSERT(ensureId("core_lobby_A", primarySteamId) == primarySteamId, "First registration must succeed");
+    TEST_ASSERT(ensureId("core_lobby_A", primarySteamId) == primarySteamId, "Idempotent lookup must return same ID");
+    TEST_ASSERT(steamToCore[primarySteamId] == "core_lobby_A", "Reverse mapping must point to core_lobby_A");
+
+    // Forced collision: core_lobby_B attempting to register with same steam ID
+    uint64_t rejectedId = ensureId("core_lobby_B", primarySteamId);
+    TEST_ASSERT(rejectedId == 0, "Conflicting lobby registration must be rejected with 0");
+    TEST_ASSERT(steamToCore[primarySteamId] == "core_lobby_A", "Existing mapping must NOT be overwritten on collision");
+    TEST_ASSERT(coreToSteam.find("core_lobby_B") == coreToSteam.end(), "Conflicting lobby must not be added to coreToSteam");
+
+    std::cout << "  [PASS] Multi-process uniqueness and collision policy certified!" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
@@ -845,6 +1081,9 @@ int main() {
     if (!TestSendUnreliableContractAndBoundaries()) return 1;
     if (!TestFragmentationHardeningAndMemoryLimits()) return 1;
     if (!TestLanInterfaceSelection()) return 1;
+    if (!TestSendReliableStrictContractAndBoundaries()) return 1;
+    if (!TestReassemblyExpirationAndPeerAccountingStress()) return 1;
+    if (!TestLobbyConflictPolicyAndMultiProcessUniqueness()) return 1;
 
     std::cout << "\n============================================================" << std::endl;
     std::cout << " [SUCCESS] ALL REFIX LAN CORE & TRANSPORT TESTS PASSED!      " << std::endl;

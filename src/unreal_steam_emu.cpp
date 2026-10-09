@@ -572,6 +572,15 @@ namespace UnrealSteamEmu {
         if (it != s_coreToSteamLobby.end()) return it->second;
 
         uint64_t steamLobbyId = (fallbackId != 0) ? fallbackId : ComputeLobbySteamID(coreLobbyId);
+
+        // Explicit collision policy: detect if steamLobbyId already belongs to a different coreLobbyId
+        auto revIt = s_steamToCoreLobby.find(steamLobbyId);
+        if (revIt != s_steamToCoreLobby.end() && revIt->second != coreLobbyId) {
+            ReFixLog("[UnrealSteam] LOBBY COLLISION REJECTED: coreId='%s' collides with existing '%s' on steamID=%llu",
+                     coreLobbyId.c_str(), revIt->second.c_str(), steamLobbyId);
+            return 0;
+        }
+
         s_coreToSteamLobby[coreLobbyId] = steamLobbyId;
         s_steamToCoreLobby[steamLobbyId] = coreLobbyId;
         return steamLobbyId;
@@ -1597,6 +1606,7 @@ namespace UnrealSteamEmu {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 for (const auto& rec : matches) {
                     uint64_t sId = EnsureSteamLobbyID(rec.lobbyId);
+                    if (sId == 0) continue;
                     LobbyInfo& lob = g_lobbies[sId];
                     lob.id = sId;
                     lob.maxMembers = rec.maxMembers;
@@ -4847,6 +4857,7 @@ namespace UnrealSteamEmu {
             if (!rec) return;
 
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            if (steamLobbyId == 0) return;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 LobbyInfo& lob = g_lobbies[steamLobbyId];

@@ -146,7 +146,9 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
 
     if (!candidates.empty()) {
         std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-            return a.score > b.score;
+            if (a.score != b.score) return a.score > b.score;
+            if (a.ip != b.ip) return a.ip < b.ip;
+            return a.name < b.name;
         });
 
         const auto& best = candidates.front();
@@ -213,6 +215,8 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
+    m_localDataEndpoint.ipv4 = ResolveLocalIpv4();
+
     // 1. Setup Group Socket (Multicast + Broadcast Listener)
     m_groupSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (m_groupSocket == INVALID_SOCKET) {
@@ -253,11 +257,14 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
         return false;
     }
 
-    // Join IPv4 Multicast Group 239.255.71.84
+    // Join IPv4 Multicast Group 239.255.71.84 on selected network interface
     struct ip_mreq mreq{};
     mreq.imr_multiaddr.s_addr = inet_addr("239.255.71.84");
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
+    mreq.imr_interface.s_addr = htonl(m_localDataEndpoint.ipv4);
+    if (setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == SOCKET_ERROR) {
+        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+        setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
+    }
 
     u_long nonblock = 1;
     ioctlsocket(m_groupSocket, FIONBIO, &nonblock);
@@ -295,7 +302,6 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     if (getsockname(m_dataSocket, reinterpret_cast<sockaddr*>(&dataSin), &sinLen) == 0) {
         m_localDataEndpoint.port = ntohs(dataSin.sin_port);
     }
-    m_localDataEndpoint.ipv4 = ResolveLocalIpv4();
 
     struct in_addr mcastIf{};
     mcastIf.s_addr = htonl(m_localDataEndpoint.ipv4);
@@ -542,6 +548,15 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                         auto fragKey = std::make_pair(rawPkt.senderPeerId, rawPkt.sessionId);
                         auto it = m_fragmentMap.find(fragKey);
                         if (it == m_fragmentMap.end()) {
+                            // Check global and per-peer memory budgets BEFORE evicting any contexts
+                            size_t chunkLen = rawPkt.payload.size();
+                            auto pIt = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
+                            size_t currentPeerBytes = (pIt != m_peerReassemblyBytes.end()) ? pIt->second : 0;
+                            if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
+                                currentPeerBytes + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                                continue;
+                            }
+
                             // Check per-peer context count
                             size_t peerContextCount = 0;
                             for (const auto& kv : m_fragmentMap) {
@@ -554,13 +569,6 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                             // Check global context count
                             if (m_fragmentMap.size() >= REFIX_MAX_REASSEMBLY_CONTEXTS) {
                                 EvictOldestReassemblyContextLocked(nullptr);
-                            }
-
-                            // Check global and per-peer memory budgets
-                            size_t chunkLen = rawPkt.payload.size();
-                            if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
-                                m_peerReassemblyBytes[rawPkt.senderPeerId] + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
-                                continue;
                             }
 
                             FragmentAssembler fa;
@@ -596,15 +604,15 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                         size_t chunkLen = rawPkt.payload.size();
                         if (fa.allocatedBytes + chunkLen > REFIX_MAX_MESSAGE_SIZE) {
                             // Abort context exceeding message limit
-                            m_globalReassemblyBytes -= fa.allocatedBytes;
-                            m_peerReassemblyBytes[rawPkt.senderPeerId] -= fa.allocatedBytes;
-                            m_fragmentMap.erase(it);
+                            ReleaseReassemblyContextLocked(it);
                             continue;
                         }
 
                         // Check global and per-peer memory budgets
+                        auto pIt2 = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
+                        size_t currentPeerBytes2 = (pIt2 != m_peerReassemblyBytes.end()) ? pIt2->second : 0;
                         if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
-                            m_peerReassemblyBytes[rawPkt.senderPeerId] + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                            currentPeerBytes2 + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
                             continue;
                         }
 
@@ -631,9 +639,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                             for (auto& chunk : fa.fragments) {
                                 fullMsg.payload.insert(fullMsg.payload.end(), chunk.begin(), chunk.end());
                             }
-                            m_globalReassemblyBytes -= fa.allocatedBytes;
-                            m_peerReassemblyBytes[rawPkt.senderPeerId] -= fa.allocatedBytes;
-                            m_fragmentMap.erase(it);
+                            ReleaseReassemblyContextLocked(it);
 
                             {
                                 std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
@@ -729,15 +735,8 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         auto now = std::chrono::steady_clock::now();
 
-        // Expire incomplete fragment assemblers > 5000ms
-        for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end();) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.startTime).count();
-            if (elapsed > 5000) {
-                it = m_fragmentMap.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        // Expire incomplete fragment assemblers using unified 10s sliding inactivity window
+        PruneExpiredFragmentsLocked(now);
 
         for (auto& [peerId, state] : m_peerStates) {
             if (state.timedOut) continue;
@@ -953,12 +952,29 @@ bool LanTransport::SendUnreliable(const LanEndpoint& target, uint8_t channel, co
 }
 
 bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len) {
+    if (!targetPeer.IsValid()) {
+        return false;
+    }
+
     if (!LanFirewall::Get().IsAllowedEndpoint(target)) {
         LanFirewall::Get().RecordBlockedEgress();
         return false;
     }
 
     if (len > REFIX_MAX_MESSAGE_SIZE) {
+        return false;
+    }
+
+    if (len > 0 && data == nullptr) {
+        return false;
+    }
+
+    if (m_dataSocket == INVALID_SOCKET) {
+        return false;
+    }
+
+    size_t totalFrags = (len == 0) ? 1 : ((len + REFIX_MAX_FRAGMENT_PAYLOAD - 1) / REFIX_MAX_FRAGMENT_PAYLOAD);
+    if (totalFrags == 0 || totalFrags > 255) {
         return false;
     }
 
@@ -1016,13 +1032,16 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
     }
 
     // Application-level fragmentation for payloads > REFIX_MAX_FRAGMENT_PAYLOAD
-    uint8_t fragTotal = static_cast<uint8_t>((len + REFIX_MAX_FRAGMENT_PAYLOAD - 1) / REFIX_MAX_FRAGMENT_PAYLOAD);
+    uint8_t fragTotal = static_cast<uint8_t>(totalFrags);
     uint32_t msgId = state.nextMessageIdOut++;
 
     const auto* srcPtr = reinterpret_cast<const uint8_t*>(data);
     size_t bytesRemaining = len;
     size_t offset = 0;
-    bool allSent = true;
+    uint32_t startSeq = state.nextSequenceOut;
+
+    std::vector<OutboundReliable> preparedFrags;
+    preparedFrags.reserve(fragTotal);
 
     for (uint8_t i = 0; i < fragTotal; ++i) {
         size_t chunkLen = (std::min)(static_cast<size_t>(REFIX_MAX_FRAGMENT_PAYLOAD), bytesRemaining);
@@ -1057,23 +1076,35 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
         out.channel = channel;
         out.target = target;
         out.targetPeer = targetPeer;
-        out.packetBytes = buffer;
+        out.packetBytes = std::move(buffer);
         out.sendTime = std::chrono::steady_clock::now();
         out.retries = 0;
-        state.unackedOutbound.push_back(out);
-
-        int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
-                          static_cast<int>(buffer.size()), 0,
-                          reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
-        if (sent == SOCKET_ERROR) {
-            allSent = false;
-        }
+        preparedFrags.push_back(std::move(out));
 
         offset += chunkLen;
         bytesRemaining -= chunkLen;
     }
 
-    return allSent;
+    // Attempt initial send of fragment 0. If socket error occurs immediately, rollback without leaking retransmissions.
+    int sent0 = sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[0].packetBytes.data()),
+                       static_cast<int>(preparedFrags[0].packetBytes.size()), 0,
+                       reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    if (sent0 == SOCKET_ERROR) {
+        state.nextSequenceOut = startSeq;
+        state.nextMessageIdOut--;
+        return false;
+    }
+
+    // Enqueue all fragments into ARQ unackedOutbound and transmit remaining fragments
+    state.unackedOutbound.push_back(preparedFrags[0]);
+    for (size_t i = 1; i < preparedFrags.size(); ++i) {
+        state.unackedOutbound.push_back(preparedFrags[i]);
+        sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[i].packetBytes.data()),
+               static_cast<int>(preparedFrags[i].packetBytes.size()), 0,
+               reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    }
+
+    return true;
 }
 
 bool LanTransport::PollInbound(InboundPacket& outPacket) {
@@ -1084,12 +1115,49 @@ bool LanTransport::PollInbound(InboundPacket& outPacket) {
     return true;
 }
 
+void LanTransport::ReleaseReassemblyMemoryLocked(const PeerId& peerId, size_t bytes) {
+    if (m_globalReassemblyBytes >= bytes) {
+        m_globalReassemblyBytes -= bytes;
+    } else {
+        m_globalReassemblyBytes = 0; // Defensively prevent underflow
+    }
+
+    auto it = m_peerReassemblyBytes.find(peerId);
+    if (it != m_peerReassemblyBytes.end()) {
+        if (it->second <= bytes) {
+            m_peerReassemblyBytes.erase(it);
+        } else {
+            it->second -= bytes;
+        }
+    }
+}
+
+void LanTransport::ReleaseReassemblyContextLocked(std::map<std::pair<PeerId, uint32_t>, FragmentAssembler>::iterator it) {
+    if (it == m_fragmentMap.end()) return;
+    PeerId peerId = it->second.senderPeerId;
+    size_t allocated = it->second.allocatedBytes;
+    m_fragmentMap.erase(it);
+
+    ReleaseReassemblyMemoryLocked(peerId, allocated);
+
+    // If this peer has no remaining reassembly contexts, prune any 0-byte accounting entry
+    bool hasRemainingContext = false;
+    for (const auto& kv : m_fragmentMap) {
+        if (kv.first.first == peerId) {
+            hasRemainingContext = true;
+            break;
+        }
+    }
+    if (!hasRemainingContext) {
+        m_peerReassemblyBytes.erase(peerId);
+    }
+}
+
 void LanTransport::PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now) {
     for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end(); ) {
         if (now - it->second.lastActivityTime > std::chrono::seconds(REFIX_REASSEMBLY_TIMEOUT_SEC)) {
-            m_globalReassemblyBytes -= it->second.allocatedBytes;
-            m_peerReassemblyBytes[it->second.senderPeerId] -= it->second.allocatedBytes;
-            it = m_fragmentMap.erase(it);
+            auto toErase = it++;
+            ReleaseReassemblyContextLocked(toErase);
         } else {
             ++it;
         }
@@ -1109,9 +1177,7 @@ void LanTransport::EvictOldestReassemblyContextLocked(const PeerId* preferredPee
     }
 
     if (oldestIt != m_fragmentMap.end()) {
-        m_globalReassemblyBytes -= oldestIt->second.allocatedBytes;
-        m_peerReassemblyBytes[oldestIt->second.senderPeerId] -= oldestIt->second.allocatedBytes;
-        m_fragmentMap.erase(oldestIt);
+        ReleaseReassemblyContextLocked(oldestIt);
     }
 }
 
@@ -1125,15 +1191,25 @@ size_t LanTransport::GetReassemblyContextCount() const {
     return m_fragmentMap.size();
 }
 
+size_t LanTransport::GetPeerReassemblyBytes(const PeerId& peerId) const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = m_peerReassemblyBytes.find(peerId);
+    return (it != m_peerReassemblyBytes.end()) ? it->second : 0;
+}
+
+size_t LanTransport::GetTrackedPeerReassemblyCount() const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    return m_peerReassemblyBytes.size();
+}
+
 void LanTransport::ResetPeerState(const PeerId& peerId) {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     m_peerStates.erase(peerId);
 
     for (auto it = m_fragmentMap.begin(); it != m_fragmentMap.end(); ) {
         if (it->first.first == peerId) {
-            m_globalReassemblyBytes -= it->second.allocatedBytes;
-            m_peerReassemblyBytes[peerId] -= it->second.allocatedBytes;
-            it = m_fragmentMap.erase(it);
+            auto toErase = it++;
+            ReleaseReassemblyContextLocked(toErase);
         } else {
             ++it;
         }

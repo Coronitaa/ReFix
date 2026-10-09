@@ -79,6 +79,8 @@ public:
     // Diagnostics & Test Inspection
     size_t GetGlobalReassemblyBytes() const;
     size_t GetReassemblyContextCount() const;
+    size_t GetPeerReassemblyBytes(const PeerId& peerId) const;
+    size_t GetTrackedPeerReassemblyCount() const;
 
 private:
     struct OutboundReliable {
@@ -125,6 +127,8 @@ private:
     bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);
     void PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now);
     void EvictOldestReassemblyContextLocked(const PeerId* preferredPeer = nullptr);
+    void ReleaseReassemblyContextLocked(std::map<std::pair<PeerId, uint32_t>, FragmentAssembler>::iterator it);
+    void ReleaseReassemblyMemoryLocked(const PeerId& peerId, size_t bytes);
 
     std::atomic<bool> m_running{false};
     uint16_t m_discoveryPort = 47584;

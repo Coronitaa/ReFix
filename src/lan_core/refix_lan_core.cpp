@@ -392,7 +392,10 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         static uint32_t s_lobbyCount = 1;
 
-        std::string lobbyId = "LOBBY_" + m_identity.GetLocalPeerId().ToString().substr(0, 8) + "_" + std::to_string(s_lobbyCount++);
+        std::string lobbyId;
+        do {
+            lobbyId = "LOBBY_" + m_identity.GetLocalPeerId().ToString() + "_" + std::to_string(s_lobbyCount++);
+        } while (m_lobbies.find(lobbyId) != m_lobbies.end());
         LobbyRecord r;
         r.lobbyId = lobbyId;
         r.ownerPeerId = m_identity.GetLocalPeerId();
