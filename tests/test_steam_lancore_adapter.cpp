@@ -67,10 +67,15 @@ typedef uint64_t (*fn_ReFix_Test_EnsureSteamLobbyID)(const char* coreLobbyId, ui
 typedef void (*fn_ReFix_Test_ResetLobbyMappings)();
 typedef size_t (*fn_ReFix_Test_GetLobbyMappingCount)();
 typedef bool (*fn_ReFix_Test_HasLobby)(uint64_t steamLobbyId);
+typedef uint64_t (*fn_ReFix_Test_GetActiveLobbyID)();
+typedef uint64_t (*fn_ReFix_Test_GetBroadcastNetPacketCount)();
+typedef void (*fn_ReFix_Test_ResetBroadcastNetPacketCount)();
 typedef bool (*fn_SteamAPI_IsAPICallCompleted)(uint64_t hAPICall, bool* pbFailed);
 
 static HMODULE LoadSteamDll() {
-    HMODULE hSteam = LoadLibraryA("bin\\steam_api64.dll");
+    HMODULE hSteam = LoadLibraryA("bin\\steam_api64_test.dll");
+    if (!hSteam) hSteam = LoadLibraryA("build\\steam_api64_test.dll");
+    if (!hSteam) hSteam = LoadLibraryA("bin\\steam_api64.dll");
     if (!hSteam) hSteam = LoadLibraryA("build\\steam_api64.dll");
     if (!hSteam) hSteam = LoadLibraryA("steam_api64.dll");
     return hSteam;
@@ -97,10 +102,14 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     auto pfnResetMappings = (fn_ReFix_Test_ResetLobbyMappings)GetProcAddress(hSteam, "ReFix_Test_ResetLobbyMappings");
     auto pfnGetMappingCount = (fn_ReFix_Test_GetLobbyMappingCount)GetProcAddress(hSteam, "ReFix_Test_GetLobbyMappingCount");
     auto pfnHasLobby = (fn_ReFix_Test_HasLobby)GetProcAddress(hSteam, "ReFix_Test_HasLobby");
+    auto pfnGetActiveLobby = (fn_ReFix_Test_GetActiveLobbyID)GetProcAddress(hSteam, "ReFix_Test_GetActiveLobbyID");
+    auto pfnGetBcastCount = (fn_ReFix_Test_GetBroadcastNetPacketCount)GetProcAddress(hSteam, "ReFix_Test_GetBroadcastNetPacketCount");
+    auto pfnResetBcastCount = (fn_ReFix_Test_ResetBroadcastNetPacketCount)GetProcAddress(hSteam, "ReFix_Test_ResetBroadcastNetPacketCount");
 
     if (!pfnInit || !pfnShutdown || !pfnRunCallbacks || !pfnGetLanCore ||
-        !pfnGetUtils || !pfnEnsureLobby || !pfnResetMappings || !pfnGetMappingCount || !pfnHasLobby) {
-        std::cerr << "[FAIL] Required exports missing from steam_api64.dll" << std::endl;
+        !pfnGetUtils || !pfnEnsureLobby || !pfnResetMappings || !pfnGetMappingCount || !pfnHasLobby ||
+        !pfnGetActiveLobby || !pfnGetBcastCount || !pfnResetBcastCount) {
+        std::cerr << "[FAIL] Required test exports missing from steam_api64_test.dll" << std::endl;
         return false;
     }
 
@@ -208,12 +217,39 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     TEST_ASSERT(!pfnHasLobby(0), "g_lobbies must never contain entry for ID 0");
     TEST_ASSERT(!core->Lobby().GetLobby(collidingCoreId).has_value(), "LanCore colliding lobby must be rolled back and destroyed");
 
-    // Confirm original lobby is unaffected
+    // Confirm original lobby is unaffected and STILL ACTIVE (g_activeLobbyID preserved!)
     CSteamID survivingLobby = pMatchmaking->GetLobbyByIndex(0);
     TEST_ASSERT(survivingLobby == steamLobbyId, "Original lobby must remain intact at index 0");
+    TEST_ASSERT(pfnGetActiveLobby() == steamLobbyId.ConvertToUint64(), "g_activeLobbyID must retain original active lobby after failed CreateLobby rollback");
+
+    // 3. Test Canonical Mode: Zero Legacy BroadcastNetPacket Invocations
+    SetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", "1");
+    pfnResetBcastCount();
+    pMatchmaking->RequestLobbyList();
+    pfnRunCallbacks();
+    TEST_ASSERT(pfnGetBcastCount() == 0, "Canonical mode RequestLobbyList must not invoke legacy BroadcastNetPacket");
 
     pfnShutdown();
-    std::cout << "  [PASS] Standalone Adapter Unit Tests & Canonical CSteamID certified." << std::endl;
+
+    // 4. Test Production Export Table Isolation (Production DLL must NOT export test hooks)
+    HMODULE hProd = LoadLibraryA("bin\\steam_api64.dll");
+    if (!hProd) hProd = LoadLibraryA("build\\steam_api64.dll");
+    if (hProd) {
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_ResetLobbyMappings") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_ResetLobbyMappings");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_EnsureSteamLobbyID") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_EnsureSteamLobbyID");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_GetLobbyMappingCount") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_GetLobbyMappingCount");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_HasLobby") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_HasLobby");
+        TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_GetActiveLobbyID") == nullptr,
+                    "Production DLL must NOT export ReFix_Test_GetActiveLobbyID");
+        FreeLibrary(hProd);
+        std::cout << "  [PASS] Production export table isolation verified (no ReFix_Test_* hooks in production DLL)." << std::endl;
+    }
+
+    std::cout << "  [PASS] Standalone Adapter Unit Tests, Rollback Preservation & Canonical CSteamID certified." << std::endl;
     return true;
 }
 

@@ -19,6 +19,9 @@ constexpr size_t   REFIX_MAX_PEER_REASSEMBLY_MEM   = 1 * 1024 * 1024; // 1 MB pe
 constexpr size_t   REFIX_MAX_REASSEMBLY_CONTEXTS   = 64; // Max concurrent reassembly contexts
 constexpr size_t   REFIX_MAX_PEER_REASSEMBLY_CONTEXTS = 16; // Max concurrent reassembly contexts per peer
 constexpr uint32_t REFIX_REASSEMBLY_TIMEOUT_SEC    = 10; // Expiration timeout for incomplete messages (seconds)
+constexpr size_t   REFIX_MAX_CONCURRENT_PEER_STATES = 128; // Max concurrent reliability peer states
+constexpr size_t   REFIX_MAX_INBOUND_QUEUE_SIZE     = 512; // Max inbound packet queue capacity
+constexpr uint32_t REFIX_PEER_STATE_IDLE_TIMEOUT_SEC = 15; // Inactive peer state pruning threshold (seconds)
 
 // Message Types
 enum class MsgType : uint8_t {

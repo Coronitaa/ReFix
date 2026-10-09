@@ -253,11 +253,37 @@ public:
         return res;
     }
 
-    void PruneStalePeers(std::chrono::milliseconds maxAge) override {
+    bool UnregisterPeer(const PeerId& peerId) override {
         std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_peers.find(peerId);
+        if (it == m_peers.end()) return false;
+        auto epIt = m_byEndpoint.find(it->second.endpoint);
+        if (epIt != m_byEndpoint.end() && epIt->second == it->first) {
+            m_byEndpoint.erase(epIt);
+        }
+        if (it->second.externalId.numericId != 0) {
+            auto sIt = m_bySteamId.find(it->second.externalId.numericId);
+            if (sIt != m_bySteamId.end() && sIt->second == it->first) {
+                m_bySteamId.erase(sIt);
+            }
+        }
+        if (!it->second.externalId.stringId.empty()) {
+            auto pIt = m_byPuid.find(it->second.externalId.stringId);
+            if (pIt != m_byPuid.end() && pIt->second == it->first) {
+                m_byPuid.erase(pIt);
+            }
+        }
+        m_peers.erase(it);
+        return true;
+    }
+
+    std::vector<PeerId> PruneStalePeers(std::chrono::milliseconds maxAge) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<PeerId> pruned;
         auto now = std::chrono::steady_clock::now();
         for (auto it = m_peers.begin(); it != m_peers.end();) {
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.lastSeen) > maxAge) {
+                pruned.push_back(it->first);
                 auto epIt = m_byEndpoint.find(it->second.endpoint);
                 if (epIt != m_byEndpoint.end() && epIt->second == it->first) {
                     m_byEndpoint.erase(epIt);
@@ -279,6 +305,7 @@ public:
                 ++it;
             }
         }
+        return pruned;
     }
 
 private:
@@ -1219,6 +1246,8 @@ public:
     }
 
     void OnPeerTimeout(const PeerId& peerId, const LanEndpoint& endpoint) override {
+        m_transport.ResetPeerState(peerId);
+        m_peers.UnregisterPeer(peerId);
         LanEvent ev;
         ev.type = LanEvent::Type::PeerLost;
         ev.peerId = peerId;
@@ -1282,8 +1311,11 @@ public:
             m_lobby.BroadcastHostedLobbies();
         }
 
-        // Prune stale peers inactive > 12s
-        m_peers.PruneStalePeers(std::chrono::milliseconds(12000));
+        // Prune stale peers inactive > 12s and reset transport state
+        auto pruned = m_peers.PruneStalePeers(std::chrono::milliseconds(12000));
+        for (const auto& pid : pruned) {
+            m_transport.ResetPeerState(pid);
+        }
 
         // Pump event queue
         m_callbacks.DispatchPending(50);

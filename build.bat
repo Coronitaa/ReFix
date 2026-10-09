@@ -58,9 +58,14 @@ copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
 set "LAN_CORE_SRC=src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp"
 set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp src\network\fault_injector.cpp src\network\message_tracker.cpp !LAN_CORE_SRC!"
 
-echo [*] Building steam_api64.dll proxy...
+echo [*] Building steam_api64.dll proxy (production)...
 cl /nologo /O2 /Zi /EHsc /std:c++17 /LD /Fobuild\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64.dll & exit /b 1 )
+
+if not exist build\test_obj mkdir build\test_obj
+echo [*] Building steam_api64_test.dll proxy (test variant with test hooks)...
+cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_BUILD_TESTS=1 /LD /Fobuild\test_obj\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64_test.dll /Fdbuild\steam_api64_test.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64_test.map
+if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64_test.dll & exit /b 1 )
 
 echo.
 echo ====================================================================
@@ -68,7 +73,8 @@ echo [OK] All ReFix DLL proxies successfully built in build\
 echo   - build\winmm.dll
 echo   - build\EOSSDK-Win64-Shipping.dll
 echo   - build\RedboneEOS.dll
-echo   - build\steam_api64.dll
+echo   - build\steam_api64.dll (Production - Clean EAT)
+echo   - build\steam_api64_test.dll (Testing - Instrumented EAT)
 echo ====================================================================
 
 :: Automatically synchronize freshly built binaries to bin/
@@ -77,6 +83,7 @@ if exist bin\ (
     copy /Y build\EOSSDK-Win64-Shipping.dll bin\EOSSDK-Win64-Shipping.dll >nul
     copy /Y build\RedboneEOS.dll bin\RedboneEOS.dll >nul
     copy /Y build\steam_api64.dll bin\steam_api64.dll >nul
+    copy /Y build\steam_api64_test.dll bin\steam_api64_test.dll >nul
     echo [OK] Synchronized freshly compiled proxies to bin\
 )
 

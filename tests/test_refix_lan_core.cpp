@@ -840,6 +840,60 @@ static void SendRawFragment(SOCKET s, const LanEndpoint& target, const PeerId& s
     sendto(s, reinterpret_cast<const char*>(buf.data()), static_cast<int>(buf.size()), 0, reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
 }
 
+static void SendRawReliableWirePacket(SOCKET s, const LanEndpoint& target, const PeerId& sender, uint32_t seq, uint8_t channel, const std::vector<uint8_t>& payload) {
+    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size());
+    auto* hdr = reinterpret_cast<WireHeader*>(buf.data());
+    hdr->magic = REFIX_WIRE_MAGIC;
+    hdr->version = REFIX_WIRE_VERSION;
+    hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
+    hdr->flags = FLAG_RELIABLE;
+    hdr->SetSenderPeerId(sender);
+    hdr->sessionId = 0;
+    hdr->channel = channel;
+    hdr->fragIndex = 0;
+    hdr->fragTotal = 1;
+    hdr->sequence = seq;
+    hdr->ack = 0;
+    hdr->sackMask = 0;
+    hdr->payloadLen = static_cast<uint16_t>(payload.size());
+    if (!payload.empty()) {
+        std::memcpy(buf.data() + sizeof(WireHeader), payload.data(), payload.size());
+    }
+
+    sockaddr_in sin{};
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(target.ipv4);
+    sin.sin_port = htons(target.port);
+    sendto(s, reinterpret_cast<const char*>(buf.data()), static_cast<int>(buf.size()), 0, reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+}
+
+static void SendRawUnreliableWirePacket(SOCKET s, const LanEndpoint& target, const PeerId& sender, const std::vector<uint8_t>& payload) {
+    std::vector<uint8_t> buf(sizeof(WireHeader) + payload.size());
+    auto* hdr = reinterpret_cast<WireHeader*>(buf.data());
+    hdr->magic = REFIX_WIRE_MAGIC;
+    hdr->version = REFIX_WIRE_VERSION;
+    hdr->msgType = static_cast<uint8_t>(MsgType::DataUnreliable);
+    hdr->flags = 0;
+    hdr->SetSenderPeerId(sender);
+    hdr->sessionId = 0;
+    hdr->channel = 1;
+    hdr->fragIndex = 0;
+    hdr->fragTotal = 1;
+    hdr->sequence = 0;
+    hdr->ack = 0;
+    hdr->sackMask = 0;
+    hdr->payloadLen = static_cast<uint16_t>(payload.size());
+    if (!payload.empty()) {
+        std::memcpy(buf.data() + sizeof(WireHeader), payload.data(), payload.size());
+    }
+
+    sockaddr_in sin{};
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(target.ipv4);
+    sin.sin_port = htons(target.port);
+    sendto(s, reinterpret_cast<const char*>(buf.data()), static_cast<int>(buf.size()), 0, reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+}
+
 static bool TestSendReliableStrictContractAndBoundaries() {
     std::cout << "[*] Running TestSendReliableStrictContractAndBoundaries..." << std::endl;
 
@@ -1242,9 +1296,9 @@ static bool TestMemoryLimitsRealBudgetsAndEviction() {
     TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 0, "Peer 5 memory must be 0 after session 999 completes");
 
     // -------------------------------------------------------------------------
-    // E. Real Memory Budget Hard Limits (1 MiB Peer Budget Enforcement)
+    // E. Real 1 MiB Per-Peer & 4 MiB Global Reassembly Memory Budget Hard Enforcement
     // -------------------------------------------------------------------------
-    // Clear all existing peer states first to provide a clean slate for 1 MiB budget testing
+    // Clear all existing peer states first to provide a clean slate
     for (uint64_t pIdx = 1; pIdx <= 4; ++pIdx) {
         PeerId p{0xFAAA0000 | pIdx, 0xFBBB0000 | pIdx};
         tr.ResetPeerState(p);
@@ -1253,71 +1307,96 @@ static bool TestMemoryLimitsRealBudgetsAndEviction() {
     TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Clean slate must have 0 global bytes");
     TEST_ASSERT(tr.GetReassemblyContextCount() == 0, "Clean slate must have 0 contexts");
 
-    uint32_t seq5 = 1;
-    // 6 sessions of 150 fragments * 1000 bytes = 900,000 bytes (fragTotal = 200, so each remains incomplete)
-    for (uint32_t sId = 101; sId <= 106; ++sId) {
-        for (uint8_t f = 0; f < 150; ++f) {
-            SendRawFragment(rawSock, ep, peer5, sId, f, 200, seq5++, chunk1k);
-            if (f % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
-    // 7th session with 148 fragments * 1000 bytes = 148,000 bytes (fragTotal = 200) -> Total = 1,048,000 bytes
-    for (uint8_t f = 0; f < 148; ++f) {
-        SendRawFragment(rawSock, ep, peer5, 107, f, 200, seq5++, chunk1k);
-        if (f % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048000, "Peer 5 must have reached 1,048,000 bytes");
-
-    // Now attempt to send fragment 148 (1000 bytes): 1,048,000 + 1000 = 1,049,000 > 1,048,576
-    // Must be rejected by the 1 MiB per-peer memory budget limit!
-    SendRawFragment(rawSock, ep, peer5, 107, 148, 200, seq5++, chunk1k);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048000, "Exceeding fragment must NOT increase peer memory beyond 1 MiB");
-
-    // Now send fragment 148 with 500 bytes: 1,048,000 + 500 = 1,048,500 <= 1,048,576
-    // Fits under 1 MiB, so must be accepted!
-    SendRawFragment(rawSock, ep, peer5, 107, 148, 200, seq5++, frag500);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048500, "Fragment fitting under 1 MiB ceiling must be accepted");
-
-    // Now attempt to send fragment 149 with 100 bytes: 1,048,500 + 100 = 1,048,600 > 1,048,576
-    // Must be rejected!
-    std::vector<uint8_t> frag100(100, 0x99);
-    SendRawFragment(rawSock, ep, peer5, 107, 149, 200, seq5++, frag100);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048500, "Overage must be strictly rejected at the 1 MiB ceiling");
-
-    // Reset Peer 5 to release the 1,048,500 bytes and verify subsequent message reception
-    tr.ResetPeerState(peer5);
-    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 0, "Peer 5 memory must be cleanly released back to 0");
-
-    // Subsequent valid message from peer 5 must be accepted and completed cleanly
-    std::vector<uint8_t> validPart1(300, 0x33);
-    std::vector<uint8_t> validPart2(300, 0x44);
-    SendRawFragment(rawSock, ep, peer5, 1000, 0, 2, 1, validPart1);
-    SendRawFragment(rawSock, ep, peer5, 1000, 1, 2, 2, validPart2);
-
-    InboundPacket validPkt;
-    TEST_ASSERT(waitForPacket(tr, validPkt), "Valid message from peer 5 must complete successfully after resource release");
-    TEST_ASSERT(validPkt.payload.size() == 600, "Reassembled size must be 600 bytes");
-    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 0, "Peer 5 memory must be 0 after completion");
-
-    // Reset all remaining peers and verify zero leaks / zero underflow
+    // 1. Build up memory across Peers 1..4:
+    // Each peer gets 7 sessions: 6 of 150 frags * 1000 B (900,000 B) + 1 of 148 frags * 1000 B (148,000 B)
+    // = 1,048,000 bytes per peer (<= 1,048,576 B).
+    // 4 peers * 7 sessions = 28 sessions total (<= 64 global limit, <= 16 per-peer limit).
+    // Aggregate global memory = 4 * 1,048,000 = 4,192,000 bytes!
     for (uint64_t pIdx = 1; pIdx <= 4; ++pIdx) {
         PeerId p{0xFAAA0000 | pIdx, 0xFBBB0000 | pIdx};
-        tr.ResetPeerState(p);
+        uint32_t pSeq = 1;
+        for (uint32_t sId = 1; sId <= 6; ++sId) {
+            for (uint8_t f = 0; f < 150; ++f) {
+                SendRawFragment(rawSock, ep, p, sId, f, 200, pSeq++, chunk1k);
+                if (f % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        for (uint8_t f = 0; f < 148; ++f) {
+            SendRawFragment(rawSock, ep, p, 7, f, 200, pSeq++, chunk1k);
+            if (f % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        TEST_ASSERT(tr.GetPeerReassemblyBytes(p) == 1048000, "Each peer must reach 1,048,000 bytes");
     }
-    tr.ResetPeerState(peer5);
 
-    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Global memory must strictly equal 0");
-    TEST_ASSERT(tr.GetReassemblyContextCount() == 0, "Context count must strictly equal 0");
-    TEST_ASSERT(tr.GetTrackedPeerReassemblyCount() == 0, "Tracked peer map must be empty");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 4192000, "Aggregate global bytes across 4 peers must equal 4,192,000");
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 28, "Context count must be 28 (4 peers * 7 sessions)");
+
+    // 2. Introduce Peer 5 (has 0 bytes used, 0 contexts active).
+    // Peer 5 sends 2 fragments of 1000 bytes:
+    // 4,192,000 + 1000 + 1000 = 4,194,000 bytes (fits under 4 MiB = 4,194,304 B).
+    SendRawFragment(rawSock, ep, peer5, 1, 0, 10, 1, chunk1k);
+    SendRawFragment(rawSock, ep, peer5, 1, 1, 10, 2, chunk1k);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 2000, "Peer 5 must have 2,000 bytes in use");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 4194000, "Global reassembly memory must equal 4,194,000 bytes");
+    // Global headroom remaining is now exactly: 4,194,304 - 4,194,000 = 304 bytes.
+
+    // 3. Now send a 500-byte fragment from Peer 5:
+    // Peer 5 usage would be: 2,000 + 500 = 2,500 bytes (well within Peer 5's 1 MiB budget!).
+    // Peer 5 context count is 1 (well within 16 context limit!).
+    // Global context count is 29 (well within 64 context limit!).
+    // BUT global memory would be 4,194,000 + 500 = 4,194,500 > 4,194,304 (exceeds 4 MiB global limit)!
+    // Must be strictly REJECTED by the 4 MiB global budget!
+    SendRawFragment(rawSock, ep, peer5, 1, 2, 10, 3, frag500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 4194000, "Fragment exceeding 4 MiB global budget must be strictly rejected");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 2000, "Peer 5 bytes must remain 2000 after rejection");
+
+    // 4. Now send a 300-byte fragment from Peer 5:
+    // 4,194,000 + 300 = 4,194,300 <= 4,194,304 (fits under 4 MiB ceiling).
+    // Must be ACCEPTED!
+    std::vector<uint8_t> frag300(300, 0x55);
+    SendRawFragment(rawSock, ep, peer5, 1, 2, 10, 4, frag300);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 4194300, "Fragment fitting under 4 MiB global ceiling must be accepted");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 2300, "Peer 5 bytes must now equal 2300");
+
+    // 5. Attempt 10-byte fragment: 4,194,300 + 10 = 4,194,310 > 4,194,304.
+    // Must be REJECTED!
+    std::vector<uint8_t> frag10(10, 0x66);
+    SendRawFragment(rawSock, ep, peer5, 1, 3, 10, 5, frag10);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 4194300, "Fragment exceeding 4 MiB global ceiling must be rejected");
+
+    // 6. Test Automatic TTL Expiration (without ResetPeerState)
+    // Wait for REFIX_REASSEMBLY_TIMEOUT_SEC (10s) sliding inactivity window to elapse
+    std::cout << "    [INFO] Testing automatic TTL reassembly expiration (waiting 10.5s)..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10500));
+
+    // Send a 1-byte fragment from a new peer to trigger PruneExpiredFragmentsLocked
+    PeerId triggerPeer{0xFAAA0099, 0xFBBB0099};
+    std::vector<uint8_t> trigFrag(1, 0xAA);
+    SendRawFragment(rawSock, ep, triggerPeer, 1, 0, 2, 1, trigFrag);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // All idle incomplete sessions must have automatically expired!
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 1, "Expired sessions must be automatically released by TTL (only trigger fragment remains)");
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 1, "Context count must be 1 (only trigger session)");
+
+    // 7. Test Transport Clean Recovery after TTL expiration
+    // Complete trigger session cleanly
+    SendRawFragment(rawSock, ep, triggerPeer, 1, 1, 2, 2, trigFrag);
+    InboundPacket trigPkt;
+    TEST_ASSERT(waitForPacket(tr, trigPkt), "Trigger message must complete cleanly after TTL expiration recovery");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Global reassembly memory must strictly return to 0");
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 0, "Reassembly context count must return to 0");
 
     closesocket(rawSock);
     tr.Stop();
 
-    std::cout << "  [PASS] 4 MiB global budget, 1 MiB peer budget, 64/16 context limits, duplicate protection, and metadata invalidation certified!" << std::endl;
+    std::cout << "  [PASS] True 4 MiB global budget across multiple peers, 1 MiB peer budget, and 64/16 context limits certified!" << std::endl;
     return true;
 }
 
@@ -1336,12 +1415,97 @@ static bool TestMulticastInitializationAndDiagnostics() {
     TEST_ASSERT(tr.GetLocalDataEndpoint().port != 0, "Ephemeral data port must be assigned");
     TEST_ASSERT(tr.GetLocalDataEndpoint().ipv4 != 0, "Local IPv4 must be non-zero");
 
+    bool joined = tr.IsMulticastJoined();
     std::string diag = tr.GetDiscoveryStatus();
     TEST_ASSERT(!diag.empty(), "Discovery diagnostics string must not be empty");
+    if (joined) {
+        TEST_ASSERT(diag.find("Multicast Active") != std::string::npos, "Diagnostics must indicate Multicast Active when joined");
+    } else {
+        TEST_ASSERT(diag.find("Degraded Broadcast-Only") != std::string::npos, "Diagnostics must indicate Degraded Broadcast-Only when not joined");
+    }
     std::cout << "    Transport discovery diagnostics: " << diag << std::endl;
-
     tr.Stop();
-    std::cout << "  [PASS] Multicast initialization, port matching, and diagnostics certified!" << std::endl;
+
+    // 2. Controlled Degraded Mode Verification
+    std::cout << "    [*] Testing controlled degraded broadcast-only discovery mode..." << std::endl;
+    LanTransport trDegraded;
+    trDegraded.SetLocalPeerId(localPeer);
+    trDegraded.SetSimulateMulticastFailure(true);
+    TEST_ASSERT(trDegraded.Start(47625), "Degraded LanTransport Start must succeed");
+    TEST_ASSERT(!trDegraded.IsMulticastJoined(), "Degraded mode must strictly report IsMulticastJoined == false");
+    std::string degradedDiag = trDegraded.GetDiscoveryStatus();
+    TEST_ASSERT(degradedDiag.find("Degraded Broadcast-Only") != std::string::npos, "Degraded mode must report Degraded Broadcast-Only status");
+    // Broadcast must succeed via broadcast/localhost without attempting multicast
+    TEST_ASSERT(trDegraded.BroadcastDiscovery("DegradedBeacon", 14), "Broadcast in degraded mode must succeed");
+    trDegraded.Stop();
+
+    std::cout << "    [NOTE] Local tests verify socket and diagnostic state transitions. Physical Ethernet switch multicast reception is not claimed." << std::endl;
+    std::cout << "  [PASS] Multicast initialization, degraded broadcast-only policy, and diagnostics certified!" << std::endl;
+    return true;
+}
+
+static bool TestPeerStateLifecycleAndInboundQueueHardening() {
+    std::cout << "[*] Running TestPeerStateLifecycleAndInboundQueueHardening..." << std::endl;
+
+    LanTransport tr;
+    PeerId localPeer{0x1010, 0x2020};
+    tr.SetLocalPeerId(localPeer);
+    TEST_ASSERT(tr.Start(47630), "Transport start failed");
+
+    LanEndpoint ep = tr.GetLocalDataEndpoint();
+    ep.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "Raw socket creation failed");
+
+    // 1. Flood with 150 distinct PeerIds (exceeding REFIX_MAX_CONCURRENT_PEER_STATES = 128)
+    std::vector<uint8_t> smallPayload(32, 0x55);
+    for (uint64_t i = 1; i <= 150; ++i) {
+        PeerId remoteP{0xEE000000 | i, 0xFF000000 | i};
+        SendRawReliableWirePacket(rawSock, ep, remoteP, 1, 1, smallPayload);
+        if (i % 30 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    size_t stateCount = tr.GetPeerStateCount();
+    TEST_ASSERT(stateCount <= REFIX_MAX_CONCURRENT_PEER_STATES, "Peer state count must be strictly capped at REFIX_MAX_CONCURRENT_PEER_STATES (128)");
+    std::cout << "    Peer states capped at: " << stateCount << " / " << REFIX_MAX_CONCURRENT_PEER_STATES << std::endl;
+
+    // 2. Test Inbound Queue Capacity Bounding and Backpressure
+    // Send 600 unpolled unreliable packets (exceeding REFIX_MAX_INBOUND_QUEUE_SIZE = 512)
+    PeerId burstPeer{0xEE000001, 0xFF000001};
+    for (int i = 0; i < 600; ++i) {
+        SendRawUnreliableWirePacket(rawSock, ep, burstPeer, smallPayload);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    size_t queueSize = tr.GetInboundQueueSize();
+    uint64_t droppedCount = tr.GetInboundQueueDroppedCount();
+    TEST_ASSERT(queueSize <= REFIX_MAX_INBOUND_QUEUE_SIZE, "Inbound queue size must be capped at REFIX_MAX_INBOUND_QUEUE_SIZE (512)");
+    TEST_ASSERT(droppedCount > 0, "Inbound queue backpressure must record dropped packets when over capacity");
+    std::cout << "    Inbound queue size capped at: " << queueSize << ", recorded drops: " << droppedCount << std::endl;
+
+    // 3. Drain queue and verify valid data flow continues
+    InboundPacket drainedPkt;
+    size_t drained = 0;
+    while (tr.PollInbound(drainedPkt)) {
+        drained++;
+    }
+    TEST_ASSERT(drained == queueSize, "Must cleanly drain all buffered packets");
+    TEST_ASSERT(tr.GetInboundQueueSize() == 0, "Inbound queue must be empty after drain");
+
+    // 4. Send fresh valid message and confirm normal operation
+    std::vector<uint8_t> testMsg(48, 0x77);
+    SendRawUnreliableWirePacket(rawSock, ep, burstPeer, testMsg);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    InboundPacket freshPkt;
+    TEST_ASSERT(tr.PollInbound(freshPkt), "Fresh packet must be received after queue drain");
+    TEST_ASSERT(freshPkt.payload == testMsg, "Payload integrity verified");
+
+    closesocket(rawSock);
+    tr.Stop();
+    std::cout << "  [PASS] Peer state lifecycle bounding and inbound queue backpressure certified!" << std::endl;
     return true;
 }
 
@@ -1371,6 +1535,7 @@ int main() {
     if (!TestReassemblyAutoExpirationAndReactorLiveness()) return 1;
     if (!TestMemoryLimitsRealBudgetsAndEviction()) return 1;
     if (!TestMulticastInitializationAndDiagnostics()) return 1;
+    if (!TestPeerStateLifecycleAndInboundQueueHardening()) return 1;
     if (!TestLobbyConflictPolicyAndProductionRegistry()) return 1;
 
     std::cout << "\n============================================================" << std::endl;

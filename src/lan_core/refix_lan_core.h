@@ -66,7 +66,8 @@ public:
     virtual std::optional<PeerId> FindByPuid(std::string_view puid) const = 0;
 
     virtual std::vector<PeerInfo> GetAllPeers() const = 0;
-    virtual void PruneStalePeers(std::chrono::milliseconds maxAge) = 0;
+    virtual bool UnregisterPeer(const PeerId& peerId) = 0;
+    virtual std::vector<PeerId> PruneStalePeers(std::chrono::milliseconds maxAge) = 0;
 };
 
 // =============================================================================

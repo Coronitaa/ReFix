@@ -81,8 +81,12 @@ public:
     size_t GetReassemblyContextCount() const;
     size_t GetPeerReassemblyBytes(const PeerId& peerId) const;
     size_t GetTrackedPeerReassemblyCount() const;
+    size_t GetPeerStateCount() const;
+    size_t GetInboundQueueSize() const;
+    uint64_t GetInboundQueueDroppedCount() const;
     bool IsMulticastJoined() const { return m_multicastJoined; }
     std::string GetDiscoveryStatus() const;
+    void SetSimulateMulticastFailure(bool fail) { m_simulateMulticastFailure = fail; }
 
 private:
     struct OutboundReliable {
@@ -128,12 +132,14 @@ private:
     void CheckRetransmissionsAndTimeouts();
     bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);
     void PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now);
+    void PruneInactivePeerStatesLocked(std::chrono::steady_clock::time_point now);
     void EvictOldestReassemblyContextLocked(const PeerId* preferredPeer = nullptr);
     void ReleaseReassemblyContextLocked(std::map<std::pair<PeerId, uint32_t>, FragmentAssembler>::iterator it);
     void ReleaseReassemblyMemoryLocked(const PeerId& peerId, size_t bytes);
 
     std::atomic<bool> m_running{false};
     bool m_multicastJoined = false;
+    bool m_simulateMulticastFailure = false;
     uint16_t m_discoveryPort = 47584;
     PeerId m_localPeerId;
     LanEndpoint m_localDataEndpoint;
@@ -149,8 +155,9 @@ private:
     size_t m_globalReassemblyBytes = 0;
     std::unordered_map<PeerId, size_t> m_peerReassemblyBytes;
 
-    std::mutex m_inboundQueueMutex;
+    mutable std::mutex m_inboundQueueMutex;
     std::deque<InboundPacket> m_inboundQueue;
+    std::atomic<uint64_t> m_inboundQueueDroppedPackets{0};
 };
 
 } // namespace refix::lan

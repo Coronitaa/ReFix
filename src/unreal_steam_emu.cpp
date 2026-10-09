@@ -113,6 +113,7 @@ namespace UnrealSteamEmu {
     static std::atomic<uint64_t> g_nextAPICall{ 100000ULL };
     static std::atomic<uint32_t> g_nextAuthTicket{ 1 };
     static std::atomic<uint64_t> g_activeLobbyID{ 0 };
+    static std::atomic<uint64_t> g_broadcastNetPacketCount{ 0 };
 
     static int32_t g_hSteamPipe = 1;
     static int32_t g_hSteamUser = 1;
@@ -523,16 +524,11 @@ namespace UnrealSteamEmu {
     static std::vector<uint64_t> g_lastMatchmakingResults;
 
     static bool ShouldUseLegacyFallback() {
-        static int s_legacyDisabled = -1;
-        if (s_legacyDisabled == -1) {
-            char buf[16] = {0};
-            if (GetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", buf, sizeof(buf)) > 0) {
-                s_legacyDisabled = (buf[0] == '1' || buf[0] == 't' || buf[0] == 'T' || buf[0] == 'y' || buf[0] == 'Y') ? 1 : 0;
-            } else {
-                s_legacyDisabled = 0;
-            }
+        char buf[16] = {0};
+        if (GetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", buf, sizeof(buf)) > 0) {
+            return !(buf[0] == '1' || buf[0] == 't' || buf[0] == 'T' || buf[0] == 'y' || buf[0] == 'Y');
         }
-        return s_legacyDisabled == 0;
+        return true;
     }
 
     static uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
@@ -683,6 +679,8 @@ namespace UnrealSteamEmu {
     }
 
     static void BroadcastNetPacket(uint8_t msgType, const void* payload, size_t payloadLen) {
+        g_broadcastNetPacketCount.fetch_add(1);
+        if (!ShouldUseLegacyFallback()) return;
         if (g_udpSocket == INVALID_SOCKET) return;
 
         std::vector<uint8_t> buf(sizeof(NetPacketHeader) + payloadLen);
@@ -1525,7 +1523,11 @@ namespace UnrealSteamEmu {
 
         // Discovery broadcast OUTSIDE of any lock (No I/O under lock!)
         if (needDiscoveryBroadcast) {
-            BroadcastNetPacket(1, discoveryBroadcastPayload.c_str(), discoveryBroadcastPayload.size());
+            if (ShouldUseLegacyFallback()) {
+                BroadcastNetPacket(1, discoveryBroadcastPayload.c_str(), discoveryBroadcastPayload.size());
+            } else {
+                refix::lan::ILanCore::Get().Discovery().BroadcastQuery();
+            }
         }
 
         // Notify timeouts outside lock
@@ -2415,7 +2417,6 @@ namespace UnrealSteamEmu {
             if (lID == 0) {
                 // Collision or registration failure: rollback in LAN Core so we don't leave an orphaned lobby
                 refix::lan::ILanCore::Get().Lobby().DestroyLobby(coreLobbyId);
-                g_activeLobbyID.store(0);
                 ReFixLog("[UnrealSteam] CreateLobby: Rejected registration of lobby '%s' (collision or invalid ID)", coreLobbyId.c_str());
 
                 LobbyCreated_t crResp = {};
@@ -3248,9 +3249,13 @@ namespace UnrealSteamEmu {
                 hs.remotePeerId = remoteID.ConvertToUint64();
                 SendLanPacket(remoteID, 7, (const uint8_t*)&hs, sizeof(hs), ReFix::PacketDirection::CLIENT_TO_HOST);
             } else {
-                // Endpoint unresolved: broadcast discovery ping so peer announces itself (BLOQUEANTE 1)
-                std::string pingPayload = g_personaName;
-                BroadcastNetPacket(1, pingPayload.c_str(), pingPayload.size());
+                // Endpoint unresolved: announce/query discovery so peer is found
+                if (ShouldUseLegacyFallback()) {
+                    std::string pingPayload = g_personaName;
+                    BroadcastNetPacket(1, pingPayload.c_str(), pingPayload.size());
+                } else {
+                    refix::lan::ILanCore::Get().Discovery().BroadcastQuery();
+                }
             }
 
             return handle;
@@ -3803,6 +3808,26 @@ namespace UnrealSteamEmu {
             memcpy(payload.data() + sizeof(int32_t), pubData, cubData);
 
             uint64_t targetSteamID = identityRemote.GetSteamID64();
+            if (targetSteamID != 0) {
+                auto peerIdOpt = refix::lan::ILanCore::Get().Peers().FindBySteamId(targetSteamID);
+                if (peerIdOpt.has_value()) {
+                    auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(peerIdOpt.value());
+                    if (pInfo && pInfo->endpoint.IsValid()) {
+                        bool reliable = (nSendFlags & k_nSteamNetworkingSend_Reliable) != 0;
+                        bool ok = false;
+                        if (reliable) {
+                            ok = refix::lan::ILanCore::Get().Transport().SendReliable(peerIdOpt.value(), pInfo->endpoint, (uint8_t)nRemoteChannel, pubData, cubData);
+                        } else {
+                            ok = refix::lan::ILanCore::Get().Transport().SendUnreliable(pInfo->endpoint, (uint8_t)nRemoteChannel, pubData, cubData);
+                        }
+                        if (ok) return k_EResultOK;
+                    }
+                }
+            }
+
+            if (!ShouldUseLegacyFallback()) {
+                return k_EResultNoConnection;
+            }
 
             sockaddr_in dest = {};
             bool hasPeer = false;
@@ -5084,8 +5109,10 @@ namespace UnrealSteamEmu {
         SteamServersConnected_t conn = {};
         PostCallback(SteamServersConnected_t::k_iCallback, &conn, sizeof(conn), 0.01);
 
-        // Broadcast NetPacket Ping with our persona name so LAN peers discover us immediately
-        BroadcastNetPacket(1, g_personaName.c_str(), g_personaName.size());
+        // Broadcast NetPacket Ping with our persona name so LAN peers discover us immediately (legacy only)
+        if (ShouldUseLegacyFallback()) {
+            BroadcastNetPacket(1, g_personaName.c_str(), g_personaName.size());
+        }
 
         ReFixLog("=================================================================");
         ReFixLog("  Re:Goldberg for Unreal Engine Initialized Successfully");
@@ -5191,6 +5218,7 @@ namespace UnrealSteamEmu {
     }
 }
 
+#if defined(REFIX_BUILD_TESTS)
 extern "C" __declspec(dllexport) uint64_t ReFix_Test_EnsureSteamLobbyID(const char* coreLobbyId, uint64_t fallbackId) {
     return UnrealSteamEmu::EnsureSteamLobbyID(coreLobbyId ? coreLobbyId : "", fallbackId);
 }
@@ -5207,3 +5235,16 @@ extern "C" __declspec(dllexport) bool ReFix_Test_HasLobby(uint64_t steamLobbyId)
     std::lock_guard<std::recursive_mutex> lock(UnrealSteamEmu::g_emuMutex);
     return UnrealSteamEmu::g_lobbies.find(steamLobbyId) != UnrealSteamEmu::g_lobbies.end();
 }
+
+extern "C" __declspec(dllexport) uint64_t ReFix_Test_GetActiveLobbyID() {
+    return UnrealSteamEmu::g_activeLobbyID.load();
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_Test_GetBroadcastNetPacketCount() {
+    return UnrealSteamEmu::g_broadcastNetPacketCount.load();
+}
+
+extern "C" __declspec(dllexport) void ReFix_Test_ResetBroadcastNetPacketCount() {
+    UnrealSteamEmu::g_broadcastNetPacketCount.store(0);
+}
+#endif

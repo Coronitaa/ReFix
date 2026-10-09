@@ -7,7 +7,15 @@
 
 namespace refix::steam {
 
-// High-avalanche 64-bit FNV-1a hash followed by Murmur3/SplitMix64 finalizer
+// High-avalanche 64-bit FNV-1a hash followed by Murmur3/SplitMix64 finalizer.
+// NOTE ON DISTRIBUTED IDENTITY GUARANTEES:
+// The 32-bit AccountID derived below provides a deterministic, high-entropy representation
+// for canonical Steamworks CSteamID formatting (k_EChatInstanceFlagLobby).
+// A 32-bit hash space has finite entropy (2^32 distinct states) and does not mathematically
+// guarantee zero collisions across all arbitrary machines globally.
+// The local SteamLobbyRegistry detects and rejects collisions known to the local host,
+// preserving bidirectional 1:1 mapping consistency. While this mitigates local conflicts,
+// it does not inherently eliminate independent hash collisions across disconnected hosts.
 inline uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
     uint64_t h = 0xCBF29CE484222325ULL;
     for (char c : coreLobbyId) {

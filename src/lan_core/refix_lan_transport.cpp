@@ -263,9 +263,15 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     mreq.imr_interface.s_addr = htonl(m_localDataEndpoint.ipv4);
 
     m_multicastJoined = false;
+    uint32_t joinedInterface = 0;
     int mcastErr = 0;
-    if (setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0) {
+
+    if (m_simulateMulticastFailure) {
+        printf("[LanTransport] Simulated multicast membership failure. Operating in degraded broadcast-only discovery mode on port %u\n",
+               m_discoveryPort);
+    } else if (setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0) {
         m_multicastJoined = true;
+        joinedInterface = m_localDataEndpoint.ipv4;
         printf("[LanTransport] Multicast membership established on interface %s for group 239.255.71.84 (port %u)\n",
                m_localDataEndpoint.ToIpString().c_str(), m_discoveryPort);
     } else {
@@ -274,12 +280,13 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
         mreq.imr_interface.s_addr = htonl(INADDR_ANY);
         if (setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0) {
             m_multicastJoined = true;
+            joinedInterface = INADDR_ANY;
             printf("[LanTransport] Multicast membership established on INADDR_ANY fallback (iface err %d) for group 239.255.71.84 (port %u)\n",
                    mcastErr, m_discoveryPort);
         } else {
             int fallbackErr = WSAGetLastError();
             m_multicastJoined = false;
-            printf("[LanTransport] Multicast membership FAILED on interface %s (err %d) and INADDR_ANY (err %d). Continuing in degraded broadcast-only discovery mode on port %u\n",
+            printf("[LanTransport] Multicast membership FAILED on interface %s (err %d) and INADDR_ANY (err %d). Operating in degraded broadcast-only discovery mode on port %u\n",
                    m_localDataEndpoint.ToIpString().c_str(), mcastErr, fallbackErr, m_discoveryPort);
         }
     }
@@ -325,9 +332,13 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
 
     if (m_multicastJoined) {
         struct in_addr mcastIf{};
-        mcastIf.s_addr = htonl(m_localDataEndpoint.ipv4);
-        setsockopt(m_dataSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
-        setsockopt(m_groupSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
+        mcastIf.s_addr = htonl(joinedInterface);
+        int ifErr1 = setsockopt(m_dataSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
+        int ifErr2 = setsockopt(m_groupSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
+        if (ifErr1 != 0 || ifErr2 != 0) {
+            printf("[LanTransport] Warning: IP_MULTICAST_IF set failed (dataSocket err: %d, groupSocket err: %d)\n",
+                   ifErr1 != 0 ? WSAGetLastError() : 0, ifErr2 != 0 ? WSAGetLastError() : 0);
+        }
     }
 
     ioctlsocket(m_dataSocket, FIONBIO, &nonblock);
@@ -479,8 +490,18 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             std::vector<InboundPacket> packetsToNotify;
             {
                 std::lock_guard<std::mutex> lock(m_stateMutex);
-                auto& state = m_peerStates[senderPeer];
-                state.lastReceivedTime = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
+                auto it = m_peerStates.find(senderPeer);
+                if (it == m_peerStates.end()) {
+                    PruneInactivePeerStatesLocked(now);
+                    if (m_peerStates.size() >= REFIX_MAX_CONCURRENT_PEER_STATES) {
+                        return; // Reject: peer state capacity reached
+                    }
+                    it = m_peerStates.emplace(senderPeer, PeerReliabilityState{}).first;
+                    it->second.lastReceivedTime = now;
+                }
+                auto& state = it->second;
+                state.lastReceivedTime = now;
                 state.timedOut = false;
 
                 uint32_t seq = hdr->sequence;
@@ -546,9 +567,13 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 for (auto& rawPkt : readyToProcess) {
                     if ((rawPkt.flags & FLAG_FRAGMENT) == 0) {
                         // Unfragmented complete message
-                        {
+                        if (!m_listener) {
                             std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                            m_inboundQueue.push_back(rawPkt);
+                            if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                                m_inboundQueue.push_back(rawPkt);
+                            } else {
+                                m_inboundQueueDroppedPackets.fetch_add(1);
+                            }
                         }
                         packetsToNotify.push_back(std::move(rawPkt));
                     } else {
@@ -667,9 +692,13 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                             }
                             ReleaseReassemblyContextLocked(it);
 
-                            {
+                            if (!m_listener) {
                                 std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-                                m_inboundQueue.push_back(fullMsg);
+                                if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                                    m_inboundQueue.push_back(fullMsg);
+                                } else {
+                                    m_inboundQueueDroppedPackets.fetch_add(1);
+                                }
                             }
                             packetsToNotify.push_back(std::move(fullMsg));
                         }
@@ -701,9 +730,13 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         pkt.fragTotal = 1;
         pkt.payload.assign(payload, payload + payloadLen);
 
-        {
+        if (!m_listener) {
             std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
-            m_inboundQueue.push_back(pkt);
+            if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
+                m_inboundQueue.push_back(pkt);
+            } else {
+                m_inboundQueueDroppedPackets.fetch_add(1);
+            }
         }
         if (m_listener) m_listener->OnInboundData(pkt);
     }
@@ -792,6 +825,9 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
                 }
             }
         }
+
+        // Clean up inactive/timed out peer states with no pending ARQ or reassembly
+        PruneInactivePeerStatesLocked(now);
     }
 
     if (m_listener) {
@@ -835,8 +871,10 @@ bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size
                    static_cast<int>(buffer.size()), 0,
                    reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
         };
-        // 1. Multicast Group (239.255.71.84)
-        sendToTarget(0xEFff4754);
+        // 1. Multicast Group (239.255.71.84) - ONLY when multicast group successfully joined!
+        if (m_multicastJoined) {
+            sendToTarget(0xEFff4754);
+        }
         // 2. Limited Broadcast (255.255.255.255)
         sendToTarget(0xFFFFFFFF);
         // 3. Localhost (127.0.0.1)
@@ -1005,7 +1043,17 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
     }
 
     std::lock_guard<std::mutex> lock(m_stateMutex);
-    auto& state = m_peerStates[targetPeer];
+    auto now = std::chrono::steady_clock::now();
+    auto it = m_peerStates.find(targetPeer);
+    if (it == m_peerStates.end()) {
+        PruneInactivePeerStatesLocked(now);
+        if (m_peerStates.size() >= REFIX_MAX_CONCURRENT_PEER_STATES) {
+            return false;
+        }
+        it = m_peerStates.emplace(targetPeer, PeerReliabilityState{}).first;
+        it->second.lastReceivedTime = now;
+    }
+    auto& state = it->second;
 
     sockaddr_in sin{};
     sin.sin_family = AF_INET;
@@ -1248,6 +1296,55 @@ void LanTransport::ResetPeerState(const PeerId& peerId) {
         }
     }
     m_peerReassemblyBytes.erase(peerId);
+}
+
+size_t LanTransport::GetPeerStateCount() const {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    return m_peerStates.size();
+}
+
+size_t LanTransport::GetInboundQueueSize() const {
+    std::lock_guard<std::mutex> lock(m_inboundQueueMutex);
+    return m_inboundQueue.size();
+}
+
+uint64_t LanTransport::GetInboundQueueDroppedCount() const {
+    return m_inboundQueueDroppedPackets.load();
+}
+
+void LanTransport::PruneInactivePeerStatesLocked(std::chrono::steady_clock::time_point now) {
+    for (auto it = m_peerStates.begin(); it != m_peerStates.end(); ) {
+        const auto& peerId = it->first;
+        auto& state = it->second;
+
+        // Condition 1: Must not have pending unacked outbound retransmissions
+        if (!state.unackedOutbound.empty()) {
+            ++it;
+            continue;
+        }
+
+        // Condition 2: Must not have pending out-of-order inbound packets
+        if (!state.outOfOrderInbound.empty()) {
+            ++it;
+            continue;
+        }
+
+        // Condition 3: Must not have active in-flight reassembly sessions
+        if (m_peerReassemblyBytes.find(peerId) != m_peerReassemblyBytes.end()) {
+            ++it;
+            continue;
+        }
+
+        // Condition 4: Termination condition: timed out or idle beyond timeout threshold
+        bool isTimedOut = state.timedOut;
+        bool isIdle = (std::chrono::duration_cast<std::chrono::seconds>(now - state.lastReceivedTime).count() >= static_cast<int64_t>(REFIX_PEER_STATE_IDLE_TIMEOUT_SEC));
+
+        if (isTimedOut || isIdle) {
+            it = m_peerStates.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 } // namespace refix::lan
