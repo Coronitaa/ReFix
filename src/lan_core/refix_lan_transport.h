@@ -27,6 +27,7 @@ struct InboundPacket {
     uint32_t sessionId = 0;
     uint8_t fragIndex = 0;
     uint8_t fragTotal = 1;
+    uint8_t generationId = 0;
     std::vector<uint8_t> payload;
 };
 
@@ -119,6 +120,9 @@ private:
         uint32_t nextSequenceOut = 1;
         uint32_t nextMessageIdOut = 1;
         uint32_t expectedSequenceIn = 1;
+        uint8_t  localGeneration = 1;
+        uint8_t  remoteGeneration = 0;
+        bool     hasRemoteGeneration = false;
         bool timedOut = false;
         bool isRegisteredPeer = false;
         std::map<uint32_t, InboundPacket> outOfOrderInbound;
@@ -160,8 +164,10 @@ private:
     void EvictOldestReassemblyContextLocked(const PeerId* preferredPeer = nullptr);
     void ReleaseReassemblyContextLocked(std::map<std::pair<PeerId, uint32_t>, FragmentAssembler>::iterator it);
     void ReleaseReassemblyMemoryLocked(const PeerId& peerId, size_t bytes);
+    void CleanupPeerReassemblyLocked(const PeerId& peerId);
 
     std::atomic<bool> m_running{false};
+    std::atomic<uint8_t> m_localGenerationCounter{1};
     bool m_multicastJoined = false;
     bool m_simulateMulticastFailure = false;
     uint16_t m_discoveryPort = 47584;

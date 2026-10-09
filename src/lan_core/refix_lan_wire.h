@@ -62,7 +62,7 @@ struct WireHeader {
     uint8_t  channel;        // 0: Signaling, 1: Game, 2: Voice, etc.
     uint8_t  fragIndex;      // 0-indexed fragment
     uint8_t  fragTotal;      // Total fragments (1 if unfragmented)
-    uint8_t  reserved;       // 0
+    uint8_t  generationId;   // Generation / session incarnation identifier (was reserved)
     uint32_t sequence;       // Sequence number for reliable data
     uint32_t ack;            // Cumulative acknowledged sequence
     uint32_t sackMask;       // 32-bit Selective ACK bitmask

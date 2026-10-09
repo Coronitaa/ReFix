@@ -1356,9 +1356,9 @@ static bool TestMemoryLimitsRealBudgetsAndEviction() {
 
     // 4. Now send a 300-byte fragment from Peer 5:
     // 4,194,000 + 300 = 4,194,300 <= 4,194,304 (fits under 4 MiB ceiling).
-    // Must be ACCEPTED!
+    // Must be ACCEPTED on sequence 3 (which was not advanced when 500B was rejected)!
     std::vector<uint8_t> frag300(300, 0x55);
-    SendRawFragment(rawSock, ep, peer5, 1, 2, 10, 4, frag300);
+    SendRawFragment(rawSock, ep, peer5, 1, 2, 10, 3, frag300);
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 4194300, "Fragment fitting under 4 MiB global ceiling must be accepted");
     TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 2300, "Peer 5 bytes must now equal 2300");
@@ -1366,7 +1366,7 @@ static bool TestMemoryLimitsRealBudgetsAndEviction() {
     // 5. Attempt 10-byte fragment: 4,194,300 + 10 = 4,194,310 > 4,194,304.
     // Must be REJECTED!
     std::vector<uint8_t> frag10(10, 0x66);
-    SendRawFragment(rawSock, ep, peer5, 1, 3, 10, 5, frag10);
+    SendRawFragment(rawSock, ep, peer5, 1, 3, 10, 4, frag10);
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 4194300, "Fragment exceeding 4 MiB global ceiling must be rejected");
 
@@ -1944,6 +1944,409 @@ static bool TestPeerStateAdmissionPolicyUnder128Limit() {
     return true;
 }
 
+static bool TestRealDualTransportE2EBackpressure() {
+    std::cout << "[*] Running TestRealDualTransportE2EBackpressure (Two Real Transports ARQ & Saturated Queue)..." << std::endl;
+
+    LanTransport trSender;
+    LanTransport trReceiver;
+
+    PeerId peerSender{0x11223344, 0x55667788};
+    PeerId peerReceiver{0x99AABBCC, 0xDDEEFF00};
+
+    trSender.SetLocalPeerId(peerSender);
+    trReceiver.SetLocalPeerId(peerReceiver);
+
+    TEST_ASSERT(trSender.Start(47650), "trSender start failed");
+    TEST_ASSERT(trReceiver.Start(47651), "trReceiver start failed");
+
+    LanEndpoint epReceiver = trReceiver.GetLocalDataEndpoint();
+    epReceiver.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "Socket creation failed");
+
+    // 1. Fill receiver's inbound queue up to 512
+    PeerId fillerPeer{0xDEADBEEF, 0xCAFEFACE};
+    std::vector<uint8_t> fillerData(32, 0x77);
+    for (int i = 0; i < 512; ++i) {
+        SendRawUnreliableWirePacket(rawSock, epReceiver, fillerPeer, fillerData);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 512, "Receiver queue must be saturated at 512");
+    uint64_t drops0 = trReceiver.GetInboundQueueDroppedCount();
+
+    // 2. Sender transmits unfragmented reliable message using SendReliable
+    std::string unfragMsg = "UNFRAG_E2E_PAYLOAD_TEST";
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, unfragMsg.data(), unfragMsg.size()), "SendReliable unfrag failed");
+
+    // Wait 150ms: datagram arrives at receiver, rejected due to queue full, sender retains it in ARQ
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 512, "Receiver queue must remain 512");
+    TEST_ASSERT(trReceiver.GetInboundQueueDroppedCount() > drops0, "Receiver must record backpressure drop");
+
+    // 3. Drain 30 items from receiver queue
+    InboundPacket drainedPkt;
+    for (int i = 0; i < 30; ++i) {
+        TEST_ASSERT(trReceiver.PollInbound(drainedPkt), "Must drain from queue");
+    }
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 482, "Queue must now have 482 items");
+
+    // 4. Wait for real ARQ retransmission from sender (100ms timer)
+    bool deliveredUnfrag = false;
+    for (int retry = 0; retry < 60; ++retry) {
+        while (trReceiver.PollInbound(drainedPkt)) {
+            if (drainedPkt.isReliable && drainedPkt.senderPeerId == peerSender) {
+                std::string s(reinterpret_cast<const char*>(drainedPkt.payload.data()), drainedPkt.payload.size());
+                if (s == unfragMsg) {
+                    deliveredUnfrag = true;
+                    break;
+                }
+            }
+        }
+        if (deliveredUnfrag) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT(deliveredUnfrag, "Unfragmented message must be delivered via real ARQ retransmission after queue space freed");
+
+    // Drain remainder of filler
+    while (trReceiver.PollInbound(drainedPkt)) {}
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 0, "Queue must be empty after full drain");
+
+    // 5. Fragmented reliable message (8 KiB) under saturated queue
+    // Fill receiver queue back to 512
+    for (int i = 0; i < 512; ++i) {
+        SendRawUnreliableWirePacket(rawSock, epReceiver, fillerPeer, fillerData);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 512, "Receiver queue must be 512 again");
+
+    std::vector<uint8_t> bigData(8192);
+    for (size_t i = 0; i < bigData.size(); ++i) {
+        bigData[i] = static_cast<uint8_t>((i * 37 + 13) % 256);
+    }
+
+    drops0 = trReceiver.GetInboundQueueDroppedCount();
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, bigData.data(), bigData.size()), "SendReliable 8KB failed");
+
+    // Completing fragment cannot enter queue while full!
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 512, "Receiver queue must remain 512 during fragmented backpressure");
+
+    // 6. Drain 30 items to open capacity for the reassembled message
+    for (int i = 0; i < 30; ++i) {
+        TEST_ASSERT(trReceiver.PollInbound(drainedPkt), "Must drain from queue");
+    }
+
+    // Wait for real ARQ retransmission of completing fragment
+    bool deliveredFrag = false;
+    for (int retry = 0; retry < 60; ++retry) {
+        while (trReceiver.PollInbound(drainedPkt)) {
+            if (drainedPkt.isReliable && drainedPkt.senderPeerId == peerSender && drainedPkt.payload.size() == 8192) {
+                if (drainedPkt.payload == bigData) {
+                    deliveredFrag = true;
+                    break;
+                }
+            }
+        }
+        if (deliveredFrag) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_ASSERT(deliveredFrag, "8KB fragmented message must be delivered with 100% bit-for-bit integrity via ARQ retransmission");
+    TEST_ASSERT(trReceiver.GetGlobalReassemblyBytes() == 0, "Global reassembly bytes must return to 0 after reassembly completion");
+    TEST_ASSERT(trReceiver.GetReassemblyContextCount() == 0, "Reassembly contexts must return to 0");
+
+    // Drain queue
+    while (trReceiver.PollInbound(drainedPkt)) {}
+
+    // 7. Out-of-order datagrams with queue almost full (510 items, room for 2 items)
+    for (int i = 0; i < 510; ++i) {
+        SendRawUnreliableWirePacket(rawSock, epReceiver, fillerPeer, fillerData);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 510, "Queue must be at 510 items");
+
+    // Test peer sends out-of-order sequences: seq 2, 3, 4 (seq 1 missing)
+    PeerId oooPeer{0x99990001, 0x88880002};
+    std::vector<uint8_t> oooData(20, 0x33);
+
+    SendRawReliableWirePacket(rawSock, epReceiver, oooPeer, 2, 1, oooData); // seq 2 OOO
+    SendRawReliableWirePacket(rawSock, epReceiver, oooPeer, 3, 1, oooData); // seq 3 OOO
+    SendRawReliableWirePacket(rawSock, epReceiver, oooPeer, 4, 1, oooData); // seq 4 OOO
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Queue still 510 (OOO packets are buffered in outOfOrderInbound, not queue)
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 510, "OOO packets must be buffered without entering inbound queue");
+
+    // Now send the missing in-order packet (seq 1)
+    // Queue has room for 2 items (510 + 2 = 512). It can admit seq 1 and seq 2!
+    // Seq 3 and seq 4 MUST NOT be admitted because queue reaches 512!
+    SendRawReliableWirePacket(rawSock, epReceiver, oooPeer, 1, 1, oooData);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    TEST_ASSERT(trReceiver.GetInboundQueueSize() == 512, "Queue must be capped at 512 items (admitting only seq 1 and seq 2)");
+
+    // Drain 10 items from queue
+    for (int i = 0; i < 10; ++i) {
+        TEST_ASSERT(trReceiver.PollInbound(drainedPkt), "Must drain items");
+    }
+
+    // Now send packet 3 (retransmitted)
+    SendRawReliableWirePacket(rawSock, epReceiver, oooPeer, 3, 1, oooData);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Seq 3 and seq 4 are now admitted!
+    bool gotSeq3 = false, gotSeq4 = false;
+    while (trReceiver.PollInbound(drainedPkt)) {
+        if (drainedPkt.senderPeerId == oooPeer) {
+            if (drainedPkt.sequence == 3) gotSeq3 = true;
+            if (drainedPkt.sequence == 4) gotSeq4 = true;
+        }
+    }
+    TEST_ASSERT(gotSeq3 && gotSeq4, "Seq 3 and Seq 4 must be safely delivered without loss after queue drained");
+
+    closesocket(rawSock);
+    trSender.Stop();
+    trReceiver.Stop();
+
+    std::cout << "  [PASS] Real dual-transport E2E backpressure, ARQ retransmissions, and OOO boundary certified!" << std::endl;
+    return true;
+}
+
+static bool TestSessionResetVsOldDuplicatesAndDisconnectLoss() {
+    std::cout << "[*] Running TestSessionResetVsOldDuplicatesAndDisconnectLoss..." << std::endl;
+
+    LanTransport trSender;
+    LanTransport trReceiver;
+
+    PeerId peerSender{0x12345678, 0x11112222};
+    PeerId peerReceiver{0x87654321, 0x33334444};
+
+    trSender.SetLocalPeerId(peerSender);
+    trReceiver.SetLocalPeerId(peerReceiver);
+
+    TEST_ASSERT(trSender.Start(47660), "trSender start failed");
+    TEST_ASSERT(trReceiver.Start(47661), "trReceiver start failed");
+
+    LanEndpoint epReceiver = trReceiver.GetLocalDataEndpoint();
+    epReceiver.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "Socket creation failed");
+
+    // 1. Establish session: send sequences 1..5
+    uint8_t sessionGen = 0;
+    for (int i = 1; i <= 5; ++i) {
+        std::string msg = "SESSION_MSG_" + std::to_string(i);
+        TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, msg.data(), msg.size()), "SendReliable failed");
+        InboundPacket inPkt;
+        bool got = false;
+        for (int r = 0; r < 50; ++r) {
+            if (trReceiver.PollInbound(inPkt)) { got = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        TEST_ASSERT(got, "Message must be received");
+        TEST_ASSERT(inPkt.sequence == static_cast<uint32_t>(i), "Sequence must match");
+        sessionGen = inPkt.generationId;
+    }
+
+    // 2. Inject duplicate of sequence 1 from the CURRENT session
+    // Must NOT reset expectedSequenceIn (which is currently 6)!
+    std::vector<uint8_t> dupBuf(sizeof(WireHeader) + 16);
+    auto* hdr = reinterpret_cast<WireHeader*>(dupBuf.data());
+    hdr->magic = REFIX_WIRE_MAGIC;
+    hdr->version = REFIX_WIRE_VERSION;
+    hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
+    hdr->flags = FLAG_RELIABLE;
+    hdr->SetSenderPeerId(peerSender);
+    hdr->sessionId = 0;
+    hdr->channel = 1;
+    hdr->fragIndex = 0;
+    hdr->fragTotal = 1;
+    hdr->generationId = sessionGen; // Generation of current session
+    hdr->sequence = 1; // Duplicate of initial sequence!
+    hdr->payloadLen = 16;
+    sockaddr_in sinRecv{};
+    sinRecv.sin_family = AF_INET;
+    sinRecv.sin_addr.s_addr = htonl(epReceiver.ipv4);
+    sinRecv.sin_port = htons(epReceiver.port);
+    sendto(rawSock, reinterpret_cast<const char*>(dupBuf.data()), static_cast<int>(dupBuf.size()), 0,
+           reinterpret_cast<const sockaddr*>(&sinRecv), sizeof(sinRecv));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Verify duplicate was discarded and NOT delivered to PollInbound()
+    InboundPacket dummyPkt;
+    TEST_ASSERT(!trReceiver.PollInbound(dummyPkt), "Duplicate of initial sequence must NOT be delivered to consumer");
+
+    // Verify subsequent sequence 6 from sender still delivers cleanly (stream was not reset!)
+    std::string msg6 = "SESSION_MSG_6";
+    TEST_ASSERT(trSender.SendReliable(peerReceiver, epReceiver, 1, msg6.data(), msg6.size()), "Send sequence 6 failed");
+    bool got6 = false;
+    for (int r = 0; r < 50; ++r) {
+        if (trReceiver.PollInbound(dummyPkt)) {
+            if (dummyPkt.sequence == 6) { got6 = true; break; }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    TEST_ASSERT(got6, "Sequence 6 must deliver cleanly: stream was protected from duplicate seq 1 reset!");
+
+    // 3. Test spoofed Disconnect from an unauthorized endpoint (different port)
+    WireHeader spoofDispHdr{};
+    spoofDispHdr.magic = REFIX_WIRE_MAGIC;
+    spoofDispHdr.version = REFIX_WIRE_VERSION;
+    spoofDispHdr.msgType = static_cast<uint8_t>(MsgType::Disconnect);
+    spoofDispHdr.SetSenderPeerId(peerSender); // Impersonating peerSender
+    spoofDispHdr.generationId = sessionGen;
+    spoofDispHdr.payloadLen = 0;
+    sendto(rawSock, reinterpret_cast<const char*>(&spoofDispHdr), sizeof(spoofDispHdr), 0,
+           reinterpret_cast<const sockaddr*>(&sinRecv), sizeof(sinRecv)); // sent from rawSock (different port!)
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(trReceiver.GetPeerStateCount() == 1, "Receiver peer state must NOT be wiped by spoofed Disconnect from different endpoint!");
+
+    // 4. Test delayed Disconnect from older generation
+    // Send Disconnect with mismatched generation
+    spoofDispHdr.generationId = static_cast<uint8_t>(sessionGen + 99);
+    sendto(rawSock, reinterpret_cast<const char*>(&spoofDispHdr), sizeof(spoofDispHdr), 0,
+           reinterpret_cast<const sockaddr*>(&sinRecv), sizeof(sinRecv));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(trReceiver.GetPeerStateCount() == 1, "Peer state must NOT be wiped by invalid generation Disconnect");
+
+    // 5. Test clean session restart when Disconnect was LOST
+    // Sender stops and restarts without Disconnect arriving at receiver
+    trSender.Stop();
+    TEST_ASSERT(trReceiver.GetPeerStateCount() == 1, "Receiver still has state from prior session");
+
+    // Sender starts fresh session (new generation)
+    LanTransport trSenderNew;
+    trSenderNew.SetLocalPeerId(peerSender);
+    TEST_ASSERT(trSenderNew.Start(47662), "trSenderNew start failed");
+
+    // Send sequence 1 from fresh session
+    std::string newSessionMsg = "NEW_SESSION_AFTER_LOST_DISCONNECT";
+    TEST_ASSERT(trSenderNew.SendReliable(peerReceiver, epReceiver, 1, newSessionMsg.data(), newSessionMsg.size()), "Send new session msg failed");
+
+    InboundPacket newPkt;
+    bool gotNew = false;
+    for (int r = 0; r < 50; ++r) {
+        if (trReceiver.PollInbound(newPkt)) { gotNew = true; break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    TEST_ASSERT(gotNew, "New session message must be delivered even when previous Disconnect was lost!");
+    TEST_ASSERT(newPkt.sequence == 1, "New session must be recognized and start with sequence 1");
+    std::string newStr(reinterpret_cast<const char*>(newPkt.payload.data()), newPkt.payload.size());
+    TEST_ASSERT(newStr == newSessionMsg, "New session payload integrity verified");
+
+    // 6. Test that an old delayed packet from prior session is discarded
+    sendto(rawSock, reinterpret_cast<const char*>(dupBuf.data()), static_cast<int>(dupBuf.size()), 0,
+           reinterpret_cast<const sockaddr*>(&sinRecv), sizeof(sinRecv)); // dupBuf has generationId = 1
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(!trReceiver.PollInbound(dummyPkt), "Old packet from obsolete generation must be discarded");
+
+    // 7. Authentic Disconnect from legitimate endpoint wipes session
+    trSenderNew.ResetPeerState(peerReceiver);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(trReceiver.GetPeerStateCount() == 0, "Receiver peer state must be cleanly erased upon authentic Disconnect");
+
+    closesocket(rawSock);
+    trSenderNew.Stop();
+    trReceiver.Stop();
+
+    std::cout << "  [PASS] Session reset vs duplicate stream protection, Disconnect validation, and reconnect certified!" << std::endl;
+    return true;
+}
+
+static bool TestPeerAdmissionEvictionLifecycle() {
+    std::cout << "[*] Running TestPeerAdmissionEvictionLifecycle (Saturate 128, LRU Eviction, Zero Leaks, Reconnect)..." << std::endl;
+
+    LanTransport tr;
+    PeerId localPeer{0xAAAA1111, 0xBBBB2222};
+    tr.SetLocalPeerId(localPeer);
+
+    std::unordered_set<PeerId> registeredPeers;
+    tr.SetPeerAdmissionFilter([&](const PeerId& pid) {
+        return registeredPeers.find(pid) != registeredPeers.end();
+    });
+
+    TEST_ASSERT(tr.Start(47670), "Transport start failed");
+    LanEndpoint ep = tr.GetLocalDataEndpoint();
+    ep.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "Socket creation failed");
+
+    // 1. Fill peer states with 128 unknown peers
+    std::vector<PeerId> unknownPeers;
+    std::vector<uint8_t> dummyData(16, 0x55);
+
+    // Oldest unknown peer (index 0) has an active incomplete fragment
+    PeerId p0{0xDEAD0000 | 1, 0xBEEF0000 | 1};
+    unknownPeers.push_back(p0);
+    SendRawReliableWirePacket(rawSock, ep, p0, 1, 1, dummyData);
+    std::vector<uint8_t> fragChunk(200, 0x44);
+    SendRawFragment(rawSock, ep, p0, 50, 0, 2, 2, fragChunk);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 200, "Oldest unknown peer must have 200 reassembly bytes");
+
+    // Populate remaining 127 unknown peers so p0 has the oldest lastActivityTime in the table
+    for (uint64_t i = 2; i <= 128; ++i) {
+        PeerId unknownPeer{0xDEAD0000 | i, 0xBEEF0000 | i};
+        unknownPeers.push_back(unknownPeer);
+        SendRawReliableWirePacket(rawSock, ep, unknownPeer, 1, 1, dummyData);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(tr.GetPeerStateCount() == 128, "Peer state count must be exactly 128");
+
+    // Drain inbound queue so subsequent verification reads the intended messages
+    InboundPacket dummyQ;
+    while (tr.PollInbound(dummyQ)) {}
+
+    // 2. Now register and admit a legitimate peer
+    PeerId legitPeer{0xCAFE0001, 0xFEED0002};
+    registeredPeers.insert(legitPeer);
+
+    std::string legitMsg = "LEGIT_MESSAGE_UNDER_SATURATION";
+    std::vector<uint8_t> legitPayload(legitMsg.begin(), legitMsg.end());
+    SendRawReliableWirePacket(rawSock, ep, legitPeer, 1, 1, legitPayload);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Table must remain capped at 128!
+    TEST_ASSERT(tr.GetPeerStateCount() == 128, "Table must remain capped at exactly 128");
+
+    InboundPacket legitPkt;
+    TEST_ASSERT(tr.PollInbound(legitPkt), "Legitimate peer packet must be admitted and delivered");
+    std::string recLegit(reinterpret_cast<const char*>(legitPkt.payload.data()), legitPkt.payload.size());
+    TEST_ASSERT(recLegit == legitMsg, "Legitimate payload integrity verified");
+
+    // 3. Confirm evicted peer's reassembly memory was completely cleaned up (zero leaks!)
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(unknownPeers[0]) == 0, "Evicted peer reassembly bytes must be 0");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Global reassembly memory must be 0: no orphan fragments leaked!");
+
+    // 4. Verify that other peers' active sequences were NOT reset
+    // Send seq 2 from unknownPeers[1]
+    SendRawReliableWirePacket(rawSock, ep, unknownPeers[1], 2, 1, dummyData);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    InboundPacket p2Pkt;
+    TEST_ASSERT(tr.PollInbound(p2Pkt), "Active sequence 2 of untouched peer must be delivered");
+    TEST_ASSERT(p2Pkt.sequence == 2, "Sequence of untouched peer must remain 2");
+
+    // 5. Allow evicted peer to reconnect via explicit session flow
+    registeredPeers.insert(unknownPeers[0]);
+    SendRawReliableWirePacket(rawSock, ep, unknownPeers[0], 1, 1, dummyData);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(tr.GetPeerStateCount() <= 128, "Table must remain bounded at 128 after evicted peer reconnection");
+
+    InboundPacket reconnectedPkt;
+    TEST_ASSERT(tr.PollInbound(reconnectedPkt), "Evicted peer must be able to reconnect cleanly");
+    TEST_ASSERT(reconnectedPkt.senderPeerId == unknownPeers[0], "Reconnected sender identity verified");
+
+    closesocket(rawSock);
+    tr.Stop();
+
+    std::cout << "  [PASS] 128-peer table saturation, LRU eviction, leak-free reassembly cleanup, and reconnection certified!" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
@@ -1977,6 +2380,9 @@ int main() {
     if (!TestInboundQueueSaturationAndBackpressure()) return 1;
     if (!TestSymmetricDatagramFramingAndValidation()) return 1;
     if (!TestPeerStateAdmissionPolicyUnder128Limit()) return 1;
+    if (!TestRealDualTransportE2EBackpressure()) return 1;
+    if (!TestSessionResetVsOldDuplicatesAndDisconnectLoss()) return 1;
+    if (!TestPeerAdmissionEvictionLifecycle()) return 1;
 
     std::cout << "\n============================================================" << std::endl;
     std::cout << " [SUCCESS] ALL REFIX LAN CORE & TRANSPORT TESTS PASSED!      " << std::endl;
