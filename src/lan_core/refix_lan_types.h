@@ -76,6 +76,16 @@ struct LanEndpoint {
         return std::string(buf);
     }
 
+    std::string ToIpString() const {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                 (ipv4 >> 24) & 0xFF,
+                 (ipv4 >> 16) & 0xFF,
+                 (ipv4 >> 8) & 0xFF,
+                 ipv4 & 0xFF);
+        return std::string(buf);
+    }
+
     static LanEndpoint Parse(std::string_view hostPort) {
         size_t colon = hostPort.find(':');
         if (colon == std::string_view::npos) return {};

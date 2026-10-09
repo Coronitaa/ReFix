@@ -34,6 +34,7 @@
 #include "include/steam/steam_api.h"
 #include "lan_core/refix_lan_types.h"
 #include "lan_core/refix_lan_core.h"
+#include "steam_lobby_mapping.h"
 
 static void SigAbortHandler(int sig) {
     fprintf(stderr, "\n[CRASH INTERCEPTED] SIGABRT received! Stack trace:\n");
@@ -60,7 +61,13 @@ typedef void (*fn_SteamAPI_RunCallbacks)();
 typedef void* (*fn_SteamAPI_SteamMatchmaking_v009)();
 typedef void* (*fn_SteamAPI_SteamNetworking_v006)();
 typedef void* (*fn_SteamAPI_SteamUser_v021)();
+typedef void* (*fn_SteamAPI_SteamUtils_v010)();
 typedef void* (*fn_ReFix_GetLanCore)();
+typedef uint64_t (*fn_ReFix_Test_EnsureSteamLobbyID)(const char* coreLobbyId, uint64_t fallbackId);
+typedef void (*fn_ReFix_Test_ResetLobbyMappings)();
+typedef size_t (*fn_ReFix_Test_GetLobbyMappingCount)();
+typedef bool (*fn_ReFix_Test_HasLobby)(uint64_t steamLobbyId);
+typedef bool (*fn_SteamAPI_IsAPICallCompleted)(uint64_t hAPICall, bool* pbFailed);
 
 static HMODULE LoadSteamDll() {
     HMODULE hSteam = LoadLibraryA("bin\\steam_api64.dll");
@@ -84,17 +91,45 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     auto pfnShutdown = (fn_SteamAPI_Shutdown)GetProcAddress(hSteam, "SteamAPI_Shutdown");
     auto pfnRunCallbacks = (fn_SteamAPI_RunCallbacks)GetProcAddress(hSteam, "SteamAPI_RunCallbacks");
     auto pfnGetMatchmaking = (fn_SteamAPI_SteamMatchmaking_v009)GetProcAddress(hSteam, "SteamAPI_SteamMatchmaking_v009");
+    auto pfnGetUtils = (fn_SteamAPI_SteamUtils_v010)GetProcAddress(hSteam, "SteamAPI_SteamUtils_v010");
     auto pfnGetLanCore = (fn_ReFix_GetLanCore)GetProcAddress(hSteam, "ReFix_GetLanCore");
+    auto pfnEnsureLobby = (fn_ReFix_Test_EnsureSteamLobbyID)GetProcAddress(hSteam, "ReFix_Test_EnsureSteamLobbyID");
+    auto pfnResetMappings = (fn_ReFix_Test_ResetLobbyMappings)GetProcAddress(hSteam, "ReFix_Test_ResetLobbyMappings");
+    auto pfnGetMappingCount = (fn_ReFix_Test_GetLobbyMappingCount)GetProcAddress(hSteam, "ReFix_Test_GetLobbyMappingCount");
+    auto pfnHasLobby = (fn_ReFix_Test_HasLobby)GetProcAddress(hSteam, "ReFix_Test_HasLobby");
 
-    if (!pfnInit || !pfnShutdown || !pfnRunCallbacks || !pfnGetLanCore) {
+    if (!pfnInit || !pfnShutdown || !pfnRunCallbacks || !pfnGetLanCore ||
+        !pfnGetUtils || !pfnEnsureLobby || !pfnResetMappings || !pfnGetMappingCount || !pfnHasLobby) {
         std::cerr << "[FAIL] Required exports missing from steam_api64.dll" << std::endl;
         return false;
     }
+
+    // 1. Production EnsureSteamLobbyID direct certification
+    pfnResetMappings();
+    uint64_t alphaSteamId = pfnEnsureLobby("core_lobby_alpha", 0);
+    TEST_ASSERT(alphaSteamId != 0, "Normal EnsureSteamLobbyID registration must succeed");
+    TEST_ASSERT(pfnGetMappingCount() == 1, "Mapping count must be 1");
+
+    uint64_t alphaSteamIdRepeat = pfnEnsureLobby("core_lobby_alpha", 0);
+    TEST_ASSERT(alphaSteamIdRepeat == alphaSteamId, "Repeated registration must return same SteamID");
+    TEST_ASSERT(pfnGetMappingCount() == 1, "Mapping count must stay 1");
+
+    // Forced collision: map "core_lobby_beta" with explicit fallbackId == alphaSteamId
+    uint64_t collisionId = pfnEnsureLobby("core_lobby_beta", alphaSteamId);
+    TEST_ASSERT(collisionId == 0, "Forced collision must return 0");
+    TEST_ASSERT(pfnGetMappingCount() == 1, "Mapping count must remain 1 after rejected collision");
+    TEST_ASSERT(pfnEnsureLobby("core_lobby_alpha", 0) == alphaSteamId, "Alpha mapping must remain preserved");
+
+    pfnResetMappings();
+    TEST_ASSERT(pfnGetMappingCount() == 0, "Mappings reset must clear map");
 
     if (!pfnInit()) {
         std::cerr << "[FAIL] SteamAPI_Init returned false!" << std::endl;
         return false;
     }
+
+    auto* pUtils = static_cast<ISteamUtils*>(pfnGetUtils());
+    TEST_ASSERT(pUtils != nullptr, "ISteamUtils must be valid");
 
     auto* core = static_cast<refix::lan::ILanCore*>(pfnGetLanCore());
     if (!core) {
@@ -117,11 +152,21 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
 
     pfnRunCallbacks();
 
+    bool bCallFailed = false;
+    bool isCompleted = pUtils->IsAPICallCompleted(hCreateCall, &bCallFailed);
+    TEST_ASSERT(isCompleted && !bCallFailed, "CreateLobby API call must succeed and not fail");
+
+    LobbyCreated_t crCreated = {};
+    bool gotCr = pUtils->GetAPICallResult(hCreateCall, &crCreated, sizeof(crCreated), LobbyCreated_t::k_iCallback, &bCallFailed);
+    TEST_ASSERT(gotCr && crCreated.m_eResult == k_EResultOK, "LobbyCreated_t must indicate k_EResultOK");
+    TEST_ASSERT(crCreated.m_ulSteamIDLobby != 0, "LobbyCreated_t steam lobby ID must be non-zero");
+
     auto knownLobbies = core->Lobby().GetAllKnownLobbies();
     TEST_ASSERT(!knownLobbies.empty(), "LanCore must contain created lobby");
 
     CSteamID steamLobbyId = pMatchmaking->GetLobbyByIndex(0);
     TEST_ASSERT(steamLobbyId.ConvertToUint64() != 0, "GetLobbyByIndex returned 0");
+    TEST_ASSERT(steamLobbyId.ConvertToUint64() == crCreated.m_ulSteamIDLobby, "Lobby ID must match callback ID");
     TEST_ASSERT(steamLobbyId.IsValid(), "Created lobby CSteamID must return IsValid() == true");
     TEST_ASSERT(steamLobbyId.IsLobby(), "Created lobby CSteamID must return IsLobby() == true");
     TEST_ASSERT(steamLobbyId.GetEUniverse() == k_EUniversePublic, "Lobby universe must equal k_EUniversePublic (1)");
@@ -134,6 +179,38 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
 
     const char* mapVal = pMatchmaking->GetLobbyData(steamLobbyId, "MapName");
     TEST_ASSERT(strcmp(mapVal, "de_dust2") == 0, "GetLobbyData('MapName') must equal 'de_dust2'");
+
+    // 2. Test CreateLobby Collision Propagation & Rollback
+    // In refix_lan_core, the next lobby created will be "LOBBY_<localPeer>_2"
+    std::string collidingCoreId = "LOBBY_" + localPeer.ToString() + "_2";
+    uint64_t targetSteamId = refix::steam::ComputeLobbySteamID(collidingCoreId);
+
+    // Pre-register blocker with targetSteamId for a different core lobby
+    uint64_t blockerId = pfnEnsureLobby("pre_existing_blocker", targetSteamId);
+    TEST_ASSERT(blockerId == targetSteamId, "Pre-registering blocker lobby must succeed");
+
+    // Now call CreateLobby: LanCore creates "LOBBY_<localPeer>_2", EnsureSteamLobbyID detects collision with blocker and returns 0!
+    SteamAPICall_t hCollidingCall = pMatchmaking->CreateLobby(k_ELobbyTypePublic, 4);
+    TEST_ASSERT(hCollidingCall != 0, "CreateLobby must return call handle even on internal collision");
+
+    pfnRunCallbacks();
+
+    bool bCollFailed = false;
+    bool collCompleted = pUtils->IsAPICallCompleted(hCollidingCall, &bCollFailed);
+    TEST_ASSERT(collCompleted, "Colliding CreateLobby call must be completed");
+    TEST_ASSERT(bCollFailed, "Colliding CreateLobby call must report failure (bFailed == true)");
+
+    LobbyCreated_t crFailResult = {};
+    pUtils->GetAPICallResult(hCollidingCall, &crFailResult, sizeof(crFailResult), LobbyCreated_t::k_iCallback, &bCollFailed);
+    TEST_ASSERT(crFailResult.m_eResult == k_EResultFail, "Colliding CreateLobby must return k_EResultFail");
+    TEST_ASSERT(crFailResult.m_ulSteamIDLobby == 0, "Colliding CreateLobby must return lobby ID 0");
+
+    TEST_ASSERT(!pfnHasLobby(0), "g_lobbies must never contain entry for ID 0");
+    TEST_ASSERT(!core->Lobby().GetLobby(collidingCoreId).has_value(), "LanCore colliding lobby must be rolled back and destroyed");
+
+    // Confirm original lobby is unaffected
+    CSteamID survivingLobby = pMatchmaking->GetLobbyByIndex(0);
+    TEST_ASSERT(survivingLobby == steamLobbyId, "Original lobby must remain intact at index 0");
 
     pfnShutdown();
     std::cout << "  [PASS] Standalone Adapter Unit Tests & Canonical CSteamID certified." << std::endl;

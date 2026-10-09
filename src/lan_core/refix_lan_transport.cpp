@@ -261,9 +261,27 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     struct ip_mreq mreq{};
     mreq.imr_multiaddr.s_addr = inet_addr("239.255.71.84");
     mreq.imr_interface.s_addr = htonl(m_localDataEndpoint.ipv4);
-    if (setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == SOCKET_ERROR) {
+
+    m_multicastJoined = false;
+    int mcastErr = 0;
+    if (setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0) {
+        m_multicastJoined = true;
+        printf("[LanTransport] Multicast membership established on interface %s for group 239.255.71.84 (port %u)\n",
+               m_localDataEndpoint.ToIpString().c_str(), m_discoveryPort);
+    } else {
+        mcastErr = WSAGetLastError();
+        // Fallback attempt to INADDR_ANY
         mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-        setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
+        if (setsockopt(m_groupSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0) {
+            m_multicastJoined = true;
+            printf("[LanTransport] Multicast membership established on INADDR_ANY fallback (iface err %d) for group 239.255.71.84 (port %u)\n",
+                   mcastErr, m_discoveryPort);
+        } else {
+            int fallbackErr = WSAGetLastError();
+            m_multicastJoined = false;
+            printf("[LanTransport] Multicast membership FAILED on interface %s (err %d) and INADDR_ANY (err %d). Continuing in degraded broadcast-only discovery mode on port %u\n",
+                   m_localDataEndpoint.ToIpString().c_str(), mcastErr, fallbackErr, m_discoveryPort);
+        }
     }
 
     u_long nonblock = 1;
@@ -278,6 +296,8 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     }
 
     setsockopt(m_dataSocket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&bcast), sizeof(bcast));
+    int rcvBufSize = 4 * 1024 * 1024;
+    setsockopt(m_dataSocket, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&rcvBufSize), sizeof(rcvBufSize));
 
     BOOL loop = TRUE;
     setsockopt(m_dataSocket, IPPROTO_IP, IP_MULTICAST_LOOP, reinterpret_cast<const char*>(&loop), sizeof(loop));
@@ -303,10 +323,12 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
         m_localDataEndpoint.port = ntohs(dataSin.sin_port);
     }
 
-    struct in_addr mcastIf{};
-    mcastIf.s_addr = htonl(m_localDataEndpoint.ipv4);
-    setsockopt(m_dataSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
-    setsockopt(m_groupSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
+    if (m_multicastJoined) {
+        struct in_addr mcastIf{};
+        mcastIf.s_addr = htonl(m_localDataEndpoint.ipv4);
+        setsockopt(m_dataSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
+        setsockopt(m_groupSocket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&mcastIf), sizeof(mcastIf));
+    }
 
     ioctlsocket(m_dataSocket, FIONBIO, &nonblock);
 
@@ -489,19 +511,21 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                         state.expectedSequenceIn++;
                     }
                 } else if (seq > state.expectedSequenceIn) {
-                    // Out of order packet, buffer it
-                    InboundPacket pkt;
-                    pkt.senderPeerId = senderPeer;
-                    pkt.senderEndpoint = fromEp;
-                    pkt.channel = hdr->channel;
-                    pkt.isReliable = true;
-                    pkt.sequence = seq;
-                    pkt.flags = hdr->flags;
-                    pkt.sessionId = hdr->sessionId;
-                    pkt.fragIndex = hdr->fragIndex;
-                    pkt.fragTotal = hdr->fragTotal;
-                    pkt.payload.assign(payload, payload + payloadLen);
-                    state.outOfOrderInbound[seq] = std::move(pkt);
+                    // Out of order packet, buffer it (capped at 64 packets to avoid unbounded memory growth)
+                    if (state.outOfOrderInbound.size() < 64) {
+                        InboundPacket pkt;
+                        pkt.senderPeerId = senderPeer;
+                        pkt.senderEndpoint = fromEp;
+                        pkt.channel = hdr->channel;
+                        pkt.isReliable = true;
+                        pkt.sequence = seq;
+                        pkt.flags = hdr->flags;
+                        pkt.sessionId = hdr->sessionId;
+                        pkt.fragIndex = hdr->fragIndex;
+                        pkt.fragTotal = hdr->fragTotal;
+                        pkt.payload.assign(payload, payload + payloadLen);
+                        state.outOfOrderInbound[seq] = std::move(pkt);
+                    }
                 }
 
                 // Build SACK bitmask
@@ -548,16 +572,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                         auto fragKey = std::make_pair(rawPkt.senderPeerId, rawPkt.sessionId);
                         auto it = m_fragmentMap.find(fragKey);
                         if (it == m_fragmentMap.end()) {
-                            // Check global and per-peer memory budgets BEFORE evicting any contexts
-                            size_t chunkLen = rawPkt.payload.size();
-                            auto pIt = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
-                            size_t currentPeerBytes = (pIt != m_peerReassemblyBytes.end()) ? pIt->second : 0;
-                            if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
-                                currentPeerBytes + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
-                                continue;
-                            }
-
-                            // Check per-peer context count
+                            // Check per-peer context count limit (16) and evict oldest if saturated
                             size_t peerContextCount = 0;
                             for (const auto& kv : m_fragmentMap) {
                                 if (kv.first.first == rawPkt.senderPeerId) peerContextCount++;
@@ -566,9 +581,18 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                                 EvictOldestReassemblyContextLocked(&rawPkt.senderPeerId);
                             }
 
-                            // Check global context count
+                            // Check global context count limit (64) and evict oldest if saturated
                             if (m_fragmentMap.size() >= REFIX_MAX_REASSEMBLY_CONTEXTS) {
                                 EvictOldestReassemblyContextLocked(nullptr);
+                            }
+
+                            // Check global and per-peer memory budgets
+                            size_t chunkLen = rawPkt.payload.size();
+                            auto pIt = m_peerReassemblyBytes.find(rawPkt.senderPeerId);
+                            size_t currentPeerBytes = (pIt != m_peerReassemblyBytes.end()) ? pIt->second : 0;
+                            if (m_globalReassemblyBytes + chunkLen > REFIX_MAX_GLOBAL_REASSEMBLY_MEM ||
+                                currentPeerBytes + chunkLen > REFIX_MAX_PEER_REASSEMBLY_MEM) {
+                                continue;
                             }
 
                             FragmentAssembler fa;
@@ -591,6 +615,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                         if (rawPkt.fragTotal != fa.totalFragments ||
                             rawPkt.channel != fa.channel ||
                             rawPkt.isReliable != fa.isReliable) {
+                            // Inconsistent metadata: drop the invalid fragment to prevent corrupting
+                            // or aborting the ongoing legitimate reassembly session.
                             continue;
                         }
 
@@ -1200,6 +1226,13 @@ size_t LanTransport::GetPeerReassemblyBytes(const PeerId& peerId) const {
 size_t LanTransport::GetTrackedPeerReassemblyCount() const {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     return m_peerReassemblyBytes.size();
+}
+
+std::string LanTransport::GetDiscoveryStatus() const {
+    if (m_multicastJoined) {
+        return "Multicast Active (239.255.71.84:" + std::to_string(m_discoveryPort) + ")";
+    }
+    return "Degraded Broadcast-Only (Port " + std::to_string(m_discoveryPort) + ")";
 }
 
 void LanTransport::ResetPeerState(const PeerId& peerId) {

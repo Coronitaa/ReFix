@@ -55,6 +55,7 @@
 #include "network/message_tracker.h"
 #include "lan_core/refix_lan_firewall.h"
 #include "lan_core/refix_lan_core.h"
+#include "steam_lobby_mapping.h"
 
 class CCallbackMgr {
 public:
@@ -502,9 +503,7 @@ namespace UnrealSteamEmu {
 
     static std::map<uint64_t, LobbyInfo> g_lobbies;
 
-    static std::mutex s_steamLobbyMapMutex;
-    static std::unordered_map<std::string, uint64_t> s_coreToSteamLobby;
-    static std::unordered_map<uint64_t, std::string> s_steamToCoreLobby;
+    // Centralized 1:1 bidirectional lobby mapping is managed by refix::steam::SteamLobbyRegistry
 
     struct PendingJoin {
         SteamAPICall_t callHandle = 0;
@@ -537,60 +536,24 @@ namespace UnrealSteamEmu {
     }
 
     static uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
-        // Deterministic high-avalanche 64-bit FNV-1a hash followed by Murmur3/SplitMix64 finalizer
-        uint64_t h = 0xCBF29CE484222325ULL;
-        for (char c : coreLobbyId) {
-            h ^= static_cast<uint8_t>(c);
-            h *= 0x100000001B3ULL;
-        }
-        h ^= (h >> 33);
-        h *= 0xFF51AFD7ED558CCDULL;
-        h ^= (h >> 33);
-        h *= 0xC4CEB9FE1A85EC53ULL;
-        h ^= (h >> 33);
-        uint32_t accountId = static_cast<uint32_t>(h ^ (h >> 32));
-        if (accountId == 0) accountId = 1;
-        return accountId;
+        return refix::steam::ComputeLobbyAccountId(coreLobbyId);
     }
 
     static uint64_t ComputeLobbySteamID(const std::string& coreLobbyId) {
-        if (coreLobbyId.empty()) return 0;
-        uint32_t accountId = ComputeLobbyAccountId(coreLobbyId);
-        // Canonical Steamworks Lobby CSteamID:
-        // - Universe: k_EUniversePublic (1)
-        // - AccountType: k_EAccountTypeChat (8)
-        // - Instance: k_EChatInstanceFlagLobby (0x40000)
-        // - AccountID: deterministic 32-bit ID derived from LanCore Lobby ID
-        CSteamID lobbySteamId(accountId, k_EChatInstanceFlagLobby, k_EUniversePublic, k_EAccountTypeChat);
-        return lobbySteamId.ConvertToUint64();
+        return refix::steam::ComputeLobbySteamID(coreLobbyId);
     }
 
     static uint64_t EnsureSteamLobbyID(const std::string& coreLobbyId, uint64_t fallbackId = 0) {
-        if (coreLobbyId.empty()) return (fallbackId != 0) ? fallbackId : 0;
-        std::lock_guard<std::mutex> lock(s_steamLobbyMapMutex);
-        auto it = s_coreToSteamLobby.find(coreLobbyId);
-        if (it != s_coreToSteamLobby.end()) return it->second;
-
-        uint64_t steamLobbyId = (fallbackId != 0) ? fallbackId : ComputeLobbySteamID(coreLobbyId);
-
-        // Explicit collision policy: detect if steamLobbyId already belongs to a different coreLobbyId
-        auto revIt = s_steamToCoreLobby.find(steamLobbyId);
-        if (revIt != s_steamToCoreLobby.end() && revIt->second != coreLobbyId) {
-            ReFixLog("[UnrealSteam] LOBBY COLLISION REJECTED: coreId='%s' collides with existing '%s' on steamID=%llu",
-                     coreLobbyId.c_str(), revIt->second.c_str(), steamLobbyId);
-            return 0;
+        uint64_t steamLobbyId = refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, fallbackId);
+        if (steamLobbyId == 0 && !coreLobbyId.empty()) {
+            ReFixLog("[UnrealSteam] LOBBY COLLISION REJECTED: coreId='%s' on fallbackId=%llu",
+                     coreLobbyId.c_str(), fallbackId);
         }
-
-        s_coreToSteamLobby[coreLobbyId] = steamLobbyId;
-        s_steamToCoreLobby[steamLobbyId] = coreLobbyId;
         return steamLobbyId;
     }
 
     static std::string GetCoreLobbyId(uint64_t steamLobbyId) {
-        std::lock_guard<std::mutex> lock(s_steamLobbyMapMutex);
-        auto it = s_steamToCoreLobby.find(steamLobbyId);
-        if (it != s_steamToCoreLobby.end()) return it->second;
-        return "";
+        return refix::steam::SteamLobbyRegistry::Get().GetCoreLobbyId(steamLobbyId);
     }
 
     static void CompleteCallResult(uint64_t hAPICall, int iCallback, const void* pData, size_t dataSize, bool bFailed) {
@@ -2433,9 +2396,40 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t CreateLobby(ELobbyType eLobbyType, int cMaxMembers) override {
             std::string coreLobbyId = refix::lan::ILanCore::Get().Lobby().CreateLobby(
                 cMaxMembers, refix::lan::LobbyPermissionLevel::PublicAdvertised);
+            if (coreLobbyId.empty()) {
+                LobbyCreated_t crResp = {};
+                crResp.m_eResult = k_EResultFail;
+                crResp.m_ulSteamIDLobby = 0;
+                SteamAPICall_t hCall = PostCallResult(LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp));
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_callResultMap.find(hCall);
+                if (it != g_callResultMap.end()) {
+                    it->second.failed = true;
+                }
+                return hCall;
+            }
+
             refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "__steam_owner", refix::lan::AttributeValue(std::to_string(g_localSteamID)));
 
             uint64_t lID = EnsureSteamLobbyID(coreLobbyId);
+            if (lID == 0) {
+                // Collision or registration failure: rollback in LAN Core so we don't leave an orphaned lobby
+                refix::lan::ILanCore::Get().Lobby().DestroyLobby(coreLobbyId);
+                g_activeLobbyID.store(0);
+                ReFixLog("[UnrealSteam] CreateLobby: Rejected registration of lobby '%s' (collision or invalid ID)", coreLobbyId.c_str());
+
+                LobbyCreated_t crResp = {};
+                crResp.m_eResult = k_EResultFail;
+                crResp.m_ulSteamIDLobby = 0;
+                SteamAPICall_t hCall = PostCallResult(LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp));
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_callResultMap.find(hCall);
+                if (it != g_callResultMap.end()) {
+                    it->second.failed = true;
+                }
+                return hCall;
+            }
+
             g_activeLobbyID.store(lID);
 
             LobbyInfo lob = {};
@@ -2557,6 +2551,9 @@ namespace UnrealSteamEmu {
                 if (it != g_lobbies.end()) {
                     auto mIt = std::find(it->second.members.begin(), it->second.members.end(), g_localSteamID);
                     if (mIt != it->second.members.end()) it->second.members.erase(mIt);
+                    if (it->second.members.empty()) {
+                        g_lobbies.erase(it);
+                    }
                 }
             }
             if (g_activeLobbyID.load() == lID) g_activeLobbyID.store(0);
@@ -4849,7 +4846,26 @@ namespace UnrealSteamEmu {
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyCreated, [](const refix::lan::LanEvent& ev) {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            if (steamLobbyId == 0) {
+                ReFixLog("[UnrealSteam] LanCore LobbyCreated: Ignored rejected/collided coreId='%s'", ev.lobbyId.c_str());
+                return;
+            }
             ReFixLog("[UnrealSteam] LanCore LobbyCreated: coreId='%s' -> steamID=%llu", ev.lobbyId.c_str(), steamLobbyId);
+        });
+
+        core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyDestroyed, [](const refix::lan::LanEvent& ev) {
+            std::string coreId = ev.lobbyId;
+            uint64_t sId = refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(coreId);
+            refix::steam::SteamLobbyRegistry::Get().UnregisterLobby(coreId);
+            if (sId != 0) {
+                std::lock_guard<std::recursive_mutex> elock(g_emuMutex);
+                g_lobbies.erase(sId);
+                if (g_activeLobbyID.load() == sId) {
+                    g_activeLobbyID.store(0);
+                }
+                ReFixLog("[UnrealSteam] LanCore LobbyDestroyed: Unregistered mapping for coreId='%s', steamID=%llu",
+                         coreId.c_str(), sId);
+            }
         });
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyUpdated, [](const refix::lan::LanEvent& ev) {
@@ -4910,6 +4926,8 @@ namespace UnrealSteamEmu {
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::MemberJoined, [](const refix::lan::LanEvent& ev) {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            if (steamLobbyId == 0) return;
+
             uint64_t memberSteamId = 0;
             auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (mInfo && mInfo->externalId.numericId != 0) {
@@ -4938,6 +4956,8 @@ namespace UnrealSteamEmu {
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::MemberLeft, [](const refix::lan::LanEvent& ev) {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            if (steamLobbyId == 0) return;
+
             uint64_t memberSteamId = 0;
             auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (mInfo && mInfo->externalId.numericId != 0) {
@@ -4975,6 +4995,22 @@ namespace UnrealSteamEmu {
                     callHandle = it->second.callHandle;
                     g_pendingJoins.erase(it);
                 }
+            }
+
+            if (ev.success && steamLobbyId == 0) {
+                refix::lan::ILanCore::Get().Lobby().LeaveLobby(ev.lobbyId);
+                ReFixLog("[UnrealSteam] LanCore LobbyJoinResult: Collision rejected for joined lobby coreId='%s'", ev.lobbyId.c_str());
+
+                LobbyEnter_t resp = {};
+                resp.m_ulSteamIDLobby = 0;
+                resp.m_rgfChatPermissions = 0;
+                resp.m_bLocked = false;
+                resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseError;
+                PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
+                if (callHandle != 0) {
+                    CompleteCallResult(callHandle, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
+                }
+                return;
             }
 
             LobbyEnter_t resp = {};
@@ -5155,3 +5191,19 @@ namespace UnrealSteamEmu {
     }
 }
 
+extern "C" __declspec(dllexport) uint64_t ReFix_Test_EnsureSteamLobbyID(const char* coreLobbyId, uint64_t fallbackId) {
+    return UnrealSteamEmu::EnsureSteamLobbyID(coreLobbyId ? coreLobbyId : "", fallbackId);
+}
+
+extern "C" __declspec(dllexport) void ReFix_Test_ResetLobbyMappings() {
+    refix::steam::SteamLobbyRegistry::Get().Clear();
+}
+
+extern "C" __declspec(dllexport) size_t ReFix_Test_GetLobbyMappingCount() {
+    return refix::steam::SteamLobbyRegistry::Get().Size();
+}
+
+extern "C" __declspec(dllexport) bool ReFix_Test_HasLobby(uint64_t steamLobbyId) {
+    std::lock_guard<std::recursive_mutex> lock(UnrealSteamEmu::g_emuMutex);
+    return UnrealSteamEmu::g_lobbies.find(steamLobbyId) != UnrealSteamEmu::g_lobbies.end();
+}

@@ -81,6 +81,8 @@ public:
     size_t GetReassemblyContextCount() const;
     size_t GetPeerReassemblyBytes(const PeerId& peerId) const;
     size_t GetTrackedPeerReassemblyCount() const;
+    bool IsMulticastJoined() const { return m_multicastJoined; }
+    std::string GetDiscoveryStatus() const;
 
 private:
     struct OutboundReliable {
@@ -131,6 +133,7 @@ private:
     void ReleaseReassemblyMemoryLocked(const PeerId& peerId, size_t bytes);
 
     std::atomic<bool> m_running{false};
+    bool m_multicastJoined = false;
     uint16_t m_discoveryPort = 47584;
     PeerId m_localPeerId;
     LanEndpoint m_localDataEndpoint;

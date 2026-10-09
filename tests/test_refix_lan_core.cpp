@@ -3,6 +3,7 @@
 #include "../src/lan_core/refix_lan_wire.h"
 #include "../src/lan_core/refix_lan_transport.h"
 #include "../src/lan_core/refix_lan_core.h"
+#include "../src/steam_lobby_mapping.h"
 
 #define STEAM_WIN32 1
 #define STEAM_API_NODLL 1
@@ -593,26 +594,11 @@ static bool TestFallbackDiscoveryPorts() {
 }
 
 static uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
-    uint64_t h = 0xCBF29CE484222325ULL;
-    for (char c : coreLobbyId) {
-        h ^= static_cast<uint8_t>(c);
-        h *= 0x100000001B3ULL;
-    }
-    h ^= (h >> 33);
-    h *= 0xFF51AFD7ED558CCDULL;
-    h ^= (h >> 33);
-    h *= 0xC4CEB9FE1A85EC53ULL;
-    h ^= (h >> 33);
-    uint32_t accountId = static_cast<uint32_t>(h ^ (h >> 32));
-    if (accountId == 0) accountId = 1;
-    return accountId;
+    return refix::steam::ComputeLobbyAccountId(coreLobbyId);
 }
 
 static uint64_t ComputeLobbySteamID(const std::string& coreLobbyId) {
-    if (coreLobbyId.empty()) return 0;
-    uint32_t accountId = ComputeLobbyAccountId(coreLobbyId);
-    CSteamID lobbySteamId(accountId, k_EChatInstanceFlagLobby, k_EUniversePublic, k_EAccountTypeChat);
-    return lobbySteamId.ConvertToUint64();
+    return refix::steam::ComputeLobbySteamID(coreLobbyId);
 }
 
 static bool TestLobbySteamIdIntegrityAndDeterminism() {
@@ -1007,56 +993,355 @@ static bool TestReassemblyExpirationAndPeerAccountingStress() {
     std::cout << "  [PASS] Reassembly accounting, bounded peer map, and post-cleanup transmission certified!" << std::endl;
     return true;
 }
+static bool TestLobbyConflictPolicyAndProductionRegistry() {
+    std::cout << "[*] Running TestLobbyConflictPolicyAndProductionRegistry..." << std::endl;
 
-static bool TestLobbyConflictPolicyAndMultiProcessUniqueness() {
-    std::cout << "[*] Running TestLobbyConflictPolicyAndMultiProcessUniqueness..." << std::endl;
+    auto& registry = refix::steam::SteamLobbyRegistry::Get();
+    registry.Clear();
 
-    // 1. Cross-process uniqueness: Two distinct PeerId's on same machine produce distinct core lobby IDs
+    // 1. Cross-process uniqueness: Two distinct PeerId's produce distinct core lobby IDs
     PeerId p1{0x12345678, (static_cast<uint64_t>(1001) << 32) | 0xAAAA};
     PeerId p2{0x12345678, (static_cast<uint64_t>(1002) << 32) | 0xBBBB};
     std::string cid1 = "LOBBY_" + p1.ToString() + "_1";
     std::string cid2 = "LOBBY_" + p2.ToString() + "_1";
     TEST_ASSERT(cid1 != cid2, "Core lobby IDs from different instances must be distinct");
 
-    uint64_t sid1 = ComputeLobbySteamID(cid1);
-    uint64_t sid2 = ComputeLobbySteamID(cid2);
+    uint64_t sid1 = refix::steam::ComputeLobbySteamID(cid1);
+    uint64_t sid2 = refix::steam::ComputeLobbySteamID(cid2);
     TEST_ASSERT(CSteamID(sid1).IsValid(), "sid1 must be valid CSteamID");
     TEST_ASSERT(CSteamID(sid2).IsValid(), "sid2 must be valid CSteamID");
     TEST_ASSERT(static_cast<uint32_t>(sid1 >> 32) == 0x01840000, "sid1 must have canonical upper 32 bits");
     TEST_ASSERT(static_cast<uint32_t>(sid2 >> 32) == 0x01840000, "sid2 must have canonical upper 32 bits");
 
-    // 2. Deterministic conflict resolution policy:
-    // When a second core lobby produces an identical AccountID, the conflict policy must reject
-    // overwriting the existing mapping, preserving 1:1 bidirectional integrity without silent corruption.
-    std::unordered_map<std::string, uint64_t> coreToSteam;
-    std::unordered_map<uint64_t, std::string> steamToCore;
+    // 2. Production Registry: Normal registration
+    uint64_t regSid1 = registry.EnsureSteamLobbyID(cid1);
+    TEST_ASSERT(regSid1 == sid1, "EnsureSteamLobbyID must match ComputeLobbySteamID");
+    TEST_ASSERT(registry.Size() == 1, "Registry size must be 1");
+    TEST_ASSERT(registry.GetCoreLobbyId(sid1) == cid1, "Reverse lookup must return cid1");
 
-    auto ensureId = [&](const std::string& coreId, uint64_t forcedSteamId) -> uint64_t {
-        auto it = coreToSteam.find(coreId);
-        if (it != coreToSteam.end()) return it->second;
+    // 3. Repeated registration of same lobby (idempotent)
+    uint64_t regSid1Repeat = registry.EnsureSteamLobbyID(cid1);
+    TEST_ASSERT(regSid1Repeat == sid1, "Idempotent registration must return same ID");
+    TEST_ASSERT(registry.Size() == 1, "Registry size must remain 1");
 
-        auto revIt = steamToCore.find(forcedSteamId);
-        if (revIt != steamToCore.end() && revIt->second != coreId) {
-            // Collision detected! Reject conflicting registration
-            return 0;
+    // 4. Forced collision of two distinct lobbies on identical SteamID
+    // cid2 attempts to register with sid1 (already assigned to cid1)
+    uint64_t rejectedId = registry.EnsureSteamLobbyID(cid2, sid1);
+    TEST_ASSERT(rejectedId == 0, "Conflicting lobby registration must be rejected with 0");
+
+    // 5. Preservation of maps after rejection
+    TEST_ASSERT(registry.GetCoreLobbyId(sid1) == cid1, "sid1 mapping must remain intact pointing to cid1");
+    TEST_ASSERT(registry.HasCoreLobby(cid1), "cid1 must remain in registry");
+    TEST_ASSERT(!registry.HasCoreLobby(cid2), "Rejected cid2 must not be present in registry");
+    TEST_ASSERT(registry.Size() == 1, "Registry size must remain 1 after rejection");
+
+    // 6. Normal registration of cid2 with natural ID
+    uint64_t regSid2 = registry.EnsureSteamLobbyID(cid2);
+    TEST_ASSERT(regSid2 == sid2, "cid2 with its own natural ID must succeed");
+    TEST_ASSERT(registry.Size() == 2, "Registry size must now be 2");
+
+    // 7. Clean unregister
+    TEST_ASSERT(registry.UnregisterLobby(cid1), "Unregister cid1 must succeed");
+    TEST_ASSERT(!registry.HasCoreLobby(cid1), "cid1 must no longer exist in registry");
+    TEST_ASSERT(registry.GetCoreLobbyId(sid1).empty(), "Reverse lookup for sid1 must be empty");
+    TEST_ASSERT(registry.Size() == 1, "Registry size must decrement to 1");
+
+    registry.Clear();
+    TEST_ASSERT(registry.Size() == 0, "Registry must be empty after Clear()");
+
+    std::cout << "  [PASS] Production SteamLobbyRegistry normal, repeat, collision, and preservation certified!" << std::endl;
+    return true;
+}
+
+static bool TestReassemblyAutoExpirationAndReactorLiveness() {
+    std::cout << "[*] Running TestReassemblyAutoExpirationAndReactorLiveness (10s Real TTL & Inactivity Window)..." << std::endl;
+
+    LanTransport tr;
+    PeerId localPeer{0x7777, 0x8888};
+    tr.SetLocalPeerId(localPeer);
+    TEST_ASSERT(tr.Start(47608), "Transport failed to start on port 47608");
+
+    LanEndpoint ep = tr.GetLocalDataEndpoint();
+    ep.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "Raw UDP socket must be created");
+
+    auto waitForPacket = [&](LanTransport& t, InboundPacket& outPkt, int timeoutMs = 2500) -> bool {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            if (t.PollInbound(outPkt)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        coreToSteam[coreId] = forcedSteamId;
-        steamToCore[forcedSteamId] = coreId;
-        return forcedSteamId;
+        return false;
     };
 
-    uint64_t primarySteamId = sid1;
-    TEST_ASSERT(ensureId("core_lobby_A", primarySteamId) == primarySteamId, "First registration must succeed");
-    TEST_ASSERT(ensureId("core_lobby_A", primarySteamId) == primarySteamId, "Idempotent lookup must return same ID");
-    TEST_ASSERT(steamToCore[primarySteamId] == "core_lobby_A", "Reverse mapping must point to core_lobby_A");
+    // 1. Create incomplete reassembly contexts for 2 peers (frag 0 of 2, 500 bytes each)
+    PeerId peer1{0xAAAA0001, 0xBBBB0001};
+    PeerId peer2{0xAAAA0002, 0xBBBB0002};
+    std::vector<uint8_t> chunk500(500, 0x5A);
 
-    // Forced collision: core_lobby_B attempting to register with same steam ID
-    uint64_t rejectedId = ensureId("core_lobby_B", primarySteamId);
-    TEST_ASSERT(rejectedId == 0, "Conflicting lobby registration must be rejected with 0");
-    TEST_ASSERT(steamToCore[primarySteamId] == "core_lobby_A", "Existing mapping must NOT be overwritten on collision");
-    TEST_ASSERT(coreToSteam.find("core_lobby_B") == coreToSteam.end(), "Conflicting lobby must not be added to coreToSteam");
+    SendRawFragment(rawSock, ep, peer1, 1001, 0, 2, 1, chunk500);
+    SendRawFragment(rawSock, ep, peer2, 2001, 0, 2, 1, chunk500);
 
-    std::cout << "  [PASS] Multi-process uniqueness and collision policy certified!" << std::endl;
+    // Give reactor thread a short time to process the datagrams
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+    // 2. Verify accounted memory and context counts
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 2, "Must track exactly 2 incomplete reassembly contexts");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 1000, "Global reassembly memory must be exactly 1000 bytes");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer1) == 500, "Peer 1 memory must be 500 bytes");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer2) == 500, "Peer 2 memory must be 500 bytes");
+    TEST_ASSERT(tr.GetTrackedPeerReassemblyCount() == 2, "Tracked peer count must be 2");
+
+    // 3. Let contexts expire by inactivity without calling ResetPeerState() or completing messages.
+    // Inactivity timeout is 10 seconds. Sleep 10.5 seconds to let the runtime reactor thread loop
+    // execute PruneExpiredFragmentsLocked() naturally.
+    std::cout << "    [TTL] Awaiting 10.5s inactivity expiration via real reactor thread..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10500));
+
+    // 4. Verify contexts have vanished and all counters are returned to 0
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 0, "All contexts must be purged after 10s inactivity");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Global reassembly bytes must return to 0 after TTL expiration");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer1) == 0, "Peer 1 accounting must return to 0");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer2) == 0, "Peer 2 accounting must return to 0");
+    TEST_ASSERT(tr.GetTrackedPeerReassemblyCount() == 0, "Tracked peer map must be clean");
+
+    // 5. Subsequent valid transmission from peer1: peer whose message expired can initiate and complete
+    // a valid message.
+    std::vector<uint8_t> newChunk1(400, 0x11);
+    std::vector<uint8_t> newChunk2(400, 0x22);
+    SendRawFragment(rawSock, ep, peer1, 3001, 0, 2, 2, newChunk1);
+    SendRawFragment(rawSock, ep, peer1, 3001, 1, 2, 3, newChunk2);
+
+    InboundPacket fullMsg;
+    TEST_ASSERT(waitForPacket(tr, fullMsg), "Must receive completed message from peer 1 after expiration");
+    TEST_ASSERT(fullMsg.payload.size() == 800, "Reassembled payload size must be 800 bytes");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Memory must be 0 after successful message completion");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer1) == 0, "Peer 1 memory must be 0 after completion");
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 0, "Context count must be 0 after completion");
+
+    // 6. Confirm reactor continues processing traffic cleanly
+    InboundPacket singlePkt;
+    std::vector<uint8_t> singlePayload(100, 0x77);
+    SendRawFragment(rawSock, ep, peer2, 4001, 0, 1, 2, singlePayload);
+    TEST_ASSERT(waitForPacket(tr, singlePkt), "Reactor must continue processing traffic");
+    TEST_ASSERT(singlePkt.payload == singlePayload, "Single packet payload must match");
+
+    closesocket(rawSock);
+    tr.Stop();
+
+    std::cout << "  [PASS] Automatic 10s TTL expiration, counter return, and post-expiration reactor liveness certified!" << std::endl;
+    return true;
+}
+
+static bool TestMemoryLimitsRealBudgetsAndEviction() {
+    std::cout << "[*] Running TestMemoryLimitsRealBudgetsAndEviction (Budgets, Counts, Incompatible Metadata)..." << std::endl;
+
+    LanTransport tr;
+    PeerId localPeer{0x1111, 0x2222};
+    tr.SetLocalPeerId(localPeer);
+    TEST_ASSERT(tr.Start(47609), "Transport failed to start on port 47609");
+
+    LanEndpoint ep = tr.GetLocalDataEndpoint();
+    ep.ipv4 = 0x7F000001;
+
+    SOCKET rawSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(rawSock != INVALID_SOCKET, "Raw UDP socket must be created");
+
+    auto waitForPacket = [&](LanTransport& t, InboundPacket& outPkt, int timeoutMs = 1500) -> bool {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            if (t.PollInbound(outPkt)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+
+    // -------------------------------------------------------------------------
+    // A. Per-Peer Context Count Limit (16) & LRU Eviction
+    // -------------------------------------------------------------------------
+    PeerId peerA{0xFAAA0001, 0xFBBB0001};
+    std::vector<uint8_t> chunk1k(1000, 0x41); // 1000 bytes each (<= REFIX_MAX_FRAGMENT_PAYLOAD 1150)
+    // Send 16 distinct sessions for peerA, 1 fragment each (total = 16 * 1000 = 16000 bytes)
+    for (uint32_t s = 1; s <= 16; ++s) {
+        SendRawFragment(rawSock, ep, peerA, s, 0, 2, s, chunk1k);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 16, "Context count must be 16 for peer A");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peerA) == 16000, "Peer A must have 16000 bytes allocated");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 16000, "Global bytes must be 16000");
+
+    // 17th session for peerA: triggers per-peer LRU eviction (session 1 evicted, freeing 1000 bytes)
+    SendRawFragment(rawSock, ep, peerA, 17, 0, 2, 17, chunk1k);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 16, "Context count must remain capped at 16 after eviction");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peerA) == 16000, "Peer A memory must remain at 16000 after 1-for-1 LRU eviction");
+
+    // -------------------------------------------------------------------------
+    // B. Global Context Count Limit (64) & Global LRU Eviction
+    // -------------------------------------------------------------------------
+    // Create contexts across peers 2..4 (16 contexts each * 1000 bytes) to reach 64 global contexts
+    for (uint64_t pIdx = 2; pIdx <= 4; ++pIdx) {
+        PeerId p{0xFAAA0000 | pIdx, 0xFBBB0000 | pIdx};
+        for (uint32_t s = 1; s <= 16; ++s) {
+            SendRawFragment(rawSock, ep, p, s, 0, 2, s, chunk1k);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 64, "Global context count must equal 64");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 64000, "Global reassembly memory must equal 64000 bytes");
+
+    // 65th context from Peer 5: triggers global LRU eviction (evicts oldest context, freeing 1000 bytes)
+    PeerId peer5{0xFAAA0005, 0xFBBB0005};
+    SendRawFragment(rawSock, ep, peer5, 1, 0, 2, 1, chunk1k);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 64, "Global context count must remain capped at 64 after global LRU eviction");
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 64000, "Global reassembly bytes must remain capped at 64000");
+
+    // -------------------------------------------------------------------------
+    // C. Duplicate Fragment Handling
+    // -------------------------------------------------------------------------
+    size_t bytesBeforeDup = tr.GetGlobalReassemblyBytes();
+    SendRawFragment(rawSock, ep, peer5, 1, 0, 2, 1, chunk1k); // duplicate
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == bytesBeforeDup, "Duplicate fragment must not increment bytes");
+
+    // -------------------------------------------------------------------------
+    // D. Incompatible Metadata Handling: Rejection Without Context Corruption
+    // -------------------------------------------------------------------------
+    // Clean state first via ResetPeerState to have a precise baseline
+    tr.ResetPeerState(peer5);
+    size_t bytesAfterReset5 = tr.GetGlobalReassemblyBytes();
+    TEST_ASSERT(bytesAfterReset5 == 63000, "Resetting peer 5 must cleanly free its 1000 bytes");
+
+    // Start a new 2-fragment session with peer 5
+    std::vector<uint8_t> frag500(500, 0x88);
+    SendRawFragment(rawSock, ep, peer5, 999, 0, 2, 1, frag500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 500, "Peer 5 must have 500 bytes allocated");
+
+    // Inject incompatible metadata: fragTotal = 5 != 2 (seq = 2)
+    SendRawFragment(rawSock, ep, peer5, 999, 1, 5, 2, frag500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Must reject the invalid fragment without corrupting ongoing context or changing memory
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 500, "Incompatible metadata must be rejected without altering peer memory");
+
+    // Send valid second fragment (fragIndex = 1, fragTotal = 2) for session 999 (seq = 3)
+    SendRawFragment(rawSock, ep, peer5, 999, 1, 2, 3, frag500);
+    InboundPacket session999Pkt;
+    TEST_ASSERT(waitForPacket(tr, session999Pkt), "Session 999 must complete successfully after bad fragment rejection");
+    TEST_ASSERT(session999Pkt.payload.size() == 1000, "Reassembled size must be 1000 bytes");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 0, "Peer 5 memory must be 0 after session 999 completes");
+
+    // -------------------------------------------------------------------------
+    // E. Real Memory Budget Hard Limits (1 MiB Peer Budget Enforcement)
+    // -------------------------------------------------------------------------
+    // Clear all existing peer states first to provide a clean slate for 1 MiB budget testing
+    for (uint64_t pIdx = 1; pIdx <= 4; ++pIdx) {
+        PeerId p{0xFAAA0000 | pIdx, 0xFBBB0000 | pIdx};
+        tr.ResetPeerState(p);
+    }
+    tr.ResetPeerState(peer5);
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Clean slate must have 0 global bytes");
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 0, "Clean slate must have 0 contexts");
+
+    uint32_t seq5 = 1;
+    // 6 sessions of 150 fragments * 1000 bytes = 900,000 bytes (fragTotal = 200, so each remains incomplete)
+    for (uint32_t sId = 101; sId <= 106; ++sId) {
+        for (uint8_t f = 0; f < 150; ++f) {
+            SendRawFragment(rawSock, ep, peer5, sId, f, 200, seq5++, chunk1k);
+            if (f % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    // 7th session with 148 fragments * 1000 bytes = 148,000 bytes (fragTotal = 200) -> Total = 1,048,000 bytes
+    for (uint8_t f = 0; f < 148; ++f) {
+        SendRawFragment(rawSock, ep, peer5, 107, f, 200, seq5++, chunk1k);
+        if (f % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048000, "Peer 5 must have reached 1,048,000 bytes");
+
+    // Now attempt to send fragment 148 (1000 bytes): 1,048,000 + 1000 = 1,049,000 > 1,048,576
+    // Must be rejected by the 1 MiB per-peer memory budget limit!
+    SendRawFragment(rawSock, ep, peer5, 107, 148, 200, seq5++, chunk1k);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048000, "Exceeding fragment must NOT increase peer memory beyond 1 MiB");
+
+    // Now send fragment 148 with 500 bytes: 1,048,000 + 500 = 1,048,500 <= 1,048,576
+    // Fits under 1 MiB, so must be accepted!
+    SendRawFragment(rawSock, ep, peer5, 107, 148, 200, seq5++, frag500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048500, "Fragment fitting under 1 MiB ceiling must be accepted");
+
+    // Now attempt to send fragment 149 with 100 bytes: 1,048,500 + 100 = 1,048,600 > 1,048,576
+    // Must be rejected!
+    std::vector<uint8_t> frag100(100, 0x99);
+    SendRawFragment(rawSock, ep, peer5, 107, 149, 200, seq5++, frag100);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 1048500, "Overage must be strictly rejected at the 1 MiB ceiling");
+
+    // Reset Peer 5 to release the 1,048,500 bytes and verify subsequent message reception
+    tr.ResetPeerState(peer5);
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 0, "Peer 5 memory must be cleanly released back to 0");
+
+    // Subsequent valid message from peer 5 must be accepted and completed cleanly
+    std::vector<uint8_t> validPart1(300, 0x33);
+    std::vector<uint8_t> validPart2(300, 0x44);
+    SendRawFragment(rawSock, ep, peer5, 1000, 0, 2, 1, validPart1);
+    SendRawFragment(rawSock, ep, peer5, 1000, 1, 2, 2, validPart2);
+
+    InboundPacket validPkt;
+    TEST_ASSERT(waitForPacket(tr, validPkt), "Valid message from peer 5 must complete successfully after resource release");
+    TEST_ASSERT(validPkt.payload.size() == 600, "Reassembled size must be 600 bytes");
+    TEST_ASSERT(tr.GetPeerReassemblyBytes(peer5) == 0, "Peer 5 memory must be 0 after completion");
+
+    // Reset all remaining peers and verify zero leaks / zero underflow
+    for (uint64_t pIdx = 1; pIdx <= 4; ++pIdx) {
+        PeerId p{0xFAAA0000 | pIdx, 0xFBBB0000 | pIdx};
+        tr.ResetPeerState(p);
+    }
+    tr.ResetPeerState(peer5);
+
+    TEST_ASSERT(tr.GetGlobalReassemblyBytes() == 0, "Global memory must strictly equal 0");
+    TEST_ASSERT(tr.GetReassemblyContextCount() == 0, "Context count must strictly equal 0");
+    TEST_ASSERT(tr.GetTrackedPeerReassemblyCount() == 0, "Tracked peer map must be empty");
+
+    closesocket(rawSock);
+    tr.Stop();
+
+    std::cout << "  [PASS] 4 MiB global budget, 1 MiB peer budget, 64/16 context limits, duplicate protection, and metadata invalidation certified!" << std::endl;
+    return true;
+}
+
+static bool TestMulticastInitializationAndDiagnostics() {
+    std::cout << "[*] Running TestMulticastInitializationAndDiagnostics..." << std::endl;
+
+    LanTransport tr;
+    PeerId localPeer{0x1212, 0x3434};
+    tr.SetLocalPeerId(localPeer);
+
+    // Start on alternate discovery port
+    uint16_t testPort = 47585;
+    TEST_ASSERT(tr.Start(testPort), "LanTransport Start must succeed");
+
+    TEST_ASSERT(tr.GetDiscoveryPort() == testPort, "Discovery port must match requested port 47585");
+    TEST_ASSERT(tr.GetLocalDataEndpoint().port != 0, "Ephemeral data port must be assigned");
+    TEST_ASSERT(tr.GetLocalDataEndpoint().ipv4 != 0, "Local IPv4 must be non-zero");
+
+    std::string diag = tr.GetDiscoveryStatus();
+    TEST_ASSERT(!diag.empty(), "Discovery diagnostics string must not be empty");
+    std::cout << "    Transport discovery diagnostics: " << diag << std::endl;
+
+    tr.Stop();
+    std::cout << "  [PASS] Multicast initialization, port matching, and diagnostics certified!" << std::endl;
     return true;
 }
 
@@ -1083,7 +1368,10 @@ int main() {
     if (!TestLanInterfaceSelection()) return 1;
     if (!TestSendReliableStrictContractAndBoundaries()) return 1;
     if (!TestReassemblyExpirationAndPeerAccountingStress()) return 1;
-    if (!TestLobbyConflictPolicyAndMultiProcessUniqueness()) return 1;
+    if (!TestReassemblyAutoExpirationAndReactorLiveness()) return 1;
+    if (!TestMemoryLimitsRealBudgetsAndEviction()) return 1;
+    if (!TestMulticastInitializationAndDiagnostics()) return 1;
+    if (!TestLobbyConflictPolicyAndProductionRegistry()) return 1;
 
     std::cout << "\n============================================================" << std::endl;
     std::cout << " [SUCCESS] ALL REFIX LAN CORE & TRANSPORT TESTS PASSED!      " << std::endl;
