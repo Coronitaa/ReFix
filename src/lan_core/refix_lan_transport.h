@@ -116,6 +116,10 @@ public:
     uint32_t GetPeerNextSequenceOut(const PeerId& peerId) const;
     size_t GetPeerOutOfOrderCount(const PeerId& peerId) const;
 
+    void SetPeerNextSequenceOutForTesting(const PeerId& peerId, uint32_t seq);
+    void SetPeerExpectedSequenceInForTesting(const PeerId& peerId, uint32_t seq);
+    void SetPeerLocalGenerationForTesting(const PeerId& peerId, uint32_t gen);
+
     void SetPeerEndpointValidator(std::function<bool(const PeerId&, const LanEndpoint&)> validator) { m_endpointValidator = std::move(validator); }
     bool AuthorizePeerMigration(const PeerId& peerId, const LanEndpoint& newEndpoint);
 
@@ -171,6 +175,8 @@ private:
     void ProcessInboundWirePacket(const uint8_t* buf, size_t len, const LanEndpoint& fromEp);
     void ProcessReliableAck(PeerReliabilityState& state, uint32_t ackSeq, uint32_t sackMask);
     void SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask, uint32_t generationId = 0);
+    void SendDisconnectPacketLocked(const LanEndpoint& target, uint32_t generationId);
+    static uint32_t CalculateSackMask(const std::map<uint32_t, InboundPacket>& ooo, uint32_t ackSeq);
     void DrainRetainedInboundLocked(PeerReliabilityState* targetPeer = nullptr);
     void CheckRetransmissionsAndTimeouts();
     bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);

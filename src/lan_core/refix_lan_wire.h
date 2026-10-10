@@ -67,8 +67,9 @@ struct WireHeader {
     uint8_t  fragIndex;      // 0-indexed fragment
     uint8_t  fragTotal;      // Total fragments (1 if unfragmented)
     uint8_t  reserved;       // Alignment / reserved
-    uint32_t sequence;       // Sequence number for reliable data
-    uint32_t ack;            // Cumulative acknowledged sequence
+    uint32_t sequence;       // Sequence number for reliable data (32-bit modular RFC 1982 serial number)
+    uint32_t ack;            // Cumulative acknowledged sequence (in DataReliable, informational only;
+                             // outbound reliability strictly confirmed via standalone DataAck)
     uint32_t sackMask;       // 32-bit Selective ACK bitmask
     uint16_t payloadLen;     // Payload byte length following this header
 
@@ -87,6 +88,31 @@ struct WireHeader {
 #pragma pack(pop)
 
 static_assert(sizeof(WireHeader) == 50, "WireHeader must be exactly 50 bytes packed");
+
+// =============================================================================
+// RFC 1982 Serial Number Arithmetic for 32-bit Sequence Numbers
+// =============================================================================
+// Window size constraint: Active ARQ sliding window size W must strictly satisfy
+// W < 2^31 (in ReFix LAN, maximum in-flight window is bounded to <= 512 datagrams).
+inline bool SeqLt(uint32_t s1, uint32_t s2) noexcept {
+    return static_cast<int32_t>(s1 - s2) < 0;
+}
+
+inline bool SeqLe(uint32_t s1, uint32_t s2) noexcept {
+    return static_cast<int32_t>(s1 - s2) <= 0;
+}
+
+inline bool SeqGt(uint32_t s1, uint32_t s2) noexcept {
+    return static_cast<int32_t>(s1 - s2) > 0;
+}
+
+inline bool SeqGe(uint32_t s1, uint32_t s2) noexcept {
+    return static_cast<int32_t>(s1 - s2) >= 0;
+}
+
+inline uint32_t SeqDiff(uint32_t s1, uint32_t s2) noexcept {
+    return s1 - s2;
+}
 
 // =============================================================================
 // Binary Serialization Helpers (Explicit Little-Endian)

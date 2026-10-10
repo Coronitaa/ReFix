@@ -495,14 +495,13 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             return;
         }
 
-        // Verify generation: delayed Disconnect from older session must NOT wipe current state
-        if (it->second.hasRemoteGeneration && hdr->generationId != it->second.remoteGeneration) {
-            return;
-        }
+        // Verify generation: Disconnect must match either the local session generation (peer rejecting our outbound flow)
+        // or remote session generation (peer closing their inbound flow).
+        bool matchesLocalGen = (it->second.localGeneration != 0 && hdr->generationId == it->second.localGeneration);
+        bool matchesRemoteGen = (it->second.hasRemoteGeneration && hdr->generationId == it->second.remoteGeneration);
 
-        // If remote generation is not yet known, do not wipe state if there are active outbound packets
-        if (!it->second.hasRemoteGeneration && !it->second.unackedOutbound.empty()) {
-            return;
+        if (!matchesLocalGen && !matchesRemoteGen) {
+            return; // Delayed / foreign generation Disconnect
         }
 
         m_peerStates.erase(it);
@@ -528,8 +527,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             return; // Reject DataAck with zero or mismatched session generation
         }
 
-        // P0 Validation 3: Cumulative ACK must not exceed next sequence out
-        if (hdr->ack >= state.nextSequenceOut) {
+        // P0 Validation 3: Cumulative ACK must not exceed next sequence out (modular comparison)
+        if (SeqGe(hdr->ack, state.nextSequenceOut)) {
             return; // Future / falsified cumulative ACK
         }
 
@@ -538,7 +537,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             for (uint32_t i = 0; i < 32; ++i) {
                 if ((hdr->sackMask & (1u << i)) != 0) {
                     uint32_t sackSeq = hdr->ack + 1 + i;
-                    if (sackSeq >= state.nextSequenceOut) {
+                    if (SeqGe(sackSeq, state.nextSequenceOut)) {
                         return; // Manipulated SACK referencing untransmitted future sequence
                     }
                 }
@@ -607,8 +606,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 return;
             }
 
-            // seq > 1: reject mismatched generation
-            if (seq > 1 && state.hasRemoteGeneration && genDiff != 0) {
+            // Reject out-of-order packet from new generation before seq 1 establishes session
+            if (state.hasRemoteGeneration && genDiff > 0 && seq != 1) {
                 return;
             }
 
@@ -638,44 +637,34 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 genDiff = 0;
             }
 
-            if (seq == 1) {
-                if (state.hasRemoteGeneration && genDiff == 0) {
-                    // Same generation!
-                    if (state.expectedSequenceIn > 1) {
-                        // Delayed duplicate of packet 1 within current active session.
-                        // Discard it and acknowledge the latest expected sequence to settle the sender.
-                        SendAckPacket(state.lastEndpoint, hdr->channel, state.expectedSequenceIn - 1, 0, state.remoteGeneration);
-                        return;
-                    }
-                } else if (state.hasRemoteGeneration && genDiff > 0) {
-                    // Authentically new generation! Peer reconnected or restarted a fresh session.
-                    state.remoteGeneration = hdr->generationId;
-                    state.expectedSequenceIn = 1;
-                    state.outOfOrderInbound.clear();
-                    state.lastEndpoint = fromEp;
-                    state.authorizedMigrationEndpoint = LanEndpoint{};
-                    CleanupPeerReassemblyLocked(senderPeer);
-                    state.timedOut = false;
-                }
+            if (state.hasRemoteGeneration && genDiff > 0 && seq == 1) {
+                // Authentically new generation! Peer reconnected or restarted a fresh session.
+                state.remoteGeneration = hdr->generationId;
+                state.expectedSequenceIn = 1;
+                state.outOfOrderInbound.clear();
+                state.lastEndpoint = fromEp;
+                state.authorizedMigrationEndpoint = LanEndpoint{};
+                CleanupPeerReassemblyLocked(senderPeer);
+                state.timedOut = false;
+                genDiff = 0;
             }
 
-            // Old duplicate packet: reject before updating endpoint or processing stale piggybacked ACK
-            if (seq < state.expectedSequenceIn) {
-                SendAckPacket(state.lastEndpoint, hdr->channel, state.expectedSequenceIn - 1, 0, state.remoteGeneration);
+            // Old duplicate packet: reject before updating endpoint (RFC 1982 modular comparison)
+            if (SeqLt(seq, state.expectedSequenceIn)) {
+                uint32_t ackSeq = state.expectedSequenceIn - 1;
+                uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
+                SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
                 return;
             }
 
-            // P1 Correlate piggybacked ACKs: only process if authentically correlated with active session
-            bool canProcessPiggybackedAck = state.hasRemoteGeneration &&
-                                            (genDiff == 0) &&
-                                            (fromEp == state.lastEndpoint) &&
-                                            (hdr->ack > 0) &&
-                                            (hdr->ack < state.nextSequenceOut);
-            if (canProcessPiggybackedAck) {
-                ProcessReliableAck(state, hdr->ack, 0);
-            }
+            // P0 Piggybacked ACKs Contract:
+            // WireHeader contains generationId which identifies the peer's outbound stream.
+            // It does not independently identify the generation of the local outbound stream being acknowledged.
+            // Per protocol contract, piggybacked ACKs are not processed via ProcessReliableAck().
+            // Outbound reliability and unackedOutbound retirement strictly require standalone DataAck datagrams.
+            // The data payload of DataReliable remains completely valid and is processed normally below.
 
-            // Validated packet belonging to current or authentically new session
+            // Validated packet belonging to current session
             state.lastDataRecvTime = now;
             state.lastActivityTime = now;
             state.lastReceivedTime = now;
@@ -700,9 +689,10 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 }
             }
 
-            if (seq > state.expectedSequenceIn) {
+            if (SeqGt(seq, state.expectedSequenceIn)) {
                 // Out-of-order packet: buffer in outOfOrderInbound and send immediate advisory SACK
-                if (state.outOfOrderInbound.size() < 64) {
+                uint32_t seqDiff = seq - state.expectedSequenceIn;
+                if (seqDiff < 64 && state.outOfOrderInbound.size() < 64) {
                     InboundPacket pkt;
                     pkt.senderPeerId = senderPeer;
                     pkt.senderEndpoint = fromEp;
@@ -720,14 +710,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     state.outOfOrderInbound[seq] = std::move(pkt);
                 }
 
-                uint32_t sackMask = 0;
                 uint32_t ackSeq = state.expectedSequenceIn - 1;
-                for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                    if (bufferedSeq > ackSeq) {
-                        uint32_t diff = bufferedSeq - ackSeq - 1;
-                        if (diff < 32) sackMask |= (1u << diff);
-                    }
-                }
+                uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
                 SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
                 return;
             }
@@ -739,14 +723,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
                     if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
                         m_inboundQueueDroppedPackets.fetch_add(1);
-                        uint32_t sackMask = 0;
                         uint32_t ackSeq = state.expectedSequenceIn - 1;
-                        for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                            if (bufferedSeq > ackSeq) {
-                                uint32_t diff = bufferedSeq - ackSeq - 1;
-                                if (diff < 32) sackMask |= (1u << diff);
-                            }
-                        }
+                        uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
                         SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
                         return;
                     }
@@ -783,14 +761,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 state.expectedSequenceIn++;
                 // Drain any contiguous candidates retained in outOfOrderInbound
                 DrainRetainedInboundLocked(&state);
-                uint32_t sackMask = 0;
                 uint32_t ackSeq = state.expectedSequenceIn - 1;
-                for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                    if (bufferedSeq > ackSeq) {
-                        uint32_t diff = bufferedSeq - ackSeq - 1;
-                        if (diff < 32) sackMask |= (1u << diff);
-                    }
-                }
+                uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
                 SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
                 return;
             } else {
@@ -814,14 +786,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 uint32_t prevExpected = state.expectedSequenceIn;
                 DrainRetainedInboundLocked(&state);
                 if (state.expectedSequenceIn == prevExpected) {
-                    uint32_t sackMask = 0;
                     uint32_t ackSeq = state.expectedSequenceIn - 1;
-                    for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                        if (bufferedSeq > ackSeq) {
-                            uint32_t diff = bufferedSeq - ackSeq - 1;
-                            if (diff < 32) sackMask |= (1u << diff);
-                        }
-                    }
+                    uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
                     SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
                 }
             }
@@ -866,9 +832,9 @@ void LanTransport::ProcessReliableAck(PeerReliabilityState& state, uint32_t ackS
     auto& unacked = state.unackedOutbound;
     auto now = std::chrono::steady_clock::now();
 
-    // 1. Remove all cumulatively acknowledged sequences <= ackSeq
+    // 1. Remove all cumulatively acknowledged sequences <= ackSeq (RFC 1982 modular comparison)
     auto it = std::remove_if(unacked.begin(), unacked.end(), [&](const OutboundReliable& r) {
-        if (r.sequence <= ackSeq) {
+        if (SeqLe(r.sequence, ackSeq)) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - r.sendTime).count();
             if (elapsed > 0) {
                 state.lastMeasuredRttMs = static_cast<uint32_t>(elapsed);
@@ -882,7 +848,7 @@ void LanTransport::ProcessReliableAck(PeerReliabilityState& state, uint32_t ackS
     // 2. Process selective ACK (SACK): dynamically update advisory reception state.
     // Cleared bits revoke SACK if the remote receiver dropped/reneged an OOO candidate.
     for (auto& r : unacked) {
-        if (r.sequence > ackSeq) {
+        if (SeqGt(r.sequence, ackSeq)) {
             uint32_t diff = r.sequence - ackSeq - 1;
             if (diff < 32) {
                 r.isSacked = ((sackMask & (1u << diff)) != 0);
@@ -916,6 +882,45 @@ void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uin
            reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
 }
 
+void LanTransport::SendDisconnectPacketLocked(const LanEndpoint& target, uint32_t generationId) {
+    if (!target.IsValid() || m_dataSocket == INVALID_SOCKET) return;
+    if (!LanFirewall::Get().IsAllowedEndpoint(target)) return;
+
+    WireHeader dHdr{};
+    dHdr.magic = REFIX_WIRE_MAGIC;
+    dHdr.version = REFIX_WIRE_VERSION;
+    dHdr.msgType = static_cast<uint8_t>(MsgType::Disconnect);
+    dHdr.flags = 0;
+    dHdr.SetSenderPeerId(m_localPeerId);
+    dHdr.sessionId = 0;
+    dHdr.channel = 0;
+    dHdr.fragIndex = 0;
+    dHdr.fragTotal = 1;
+    dHdr.generationId = generationId;
+    dHdr.sequence = 0;
+    dHdr.ack = 0;
+    dHdr.sackMask = 0;
+    dHdr.payloadLen = 0;
+
+    sockaddr_in sin{};
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(target.ipv4);
+    sin.sin_port = htons(target.port);
+    sendto(m_dataSocket, reinterpret_cast<const char*>(&dHdr), sizeof(dHdr), 0,
+           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+}
+
+uint32_t LanTransport::CalculateSackMask(const std::map<uint32_t, InboundPacket>& ooo, uint32_t ackSeq) {
+    uint32_t sackMask = 0;
+    for (const auto& [bufferedSeq, _] : ooo) {
+        if (SeqGt(bufferedSeq, ackSeq)) {
+            uint32_t diff = bufferedSeq - ackSeq - 1;
+            if (diff < 32) sackMask |= (1u << diff);
+        }
+    }
+    return sackMask;
+}
+
 void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) {
     auto drainSingle = [&](const PeerId& peerId, PeerReliabilityState& state) {
         if (state.outOfOrderInbound.empty()) return;
@@ -923,8 +928,11 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
         std::vector<InboundPacket> packetsToNotify;
         bool advanced = false;
 
-        while (!state.outOfOrderInbound.empty() && state.outOfOrderInbound.begin()->first == state.expectedSequenceIn) {
-            auto itCandidate = state.outOfOrderInbound.begin();
+        while (!state.outOfOrderInbound.empty()) {
+            auto itCandidate = state.outOfOrderInbound.find(state.expectedSequenceIn);
+            if (itCandidate == state.outOfOrderInbound.end()) {
+                break;
+            }
             auto& cand = itCandidate->second;
             bool candIsFrag = ((cand.flags & FLAG_FRAGMENT) != 0);
 
@@ -1000,16 +1008,16 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     bool wasSacked = cand.wasSacked;
                     state.outOfOrderInbound.erase(itCandidate);
                     if (wasSacked) {
-                        uint32_t sackMask = 0;
                         uint32_t ackSeq = state.expectedSequenceIn - 1;
-                        for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                            if (bufferedSeq > ackSeq) {
-                                uint32_t diff = bufferedSeq - ackSeq - 1;
-                                if (diff < 32) sackMask |= (1u << diff);
-                            }
-                        }
+                        uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
                         SendAckPacket(state.lastEndpoint, 0, ackSeq, sackMask, state.remoteGeneration);
                     }
+                    ReleaseReassemblyContextLocked(itFrag);
+                    uint32_t termGen = (state.remoteGeneration != 0) ? state.remoteGeneration : state.localGeneration;
+                    SendDisconnectPacketLocked(state.lastEndpoint, termGen);
+                    state.outOfOrderInbound.clear();
+                    CleanupPeerReassemblyLocked(cand.senderPeerId);
+                    state.timedOut = true;
                     break;
                 }
 
@@ -1028,16 +1036,15 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     ReleaseReassemblyContextLocked(itFrag);
                     state.outOfOrderInbound.erase(itCandidate);
                     if (wasSacked) {
-                        uint32_t sackMask = 0;
                         uint32_t ackSeq = state.expectedSequenceIn - 1;
-                        for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                            if (bufferedSeq > ackSeq) {
-                                uint32_t diff = bufferedSeq - ackSeq - 1;
-                                if (diff < 32) sackMask |= (1u << diff);
-                            }
-                        }
+                        uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
                         SendAckPacket(state.lastEndpoint, 0, ackSeq, sackMask, state.remoteGeneration);
                     }
+                    uint32_t termGen = (state.remoteGeneration != 0) ? state.remoteGeneration : state.localGeneration;
+                    SendDisconnectPacketLocked(state.lastEndpoint, termGen);
+                    state.outOfOrderInbound.clear();
+                    CleanupPeerReassemblyLocked(cand.senderPeerId);
+                    state.timedOut = true;
                     break;
                 }
 
@@ -1109,14 +1116,8 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
         }
 
         if (advanced) {
-            uint32_t sackMask = 0;
             uint32_t ackSeq = state.expectedSequenceIn - 1;
-            for (const auto& [bufferedSeq, _] : state.outOfOrderInbound) {
-                if (bufferedSeq > ackSeq) {
-                    uint32_t diff = bufferedSeq - ackSeq - 1;
-                    if (diff < 32) sackMask |= (1u << diff);
-                }
-            }
+            uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
             SendAckPacket(state.lastEndpoint, 0, ackSeq, sackMask, state.remoteGeneration);
         }
 
@@ -1690,28 +1691,8 @@ void LanTransport::ResetPeerState(const PeerId& peerId) {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     auto it = m_peerStates.find(peerId);
     if (it != m_peerStates.end()) {
-        if (it->second.lastEndpoint.IsValid() && m_dataSocket != INVALID_SOCKET) {
-            WireHeader dHdr{};
-            dHdr.magic = REFIX_WIRE_MAGIC;
-            dHdr.version = REFIX_WIRE_VERSION;
-            dHdr.msgType = static_cast<uint8_t>(MsgType::Disconnect);
-            dHdr.flags = 0;
-            dHdr.SetSenderPeerId(m_localPeerId);
-            dHdr.sessionId = 0;
-            dHdr.channel = 0;
-            dHdr.fragIndex = 0;
-            dHdr.fragTotal = 1;
-            dHdr.generationId = it->second.localGeneration;
-            dHdr.sequence = 0;
-            dHdr.ack = 0;
-            dHdr.sackMask = 0;
-            dHdr.payloadLen = 0;
-            sockaddr_in sin{};
-            sin.sin_family = AF_INET;
-            sin.sin_addr.s_addr = htonl(it->second.lastEndpoint.ipv4);
-            sin.sin_port = htons(it->second.lastEndpoint.port);
-            sendto(m_dataSocket, reinterpret_cast<const char*>(&dHdr), sizeof(dHdr), 0,
-                   reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+        if (it->second.lastEndpoint.IsValid()) {
+            SendDisconnectPacketLocked(it->second.lastEndpoint, it->second.localGeneration);
         }
         m_peerStates.erase(it);
     }
@@ -1776,28 +1757,8 @@ std::unordered_map<PeerId, LanTransport::PeerReliabilityState>::iterator LanTran
     auto targetCandidate = oldestCandidate;
 
     if (targetCandidate != m_peerStates.end()) {
-        if (targetCandidate->second.lastEndpoint.IsValid() && m_dataSocket != INVALID_SOCKET) {
-            WireHeader dHdr{};
-            dHdr.magic = REFIX_WIRE_MAGIC;
-            dHdr.version = REFIX_WIRE_VERSION;
-            dHdr.msgType = static_cast<uint8_t>(MsgType::Disconnect);
-            dHdr.flags = 0;
-            dHdr.SetSenderPeerId(m_localPeerId);
-            dHdr.sessionId = 0;
-            dHdr.channel = 0;
-            dHdr.fragIndex = 0;
-            dHdr.fragTotal = 1;
-            dHdr.generationId = targetCandidate->second.localGeneration;
-            dHdr.sequence = 0;
-            dHdr.ack = 0;
-            dHdr.sackMask = 0;
-            dHdr.payloadLen = 0;
-            sockaddr_in sin{};
-            sin.sin_family = AF_INET;
-            sin.sin_addr.s_addr = htonl(targetCandidate->second.lastEndpoint.ipv4);
-            sin.sin_port = htons(targetCandidate->second.lastEndpoint.port);
-            sendto(m_dataSocket, reinterpret_cast<const char*>(&dHdr), sizeof(dHdr), 0,
-                   reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+        if (targetCandidate->second.lastEndpoint.IsValid()) {
+            SendDisconnectPacketLocked(targetCandidate->second.lastEndpoint, targetCandidate->second.localGeneration);
         }
         PeerId evictedPeer = targetCandidate->first;
         m_peerStates.erase(targetCandidate);
@@ -1912,6 +1873,30 @@ bool LanTransport::AuthorizePeerMigration(const PeerId& peerId, const LanEndpoin
         return true;
     }
     return false;
+}
+
+void LanTransport::SetPeerNextSequenceOutForTesting(const PeerId& peerId, uint32_t seq) {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = TryAdmitPeerStateLocked(peerId, true, std::chrono::steady_clock::now());
+    if (it != m_peerStates.end()) {
+        it->second.nextSequenceOut = seq;
+    }
+}
+
+void LanTransport::SetPeerExpectedSequenceInForTesting(const PeerId& peerId, uint32_t seq) {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = TryAdmitPeerStateLocked(peerId, true, std::chrono::steady_clock::now());
+    if (it != m_peerStates.end()) {
+        it->second.expectedSequenceIn = seq;
+    }
+}
+
+void LanTransport::SetPeerLocalGenerationForTesting(const PeerId& peerId, uint32_t gen) {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    auto it = TryAdmitPeerStateLocked(peerId, true, std::chrono::steady_clock::now());
+    if (it != m_peerStates.end()) {
+        it->second.localGeneration = gen;
+    }
 }
 
 } // namespace refix::lan
