@@ -80,6 +80,15 @@ namespace UnrealSteamEmu {
     void* GetSteamScreenshots();
     void* GetSteamTimeline();
     void* GetSteamNetworkingMessages();
+    void* GetSteamGameSearch();
+    void* GetSteamAppList();
+    void* GetSteamMusic();
+    void* GetSteamMusicRemote();
+    void* GetSteamHTMLSurface();
+    void* GetSteamVideo();
+    void* GetSteamParentalSettings();
+    void* GetSteamParties();
+    void* GetSteamRemotePlay();
 
     // Aliases with ISteam prefix
     inline void* GetISteamClient() { return GetSteamClient(); }
@@ -106,10 +115,26 @@ namespace UnrealSteamEmu {
     inline void* GetISteamInventory() { return GetSteamInventory(); }
     inline void* GetISteamScreenshots() { return GetSteamScreenshots(); }
     inline void* GetISteamTimeline() { return GetSteamTimeline(); }
+    inline void* GetISteamGameSearch() { return GetSteamGameSearch(); }
+    inline void* GetISteamAppList() { return GetSteamAppList(); }
+    inline void* GetISteamMusic() { return GetSteamMusic(); }
+    inline void* GetISteamMusicRemote() { return GetSteamMusicRemote(); }
+    inline void* GetISteamHTMLSurface() { return GetSteamHTMLSurface(); }
+    inline void* GetISteamVideo() { return GetSteamVideo(); }
+    inline void* GetISteamParentalSettings() { return GetSteamParentalSettings(); }
+    inline void* GetISteamParties() { return GetSteamParties(); }
+    inline void* GetISteamRemotePlay() { return GetSteamRemotePlay(); }
 
     // Auth ticket helpers
     uint32_t GetAuthSessionTicket(void* pTicket, int cbMaxTicket, uint32_t* pcbTicket, const void* pSteamNetworkingIdentity = nullptr);
     uint32_t GetAuthTicketForWebApi(const char* pchIdentity);
+
+    // RemoteStorage helpers
+    bool RemoteStorage_FileWrite(const char* pchFile, const void* pvData, int32_t cubData);
+    int32_t RemoteStorage_FileRead(const char* pchFile, void* pvData, int32_t cubDataToRead);
+    bool RemoteStorage_FileExists(const char* pchFile);
+    int32_t RemoteStorage_GetFileSize(const char* pchFile);
+    bool RemoteStorage_FileDelete(const char* pchFile);
 
     // Lobby sync notification with EOS
     void NotifyEOSLobby(uint64_t lobbyID);

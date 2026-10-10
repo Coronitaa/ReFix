@@ -8,6 +8,7 @@ param(
     [string]$PhotonRegion = "",
     [string]$GameName = "",
     [string]$UserName = "",
+    [string]$SteamId = "",
     [string]$RealAppId = "480",
     [string]$MaskAppId = "480",
     [string]$Language = "english",
@@ -30,6 +31,8 @@ if (-not $EngineType -and $env:REFIX_ENGINE_TYPE) { $EngineType = $env:REFIX_ENG
 if (-not $OnlineMode -and $env:REFIX_ONLINE_MODE) { $OnlineMode = $env:REFIX_ONLINE_MODE }
 if (-not $GameName  -and $env:REFIX_GAME_NAME)  { $GameName  = $env:REFIX_GAME_NAME }
 if (-not $UserName  -and $env:REFIX_USERNAME)   { $UserName  = $env:REFIX_USERNAME }
+if (-not $SteamId   -and $env:REFIX_STEAM_ID)   { $SteamId   = $env:REFIX_STEAM_ID }
+if (-not $SteamId   -and $env:REFIX_STEAMID)    { $SteamId   = $env:REFIX_STEAMID }
 if ((-not $RealAppId -or $RealAppId -eq "480") -and $env:REFIX_REAL_APPID) { $RealAppId = $env:REFIX_REAL_APPID }
 if ((-not $MaskAppId -or $MaskAppId -eq "480") -and $env:REFIX_MASK_APPID) { $MaskAppId = $env:REFIX_MASK_APPID }
 if ((-not $ListenPort -or $ListenPort -eq "47584") -and $env:REFIX_LAN_PORT) { $ListenPort = $env:REFIX_LAN_PORT }
@@ -67,7 +70,8 @@ function Get-Or-Generate-Identity {
     param(
         [string]$ConfigPath,
         [string]$InputName,
-        [string]$BasePath
+        [string]$BasePath,
+        [string]$InputSteamId = ""
     )
 
     $finalSteamId = ""
@@ -94,6 +98,12 @@ function Get-Or-Generate-Identity {
                 }
             }
         }
+    }
+
+    # If an explicit SteamID was provided during deployment, prioritize it
+    if ($InputSteamId -and $InputSteamId.Trim() -ne "" -and $InputSteamId.Trim() -match "^[0-9]{15,20}$") {
+        $finalSteamId = $InputSteamId.Trim()
+        $autoGenerateSteamId = $false
     }
 
     # If an explicit name was provided during deployment, prioritize it
@@ -572,6 +582,33 @@ if ($pluginDirs32.Count -gt 0) {
 
 if ($pluginDirs.Count -eq 0) { $pluginDirs += $ExeDir }
 
+# Detect if game is 32-bit (x86) to prevent fatal 64-bit DLL injection into 32-bit processes
+$isX86Game = ($pluginDirs32.Count -gt 0)
+if (-not $isX86Game) {
+    $gameExesInDir = Get-ChildItem -LiteralPath $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
+    
+    $candidateExes = @()
+    $mainExe = $gameExesInDir | Where-Object { $_.Name -like "*$GameName*" } | Select-Object -First 1
+    if ($mainExe) { $candidateExes += $mainExe }
+    $candidateExes += ($gameExesInDir | Where-Object { $_.Name -notlike "*Launcher*" -and ($mainExe -eq $null -or $_.FullName -ne $mainExe.FullName) })
+    $candidateExes += ($gameExesInDir | Where-Object { $_.Name -like "*Launcher*" })
+
+    foreach ($ge in $candidateExes) {
+        try {
+            $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
+            if ($peBytes.Length -ge 0x40) {
+                $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
+                if ($peOffset + 6 -le $peBytes.Length) {
+                    $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
+                    if ($mach -eq 0x014c) { $isX86Game = $true; break }
+                    elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
+                }
+            }
+        } catch {}
+    }
+}
+
 switch ($OnlineMode) {
     "valve" {
         # --- Mode 1: ReFix Online por Steam (Valve Mode) ---
@@ -671,33 +708,6 @@ switch ($OnlineMode) {
             }
         }
 
-        # Detect if game is 32-bit (x86) to prevent fatal 64-bit DLL injection into 32-bit processes
-        $isX86Game = ($pluginDirs32.Count -gt 0)
-        if (-not $isX86Game) {
-            $gameExesInDir = Get-ChildItem -LiteralPath $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
-            
-            $candidateExes = @()
-            $mainExe = $gameExesInDir | Where-Object { $_.Name -like "*$GameName*" } | Select-Object -First 1
-            if ($mainExe) { $candidateExes += $mainExe }
-            $candidateExes += ($gameExesInDir | Where-Object { $_.Name -notlike "*Launcher*" -and ($mainExe -eq $null -or $_.FullName -ne $mainExe.FullName) })
-            $candidateExes += ($gameExesInDir | Where-Object { $_.Name -like "*Launcher*" })
-
-            foreach ($ge in $candidateExes) {
-                try {
-                    $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
-                    if ($peBytes.Length -ge 0x40) {
-                        $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
-                        if ($peOffset + 6 -le $peBytes.Length) {
-                            $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
-                            if ($mach -eq 0x014c) { $isX86Game = $true; break }
-                            elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
-                        }
-                    }
-                } catch {}
-            }
-        }
-
         # Also deploy winmm.dll to ExeDir for early Steam Overlay injection (64-bit only)
         $winmmPath = Join-Path $BinDir "winmm.dll"
         if ((Test-Path -LiteralPath $winmmPath) -and (-not $isX86Game)) {
@@ -734,7 +744,7 @@ switch ($OnlineMode) {
 
         # Synchronize ReFix.ini in ExeDir
         $reFixIniPath = Join-Path $ExeDir "ReFix.ini"
-        $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir
+        $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir -InputSteamId $SteamId
         $finalUserName = if ($UserName) { $UserName } else { $identity.Name }
         $finalSteamId = $identity.SteamId
         $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
@@ -801,7 +811,7 @@ switch ($OnlineMode) {
 
         # Synchronize unified ReFix.ini in ExeDir for UNAE and DRPI
         $reFixIniPath = Join-Path $ExeDir "ReFix.ini"
-        $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir
+        $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir -InputSteamId $SteamId
         $finalUserName = if ($UserName) { $UserName } else { $identity.Name }
         $finalSteamId = $identity.SteamId
         $filterVal = if ($RealAppId -and $RealAppId -ne "0") { $RealAppId } else { "480" }
@@ -1010,7 +1020,7 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
     Write-Host "[3/6] Synchronizing Re:Goldberg LAN Configuration & Persistent Identity..." -ForegroundColor Cyan
 
     $reFixIniPath = Join-Path $ExeDir "ReFix.ini"
-    $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir
+    $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir -InputSteamId $SteamId
 
     $finalRealAppId = $RealAppId
     if (-not $finalRealAppId -or $finalRealAppId -eq "0") {

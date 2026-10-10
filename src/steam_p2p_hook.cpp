@@ -721,6 +721,9 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         // Enforce Internet-Zero BEFORE buffering into Pre-Lobby Hold Buffer
         if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to)) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
+            uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
+            SteamP2PHook::Log("[Internet-Zero] BLOCKED sendto to external endpoint %u.%u.%u.%u:%u (synthetic_success, total_blocked=%llu)",
+                (destIP >> 24) & 0xFF, (destIP >> 16) & 0xFF, (destIP >> 8) & 0xFF, destIP & 0xFF, destPort, totalBlocked);
             return len; // Synthetic success: drop packet under Internet-Zero
         }
 
@@ -749,6 +752,17 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     if (to) {
         if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to)) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
+            uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
+            char ipStr[64] = "unknown";
+            uint16_t port = 0;
+            if (to->sa_family == AF_INET) {
+                const sockaddr_in* sin = reinterpret_cast<const sockaddr_in*>(to);
+                uint32_t ip = ntohl(sin->sin_addr.s_addr);
+                port = ntohs(sin->sin_port);
+                snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+            }
+            SteamP2PHook::Log("[Internet-Zero] BLOCKED raw sendto to external endpoint %s:%u (synthetic_success, total_blocked=%llu)",
+                ipStr, port, totalBlocked);
             return len; // Synthetic success: drop packet under Internet-Zero
         }
     }
@@ -906,10 +920,28 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
     }
 
     if (name) {
-        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(name)) {
+        char ipStr[64] = "unknown";
+        uint16_t port = 0;
+        if (name->sa_family == AF_INET) {
+            const sockaddr_in* sin = reinterpret_cast<const sockaddr_in*>(name);
+            uint32_t ip = ntohl(sin->sin_addr.s_addr);
+            port = ntohs(sin->sin_port);
+            snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+        } else if (name->sa_family == AF_INET6) {
+            snprintf(ipStr, sizeof(ipStr), "IPv6");
+        }
+
+        bool isLan = IsAllowedLanEndpoint(name);
+        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !isLan) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
+            uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
+            SteamP2PHook::Log("[Internet-Zero] BLOCKED connect to external endpoint %s:%u (error=WSAEHOSTUNREACH, total_blocked=%llu)",
+                ipStr, port, totalBlocked);
             WSASetLastError(WSAEHOSTUNREACH);
             return SOCKET_ERROR;
+        } else {
+            SteamP2PHook::Log("[Internet-Zero] ALLOWED connect to %s endpoint %s:%u",
+                isLan ? "LAN" : "External", ipStr, port);
         }
     }
     return g_orig_connect(s, name, namelen);

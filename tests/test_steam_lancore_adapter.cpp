@@ -33,6 +33,7 @@
 #define STEAM_WIN32 1
 #define STEAM_API_NODLL 1
 #include "include/steam/steam_api.h"
+#include "isteamclient021.h"
 #include "lan_core/refix_lan_types.h"
 #include "lan_core/refix_lan_core.h"
 #include "steam_lobby_mapping.h"
@@ -76,6 +77,25 @@ typedef uint64_t (*fn_ReFix_Test_GetLegacyRecvFromCount)();
 typedef bool (*fn_ReFix_Test_IsLegacySocketInitialized)();
 typedef void (*fn_ReFix_Test_ResetLegacyCounters)();
 typedef bool (*fn_SteamAPI_IsAPICallCompleted)(uint64_t hAPICall, bool* pbFailed);
+typedef void* (*fn_SteamInternal_CreateInterface)(const char* pszVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamUserStats)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamRemoteStorage)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamScreenshots)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamHTTP)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamUGC)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamInput)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamInventory)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamGameSearch)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamMusic)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamMusicRemote)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamHTMLSurface)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamVideo)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamParentalSettings)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamParties)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamRemotePlay)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamAppList)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_SteamAPI_ISteamClient_GetISteamController)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
+typedef void* (*fn_VoidAccessor)();
 
 static HMODULE LoadSteamDll() {
     HMODULE hSteam = LoadLibraryA("bin\\steam_api64_test.dll");
@@ -147,6 +167,120 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
         std::cerr << "[FAIL] SteamAPI_Init returned false!" << std::endl;
         return false;
     }
+
+    auto pfnGetUser = (fn_SteamAPI_SteamUser_v021)GetProcAddress(hSteam, "SteamAPI_SteamUser_v021");
+    TEST_ASSERT(pfnGetUser != nullptr, "SteamAPI_SteamUser_v021 must be exported");
+    auto* pUser = static_cast<ISteamUser*>(pfnGetUser());
+    TEST_ASSERT(pUser != nullptr, "ISteamUser instance must be valid");
+    CSteamID localSid = pUser->GetSteamID();
+    TEST_ASSERT(localSid.ConvertToUint64() == 76561198000000099ULL, "ISteamUser::GetSteamID must reflect REFIX_STEAM_ID env var precedence");
+
+    // ABI Verification: Resolve SteamClient021 via SteamInternal_CreateInterface
+    auto pfnCreateInterface = (fn_SteamInternal_CreateInterface)GetProcAddress(hSteam, "SteamInternal_CreateInterface");
+    TEST_ASSERT(pfnCreateInterface != nullptr, "SteamInternal_CreateInterface must be exported");
+    auto* pClient021 = static_cast<ISteamClient021*>(pfnCreateInterface("SteamClient021"));
+    TEST_ASSERT(pClient021 != nullptr, "SteamInternal_CreateInterface('SteamClient021') must resolve valid pointer");
+
+    HSteamPipe hPipe = pClient021->CreateSteamPipe();
+    TEST_ASSERT(hPipe != 0, "CreateSteamPipe on ISteamClient021 must return valid handle");
+    HSteamUser hUser = pClient021->ConnectToGlobalUser(hPipe);
+    TEST_ASSERT(hUser != 0, "ConnectToGlobalUser on ISteamClient021 must return valid handle");
+
+    TEST_ASSERT(pClient021->GetISteamUser(hUser, hPipe, "SteamUser021") != nullptr, "GetISteamUser via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamUtils(hPipe, "SteamUtils010") != nullptr, "GetISteamUtils via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamMatchmaking(hUser, hPipe, "SteamMatchMaking009") != nullptr, "GetISteamMatchmaking via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamNetworking(hUser, hPipe, "SteamNetworking006") != nullptr, "GetISteamNetworking via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamHTTP(hUser, hPipe, "STEAMHTTP_INTERFACE_VERSION003") != nullptr, "GetISteamHTTP via ISteamClient021 must be valid (slot 24 ABI alignment preserved)");
+    TEST_ASSERT(pClient021->GetISteamUserStats(hUser, hPipe, "STEAMUSERSTATS_INTERFACE_VERSION012") != nullptr, "GetISteamUserStats via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamRemoteStorage(hUser, hPipe, "STEAMREMOTESTORAGE_INTERFACE_VERSION014") != nullptr, "GetISteamRemoteStorage via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamScreenshots(hUser, hPipe, "STEAMSCREENSHOTS_INTERFACE_VERSION003") != nullptr, "GetISteamScreenshots via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamUGC(hUser, hPipe, "STEAMUGC_INTERFACE_VERSION016") != nullptr, "GetISteamUGC via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamInput(hUser, hPipe, "SteamInput006") != nullptr, "GetISteamInput via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamInventory(hUser, hPipe, "STEAMINVENTORY_INTERFACE_V003") != nullptr, "GetISteamInventory via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamGameSearch(hUser, hPipe, "SteamMatchGameSearch001") != nullptr, "GetISteamGameSearch via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamMusic(hUser, hPipe, "STEAMMUSIC_INTERFACE_VERSION001") != nullptr, "GetISteamMusic via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamMusicRemote(hUser, hPipe, "STEAMMUSICREMOTE_INTERFACE_VERSION001") != nullptr, "GetISteamMusicRemote via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamHTMLSurface(hUser, hPipe, "STEAMHTMLSURFACE_INTERFACE_VERSION_005") != nullptr, "GetISteamHTMLSurface via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamVideo(hUser, hPipe, "STEAMVIDEO_INTERFACE_V007") != nullptr, "GetISteamVideo via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamParentalSettings(hUser, hPipe, "STEAMPARENTALSETTINGS_INTERFACE_VERSION001") != nullptr, "GetISteamParentalSettings via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamParties(hUser, hPipe, "SteamParties002") != nullptr, "GetISteamParties via ISteamClient021 must be valid");
+    TEST_ASSERT(pClient021->GetISteamRemotePlay(hUser, hPipe, "STEAMREMOTEPLAY_INTERFACE_VERSION004") != nullptr, "GetISteamRemotePlay via ISteamClient021 must be valid");
+
+    // Verification of flat C exports required by Steamworks.NET NativeMethods
+    auto pfnFlatHTTP = (fn_SteamAPI_ISteamClient_GetISteamHTTP)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamHTTP");
+    auto pfnFlatUserStats = (fn_SteamAPI_ISteamClient_GetISteamUserStats)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamUserStats");
+    auto pfnFlatRemoteStorage = (fn_SteamAPI_ISteamClient_GetISteamRemoteStorage)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamRemoteStorage");
+    auto pfnFlatScreenshots = (fn_SteamAPI_ISteamClient_GetISteamScreenshots)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamScreenshots");
+    auto pfnFlatUGC = (fn_SteamAPI_ISteamClient_GetISteamUGC)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamUGC");
+    auto pfnFlatInput = (fn_SteamAPI_ISteamClient_GetISteamInput)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamInput");
+    auto pfnFlatInventory = (fn_SteamAPI_ISteamClient_GetISteamInventory)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamInventory");
+    auto pfnFlatGameSearch = (fn_SteamAPI_ISteamClient_GetISteamGameSearch)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamGameSearch");
+    auto pfnFlatMusic = (fn_SteamAPI_ISteamClient_GetISteamMusic)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamMusic");
+    auto pfnFlatMusicRemote = (fn_SteamAPI_ISteamClient_GetISteamMusicRemote)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamMusicRemote");
+    auto pfnFlatHTMLSurface = (fn_SteamAPI_ISteamClient_GetISteamHTMLSurface)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamHTMLSurface");
+    auto pfnFlatVideo = (fn_SteamAPI_ISteamClient_GetISteamVideo)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamVideo");
+    auto pfnFlatParentalSettings = (fn_SteamAPI_ISteamClient_GetISteamParentalSettings)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamParentalSettings");
+    auto pfnFlatParties = (fn_SteamAPI_ISteamClient_GetISteamParties)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamParties");
+    auto pfnFlatRemotePlay = (fn_SteamAPI_ISteamClient_GetISteamRemotePlay)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamRemotePlay");
+    auto pfnFlatAppList = (fn_SteamAPI_ISteamClient_GetISteamAppList)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamAppList");
+    auto pfnFlatController = (fn_SteamAPI_ISteamClient_GetISteamController)GetProcAddress(hSteam, "SteamAPI_ISteamClient_GetISteamController");
+
+    TEST_ASSERT(pfnFlatHTTP && pfnFlatUserStats && pfnFlatRemoteStorage && pfnFlatScreenshots && pfnFlatUGC && pfnFlatInput && pfnFlatInventory &&
+                pfnFlatGameSearch && pfnFlatMusic && pfnFlatMusicRemote && pfnFlatHTMLSurface && pfnFlatVideo && pfnFlatParentalSettings && pfnFlatParties && pfnFlatRemotePlay && pfnFlatAppList && pfnFlatController,
+                "All Steamworks.NET flat exports must be present in DLL export table");
+
+    TEST_ASSERT(pfnFlatHTTP(pClient021, hUser, hPipe, "STEAMHTTP_INTERFACE_VERSION003") != nullptr, "SteamAPI_ISteamClient_GetISteamHTTP must return valid interface");
+    TEST_ASSERT(pfnFlatUserStats(pClient021, hUser, hPipe, "STEAMUSERSTATS_INTERFACE_VERSION012") != nullptr, "SteamAPI_ISteamClient_GetISteamUserStats must return valid interface");
+    TEST_ASSERT(pfnFlatRemoteStorage(pClient021, hUser, hPipe, "STEAMREMOTESTORAGE_INTERFACE_VERSION014") != nullptr, "SteamAPI_ISteamClient_GetISteamRemoteStorage must return valid interface");
+    TEST_ASSERT(pfnFlatScreenshots(pClient021, hUser, hPipe, "STEAMSCREENSHOTS_INTERFACE_VERSION003") != nullptr, "SteamAPI_ISteamClient_GetISteamScreenshots must return valid interface");
+    TEST_ASSERT(pfnFlatUGC(pClient021, hUser, hPipe, "STEAMUGC_INTERFACE_VERSION016") != nullptr, "SteamAPI_ISteamClient_GetISteamUGC must return valid interface");
+    TEST_ASSERT(pfnFlatInput(pClient021, hUser, hPipe, "SteamInput006") != nullptr, "SteamAPI_ISteamClient_GetISteamInput must return valid interface");
+    TEST_ASSERT(pfnFlatInventory(pClient021, hUser, hPipe, "STEAMINVENTORY_INTERFACE_V003") != nullptr, "SteamAPI_ISteamClient_GetISteamInventory must return valid interface");
+    TEST_ASSERT(pfnFlatGameSearch(pClient021, hUser, hPipe, "SteamMatchGameSearch001") != nullptr, "SteamAPI_ISteamClient_GetISteamGameSearch must return valid interface");
+    TEST_ASSERT(pfnFlatMusic(pClient021, hUser, hPipe, "STEAMMUSIC_INTERFACE_VERSION001") != nullptr, "SteamAPI_ISteamClient_GetISteamMusic must return valid interface");
+    TEST_ASSERT(pfnFlatMusicRemote(pClient021, hUser, hPipe, "STEAMMUSICREMOTE_INTERFACE_VERSION001") != nullptr, "SteamAPI_ISteamClient_GetISteamMusicRemote must return valid interface");
+    TEST_ASSERT(pfnFlatHTMLSurface(pClient021, hUser, hPipe, "STEAMHTMLSURFACE_INTERFACE_VERSION_005") != nullptr, "SteamAPI_ISteamClient_GetISteamHTMLSurface must return valid interface");
+    TEST_ASSERT(pfnFlatVideo(pClient021, hUser, hPipe, "STEAMVIDEO_INTERFACE_V007") != nullptr, "SteamAPI_ISteamClient_GetISteamVideo must return valid interface");
+    TEST_ASSERT(pfnFlatParentalSettings(pClient021, hUser, hPipe, "STEAMPARENTALSETTINGS_INTERFACE_VERSION001") != nullptr, "SteamAPI_ISteamClient_GetISteamParentalSettings must return valid interface");
+    TEST_ASSERT(pfnFlatParties(pClient021, hUser, hPipe, "SteamParties002") != nullptr, "SteamAPI_ISteamClient_GetISteamParties must return valid interface");
+    TEST_ASSERT(pfnFlatRemotePlay(pClient021, hUser, hPipe, "STEAMREMOTEPLAY_INTERFACE_VERSION004") != nullptr, "SteamAPI_ISteamClient_GetISteamRemotePlay must return valid interface");
+    TEST_ASSERT(pfnFlatAppList(pClient021, hUser, hPipe, "STEAMAPPLIST_INTERFACE_VERSION001") != nullptr, "SteamAPI_ISteamClient_GetISteamAppList must return valid interface");
+    TEST_ASSERT(pfnFlatController(pClient021, hUser, hPipe, "SteamInput006") != nullptr, "SteamAPI_ISteamClient_GetISteamController must return valid interface");
+
+    // Verification of direct accessors
+    auto pfnAccGameSearch = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamGameSearch_v001");
+    auto pfnAccAppList = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamAppList_v001");
+    auto pfnAccMusic = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamMusic_v001");
+    auto pfnAccMusicRemote = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamMusicRemote_v001");
+    auto pfnAccHTMLSurface = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamHTMLSurface_v005");
+    auto pfnAccVideo = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamVideo_v007");
+    auto pfnAccParentalSettings = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamParentalSettings_v001");
+    auto pfnAccParties = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamParties_v002");
+    auto pfnAccRemotePlay = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamRemotePlay_v001");
+    auto pfnAccTimeline = (fn_VoidAccessor)GetProcAddress(hSteam, "SteamAPI_SteamTimeline_v004");
+    TEST_ASSERT(pfnAccGameSearch && pfnAccAppList && pfnAccMusic && pfnAccMusicRemote && pfnAccHTMLSurface && pfnAccVideo && pfnAccParentalSettings && pfnAccParties && pfnAccRemotePlay && pfnAccTimeline,
+                "All Steamworks direct accessors must be present in DLL export table");
+    TEST_ASSERT(pfnAccGameSearch() != nullptr, "SteamAPI_SteamGameSearch_v001() must return valid interface");
+    TEST_ASSERT(pfnAccAppList() != nullptr, "SteamAPI_SteamAppList_v001() must return valid interface");
+    TEST_ASSERT(pfnAccMusic() != nullptr, "SteamAPI_SteamMusic_v001() must return valid interface");
+    TEST_ASSERT(pfnAccMusicRemote() != nullptr, "SteamAPI_SteamMusicRemote_v001() must return valid interface");
+    TEST_ASSERT(pfnAccHTMLSurface() != nullptr, "SteamAPI_SteamHTMLSurface_v005() must return valid interface");
+    TEST_ASSERT(pfnAccVideo() != nullptr, "SteamAPI_SteamVideo_v007() must return valid interface");
+    TEST_ASSERT(pfnAccParentalSettings() != nullptr, "SteamAPI_SteamParentalSettings_v001() must return valid interface");
+    TEST_ASSERT(pfnAccParties() != nullptr, "SteamAPI_SteamParties_v002() must return valid interface");
+    TEST_ASSERT(pfnAccRemotePlay() != nullptr, "SteamAPI_SteamRemotePlay_v001() must return valid interface");
+    TEST_ASSERT(pfnAccTimeline() != nullptr, "SteamAPI_SteamTimeline_v004() must return valid interface");
+
+    // Verification of CreateInterface generic resolution
+    TEST_ASSERT(pfnCreateInterface("SteamMatchGameSearch001") != nullptr, "CreateInterface(SteamMatchGameSearch001) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("STEAMAPPLIST_INTERFACE_VERSION001") != nullptr, "CreateInterface(STEAMAPPLIST_INTERFACE_VERSION001) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("STEAMMUSIC_INTERFACE_VERSION001") != nullptr, "CreateInterface(STEAMMUSIC_INTERFACE_VERSION001) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("STEAMMUSICREMOTE_INTERFACE_VERSION001") != nullptr, "CreateInterface(STEAMMUSICREMOTE_INTERFACE_VERSION001) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("STEAMHTMLSURFACE_INTERFACE_VERSION_005") != nullptr, "CreateInterface(STEAMHTMLSURFACE_INTERFACE_VERSION_005) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("STEAMVIDEO_INTERFACE_V007") != nullptr, "CreateInterface(STEAMVIDEO_INTERFACE_V007) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("STEAMPARENTALSETTINGS_INTERFACE_VERSION001") != nullptr, "CreateInterface(STEAMPARENTALSETTINGS_INTERFACE_VERSION001) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("SteamParties002") != nullptr, "CreateInterface(SteamParties002) must return valid interface");
+    TEST_ASSERT(pfnCreateInterface("STEAMREMOTEPLAY_INTERFACE_VERSION004") != nullptr, "CreateInterface(STEAMREMOTEPLAY_INTERFACE_VERSION004) must return valid interface");
 
     auto* pUtils = static_cast<ISteamUtils*>(pfnGetUtils());
     TEST_ASSERT(pUtils != nullptr, "ISteamUtils must be valid");

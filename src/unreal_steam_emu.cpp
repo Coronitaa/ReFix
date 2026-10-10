@@ -16,6 +16,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wincrypt.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
@@ -44,10 +45,18 @@
 #include "include/steam/steam_api.h"
 #include "include/steam/isteamfriends017.h"
 #include "include/steam/isteamuser021.h"
+#include "include/steam/isteamclient021.h"
 #include "include/steam/isteamgameserver012.h"
 #include "include/steam/isteamnetworkingsockets.h"
 #include "include/steam/isteamnetworkingutils.h"
 #include "include/steam/isteamnetworkingmessages.h"
+#include "include/steam/isteamapplist.h"
+#include "include/steam/isteammusic.h"
+#include "include/steam/isteammusicremote.h"
+#include "include/steam/isteamhtmlsurface.h"
+#include "include/steam/isteamvideo.h"
+#include "include/steam/isteamparentalsettings.h"
+#include "include/steam/isteamremoteplay.h"
 
 #include "unreal_steam_emu.h"
 #include "unreal_detect.h"
@@ -125,24 +134,102 @@ namespace UnrealSteamEmu {
 
     static SOCKET g_udpSocket = INVALID_SOCKET;
 
-    // Helper: generate stable deterministic SteamID
+    // Helper: generate stable deterministic SteamID (aligned with deploy_helper.ps1 MachineGuid MD5)
     static uint64_t GenerateDeterministicSteamID() {
-        char compName[MAX_COMPUTERNAME_LENGTH + 1] = { 0 };
-        DWORD cSize = sizeof(compName);
-        GetComputerNameA(compName, &cSize);
-
-        char userName[256] = { 0 };
-        DWORD uSize = sizeof(userName);
-        GetUserNameA(userName, &uSize);
-
-        std::string seed = std::string(compName) + "_" + std::string(userName);
-        uint32_t hash = 5381;
-        for (char c : seed) {
-            hash = ((hash << 5) + hash) + (uint8_t)c;
+        char guidBuf[128] = { 0 };
+        HKEY hKey = NULL;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            DWORD dwSize = sizeof(guidBuf);
+            DWORD dwType = REG_SZ;
+            RegQueryValueExA(hKey, "MachineGuid", NULL, &dwType, (LPBYTE)guidBuf, &dwSize);
+            RegCloseKey(hKey);
         }
 
-        uint64_t accountID = (uint64_t)(hash & 0x7FFFFFFF);
-        return 0x0110000100000000ULL | accountID;
+        std::string rawString;
+        if (guidBuf[0]) {
+            rawString = guidBuf;
+        } else {
+            char compName[MAX_COMPUTERNAME_LENGTH + 1] = { 0 };
+            DWORD cSize = sizeof(compName);
+            GetComputerNameA(compName, &cSize);
+
+            char userName[256] = { 0 };
+            DWORD uSize = sizeof(userName);
+            GetUserNameA(userName, &uSize);
+
+            rawString = std::string(compName) + "_" + std::string(userName);
+        }
+
+        uint32_t accountId = 0;
+        HCRYPTPROV hProv = 0;
+        if (CryptAcquireContextA(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+            HCRYPTHASH hHash = 0;
+            if (CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash)) {
+                CryptHashData(hHash, (const BYTE*)rawString.data(), (DWORD)rawString.size(), 0);
+                BYTE hashBytes[16] = { 0 };
+                DWORD hashLen = sizeof(hashBytes);
+                if (CryptGetHashParam(hHash, HP_HASHVAL, hashBytes, &hashLen, 0)) {
+                    memcpy(&accountId, hashBytes, sizeof(uint32_t));
+                }
+                CryptDestroyHash(hHash);
+            }
+            CryptReleaseContext(hProv, 0);
+        }
+
+        if (accountId == 0) {
+            uint32_t hash = 5381;
+            for (char c : rawString) {
+                hash = ((hash << 5) + hash) + (uint8_t)c;
+            }
+            accountId = hash;
+        }
+
+        accountId = (accountId & 0x1FFFFFFF) + 100000000;
+        uint64_t basePrefix = 76561197960265728ULL; // 0x0110000100000000ULL
+        return basePrefix + (uint64_t)accountId;
+    }
+
+    static uint64_t TryGetSteamClientActiveSteamID() {
+        HKEY hKey = NULL;
+        if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\ActiveProcess", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD dwAccountID = 0;
+            DWORD dwSize = sizeof(dwAccountID);
+            DWORD dwType = REG_DWORD;
+            LONG res = RegQueryValueExA(hKey, "ActiveUser", NULL, &dwType, (LPBYTE)&dwAccountID, &dwSize);
+            RegCloseKey(hKey);
+            if (res == ERROR_SUCCESS && dwAccountID != 0) {
+                return 0x0110000100000000ULL | (uint64_t)dwAccountID;
+            }
+        }
+        if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\Users", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            char subKeyName[256] = { 0 };
+            DWORD nameLen = sizeof(subKeyName);
+            if (RegEnumKeyExA(hKey, 0, subKeyName, &nameLen, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+                RegCloseKey(hKey);
+                uint64_t accId = _strtoui64(subKeyName, nullptr, 10);
+                if (accId != 0) {
+                    return 0x0110000100000000ULL | accId;
+                }
+            } else {
+                RegCloseKey(hKey);
+            }
+        }
+        return 0;
+    }
+
+    static std::string TryGetSteamClientPersonaName() {
+        HKEY hKey = NULL;
+        if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            char nameBuf[256] = { 0 };
+            DWORD dwSize = sizeof(nameBuf);
+            DWORD dwType = REG_SZ;
+            LONG res = RegQueryValueExA(hKey, "LastGameNameUsed", NULL, &dwType, (LPBYTE)nameBuf, &dwSize);
+            RegCloseKey(hKey);
+            if (res == ERROR_SUCCESS && nameBuf[0] != '\0') {
+                return std::string(nameBuf);
+            }
+        }
+        return "";
     }
 
     static void SyncTicketToEnvironment(const uint8_t* data, size_t size, uint32_t handle) {
@@ -156,6 +243,14 @@ namespace UnrealSteamEmu {
         }
         SetEnvironmentVariableA("REFIX_STEAM_AUTH_TICKET", hexStr.c_str());
         SetEnvironmentVariableA("REFIX_STEAM_AUTH_HANDLE", std::to_string(handle).c_str());
+    }
+
+    static bool ShouldUseLegacyFallback() {
+        char buf[16] = {0};
+        if (GetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", buf, sizeof(buf)) > 0) {
+            return !(buf[0] == '1' || buf[0] == 't' || buf[0] == 'T' || buf[0] == 'y' || buf[0] == 'Y');
+        }
+        return true;
     }
 
     static void LoadConfig() {
@@ -204,11 +299,16 @@ namespace UnrealSteamEmu {
 
         std::vector<std::string> sidFiles = {
             exeDir + "steam_settings\\force_steamid.txt",
+            exeDir + "steam_settings\\user_steam_id.txt",
             exeDir + "..\\steam_settings\\force_steamid.txt",
+            exeDir + "..\\steam_settings\\user_steam_id.txt",
             exeDir + "..\\..\\steam_settings\\force_steamid.txt",
-            exeDir + "..\\..\\..\\steam_settings\\force_steamid.txt"
+            exeDir + "..\\..\\steam_settings\\user_steam_id.txt",
+            exeDir + "..\\..\\..\\steam_settings\\force_steamid.txt",
+            exeDir + "..\\..\\..\\steam_settings\\user_steam_id.txt"
         };
         uint64_t goldbergSteamId = 0;
+        std::string goldbergSteamIdFile = "";
         for (const auto& sf : sidFiles) {
             std::ifstream file(sf);
             if (file.is_open()) {
@@ -217,91 +317,210 @@ namespace UnrealSteamEmu {
                     uint64_t sid = _strtoui64(line.c_str(), nullptr, 10);
                     if (sid != 0) {
                         goldbergSteamId = sid;
+                        goldbergSteamIdFile = sf;
                         break;
                     }
                 }
             }
         }
 
+        // 1. Read SteamID configuration flags
+        char bufAutoGen[16] = { 0 };
+        GetPrivateProfileStringA("User", "AutoGenerateSteamId", "", bufAutoGen, sizeof(bufAutoGen), iniPath.c_str());
+        if (!bufAutoGen[0]) {
+            GetPrivateProfileStringA("Unreal.Steam", "AutoGenerateSteamId", "", bufAutoGen, sizeof(bufAutoGen), iniPath.c_str());
+        }
+        bool bAutoGenExplicitTrue = (_stricmp(bufAutoGen, "true") == 0 || strcmp(bufAutoGen, "1") == 0);
+
+        char bufUseSteamClient[16] = { 0 };
+        GetPrivateProfileStringA("User", "UseSteamClientSteamId", "", bufUseSteamClient, sizeof(bufUseSteamClient), iniPath.c_str());
+        if (!bufUseSteamClient[0]) {
+            GetPrivateProfileStringA("User", "UseSteamClient", "", bufUseSteamClient, sizeof(bufUseSteamClient), iniPath.c_str());
+        }
+        if (!bufUseSteamClient[0]) {
+            GetPrivateProfileStringA("Unreal.Steam", "UseSteamClientSteamId", "", bufUseSteamClient, sizeof(bufUseSteamClient), iniPath.c_str());
+        }
+        bool bUseSteamClient = (_stricmp(bufUseSteamClient, "true") == 0 || strcmp(bufUseSteamClient, "1") == 0);
+
+        char bufId[64] = { 0 };
+        GetPrivateProfileStringA("User", "SteamId", "", bufId, sizeof(bufId), iniPath.c_str());
+        if (!bufId[0]) {
+            GetPrivateProfileStringA("Unreal.Steam", "SteamId", "", bufId, sizeof(bufId), iniPath.c_str());
+        }
+
+        if (_stricmp(bufId, "steam") == 0 || _stricmp(bufId, "client") == 0) {
+            bUseSteamClient = true;
+        } else if (_stricmp(bufId, "auto") == 0) {
+            bAutoGenExplicitTrue = true;
+        }
+
+        std::string nameSource = "fallback:Player";
         char buf[256] = { 0 };
         // Priority 1: [User] Name
         GetPrivateProfileStringA("User", "Name", "", buf, sizeof(buf), iniPath.c_str());
+        if (buf[0] != '\0') nameSource = "ini:[User] Name";
         // Priority 2: [Unreal.Steam] PersonaName
         if (buf[0] == '\0') {
             GetPrivateProfileStringA("Unreal.Steam", "PersonaName", "", buf, sizeof(buf), iniPath.c_str());
+            if (buf[0] != '\0') nameSource = "ini:[Unreal.Steam] PersonaName";
         }
         // Priority 3: [User] PersonaName
         if (buf[0] == '\0') {
             GetPrivateProfileStringA("User", "PersonaName", "", buf, sizeof(buf), iniPath.c_str());
+            if (buf[0] != '\0') nameSource = "ini:[User] PersonaName";
         }
         // Priority 4: [User] Username
         if (buf[0] == '\0') {
             GetPrivateProfileStringA("User", "Username", "", buf, sizeof(buf), iniPath.c_str());
+            if (buf[0] != '\0') nameSource = "ini:[User] Username";
         }
         // Priority 5: Goldberg steam_settings/force_account_name.txt
         if (buf[0] == '\0' && !goldbergName.empty()) {
             strncpy_s(buf, sizeof(buf), goldbergName.c_str(), _TRUNCATE);
+            nameSource = "file:steam_settings/force_account_name.txt";
         }
-        // Priority 6: Environment variables
+        // Priority 6: Steam client if requested
+        if (buf[0] == '\0' && bUseSteamClient) {
+            std::string scName = TryGetSteamClientPersonaName();
+            if (!scName.empty()) {
+                strncpy_s(buf, sizeof(buf), scName.c_str(), _TRUNCATE);
+                nameSource = "steam_client:HKCU\\Software\\Valve\\Steam\\LastGameNameUsed";
+            }
+        }
+        // Priority 7: Environment variables
         if (buf[0] == '\0') {
             char envName[128] = { 0 };
             if (GetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
                 strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+                nameSource = "env:REFIX_STEAM_PERSONA_NAME";
             } else if (GetEnvironmentVariableA("REFIX_USER_NAME", envName, sizeof(envName)) > 0 && envName[0]) {
                 strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+                nameSource = "env:REFIX_USER_NAME";
             } else if (GetEnvironmentVariableA("REFIX_USERNAME", envName, sizeof(envName)) > 0 && envName[0]) {
                 strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+                nameSource = "env:REFIX_USERNAME";
             } else if (GetEnvironmentVariableA("SteamPersonaName", envName, sizeof(envName)) > 0 && envName[0]) {
                 strncpy_s(buf, sizeof(buf), envName, _TRUNCATE);
+                nameSource = "env:SteamPersonaName";
             }
         }
         if (buf[0] != '\0') {
             g_personaName = buf;
         } else {
             g_personaName = "Player";
+            nameSource = "fallback:Player";
         }
 
+        std::string sidSource = "unknown";
         char envSid[64] = { 0 };
         if (GetEnvironmentVariableA("REFIX_STEAM_ID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-            g_localSteamID = _strtoui64(envSid, nullptr, 10);
         } else if (GetEnvironmentVariableA("REFIX_STEAMID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-            g_localSteamID = _strtoui64(envSid, nullptr, 10);
         } else if (GetEnvironmentVariableA("SteamID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-            g_localSteamID = _strtoui64(envSid, nullptr, 10);
         } else if (GetEnvironmentVariableA("SteamId", envSid, sizeof(envSid)) > 0 && envSid[0]) {
-            g_localSteamID = _strtoui64(envSid, nullptr, 10);
+        }
+
+        if (envSid[0]) {
+            if (_stricmp(envSid, "auto") == 0) {
+                g_localSteamID = GenerateDeterministicSteamID();
+                sidSource = "env:auto->GenerateDeterministicSteamID";
+            } else if (_stricmp(envSid, "steam") == 0 || _stricmp(envSid, "client") == 0) {
+                uint64_t scId = TryGetSteamClientActiveSteamID();
+                if (scId != 0) {
+                    g_localSteamID = scId;
+                    sidSource = "env:steam->SteamClientRegistry";
+                } else {
+                    g_localSteamID = GenerateDeterministicSteamID();
+                    sidSource = "env:steam->fallback:GenerateDeterministicSteamID";
+                }
+            } else {
+                g_localSteamID = _strtoui64(envSid, nullptr, 10);
+                if (g_localSteamID != 0) sidSource = "env:numeric";
+            }
         }
 
         if (g_localSteamID == 0) {
-            char bufId[64] = { 0 };
-            GetPrivateProfileStringA("Unreal.Steam", "SteamId", "", bufId, sizeof(bufId), iniPath.c_str());
-            if (bufId[0]) {
-                g_localSteamID = _strtoui64(bufId, nullptr, 10);
-            }
-            if (g_localSteamID == 0) {
-                GetPrivateProfileStringA("User", "SteamId", "", bufId, sizeof(bufId), iniPath.c_str());
-                if (bufId[0]) g_localSteamID = _strtoui64(bufId, nullptr, 10);
-            }
-            if (g_localSteamID == 0 && goldbergSteamId != 0) {
-                g_localSteamID = goldbergSteamId;
+            if (bUseSteamClient) {
+                uint64_t scId = TryGetSteamClientActiveSteamID();
+                if (scId != 0) {
+                    g_localSteamID = scId;
+                    sidSource = "steam_client:HKCU\\Software\\Valve\\Steam";
+                } else {
+                    g_localSteamID = GenerateDeterministicSteamID();
+                    sidSource = "steam_client_not_found->fallback:GenerateDeterministicSteamID";
+                }
+            } else if (bAutoGenExplicitTrue) {
+                g_localSteamID = GenerateDeterministicSteamID();
+                sidSource = "ini:AutoGenerateSteamId=true->GenerateDeterministicSteamID";
+            } else if (bufId[0] && _stricmp(bufId, "auto") != 0 && _stricmp(bufId, "steam") != 0 && _stricmp(bufId, "client") != 0) {
+                uint64_t explicitId = _strtoui64(bufId, nullptr, 10);
+                if (explicitId != 0) {
+                    g_localSteamID = explicitId;
+                    sidSource = "ini:SteamId";
+                }
             }
         }
+
+        if (g_localSteamID == 0 && !bAutoGenExplicitTrue && goldbergSteamId != 0) {
+            g_localSteamID = goldbergSteamId;
+            sidSource = "file:" + goldbergSteamIdFile;
+        }
+
         if (g_localSteamID == 0) {
             g_localSteamID = GenerateDeterministicSteamID();
+            sidSource = "default:GenerateDeterministicSteamID";
         }
 
+        std::string appIdSource = "unknown";
         char bufApp[64];
         GetPrivateProfileStringA("Unreal.Steam", "AppId", "", bufApp, sizeof(bufApp), iniPath.c_str());
-        if (bufApp[0]) g_appID = (uint32_t)atoi(bufApp);
-        else {
+        if (bufApp[0] && atoi(bufApp) != 0) {
+            g_appID = (uint32_t)atoi(bufApp);
+            appIdSource = "ini:[Unreal.Steam] AppId";
+        } else {
             GetPrivateProfileStringA("Steam", "RealAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
-            if (bufApp[0] && strcmp(bufApp, "0") != 0) g_appID = (uint32_t)atoi(bufApp);
-            else {
-                GetPrivateProfileStringA("Steam", "MaskAppId", "480", bufApp, sizeof(bufApp), iniPath.c_str());
+            if (bufApp[0] && strcmp(bufApp, "0") != 0) {
                 g_appID = (uint32_t)atoi(bufApp);
+                appIdSource = "ini:[Steam] RealAppId";
+            } else {
+                GetPrivateProfileStringA("Steam", "MaskAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
+                if (bufApp[0] && strcmp(bufApp, "0") != 0) {
+                    g_appID = (uint32_t)atoi(bufApp);
+                    appIdSource = "ini:[Steam] MaskAppId";
+                }
             }
         }
-        if (g_appID == 0) g_appID = 480;
+        if (g_appID == 0) {
+            std::string appidTxtPath = exeDir + "steam_appid.txt";
+            std::ifstream af(appidTxtPath);
+            if (af.is_open()) {
+                std::string line;
+                if (std::getline(af, line)) {
+                    uint32_t a = (uint32_t)atoi(line.c_str());
+                    if (a != 0) {
+                        g_appID = a;
+                        appIdSource = "file:" + appidTxtPath;
+                    }
+                }
+            }
+        }
+        if (g_appID == 0) {
+            g_appID = 480;
+            appIdSource = "fallback:default(480)";
+        }
+
+        char envNoLegacy[16] = { 0 };
+        bool noLegacySet = (GetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", envNoLegacy, sizeof(envNoLegacy)) > 0);
+        bool legacyFallbackActive = ShouldUseLegacyFallback();
+
+        ReFixLog("[ConfigDiag] ExePath: '%s'", exePath);
+        ReFixLog("[ConfigDiag] Selected IniPath: '%s'", iniPath.c_str());
+        ReFixLog("[ConfigDiag] SteamID Source: '%s' -> %llu", sidSource.c_str(), g_localSteamID);
+        ReFixLog("[ConfigDiag] AppID Source: '%s' -> %u", appIdSource.c_str(), g_appID);
+        ReFixLog("[ConfigDiag] Persona Name Source: '%s' -> '%s'", nameSource.c_str(), g_personaName.c_str());
+        ReFixLog("[ConfigDiag] REFIX_DISABLE_LEGACY_FALLBACKS: %s (Value='%s', LegacyFallbackActive=%s)",
+            noLegacySet ? "SET" : "NOT SET",
+            noLegacySet ? envNoLegacy : "",
+            legacyFallbackActive ? "TRUE" : "FALSE");
 
         GetPrivateProfileStringA("Unreal.Steam", "Language", "english", buf, sizeof(buf), iniPath.c_str());
         g_language = buf;
@@ -526,14 +745,6 @@ namespace UnrealSteamEmu {
     static refix::lan::MatchmakingCriteria g_pendingSearchCriteria;
     static std::vector<uint64_t> g_lastMatchmakingResults;
 
-    static bool ShouldUseLegacyFallback() {
-        char buf[16] = {0};
-        if (GetEnvironmentVariableA("REFIX_DISABLE_LEGACY_FALLBACKS", buf, sizeof(buf)) > 0) {
-            return !(buf[0] == '1' || buf[0] == 't' || buf[0] == 'T' || buf[0] == 'y' || buf[0] == 'Y');
-        }
-        return true;
-    }
-
     static uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
         return refix::steam::ComputeLobbyAccountId(coreLobbyId);
     }
@@ -624,7 +835,10 @@ namespace UnrealSteamEmu {
     #pragma pack(pop)
 
     static void InitSockets() {
-        if (!ShouldUseLegacyFallback()) return;
+        if (!ShouldUseLegacyFallback()) {
+            ReFixLog("[UnrealSteam] InitSockets: Skipped legacy UDP socket (REFIX_DISABLE_LEGACY_FALLBACKS active)");
+            return;
+        }
         if (g_udpSocket != INVALID_SOCKET) return;
 
         WSADATA wsa;
@@ -646,16 +860,18 @@ namespace UnrealSteamEmu {
             addr.sin_port = htons(g_listenPort);
 
             if (bind(g_udpSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+                int err = WSAGetLastError();
+                ReFixLog("[UnrealSteam] Warning: Failed to bind legacy UDP socket to port %u (WSAError=%d), attempting ephemeral fallback", g_listenPort, err);
                 // If binding to requested g_listenPort failed, fall back to ephemeral port 0
                 addr.sin_port = 0;
                 if (bind(g_udpSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-                    ReFixLog("[UnrealSteam] Warning: Could not bind UDP socket to port %u or ephemeral", g_listenPort);
+                    ReFixLog("[UnrealSteam] Error: Could not bind legacy UDP socket to port %u or ephemeral (WSAError=%d)", g_listenPort, WSAGetLastError());
                 } else {
                     sockaddr_in boundAddr = {};
                     int boundLen = sizeof(boundAddr);
                     if (getsockname(g_udpSocket, (sockaddr*)&boundAddr, &boundLen) == 0) {
                         g_listenPort = ntohs(boundAddr.sin_port);
-                        ReFixLog("[UnrealSteam] Bound UDP socket to ephemeral port %u (fallback from collision)", g_listenPort);
+                        ReFixLog("[UnrealSteam] Bound legacy UDP socket to ephemeral port %u (fallback from collision, handle=%p)", g_listenPort, (void*)g_udpSocket);
                     }
                 }
             } else {
@@ -664,8 +880,10 @@ namespace UnrealSteamEmu {
                 if (getsockname(g_udpSocket, (sockaddr*)&boundAddr, &boundLen) == 0) {
                     g_listenPort = ntohs(boundAddr.sin_port);
                 }
-                ReFixLog("[UnrealSteam] Bound UDP socket to port %u for LAN discovery & P2P", g_listenPort);
+                ReFixLog("[UnrealSteam] Bound legacy UDP socket to port %u for LAN discovery & P2P (handle=%p)", g_listenPort, (void*)g_udpSocket);
             }
+        } else {
+            ReFixLog("[UnrealSteam] Error: socket(AF_INET, SOCK_DGRAM) failed for legacy UDP socket (WSAError=%d)", WSAGetLastError());
         }
     }
 
@@ -1794,7 +2012,13 @@ namespace UnrealSteamEmu {
     public:
         virtual HSteamUser GetHSteamUser() override { return g_hSteamUser; }
         virtual bool BLoggedOn() override { return true; }
-        virtual CSteamID GetSteamID() override { return CSteamID(g_localSteamID); }
+        virtual CSteamID GetSteamID() override {
+            static std::atomic<bool> s_logged{ false };
+            if (!s_logged.exchange(true)) {
+                ReFixLog("[UnrealSteam] ISteamUser::GetSteamID() returning SteamID64=%llu", g_localSteamID);
+            }
+            return CSteamID(g_localSteamID);
+        }
 
         virtual int InitiateGameConnection(void *pAuthBlob, int cbMaxAuthBlob, CSteamID steamIDGameServer, uint32 unIPServer, uint16 usPortServer, bool bSecure) override {
             if (pAuthBlob && cbMaxAuthBlob >= 152) {
@@ -2159,9 +2383,9 @@ namespace UnrealSteamEmu {
         virtual void SetPlayedWith(CSteamID steamIDUserPlayedWith) override {}
         virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override {}
 
-        virtual int GetSmallFriendAvatar(CSteamID steamIDFriend) override { return 0; }
-        virtual int GetMediumFriendAvatar(CSteamID steamIDFriend) override { return 0; }
-        virtual int GetLargeFriendAvatar(CSteamID steamIDFriend) override { return 0; }
+        virtual int GetSmallFriendAvatar(CSteamID steamIDFriend) override { return 1; }
+        virtual int GetMediumFriendAvatar(CSteamID steamIDFriend) override { return 1; }
+        virtual int GetLargeFriendAvatar(CSteamID steamIDFriend) override { return 1; }
 
         virtual bool RequestUserInformation(CSteamID steamIDUser, bool bRequireNameOnly) override { return false; }
         virtual SteamAPICall_t RequestClanOfficerList(CSteamID steamIDClan) override { return 0; }
@@ -2263,11 +2487,31 @@ namespace UnrealSteamEmu {
         virtual EUniverse GetConnectedUniverse() override { return k_EUniversePublic; }
         virtual uint32 GetServerRealTime() override { return (uint32)::time(NULL); }
         virtual const char *GetIPCountry() override { return "US"; }
-        virtual bool GetImageSize(int iImage, uint32 *pnWidth, uint32 *pnHeight) override { return false; }
-        virtual bool GetImageRGBA(int iImage, uint8 *pubDest, int nDestBufferSize) override { return false; }
+        virtual bool GetImageSize(int iImage, uint32 *pnWidth, uint32 *pnHeight) override {
+            if (iImage <= 0) return false;
+            if (pnWidth) *pnWidth = 32;
+            if (pnHeight) *pnHeight = 32;
+            return true;
+        }
+        virtual bool GetImageRGBA(int iImage, uint8 *pubDest, int nDestBufferSize) override {
+            if (iImage <= 0 || !pubDest || nDestBufferSize < 32 * 32 * 4) return false;
+            for (int i = 0; i < 32 * 32; i++) {
+                pubDest[i * 4 + 0] = 70;  // R
+                pubDest[i * 4 + 1] = 130; // G
+                pubDest[i * 4 + 2] = 220; // B
+                pubDest[i * 4 + 3] = 255; // A
+            }
+            return true;
+        }
         virtual bool GetCSERIPPort(uint32 *unIP, uint16 *usPort) override { return false; }
         virtual uint8 GetCurrentBatteryPower() override { return 255; }
-        virtual uint32 GetAppID() override { return g_appID; }
+        virtual uint32 GetAppID() override {
+            static std::atomic<bool> s_logged{ false };
+            if (!s_logged.exchange(true)) {
+                ReFixLog("[UnrealSteam] ISteamUtils::GetAppID() returning AppID=%u", g_appID);
+            }
+            return g_appID;
+        }
         virtual void SetOverlayNotificationPosition(ENotificationPosition eNotificationPosition) override {}
 
         virtual bool IsAPICallCompleted(SteamAPICall_t hSteamAPICall, bool *pbFailed) override {
@@ -4584,6 +4828,231 @@ namespace UnrealSteamEmu {
     };
     static CSteamTimelineEmu g_steamTimelineInstance;
 
+    // --- ISteamGameSearch ---
+    class CSteamGameSearchEmu : public ISteamGameSearch {
+    public:
+        virtual EGameSearchErrorCode_t AddGameSearchParams(const char *pchKeyToFind, const char *pchValuesToFind) override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t SearchForGameWithLobby(CSteamID steamIDLobby, int nPlayerMin, int nPlayerMax) override { return k_EGameSearchErrorCode_Failed_No_Search_In_Progress; }
+        virtual EGameSearchErrorCode_t SearchForGameSolo(int nPlayerMin, int nPlayerMax) override { return k_EGameSearchErrorCode_Failed_No_Search_In_Progress; }
+        virtual EGameSearchErrorCode_t AcceptGame() override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t DeclineGame() override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t RetrieveConnectionDetails(CSteamID steamIDHost, char *pchConnectionDetails, int cubConnectionDetails) override {
+            if (pchConnectionDetails && cubConnectionDetails > 0) pchConnectionDetails[0] = '\0';
+            return k_EGameSearchErrorCode_OK;
+        }
+        virtual EGameSearchErrorCode_t EndGameSearch() override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t SetGameHostParams(const char *pchKey, const char *pchValue) override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t SetConnectionDetails(const char *pchConnectionDetails, int cubConnectionDetails) override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t RequestPlayersForGame(int nPlayerMin, int nPlayerMax, int nMaxTeamSize) override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t HostConfirmGameStart(uint64 ullUniqueGameID) override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t CancelRequestPlayersForGame() override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t SubmitPlayerResult(uint64 ullUniqueGameID, CSteamID steamIDPlayer, EPlayerResult_t EPlayerResult) override { return k_EGameSearchErrorCode_OK; }
+        virtual EGameSearchErrorCode_t EndGame(uint64 ullUniqueGameID) override { return k_EGameSearchErrorCode_OK; }
+    };
+    static CSteamGameSearchEmu g_steamGameSearchInstance;
+
+    // --- ISteamAppList ---
+    class CSteamAppListEmu : public ISteamAppList {
+    public:
+        virtual uint32 GetNumInstalledApps() override { return 1; }
+        virtual uint32 GetInstalledApps(AppId_t *pvecAppID, uint32 unMaxAppIDs) override {
+            if (pvecAppID && unMaxAppIDs > 0) {
+                pvecAppID[0] = g_appID;
+                return 1;
+            }
+            return 0;
+        }
+        virtual int GetAppName(AppId_t nAppID, char *pchName, int cchNameMax) override {
+            if (pchName && cchNameMax > 0) {
+                strncpy_s(pchName, cchNameMax, "Game", _TRUNCATE);
+                return (int)strlen(pchName);
+            }
+            return -1;
+        }
+        virtual int GetAppInstallDir(AppId_t nAppID, char *pchDirectory, int cchNameMax) override {
+            if (pchDirectory && cchNameMax > 0) {
+                strncpy_s(pchDirectory, cchNameMax, ".", _TRUNCATE);
+                return (int)strlen(pchDirectory);
+            }
+            return -1;
+        }
+        virtual int GetAppBuildId(AppId_t nAppID) override { return 1; }
+    };
+    static CSteamAppListEmu g_steamAppListInstance;
+
+    // --- ISteamMusic ---
+    class CSteamMusicEmu : public ISteamMusic {
+    public:
+        virtual bool BIsEnabled() override { return false; }
+        virtual bool BIsPlaying() override { return false; }
+        virtual AudioPlayback_Status GetPlaybackStatus() override { return AudioPlayback_Idle; }
+        virtual void Play() override {}
+        virtual void Pause() override {}
+        virtual void PlayPrevious() override {}
+        virtual void PlayNext() override {}
+        virtual void SetVolume(float flVolume) override {}
+        virtual float GetVolume() override { return 1.0f; }
+    };
+    static CSteamMusicEmu g_steamMusicInstance;
+
+    // --- ISteamMusicRemote ---
+    class CSteamMusicRemoteEmu : public ISteamMusicRemote {
+    public:
+        virtual bool RegisterSteamMusicRemote(const char *pchName) override { return true; }
+        virtual bool DeregisterSteamMusicRemote() override { return true; }
+        virtual bool BIsCurrentMusicRemote() override { return false; }
+        virtual bool BActivationSuccess(bool bValue) override { return true; }
+        virtual bool SetDisplayName(const char *pchDisplayName) override { return true; }
+        virtual bool SetPNGIcon_64x64(void *pvBuffer, uint32 cbBufferLength) override { return true; }
+        virtual bool EnablePlayPrevious(bool bValue) override { return true; }
+        virtual bool EnablePlayNext(bool bValue) override { return true; }
+        virtual bool EnableShuffled(bool bValue) override { return true; }
+        virtual bool EnableLooped(bool bValue) override { return true; }
+        virtual bool EnableQueue(bool bValue) override { return true; }
+        virtual bool EnablePlaylists(bool bValue) override { return true; }
+        virtual bool UpdatePlaybackStatus(AudioPlayback_Status nStatus) override { return true; }
+        virtual bool UpdateShuffled(bool bValue) override { return true; }
+        virtual bool UpdateLooped(bool bValue) override { return true; }
+        virtual bool UpdateVolume(float flValue) override { return true; }
+        virtual bool CurrentEntryWillChange() override { return true; }
+        virtual bool CurrentEntryIsAvailable(bool bAvailable) override { return true; }
+        virtual bool UpdateCurrentEntryText(const char *pchText) override { return true; }
+        virtual bool UpdateCurrentEntryElapsedSeconds(int nValue) override { return true; }
+        virtual bool UpdateCurrentEntryCoverArt(void *pvBuffer, uint32 cbBufferLength) override { return true; }
+        virtual bool CurrentEntryDidChange() override { return true; }
+        virtual bool QueueWillChange() override { return true; }
+        virtual bool ResetQueueEntries() override { return true; }
+        virtual bool SetQueueEntry(int nID, int nPosition, const char *pchEntryText) override { return true; }
+        virtual bool SetCurrentQueueEntry(int nID) override { return true; }
+        virtual bool QueueDidChange() override { return true; }
+        virtual bool PlaylistWillChange() override { return true; }
+        virtual bool ResetPlaylistEntries() override { return true; }
+        virtual bool SetPlaylistEntry(int nID, int nPosition, const char *pchEntryText) override { return true; }
+        virtual bool SetCurrentPlaylistEntry(int nID) override { return true; }
+        virtual bool PlaylistDidChange() override { return true; }
+    };
+    static CSteamMusicRemoteEmu g_steamMusicRemoteInstance;
+
+    // --- ISteamHTMLSurface ---
+    class CSteamHTMLSurfaceEmu : public ISteamHTMLSurface {
+    public:
+        virtual ~CSteamHTMLSurfaceEmu() {}
+        virtual bool Init() override { return true; }
+        virtual bool Shutdown() override { return true; }
+        virtual SteamAPICall_t CreateBrowser(const char *pchUserAgent, const char *pchUserCSS) override { return 0; }
+        virtual void RemoveBrowser(HHTMLBrowser unBrowserHandle) override {}
+        virtual void LoadURL(HHTMLBrowser unBrowserHandle, const char *pchURL, const char *pchPostData) override {}
+        virtual void SetSize(HHTMLBrowser unBrowserHandle, uint32 unWidth, uint32 unHeight) override {}
+        virtual void StopLoad(HHTMLBrowser unBrowserHandle) override {}
+        virtual void Reload(HHTMLBrowser unBrowserHandle) override {}
+        virtual void GoBack(HHTMLBrowser unBrowserHandle) override {}
+        virtual void GoForward(HHTMLBrowser unBrowserHandle) override {}
+        virtual void AddHeader(HHTMLBrowser unBrowserHandle, const char *pchKey, const char *pchValue) override {}
+        virtual void ExecuteJavascript(HHTMLBrowser unBrowserHandle, const char *pchScript) override {}
+        virtual void MouseUp(HHTMLBrowser unBrowserHandle, EHTMLMouseButton eMouseButton) override {}
+        virtual void MouseDown(HHTMLBrowser unBrowserHandle, EHTMLMouseButton eMouseButton) override {}
+        virtual void MouseDoubleClick(HHTMLBrowser unBrowserHandle, EHTMLMouseButton eMouseButton) override {}
+        virtual void MouseMove(HHTMLBrowser unBrowserHandle, int x, int y) override {}
+        virtual void MouseWheel(HHTMLBrowser unBrowserHandle, int32 nDelta) override {}
+        virtual void KeyDown(HHTMLBrowser unBrowserHandle, uint32 nNativeKeyCode, EHTMLKeyModifiers eHTMLKeyModifiers, bool bIsSystemKey = false) override {}
+        virtual void KeyUp(HHTMLBrowser unBrowserHandle, uint32 nNativeKeyCode, EHTMLKeyModifiers eHTMLKeyModifiers) override {}
+        virtual void KeyChar(HHTMLBrowser unBrowserHandle, uint32 cUnicodeChar, EHTMLKeyModifiers eHTMLKeyModifiers) override {}
+        virtual void SetHorizontalScroll(HHTMLBrowser unBrowserHandle, uint32 nAbsolutePixelScroll) override {}
+        virtual void SetVerticalScroll(HHTMLBrowser unBrowserHandle, uint32 nAbsolutePixelScroll) override {}
+        virtual void SetKeyFocus(HHTMLBrowser unBrowserHandle, bool bHasKeyFocus) override {}
+        virtual void ViewSource(HHTMLBrowser unBrowserHandle) override {}
+        virtual void CopyToClipboard(HHTMLBrowser unBrowserHandle) override {}
+        virtual void PasteFromClipboard(HHTMLBrowser unBrowserHandle) override {}
+        virtual void Find(HHTMLBrowser unBrowserHandle, const char *pchSearchStr, bool bCurrentlyInFind, bool bReverse) override {}
+        virtual void StopFind(HHTMLBrowser unBrowserHandle) override {}
+        virtual void GetLinkAtPosition(HHTMLBrowser unBrowserHandle, int x, int y) override {}
+        virtual void SetCookie(const char *pchHostname, const char *pchKey, const char *pchValue, const char *pchPath = "/", RTime32 nExpires = 0, bool bSecure = false, bool bHTTPOnly = false) override {}
+        virtual void SetPageScaleFactor(HHTMLBrowser unBrowserHandle, float flZoom, int nPointX, int nPointY) override {}
+        virtual void SetBackgroundMode(HHTMLBrowser unBrowserHandle, bool bBackgroundMode) override {}
+        virtual void SetDPIScalingFactor(HHTMLBrowser unBrowserHandle, float flDPIScaling) override {}
+        virtual void OpenDeveloperTools(HHTMLBrowser unBrowserHandle) override {}
+        virtual void AllowStartRequest(HHTMLBrowser unBrowserHandle, bool bAllowed) override {}
+        virtual void JSDialogResponse(HHTMLBrowser unBrowserHandle, bool bResult) override {}
+        virtual void FileLoadDialogResponse(HHTMLBrowser unBrowserHandle, const char **pchSelectedFiles) override {}
+    };
+    static CSteamHTMLSurfaceEmu g_steamHTMLSurfaceInstance;
+
+    // --- ISteamVideo ---
+    class CSteamVideoEmu : public ISteamVideo {
+    public:
+        virtual void GetVideoURL(AppId_t unVideoAppID) override {}
+        virtual bool IsBroadcasting(int *pnNumViewers) override { if (pnNumViewers) *pnNumViewers = 0; return false; }
+        virtual void GetOPFSettings(AppId_t unVideoAppID) override {}
+        virtual bool GetOPFStringForApp(AppId_t unVideoAppID, char *pchBuffer, int32 *pnBufferSize) override {
+            if (pnBufferSize) *pnBufferSize = 0;
+            return false;
+        }
+    };
+    static CSteamVideoEmu g_steamVideoInstance;
+
+    // --- ISteamParentalSettings ---
+    class CSteamParentalSettingsEmu : public ISteamParentalSettings {
+    public:
+        virtual bool BIsParentalLockEnabled() override { return false; }
+        virtual bool BIsParentalLockLocked() override { return false; }
+        virtual bool BIsAppBlocked(AppId_t nAppID) override { return false; }
+        virtual bool BIsAppInBlockList(AppId_t nAppID) override { return false; }
+        virtual bool BIsFeatureBlocked(EParentalFeature eFeature) override { return false; }
+        virtual bool BIsFeatureInBlockList(EParentalFeature eFeature) override { return false; }
+    };
+    static CSteamParentalSettingsEmu g_steamParentalSettingsInstance;
+
+    // --- ISteamParties ---
+    class CSteamPartiesEmu : public ISteamParties {
+    public:
+        virtual uint32 GetNumActiveBeacons() override { return 0; }
+        virtual PartyBeaconID_t GetBeaconByIndex(uint32 unIndex) override { return 0; }
+        virtual bool GetBeaconDetails(PartyBeaconID_t ulBeaconID, CSteamID *pSteamIDBeaconOwner, SteamPartyBeaconLocation_t *pLocation, char *pchMetadata, int cchMetadata) override { return false; }
+        virtual SteamAPICall_t JoinParty(PartyBeaconID_t ulBeaconID) override { return 0; }
+        virtual bool GetNumAvailableBeaconLocations(uint32 *puNumLocations) override { if (puNumLocations) *puNumLocations = 0; return true; }
+        virtual bool GetAvailableBeaconLocations(SteamPartyBeaconLocation_t *pLocationList, uint32 uMaxNumLocations) override { return true; }
+        virtual SteamAPICall_t CreateBeacon(uint32 unOpenSlots, SteamPartyBeaconLocation_t *pBeaconLocation, const char *pchConnectString, const char *pchMetadata) override { return 0; }
+        virtual void OnReservationCompleted(PartyBeaconID_t ulBeacon, CSteamID steamIDUser) override {}
+        virtual void CancelReservation(PartyBeaconID_t ulBeacon, CSteamID steamIDUser) override {}
+        virtual SteamAPICall_t ChangeNumOpenSlots(PartyBeaconID_t ulBeacon, uint32 unOpenSlots) override { return 0; }
+        virtual bool DestroyBeacon(PartyBeaconID_t ulBeacon) override { return true; }
+        virtual bool GetBeaconLocationData(SteamPartyBeaconLocation_t BeaconLocation, ESteamPartyBeaconLocationData eData, char *pchDataStringOut, int cchDataStringOut) override {
+            if (pchDataStringOut && cchDataStringOut > 0) pchDataStringOut[0] = '\0';
+            return false;
+        }
+    };
+    static CSteamPartiesEmu g_steamPartiesInstance;
+
+    // --- ISteamRemotePlay ---
+    class CSteamRemotePlayEmu : public ISteamRemotePlay {
+    public:
+        virtual uint32 GetSessionCount() override { return 0; }
+        virtual RemotePlaySessionID_t GetSessionID(int iSessionIndex) override { return 0; }
+        virtual bool BSessionRemotePlayTogether(RemotePlaySessionID_t unSessionID) override { return false; }
+        virtual CSteamID GetSessionSteamID(RemotePlaySessionID_t unSessionID) override { return CSteamID(); }
+        virtual uint32 GetSessionGuestID(RemotePlaySessionID_t unSessionID) override { return 0; }
+        virtual const char *GetSessionClientName(RemotePlaySessionID_t unSessionID) override { return ""; }
+        virtual ESteamDeviceFormFactor GetSessionClientFormFactor(RemotePlaySessionID_t unSessionID) override { return k_ESteamDeviceFormFactorUnknown; }
+        virtual bool BGetSessionClientResolution(RemotePlaySessionID_t unSessionID, int *pnResolutionX, int *pnResolutionY) override {
+            if (pnResolutionX) *pnResolutionX = 0;
+            if (pnResolutionY) *pnResolutionY = 0;
+            return false;
+        }
+        virtual bool BSendRemotePlayTogetherInvite(CSteamID steamIDFriend) override { return false; }
+        virtual bool ShowRemotePlayTogetherUI() override { return false; }
+        virtual bool BEnableRemotePlayTogetherDirectInput() override { return false; }
+        virtual void DisableRemotePlayTogetherDirectInput() override {}
+        virtual uint32 GetInput(RemotePlayInput_t *pInput, uint32 unMaxEvents) override { return 0; }
+        virtual void SetMouseVisibility(RemotePlaySessionID_t unSessionID, bool bVisible) override {}
+        virtual void SetMousePosition(RemotePlaySessionID_t unSessionID, float flNormalizedX, float flNormalizedY) override {}
+        virtual RemotePlayCursorID_t CreateMouseCursor(int nWidth, int nHeight, int nHotX, int nHotY, const void *pBGRA, int nPitch = 0) override { return 0; }
+        virtual void SetMouseCursor(RemotePlaySessionID_t unSessionID, RemotePlayCursorID_t unCursorID) override {}
+        virtual int GetSmallSessionAvatar(RemotePlaySessionID_t unSessionID) override { return -1; }
+        virtual int GetMediumSessionAvatar(RemotePlaySessionID_t unSessionID) override { return -1; }
+        virtual int GetLargeSessionAvatar(RemotePlaySessionID_t unSessionID) override { return -1; }
+    };
+    static CSteamRemotePlayEmu g_steamRemotePlayInstance;
+
     // --- ISteamClient ---
     class CSteamClientEmu : public ISteamClient {
     public:
@@ -4663,24 +5132,126 @@ namespace UnrealSteamEmu {
         virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
             return &g_steamUGCInstance;
         }
-        virtual ISteamMusic *GetISteamMusic(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return nullptr; }
-        virtual ISteamHTMLSurface *GetISteamHTMLSurface(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return nullptr; }
+        virtual ISteamMusic *GetISteamMusic(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamMusicInstance; }
+        virtual ISteamHTMLSurface *GetISteamHTMLSurface(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamHTMLSurfaceInstance; }
         virtual void DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
         virtual void DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
         virtual void Set_SteamAPI_CCheckCallbackRegisteredInProcess(SteamAPI_CheckCallbackRegistered_t func) override {}
         virtual ISteamInventory *GetISteamInventory(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
             return &g_steamInventoryInstance;
         }
-        virtual ISteamVideo *GetISteamVideo(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return nullptr; }
-        virtual ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return nullptr; }
+        virtual ISteamVideo *GetISteamVideo(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamVideoInstance; }
+        virtual ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamParentalSettingsInstance; }
         virtual ISteamInput *GetISteamInput(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
             return &g_steamInputInstance;
         }
-        virtual ISteamParties *GetISteamParties(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return nullptr; }
-        virtual ISteamRemotePlay *GetISteamRemotePlay(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return nullptr; }
+        virtual ISteamParties *GetISteamParties(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamPartiesInstance; }
+        virtual ISteamRemotePlay *GetISteamRemotePlay(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamRemotePlayInstance; }
         virtual void DestroyAllInterfaces() override {}
     };
     static CSteamClientEmu g_steamClientInstance;
+
+    // --- ISteamClient021 ---
+    class CSteamClient021Emu : public ISteamClient021 {
+    public:
+        virtual HSteamPipe CreateSteamPipe() override { return g_hSteamPipe; }
+        virtual bool BReleaseSteamPipe(HSteamPipe hSteamPipe) override { return true; }
+        virtual HSteamUser ConnectToGlobalUser(HSteamPipe hSteamPipe) override { return g_hSteamUser; }
+        virtual HSteamUser CreateLocalUser(HSteamPipe *phSteamPipe, EAccountType eAccountType) override {
+            if (phSteamPipe) *phSteamPipe = g_hSteamPipe;
+            return g_hSteamUser;
+        }
+        virtual void ReleaseUser(HSteamPipe hSteamPipe, HSteamUser hUser) override {}
+
+        virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "SteamUser021") || strstr(pchVersion, "SteamUser020") ||
+                strstr(pchVersion, "SteamUser019") || strstr(pchVersion, "SteamUser018") ||
+                strstr(pchVersion, "SteamUser017") || strstr(pchVersion, "SteamUser016") ||
+                strstr(pchVersion, "SteamUser015") || strstr(pchVersion, "SteamUser014") ||
+                strstr(pchVersion, "SteamUser013") || strstr(pchVersion, "SteamUser012") ||
+                strstr(pchVersion, "SteamUser011") || strstr(pchVersion, "SteamUser010") ||
+                strstr(pchVersion, "SteamUser009") || strstr(pchVersion, "SteamUser008"))) {
+                return (ISteamUser*)&g_steamUser021Instance;
+            }
+            return &g_steamUserInstance;
+        }
+        virtual ISteamGameServer *GetISteamGameServer(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "SteamGameServer012") || strstr(pchVersion, "SteamGameServer011") ||
+                strstr(pchVersion, "SteamGameServer010") || strstr(pchVersion, "SteamGameServer009") ||
+                strstr(pchVersion, "SteamGameServer008"))) {
+                return (ISteamGameServer*)&g_steamGameServer012Instance;
+            }
+            return &g_steamGameServerInstance;
+        }
+        virtual void SetLocalIPBinding(const SteamIPAddress_t &unIP, uint16 usPort) override {}
+        virtual ISteamFriends *GetISteamFriends(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return reinterpret_cast<ISteamFriends*>(&g_steamFriendsInstance);
+        }
+        virtual ISteamUtils *GetISteamUtils(HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamUtilsInstance;
+        }
+        virtual ISteamMatchmaking *GetISteamMatchmaking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamMatchmakingInstance;
+        }
+        virtual ISteamMatchmakingServers *GetISteamMatchmakingServers(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamMatchmakingServersInstance;
+        }
+        virtual void *GetISteamGenericInterface(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return GetGenericInterface(pchVersion);
+        }
+        virtual ISteamUserStats *GetISteamUserStats(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamUserStatsInstance;
+        }
+        virtual ISteamGameServerStats *GetISteamGameServerStats(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamGameServerStatsInstance;
+        }
+        virtual ISteamApps *GetISteamApps(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamAppsInstance;
+        }
+        virtual ISteamNetworking *GetISteamNetworking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamNetworkingInstance;
+        }
+        virtual ISteamRemoteStorage *GetISteamRemoteStorage(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamRemoteStorageInstance;
+        }
+        virtual ISteamScreenshots *GetISteamScreenshots(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamScreenshotsInstance;
+        }
+        virtual ISteamGameSearch *GetISteamGameSearch(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamGameSearchInstance;
+        }
+        virtual void RunFrame() override {}
+        virtual uint32 GetIPCCallCount() override { return 0; }
+        virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t pFunction) override {}
+        virtual bool BShutdownIfAllPipesClosed() override { return true; }
+        virtual ISteamHTTP *GetISteamHTTP(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamHTTPInstance;
+        }
+        virtual ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return (ISteamController*)&g_steamInputInstance;
+        }
+        virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamUGCInstance;
+        }
+        virtual ISteamMusic *GetISteamMusic(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamMusicInstance; }
+        virtual ISteamMusicRemote *GetISteamMusicRemote(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamMusicRemoteInstance; }
+        virtual ISteamHTMLSurface *GetISteamHTMLSurface(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamHTMLSurfaceInstance; }
+        virtual void DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
+        virtual void DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
+        virtual void Set_SteamAPI_CCheckCallbackRegisteredInProcess(SteamAPI_CheckCallbackRegistered_t func) override {}
+        virtual ISteamInventory *GetISteamInventory(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamInventoryInstance;
+        }
+        virtual ISteamVideo *GetISteamVideo(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamVideoInstance; }
+        virtual ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamParentalSettingsInstance; }
+        virtual ISteamInput *GetISteamInput(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            return &g_steamInputInstance;
+        }
+        virtual ISteamParties *GetISteamParties(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamPartiesInstance; }
+        virtual ISteamRemotePlay *GetISteamRemotePlay(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamRemotePlayInstance; }
+        virtual void DestroyAllInterfaces() override {}
+    };
+    static CSteamClient021Emu g_steamClient021Instance;
 
     // =========================================================================
     // INTERFACE RESOLUTION & PUBLIC ACCESSORS
@@ -4691,6 +5262,8 @@ namespace UnrealSteamEmu {
 
         ReFixLog("[UnrealSteam] Resolving Interface Version: '%s'", pchVersion);
 
+        if (strstr(pchVersion, "SteamClient021") || strstr(pchVersion, "STEAMCLIENT021"))
+            return &g_steamClient021Instance;
         if (strstr(pchVersion, "SteamClient") || strstr(pchVersion, "STEAMCLIENT"))
             return &g_steamClientInstance;
         if (strstr(pchVersion, "SteamUser021") || strstr(pchVersion, "SteamUser020") ||
@@ -4745,6 +5318,24 @@ namespace UnrealSteamEmu {
             return &g_steamScreenshotsInstance;
         if (strstr(pchVersion, "STEAMTIMELINE") || strstr(pchVersion, "SteamTimeline"))
             return &g_steamTimelineInstance;
+        if (strstr(pchVersion, "SteamMatchGameSearch") || strstr(pchVersion, "SteamGameSearch") || strstr(pchVersion, "STEAMGAMESEARCH"))
+            return &g_steamGameSearchInstance;
+        if (strstr(pchVersion, "STEAMAPPLIST") || strstr(pchVersion, "SteamAppList"))
+            return &g_steamAppListInstance;
+        if (strstr(pchVersion, "STEAMMUSICREMOTE") || strstr(pchVersion, "SteamMusicRemote"))
+            return &g_steamMusicRemoteInstance;
+        if (strstr(pchVersion, "STEAMMUSIC") || strstr(pchVersion, "SteamMusic"))
+            return &g_steamMusicInstance;
+        if (strstr(pchVersion, "STEAMHTMLSURFACE") || strstr(pchVersion, "SteamHTMLSurface"))
+            return &g_steamHTMLSurfaceInstance;
+        if (strstr(pchVersion, "STEAMVIDEO") || strstr(pchVersion, "SteamVideo"))
+            return &g_steamVideoInstance;
+        if (strstr(pchVersion, "STEAMPARENTALSETTINGS") || strstr(pchVersion, "SteamParentalSettings"))
+            return &g_steamParentalSettingsInstance;
+        if (strstr(pchVersion, "SteamParties") || strstr(pchVersion, "STEAMPARTIES"))
+            return &g_steamPartiesInstance;
+        if (strstr(pchVersion, "STEAMREMOTEPLAY") || strstr(pchVersion, "SteamRemotePlay"))
+            return &g_steamRemotePlayInstance;
 
         ReFixLog("[UnrealSteam] Warning: Unrecognized interface '%s'", pchVersion);
         return nullptr;
@@ -4814,6 +5405,15 @@ namespace UnrealSteamEmu {
     void* GetSteamInventory() { return &g_steamInventoryInstance; }
     void* GetSteamScreenshots() { return &g_steamScreenshotsInstance; }
     void* GetSteamTimeline() { return &g_steamTimelineInstance; }
+    void* GetSteamGameSearch() { return &g_steamGameSearchInstance; }
+    void* GetSteamAppList() { return &g_steamAppListInstance; }
+    void* GetSteamMusic() { return &g_steamMusicInstance; }
+    void* GetSteamMusicRemote() { return &g_steamMusicRemoteInstance; }
+    void* GetSteamHTMLSurface() { return &g_steamHTMLSurfaceInstance; }
+    void* GetSteamVideo() { return &g_steamVideoInstance; }
+    void* GetSteamParentalSettings() { return &g_steamParentalSettingsInstance; }
+    void* GetSteamParties() { return &g_steamPartiesInstance; }
+    void* GetSteamRemotePlay() { return &g_steamRemotePlayInstance; }
 
     void NotifyEOSLobby(uint64_t lobbyID) {
         if (lobbyID != 0) {
@@ -4851,6 +5451,10 @@ namespace UnrealSteamEmu {
             g_bInitialized = false;
             return false;
         }
+        auto ep = core.Transport().GetLocalDataEndpoint();
+        ReFixLog("[UnrealSteam] Universal LAN Core initialized. DataEndpoint=%u.%u.%u.%u:%u, DiscoveryPort=%u",
+            (ep.ipv4 >> 24) & 0xFF, (ep.ipv4 >> 16) & 0xFF, (ep.ipv4 >> 8) & 0xFF, ep.ipv4 & 0xFF,
+            ep.port, core.Transport().GetDiscoveryPort());
         core.Identity().SetDisplayName(g_personaName);
 
         // Bind local SteamID
@@ -5213,6 +5817,26 @@ namespace UnrealSteamEmu {
 
     uint32_t GetAuthTicketForWebApi(const char* pchIdentity) {
         return g_steamUserInstance.GetAuthTicketForWebApi(pchIdentity);
+    }
+
+    bool RemoteStorage_FileWrite(const char* pchFile, const void* pvData, int32_t cubData) {
+        return g_steamRemoteStorageInstance.FileWrite(pchFile, pvData, cubData);
+    }
+
+    int32_t RemoteStorage_FileRead(const char* pchFile, void* pvData, int32_t cubDataToRead) {
+        return g_steamRemoteStorageInstance.FileRead(pchFile, pvData, cubDataToRead);
+    }
+
+    bool RemoteStorage_FileExists(const char* pchFile) {
+        return g_steamRemoteStorageInstance.FileExists(pchFile);
+    }
+
+    int32_t RemoteStorage_GetFileSize(const char* pchFile) {
+        return g_steamRemoteStorageInstance.GetFileSize(pchFile);
+    }
+
+    bool RemoteStorage_FileDelete(const char* pchFile) {
+        return g_steamRemoteStorageInstance.FileDelete(pchFile);
     }
 
     bool IsInitialized() {

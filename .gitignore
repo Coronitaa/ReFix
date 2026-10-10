@@ -1,6 +1,7 @@
 # Build output and temp directories
 build/
 deploy/
+pre_release/
 *.obj
 *.pdb
 *.map
