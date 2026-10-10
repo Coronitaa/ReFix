@@ -761,6 +761,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 state.expectedSequenceIn++;
                 // Drain any contiguous candidates retained in outOfOrderInbound
                 DrainRetainedInboundLocked(&state);
+                if (state.timedOut) return;
                 uint32_t ackSeq = state.expectedSequenceIn - 1;
                 uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
                 SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
@@ -785,6 +786,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 }
                 uint32_t prevExpected = state.expectedSequenceIn;
                 DrainRetainedInboundLocked(&state);
+                if (state.timedOut) return;
                 if (state.expectedSequenceIn == prevExpected) {
                     uint32_t ackSeq = state.expectedSequenceIn - 1;
                     uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
@@ -1005,6 +1007,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     // Policy: Reject incompatible datagram without confirming sequence or corrupting valid context.
                     // If candidate was previously SACKed, send an immediate advisory ACK with updated SACK mask
                     // so sender clears isSacked and can recover rather than permanently stalling.
+                    PeerId senderPeerId = cand.senderPeerId;
                     bool wasSacked = cand.wasSacked;
                     state.outOfOrderInbound.erase(itCandidate);
                     if (wasSacked) {
@@ -1016,7 +1019,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     uint32_t termGen = (state.remoteGeneration != 0) ? state.remoteGeneration : state.localGeneration;
                     SendDisconnectPacketLocked(state.lastEndpoint, termGen);
                     state.outOfOrderInbound.clear();
-                    CleanupPeerReassemblyLocked(cand.senderPeerId);
+                    CleanupPeerReassemblyLocked(senderPeerId);
                     state.timedOut = true;
                     break;
                 }
@@ -1032,6 +1035,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
 
                 // Reconstruction limit (256 KB)
                 if (fa.allocatedBytes + chunkLen > REFIX_MAX_MESSAGE_SIZE) {
+                    PeerId senderPeerId = cand.senderPeerId;
                     bool wasSacked = cand.wasSacked;
                     ReleaseReassemblyContextLocked(itFrag);
                     state.outOfOrderInbound.erase(itCandidate);
@@ -1043,7 +1047,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     uint32_t termGen = (state.remoteGeneration != 0) ? state.remoteGeneration : state.localGeneration;
                     SendDisconnectPacketLocked(state.lastEndpoint, termGen);
                     state.outOfOrderInbound.clear();
-                    CleanupPeerReassemblyLocked(cand.senderPeerId);
+                    CleanupPeerReassemblyLocked(senderPeerId);
                     state.timedOut = true;
                     break;
                 }
@@ -1417,6 +1421,13 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
         return false;
     }
     auto& state = it->second;
+
+    // P1: ARQ Outbound Window Limit (REFIX_MAX_UNACKED_OUTBOUND = 512 datagrams per peer)
+    // Enforce that all fragments can be admitted before allocating sequence numbers or transmitting.
+    if (state.unackedOutbound.size() + totalFrags > REFIX_MAX_UNACKED_OUTBOUND) {
+        return false;
+    }
+
     if (state.localGeneration == 0) {
         state.localGeneration = m_localGenerationCounter.fetch_add(1);
         if (state.localGeneration == 0) state.localGeneration = m_localGenerationCounter.fetch_add(1);

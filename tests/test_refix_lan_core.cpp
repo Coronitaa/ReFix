@@ -3800,6 +3800,255 @@ static bool TestP1_SackedCandidateInvalidationAndLifecycleRecovery() {
     return true;
 }
 
+static bool TestP0_DrainReconstructionLimitExceededInvalidation() {
+    std::cout << "[*] Running TestP0_DrainReconstructionLimitExceededInvalidation..." << std::endl;
+
+    LanTransport trReceiver;
+    TEST_ASSERT(trReceiver.Start(47842), "trReceiver start failed");
+
+    LanEndpoint epReceiver = trReceiver.GetLocalDataEndpoint();
+    epReceiver.ipv4 = 0x7F000001;
+
+    SOCKET sockSender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(sockSender != INVALID_SOCKET, "sockSender creation failed");
+    sockaddr_in sendSin{};
+    sendSin.sin_family = AF_INET;
+    sendSin.sin_addr.s_addr = htonl(0x7F000001);
+    sendSin.sin_port = htons(47841);
+    TEST_ASSERT(bind(sockSender, reinterpret_cast<const sockaddr*>(&sendSin), sizeof(sendSin)) == 0, "sockSender bind failed");
+    u_long nonblock = 1;
+    ioctlsocket(sockSender, FIONBIO, &nonblock);
+
+    PeerId peerSender{0x1234567812345678ULL, 0x8765432187654321ULL};
+    uint32_t sessionGen = 88;
+    uint32_t fragMsgId = 42;
+    uint8_t totalFrags = 228; // 228 fragments of 1150 bytes = 262,200 bytes > 262,144 (256 KB)
+
+    sockaddr_in toRecvSin{};
+    toRecvSin.sin_family = AF_INET;
+    toRecvSin.sin_addr.s_addr = htonl(epReceiver.ipv4);
+    toRecvSin.sin_port = htons(epReceiver.port);
+
+    auto makeFragment = [&](uint8_t fIndex, uint32_t seq, size_t payloadSize, bool isLast) {
+        std::vector<uint8_t> buf(sizeof(WireHeader) + payloadSize, 0x5A);
+        auto* hdr = reinterpret_cast<WireHeader*>(buf.data());
+        hdr->magic = REFIX_WIRE_MAGIC;
+        hdr->version = REFIX_WIRE_VERSION;
+        hdr->msgType = static_cast<uint8_t>(MsgType::DataReliable);
+        hdr->flags = FLAG_RELIABLE | FLAG_FRAGMENT | (isLast ? FLAG_LAST_FRAGMENT : 0);
+        hdr->SetSenderPeerId(peerSender);
+        hdr->sessionId = fragMsgId;
+        hdr->channel = 1;
+        hdr->fragIndex = fIndex;
+        hdr->fragTotal = totalFrags;
+        hdr->generationId = sessionGen;
+        hdr->sequence = seq;
+        hdr->ack = 0;
+        hdr->sackMask = 0;
+        hdr->payloadLen = static_cast<uint16_t>(payloadSize);
+        return buf;
+    };
+
+    // 1. Send fragments 0 to 225 (seq 1 to 226) in order.
+    // 226 fragments * 1150 bytes = 259,900 bytes (within 256 KB = 262,144 bytes).
+    for (uint8_t i = 0; i < 226; ++i) {
+        auto pkt = makeFragment(i, i + 1, 1150, false);
+        sendto(sockSender, reinterpret_cast<const char*>(pkt.data()), static_cast<int>(pkt.size()), 0,
+               reinterpret_cast<const sockaddr*>(&toRecvSin), sizeof(toRecvSin));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    TEST_ASSERT(trReceiver.GetPeerExpectedSequenceIn(peerSender) == 227, "Expected sequence must be 227 after 226 in-order fragments");
+    TEST_ASSERT(trReceiver.GetReassemblyContextCount() == 1, "Must have 1 reassembly context");
+    TEST_ASSERT(trReceiver.GetGlobalReassemblyBytes() == 259900, "Global reassembly bytes must be 259,900");
+    TEST_ASSERT(trReceiver.GetPeerReassemblyBytes(peerSender) == 259900, "Peer reassembly bytes must be 259,900");
+
+    // 2. Now send the last fragment: index 227 (seq 228), out of order!
+    // Since expectedSequenceIn == 227, seq 228 has seqDiff == 1 (< 64), so it will be buffered in outOfOrderInbound as SACKed candidate!
+    auto pkt228 = makeFragment(227, 228, 1150, true);
+    sendto(sockSender, reinterpret_cast<const char*>(pkt228.data()), static_cast<int>(pkt228.size()), 0,
+           reinterpret_cast<const sockaddr*>(&toRecvSin), sizeof(toRecvSin));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(trReceiver.GetPeerOutOfOrderCount(peerSender) == 1, "Receiver must hold seq 228 in outOfOrderInbound");
+
+    // 3. Send fragment index 226 (seq 227): in-order fragment bridging the gap!
+    // When seq 227 is drained:
+    // fa.allocatedBytes reaches 259,900 + 1150 = 261,050 bytes.
+    // Next, DrainRetainedInboundLocked encounters candidate seq 228:
+    // fa.allocatedBytes + 1150 = 262,200 > 262,144 (REFIX_MAX_MESSAGE_SIZE)!
+    // The reconstruction limit triggers on candidate seq 228!
+    auto pkt227 = makeFragment(226, 227, 1150, false);
+    sendto(sockSender, reinterpret_cast<const char*>(pkt227.data()), static_cast<int>(pkt227.size()), 0,
+           reinterpret_cast<const sockaddr*>(&toRecvSin), sizeof(toRecvSin));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // 4. Verification:
+    // - Receiver has evicted the corrupted/excessive context and wiped all OOO candidates
+    TEST_ASSERT(trReceiver.GetPeerOutOfOrderCount(peerSender) == 0, "Receiver must clear all stored candidates");
+    TEST_ASSERT(trReceiver.GetGlobalReassemblyBytes() == 0, "Global reassembly bytes must be cleanly reset to 0");
+    TEST_ASSERT(trReceiver.GetPeerReassemblyBytes(peerSender) == 0, "Peer reassembly bytes must be cleanly reset to 0");
+    TEST_ASSERT(trReceiver.GetReassemblyContextCount() == 0, "Reassembly context count must be 0");
+
+    // - Expected sequence must NOT advance past sequence 228 as if the invalid oversized message was delivered
+    uint32_t finalExpSeq = trReceiver.GetPeerExpectedSequenceIn(peerSender);
+    TEST_ASSERT(finalExpSeq != 229, "Expected sequence must NOT advance as if invalid payload was delivered");
+
+    InboundPacket dummyPkt;
+    TEST_ASSERT(!trReceiver.PollInbound(dummyPkt), "Oversized message must NEVER be delivered to application");
+
+    // - Verify sockSender received a Disconnect packet from receiver
+    bool gotDisconnect = false;
+    uint8_t rBuf[2048];
+    sockaddr_in rSin{};
+    int rLen = sizeof(rSin);
+    while (true) {
+        int bytes = recvfrom(sockSender, reinterpret_cast<char*>(rBuf), sizeof(rBuf), 0,
+                             reinterpret_cast<sockaddr*>(&rSin), &rLen);
+        if (bytes <= 0) break;
+        if (bytes >= static_cast<int>(sizeof(WireHeader))) {
+            auto* rHdr = reinterpret_cast<WireHeader*>(rBuf);
+            if (rHdr->msgType == static_cast<uint8_t>(MsgType::Disconnect)) {
+                gotDisconnect = true;
+            }
+        }
+    }
+    TEST_ASSERT(gotDisconnect, "Sender must receive terminal Disconnect packet from receiver");
+
+    closesocket(sockSender);
+    trReceiver.Stop();
+
+    std::cout << "  [PASS] REFIX_MAX_MESSAGE_SIZE reconstruction limit, SACKed candidate eviction, clean zero-leak memory release, and Disconnect certified!" << std::endl;
+    return true;
+}
+
+static bool TestP1_OutboundArqQueueLimitAndNoPartialSends() {
+    std::cout << "[*] Running TestP1_OutboundArqQueueLimitAndNoPartialSends..." << std::endl;
+
+    LanTransport trSender;
+    TEST_ASSERT(trSender.Start(47851), "trSender start failed");
+
+    LanEndpoint epSender = trSender.GetLocalDataEndpoint();
+    epSender.ipv4 = 0x7F000001;
+
+    SOCKET sockSink = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST_ASSERT(sockSink != INVALID_SOCKET, "sockSink creation failed");
+    sockaddr_in sinkSin{};
+    sinkSin.sin_family = AF_INET;
+    sinkSin.sin_addr.s_addr = htonl(0x7F000001);
+    sinkSin.sin_port = htons(47853);
+    TEST_ASSERT(bind(sockSink, reinterpret_cast<const sockaddr*>(&sinkSin), sizeof(sinkSin)) == 0, "sockSink bind failed");
+    u_long nonblock = 1;
+    ioctlsocket(sockSink, FIONBIO, &nonblock);
+    LanEndpoint epSink{0x7F000001, 47853};
+
+    PeerId peerSink{0x8888777766665555ULL, 0x1111222233334444ULL};
+
+    // 1. Fill outbound queue with 512 unacknowledged reliable datagrams
+    std::string smallMsg = "ARQ_QUEUE_LIMIT_MSG";
+    for (int i = 0; i < 512; ++i) {
+        bool ok = trSender.SendReliable(peerSink, epSink, 1, smallMsg.data(), smallMsg.size());
+        TEST_ASSERT(ok, "SendReliable within 512 capacity must succeed");
+    }
+
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 512, "Unacked count must be exactly 512");
+    uint32_t seqAfter512 = trSender.GetPeerNextSequenceOut(peerSink);
+    TEST_ASSERT(seqAfter512 == 513, "Next sequence out must be 513 after 512 single packets");
+
+    // Drain raw datagrams received at sockSink so socket buffer does not overflow
+    uint8_t drainBuf[2048];
+    while (recvfrom(sockSink, reinterpret_cast<char*>(drainBuf), sizeof(drainBuf), 0, nullptr, nullptr) > 0) {}
+
+    // 2. 513th packet MUST be rejected: queue is at maximum capacity (512)
+    bool ok513 = trSender.SendReliable(peerSink, epSink, 1, smallMsg.data(), smallMsg.size());
+    TEST_ASSERT(!ok513, "513th SendReliable must be rejected when unackedOutbound reaches 512");
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 512, "Queue must remain capped at 512");
+    TEST_ASSERT(trSender.GetPeerNextSequenceOut(peerSink) == seqAfter512, "Next sequence out must NOT advance when send is rejected");
+
+    // 3. Fragmented message when queue is full: MUST be rejected without partial sends
+    std::vector<uint8_t> frag2Chunks(2000, 0x33); // 2000 bytes = 2 fragments
+    bool okFragFull = trSender.SendReliable(peerSink, epSink, 1, frag2Chunks.data(), frag2Chunks.size());
+    TEST_ASSERT(!okFragFull, "Fragmented send must be rejected when queue is full");
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 512, "Queue must remain exactly 512");
+    TEST_ASSERT(trSender.GetPeerNextSequenceOut(peerSink) == seqAfter512, "Sequence must NOT advance on rejected fragmented send");
+
+    // Verify nothing was sent on the wire during rejected sends
+    int leaked = recvfrom(sockSink, reinterpret_cast<char*>(drainBuf), sizeof(drainBuf), 0, nullptr, nullptr);
+    TEST_ASSERT(leaked <= 0, "No partial datagrams must be transmitted on wire when send is rejected");
+
+    // 4. Free 2 slots by sending cumulative ACK for sequence 2
+    uint32_t senderGen = trSender.GetPeerLocalGeneration(peerSink);
+    TEST_ASSERT(senderGen != 0, "Sender local generation must be non-zero");
+
+    WireHeader ackHdr{};
+    ackHdr.magic = REFIX_WIRE_MAGIC;
+    ackHdr.version = REFIX_WIRE_VERSION;
+    ackHdr.msgType = static_cast<uint8_t>(MsgType::DataAck);
+    ackHdr.flags = FLAG_HAS_ACK;
+    ackHdr.SetSenderPeerId(peerSink);
+    ackHdr.generationId = senderGen;
+    ackHdr.channel = 1;
+    ackHdr.ack = 2; // Cumulatively acknowledges seq 1 and seq 2
+    ackHdr.sackMask = 0;
+    ackHdr.payloadLen = 0;
+
+    sockaddr_in toSenderSin{};
+    toSenderSin.sin_family = AF_INET;
+    toSenderSin.sin_addr.s_addr = htonl(epSender.ipv4);
+    toSenderSin.sin_port = htons(epSender.port);
+
+    sendto(sockSink, reinterpret_cast<const char*>(&ackHdr), sizeof(ackHdr), 0,
+           reinterpret_cast<const sockaddr*>(&toSenderSin), sizeof(toSenderSin));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 510, "Unacked count must drop to 510 after retiring seq 1 and 2");
+
+    // 5. Test pre-admission check: room for 2, message requires 3 fragments (3000 bytes)
+    // MUST return false, transmit 0 fragments, consume 0 sequence numbers!
+    std::vector<uint8_t> frag3Chunks(3000, 0x44); // 3000 bytes = 3 fragments
+    bool okFrag3 = trSender.SendReliable(peerSink, epSink, 1, frag3Chunks.data(), frag3Chunks.size());
+    TEST_ASSERT(!okFrag3, "SendReliable with 3 fragments when capacity is 2 MUST return false");
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 510, "Queue must remain 510 (no orphaned fragments)");
+    TEST_ASSERT(trSender.GetPeerNextSequenceOut(peerSink) == seqAfter512, "Sequence must NOT advance");
+
+    leaked = recvfrom(sockSink, reinterpret_cast<char*>(drainBuf), sizeof(drainBuf), 0, nullptr, nullptr);
+    TEST_ASSERT(leaked <= 0, "Zero partial fragments transmitted on wire");
+
+    // 6. Test send with exactly 2 fragments (2000 bytes): capacity is 2 -> MUST succeed!
+    std::vector<uint8_t> fragExact2(2000, 0x55); // 2000 bytes = 2 fragments
+    bool okExact2 = trSender.SendReliable(peerSink, epSink, 1, fragExact2.data(), fragExact2.size());
+    TEST_ASSERT(okExact2, "SendReliable with 2 fragments into 2 available slots MUST succeed");
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 512, "Queue must now be exactly 512");
+    TEST_ASSERT(trSender.GetPeerNextSequenceOut(peerSink) == seqAfter512 + 2, "Sequence must advance by exactly 2");
+
+    // Verify exactly 2 fragments arrived at sockSink
+    int countRcv = 0;
+    while (recvfrom(sockSink, reinterpret_cast<char*>(drainBuf), sizeof(drainBuf), 0, nullptr, nullptr) > 0) {
+        countRcv++;
+    }
+    TEST_ASSERT(countRcv == 2, "Exactly 2 fragments must be transmitted on wire");
+
+    // 7. Full ACK retirement: ack = 514 (all in-flight packets retired)
+    ackHdr.ack = seqAfter512 + 1; // 514
+    sendto(sockSink, reinterpret_cast<const char*>(&ackHdr), sizeof(ackHdr), 0,
+           reinterpret_cast<const sockaddr*>(&toSenderSin), sizeof(toSenderSin));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 0, "Cumulative ACK must cleanly retire all unacked packets to 0");
+
+    // Queue is empty: new send immediately succeeds
+    bool okPostAck = trSender.SendReliable(peerSink, epSink, 1, smallMsg.data(), smallMsg.size());
+    TEST_ASSERT(okPostAck, "SendReliable after full retirement must succeed");
+    TEST_ASSERT(trSender.GetUnackedOutboundCount(peerSink) == 1, "Queue must contain 1 unacked packet");
+
+    closesocket(sockSink);
+    trSender.Stop();
+
+    std::cout << "  [PASS] ARQ outbound capacity limit (512), pre-admission fragment validation, zero partial sends, and clean queue retirement certified!" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
@@ -3847,6 +4096,8 @@ int main() {
     if (!TestP1_ArqSequenceModularWrap()) return 1;
     if (!TestP1_IncompatibleFragmentMetadataRejection()) return 1;
     if (!TestP1_SackedCandidateInvalidationAndLifecycleRecovery()) return 1;
+    if (!TestP0_DrainReconstructionLimitExceededInvalidation()) return 1;
+    if (!TestP1_OutboundArqQueueLimitAndNoPartialSends()) return 1;
 
     std::cout << "\n============================================================" << std::endl;
     std::cout << " [SUCCESS] ALL REFIX LAN CORE & TRANSPORT TESTS PASSED!      " << std::endl;
