@@ -34,8 +34,10 @@ namespace UnrealSteamEmu {
 
     bool IsAPICallCompleted(uint64_t hAPICall, bool* pbFailed);
     bool GetAPICallResult(uint64_t hAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
+    int GetAPICallFailureReason(uint64_t hAPICall);
 
     // Manual Dispatch
+    void ManualDispatch_Init();
     void ManualDispatch_RunFrame(int32_t hSteamPipe);
     bool ManualDispatch_GetNextCallback(int32_t hSteamPipe, void* pCallbackMsg);
     void ManualDispatch_FreeLastCallback(int32_t hSteamPipe);
@@ -135,6 +137,46 @@ namespace UnrealSteamEmu {
     bool RemoteStorage_FileExists(const char* pchFile);
     int32_t RemoteStorage_GetFileSize(const char* pchFile);
     bool RemoteStorage_FileDelete(const char* pchFile);
+
+    // Matchmaking helpers
+    uint64_t Matchmaking_CreateLobby(int eLobbyType, int cMaxMembers);
+    uint64_t Matchmaking_JoinLobby(uint64_t steamIDLobby);
+    void Matchmaking_LeaveLobby(uint64_t steamIDLobby);
+    bool Matchmaking_SetLobbyData(uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
+    const char* Matchmaking_GetLobbyData(uint64_t steamIDLobby, const char* pchKey);
+    int Matchmaking_GetLobbyDataCount(uint64_t steamIDLobby);
+    bool Matchmaking_GetLobbyDataByIndex(uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize);
+    uint64_t Matchmaking_RequestLobbyList();
+    void Matchmaking_AddRequestLobbyListStringFilter(const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType);
+    void Matchmaking_AddRequestLobbyListNumericalFilter(const char* pchKeyToMatch, int nValueToMatch, int eComparisonType);
+    void Matchmaking_AddRequestLobbyListNearValueFilter(const char* pchKeyToMatch, int nValueToBeCloseTo);
+    void Matchmaking_AddRequestLobbyListFilterSlotsAvailable(int nSlotsAvailable);
+    void Matchmaking_AddRequestLobbyListDistanceFilter(int eLobbyDistanceFilter);
+    void Matchmaking_AddRequestLobbyListResultCountFilter(int cMaxResults);
+    void Matchmaking_AddRequestLobbyListCompatibleMembersFilter(uint64_t steamIDLobby);
+    uint64_t Matchmaking_GetLobbyByIndex(int iLobby);
+    int Matchmaking_GetNumLobbyMembers(uint64_t steamIDLobby);
+    uint64_t Matchmaking_GetLobbyMemberByIndex(uint64_t steamIDLobby, int iMember);
+    uint64_t Matchmaking_GetLobbyOwner(uint64_t steamIDLobby);
+    bool Matchmaking_SetLobbyOwner(uint64_t steamIDLobby, uint64_t steamIDNewOwner);
+    bool Matchmaking_SetLobbyJoinable(uint64_t steamIDLobby, bool bLobbyJoinable);
+    const char* Matchmaking_GetLobbyMemberData(uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey);
+    void Matchmaking_SetLobbyMemberData(uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
+    bool Matchmaking_InviteUserToLobby(uint64_t steamIDLobby, uint64_t steamIDInvitee);
+    bool Matchmaking_SetLobbyMemberLimit(uint64_t steamIDLobby, int cMaxMembers);
+    int Matchmaking_GetLobbyMemberLimit(uint64_t steamIDLobby);
+    bool Matchmaking_SetLobbyType(uint64_t steamIDLobby, int eLobbyType);
+    bool Matchmaking_SetLinkedLobby(uint64_t steamIDLobby, uint64_t steamIDLobbyDependent);
+    bool Matchmaking_DeleteLobbyData(uint64_t steamIDLobby, const char* pchKey);
+    bool Matchmaking_SendLobbyChatMsg(uint64_t steamIDLobby, const void* pvMsgBody, int cubMsgBody);
+    int Matchmaking_GetLobbyChatEntry(uint64_t steamIDLobby, int iChatID, uint64_t* pSteamIDUser, void* pvData, int cubData, int* peChatEntryType);
+    bool Matchmaking_RequestLobbyData(uint64_t steamIDLobby);
+    void Matchmaking_SetLobbyGameServer(uint64_t steamIDLobby, uint32_t unGameServerIP, uint16_t unGameServerPort, uint64_t steamIDGameServer);
+    bool Matchmaking_GetLobbyGameServer(uint64_t steamIDLobby, uint32_t* punGameServerIP, uint16_t* punGameServerPort, uint64_t* psteamIDGameServer);
+    int Matchmaking_GetFavoriteGameCount();
+    bool Matchmaking_GetFavoriteGame(int iGame, uint32_t* pnAppID, uint32_t* pnIP, uint16_t* pnConnPort, uint16_t* pnQueryPort, uint32_t* punFlags, uint32_t* pRTime32LastPlayedOnServer);
+    int Matchmaking_AddFavoriteGame(uint32_t nAppID, uint32_t nIP, uint16_t nConnPort, uint16_t nQueryPort, uint32_t unFlags, uint32_t rTime32);
+    bool Matchmaking_RemoveFavoriteGame(uint32_t nAppID, uint32_t nIP, uint16_t nConnPort, uint16_t nQueryPort, uint32_t unFlags);
 
     // Lobby sync notification with EOS
     void NotifyEOSLobby(uint64_t lobbyID);

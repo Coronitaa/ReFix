@@ -96,6 +96,19 @@ typedef void* (*fn_SteamAPI_ISteamClient_GetISteamRemotePlay)(void* pClient, HSt
 typedef void* (*fn_SteamAPI_ISteamClient_GetISteamAppList)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
 typedef void* (*fn_SteamAPI_ISteamClient_GetISteamController)(void* pClient, HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char* pchVersion);
 typedef void* (*fn_VoidAccessor)();
+typedef uint64_t (*fn_SteamAPI_ISteamMatchmaking_CreateLobby)(void* self, int eLobbyType, int cMaxMembers);
+typedef bool (*fn_SteamAPI_ISteamMatchmaking_SetLobbyData)(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
+typedef const char* (*fn_SteamAPI_ISteamMatchmaking_GetLobbyData)(void* self, uint64_t steamIDLobby, const char* pchKey);
+typedef uint64_t (*fn_SteamAPI_ISteamMatchmaking_GetLobbyOwner)(void* self, uint64_t steamIDLobby);
+typedef int (*fn_SteamAPI_ISteamMatchmaking_GetNumLobbyMembers)(void* self, uint64_t steamIDLobby);
+typedef bool (*fn_SteamAPI_ISteamUtils_IsAPICallCompleted)(void* self, uint64_t hSteamAPICall, bool* pbFailed);
+typedef int (*fn_SteamAPI_ISteamUtils_GetAPICallFailureReason)(void* self, uint64_t hSteamAPICall);
+typedef bool (*fn_SteamAPI_ISteamUtils_GetAPICallResult)(void* self, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
+typedef void (*fn_SteamAPI_ManualDispatch_Init)();
+typedef void (*fn_SteamAPI_ManualDispatch_RunFrame)(uint32_t hSteamPipe);
+typedef bool (*fn_SteamAPI_ManualDispatch_GetNextCallback)(uint32_t hSteamPipe, void* pCallbackMsg);
+typedef void (*fn_SteamAPI_ManualDispatch_FreeLastCallback)(uint32_t hSteamPipe);
+typedef bool (*fn_SteamAPI_ManualDispatch_GetAPICallResult)(uint32_t hSteamPipe, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
 
 static HMODULE LoadSteamDll() {
     HMODULE hSteam = LoadLibraryA("bin\\steam_api64_test.dll");
@@ -105,6 +118,8 @@ static HMODULE LoadSteamDll() {
     if (!hSteam) hSteam = LoadLibraryA("steam_api64.dll");
     return hSteam;
 }
+
+static bool RunGenericLobbyCreationAuditTests(HMODULE hSteam);
 
 // -----------------------------------------------------------------------------
 // Standalone Adapter Unit Checks (Single Process)
@@ -433,6 +448,168 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     }
 
     std::cout << "  [PASS] Standalone Adapter Unit Tests, Rollback Preservation & Canonical CSteamID certified." << std::endl;
+    return RunGenericLobbyCreationAuditTests(hSteam);
+}
+
+// -----------------------------------------------------------------------------
+// Generic Steamworks Lobby Creation & Async Dispatch Audit Tests
+// -----------------------------------------------------------------------------
+static bool RunGenericLobbyCreationAuditTests(HMODULE hSteam) {
+    std::cout << "[*] Running Generic Steamworks Lobby Creation & Async Dispatch Audit Tests..." << std::endl;
+
+    SetEnvironmentVariableA("REFIX_NETWORK_MODE", "LAN");
+    SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", "AuditHost");
+    SetEnvironmentVariableA("REFIX_STEAM_ID", "76561198000000099");
+    SetEnvironmentVariableA("REFIX_LISTEN_PORT", "47588");
+
+    auto pfnInit = (fn_SteamAPI_Init)GetProcAddress(hSteam, "SteamAPI_Init");
+    auto pfnShutdown = (fn_SteamAPI_Shutdown)GetProcAddress(hSteam, "SteamAPI_Shutdown");
+    auto pfnGetMatchmaking = (fn_SteamAPI_SteamMatchmaking_v009)GetProcAddress(hSteam, "SteamAPI_SteamMatchmaking_v009");
+    auto pfnGetUtils = (fn_SteamAPI_SteamUtils_v010)GetProcAddress(hSteam, "SteamAPI_SteamUtils_v010");
+    auto pfnGetLanCore = (fn_ReFix_GetLanCore)GetProcAddress(hSteam, "ReFix_GetLanCore");
+
+    // Flat C Matchmaking exports
+    auto pfnFlatCreateLobby = (fn_SteamAPI_ISteamMatchmaking_CreateLobby)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_CreateLobby");
+    auto pfnFlatSetLobbyData = (fn_SteamAPI_ISteamMatchmaking_SetLobbyData)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_SetLobbyData");
+    auto pfnFlatGetLobbyData = (fn_SteamAPI_ISteamMatchmaking_GetLobbyData)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_GetLobbyData");
+    auto pfnFlatGetLobbyOwner = (fn_SteamAPI_ISteamMatchmaking_GetLobbyOwner)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+    auto pfnFlatGetNumLobbyMembers = (fn_SteamAPI_ISteamMatchmaking_GetNumLobbyMembers)GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
+
+    // Flat C Utils exports
+    auto pfnFlatIsAPICallCompleted = (fn_SteamAPI_ISteamUtils_IsAPICallCompleted)GetProcAddress(hSteam, "SteamAPI_ISteamUtils_IsAPICallCompleted");
+    auto pfnFlatGetAPICallFailureReason = (fn_SteamAPI_ISteamUtils_GetAPICallFailureReason)GetProcAddress(hSteam, "SteamAPI_ISteamUtils_GetAPICallFailureReason");
+    auto pfnFlatGetAPICallResult = (fn_SteamAPI_ISteamUtils_GetAPICallResult)GetProcAddress(hSteam, "SteamAPI_ISteamUtils_GetAPICallResult");
+
+    // Manual Dispatch exports
+    auto pfnManualInit = (fn_SteamAPI_ManualDispatch_Init)GetProcAddress(hSteam, "SteamAPI_ManualDispatch_Init");
+    auto pfnManualRunFrame = (fn_SteamAPI_ManualDispatch_RunFrame)GetProcAddress(hSteam, "SteamAPI_ManualDispatch_RunFrame");
+    auto pfnManualGetNext = (fn_SteamAPI_ManualDispatch_GetNextCallback)GetProcAddress(hSteam, "SteamAPI_ManualDispatch_GetNextCallback");
+    auto pfnManualFreeLast = (fn_SteamAPI_ManualDispatch_FreeLastCallback)GetProcAddress(hSteam, "SteamAPI_ManualDispatch_FreeLastCallback");
+    auto pfnManualGetCallResult = (fn_SteamAPI_ManualDispatch_GetAPICallResult)GetProcAddress(hSteam, "SteamAPI_ManualDispatch_GetAPICallResult");
+
+    TEST_ASSERT(pfnFlatCreateLobby != nullptr, "SteamAPI_ISteamMatchmaking_CreateLobby flat export must exist");
+    TEST_ASSERT(pfnFlatSetLobbyData != nullptr, "SteamAPI_ISteamMatchmaking_SetLobbyData flat export must exist");
+    TEST_ASSERT(pfnFlatGetLobbyData != nullptr, "SteamAPI_ISteamMatchmaking_GetLobbyData flat export must exist");
+    TEST_ASSERT(pfnFlatGetLobbyOwner != nullptr, "SteamAPI_ISteamMatchmaking_GetLobbyOwner flat export must exist");
+    TEST_ASSERT(pfnFlatGetNumLobbyMembers != nullptr, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers flat export must exist");
+    TEST_ASSERT(pfnFlatIsAPICallCompleted != nullptr, "SteamAPI_ISteamUtils_IsAPICallCompleted flat export must exist");
+    TEST_ASSERT(pfnFlatGetAPICallFailureReason != nullptr, "SteamAPI_ISteamUtils_GetAPICallFailureReason flat export must exist");
+    TEST_ASSERT(pfnFlatGetAPICallResult != nullptr, "SteamAPI_ISteamUtils_GetAPICallResult flat export must exist");
+    TEST_ASSERT(pfnManualInit != nullptr, "SteamAPI_ManualDispatch_Init must exist");
+    TEST_ASSERT(pfnManualRunFrame != nullptr, "SteamAPI_ManualDispatch_RunFrame must exist");
+    TEST_ASSERT(pfnManualGetNext != nullptr, "SteamAPI_ManualDispatch_GetNextCallback must exist");
+    TEST_ASSERT(pfnManualFreeLast != nullptr, "SteamAPI_ManualDispatch_FreeLastCallback must exist");
+    TEST_ASSERT(pfnManualGetCallResult != nullptr, "SteamAPI_ManualDispatch_GetAPICallResult must exist");
+
+    TEST_ASSERT(pfnInit(), "SteamAPI_Init must succeed in audit harness");
+    pfnManualInit();
+
+    auto* pMatchmaking = static_cast<ISteamMatchmaking*>(pfnGetMatchmaking());
+    auto* pUtils = static_cast<ISteamUtils*>(pfnGetUtils());
+    auto* core = static_cast<refix::lan::ILanCore*>(pfnGetLanCore());
+    TEST_ASSERT(pMatchmaking && pUtils && core, "Subsystems must be initialized");
+
+    // 1. Invoke public creation API via Flat C export
+    SteamAPICall_t hCall = pfnFlatCreateLobby(pMatchmaking, k_ELobbyTypePublic, 6);
+    TEST_ASSERT(hCall != 0, "SteamAPI_ISteamMatchmaking_CreateLobby must return non-zero SteamAPICall_t handle");
+
+    // Before frame dispatch, call must not be completed
+    bool bFailedPre = false;
+    TEST_ASSERT(!pfnFlatIsAPICallCompleted(pUtils, hCall, &bFailedPre), "Call must be pending prior to frame dispatch");
+    TEST_ASSERT(!bFailedPre, "Call failure must not be set while pending");
+    TEST_ASSERT(pfnFlatGetAPICallFailureReason(pUtils, hCall) == -1, "Failure reason must be -1 (None/Pending)");
+
+    // 2. Dispatch frame via Manual Dispatch
+    pfnManualRunFrame(1);
+
+    // 3. Verify callback delivery order: 703 (LobbyCreated_t) MUST arrive before 504 (LobbyEnter_t)
+    CallbackMsg_t cbMsg = {};
+    bool found703 = false;
+    bool found504 = false;
+    uint64_t steamLobbyId = 0;
+
+    while (pfnManualGetNext(1, &cbMsg)) {
+        if (cbMsg.m_iCallback == 703) {
+            found703 = true;
+            TEST_ASSERT(!found504, "Callback 703 (SteamAPICallCompleted_t) MUST arrive strictly before Callback 504 (LobbyEnter_t)");
+
+            // Verify APICall result retrieval via ManualDispatch_GetAPICallResult
+            LobbyCreated_t crCreated = {};
+            bool bFailed = true;
+            bool resManual = pfnManualGetCallResult(1, hCall, &crCreated, sizeof(crCreated), 703, &bFailed);
+            TEST_ASSERT(resManual, "ManualDispatch_GetAPICallResult must return true for completed call");
+            TEST_ASSERT(!bFailed, "Call must not be failed");
+            TEST_ASSERT(crCreated.m_eResult == k_EResultOK, "LobbyCreated_t result must be k_EResultOK");
+            TEST_ASSERT(crCreated.m_ulSteamIDLobby != 0, "LobbyCreated_t must return valid non-zero SteamID");
+            steamLobbyId = crCreated.m_ulSteamIDLobby;
+
+            // Verify APICall result retrieval via Flat ISteamUtils export
+            LobbyCreated_t crCreatedUtils = {};
+            bool bFailedUtils = true;
+            bool resUtils = pfnFlatGetAPICallResult(pUtils, hCall, &crCreatedUtils, sizeof(crCreatedUtils), 703, &bFailedUtils);
+            TEST_ASSERT(resUtils, "SteamAPI_ISteamUtils_GetAPICallResult must return true for completed call");
+            TEST_ASSERT(!bFailedUtils, "Utils result must report bFailed == false");
+            TEST_ASSERT(crCreatedUtils.m_ulSteamIDLobby == crCreated.m_ulSteamIDLobby, "Lobby IDs must match");
+        } else if (cbMsg.m_iCallback == 504) {
+            found504 = true;
+            TEST_ASSERT(found703, "Callback 504 (LobbyEnter_t) MUST NOT arrive before Callback 703 (LobbyCreated_t CallResult)");
+        }
+        pfnManualFreeLast(1);
+    }
+
+    TEST_ASSERT(found703, "Callback 703 (LobbyCreated_t CallResult) must have been delivered");
+    TEST_ASSERT(found504, "Callback 504 (LobbyEnter_t generic callback) must have been delivered");
+
+    // 6. Verify LanCore lobby registry state and metadata
+    auto knownLobbies = core->Lobby().GetAllKnownLobbies();
+    TEST_ASSERT(!knownLobbies.empty(), "ILanCore must contain registered lobby");
+
+    uint64_t ownerId = pfnFlatGetLobbyOwner(pMatchmaking, steamLobbyId);
+    TEST_ASSERT(ownerId == 76561198000000099ULL, "Lobby owner must match local SteamID");
+    TEST_ASSERT(pfnFlatGetNumLobbyMembers(pMatchmaking, steamLobbyId) == 1, "Host must be registered as member 1");
+
+    bool setOk = pfnFlatSetLobbyData(pMatchmaking, steamLobbyId, "GameType", "LAN_Deathmatch");
+    TEST_ASSERT(setOk, "SetLobbyData flat export must return true");
+    const char* val = pfnFlatGetLobbyData(pMatchmaking, steamLobbyId, "GameType");
+    TEST_ASSERT(strcmp(val, "LAN_Deathmatch") == 0, "GetLobbyData flat export must return set value");
+
+    // 7. Verify failure behavior for invalid call handle (no fake success)
+    bool bBogusFailed = false;
+    TEST_ASSERT(!pfnFlatIsAPICallCompleted(pUtils, 0x12345678ULL, &bBogusFailed), "Bogus call handle must not be completed");
+    TEST_ASSERT(pfnFlatGetAPICallFailureReason(pUtils, 0x12345678ULL) == k_ESteamAPICallFailureInvalidHandle, "Bogus call handle failure reason must be k_ESteamAPICallFailureInvalidHandle (2)");
+    LobbyCreated_t bogusCr = {};
+    TEST_ASSERT(!pfnFlatGetAPICallResult(pUtils, 0x12345678ULL, &bogusCr, sizeof(bogusCr), 703, &bBogusFailed), "Bogus call handle must return false on GetAPICallResult");
+
+    // 8. Re-initialization resilience: Shutdown and Init again cleanly
+    pfnShutdown();
+
+    TEST_ASSERT(pfnInit(), "Subsequent SteamAPI_Init after shutdown must succeed");
+    auto* pMatch2 = static_cast<ISteamMatchmaking*>(pfnGetMatchmaking());
+    auto* pUtils2 = static_cast<ISteamUtils*>(pfnGetUtils());
+    SteamAPICall_t hCall2 = pfnFlatCreateLobby(pMatch2, k_ELobbyTypePublic, 4);
+    TEST_ASSERT(hCall2 != 0, "Second session CreateLobby must return valid handle");
+    pfnManualRunFrame(1);
+
+    bool foundSecond703 = false;
+    bool foundSecond504 = false;
+    CallbackMsg_t cbMsg2 = {};
+    while (pfnManualGetNext(1, &cbMsg2)) {
+        if (cbMsg2.m_iCallback == 703) {
+            foundSecond703 = true;
+            LobbyCreated_t crCreated2 = {};
+            bool bFailed2 = true;
+            TEST_ASSERT(pfnManualGetCallResult(1, hCall2, &crCreated2, sizeof(crCreated2), 703, &bFailed2), "Second session call result must succeed");
+            TEST_ASSERT(!bFailed2 && crCreated2.m_eResult == k_EResultOK, "Second session lobby creation must succeed");
+        } else if (cbMsg2.m_iCallback == 504) {
+            foundSecond504 = true;
+        }
+        pfnManualFreeLast(1);
+    }
+    TEST_ASSERT(foundSecond703, "Second session 703 must be delivered");
+    TEST_ASSERT(foundSecond504, "Second session 504 must be delivered");
+
+    pfnShutdown();
+    std::cout << "  [PASS] Generic Steamworks Lobby Creation & Async Dispatch Audit Tests certified." << std::endl;
     return true;
 }
 

@@ -21,6 +21,7 @@
 #include "network/network_mode.h"
 #include "providers/provider_factory.h"
 #include <vector>
+#include <unordered_map>
 #include <thread>
 #include <mutex>
 #include "upnp_firewall.h"
@@ -32,6 +33,8 @@
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
 #include "lan_core/refix_lan_core.h"
+
+static bool EnsureOriginal();
 
 #define STEAM_FORWARD_COUNT 1141
 
@@ -1266,6 +1269,9 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_RequestSpectatorServerList(void* self, uint32_t iApp, void** ppchFilters, uint32_t nFilters, void* pResponse);
 extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_RequestLANServerList(void* self, uint32_t iApp, void* pResponse);
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamUtils_IsAPICallCompleted(void* self, uint64_t hSteamAPICall, bool* pbFailed);
+extern "C" __declspec(dllexport) int SteamAPI_ISteamUtils_GetAPICallFailureReason(void* self, uint64_t hSteamAPICall);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamUtils_GetAPICallResult(void* self, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
 
 typedef void (*fn_SteamAPI_Shutdown_t)();
 static fn_SteamAPI_Shutdown_t g_pfn_Shutdown = nullptr;
@@ -2396,6 +2402,10 @@ static bool Intercepted_SteamAPI_ISteamFriends_GetFriendGamePlayed(void* self, u
 static void Hooked_ISteamMatchmaking_AddRequestLobbyListStringFilter(void* self, const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType) {
     ReFixLog("ISteamMatchmaking::AddRequestLobbyListStringFilter Hook: key='%s', value='%s', comparison=%d (self=%p)",
              pchKeyToMatch ? pchKeyToMatch : "(null)", pchValueToMatch ? pchValueToMatch : "(null)", eComparisonType, self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_AddRequestLobbyListStringFilter(pchKeyToMatch, pchValueToMatch, eComparisonType);
+        return;
+    }
     if (g_orig_VTable_AddStringFilter && self) {
         g_orig_VTable_AddStringFilter(self, pchKeyToMatch, pchValueToMatch, eComparisonType);
     } else if (g_pfn_AddRequestLobbyListStringFilter && self) {
@@ -2409,6 +2419,10 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobby
 static void Hooked_ISteamMatchmaking_AddRequestLobbyListNumericalFilter(void* self, const char* pchKeyToMatch, int nValueToMatch, int eComparisonType) {
     ReFixLog("ISteamMatchmaking::AddRequestLobbyListNumericalFilter Hook: key='%s', value=%d, comparison=%d (self=%p)",
              pchKeyToMatch ? pchKeyToMatch : "(null)", nValueToMatch, eComparisonType, self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_AddRequestLobbyListNumericalFilter(pchKeyToMatch, nValueToMatch, eComparisonType);
+        return;
+    }
     if (g_orig_VTable_AddNumericalFilter && self) {
         g_orig_VTable_AddNumericalFilter(self, pchKeyToMatch, nValueToMatch, eComparisonType);
     } else if (g_pfn_AddRequestLobbyListNumericalFilter && self) {
@@ -2422,6 +2436,10 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobby
 static void Hooked_ISteamMatchmaking_AddRequestLobbyListNearValueFilter(void* self, const char* pchKeyToMatch, int nValueToBeCloseTo) {
     ReFixLog("ISteamMatchmaking::AddRequestLobbyListNearValueFilter Hook: key='%s', nearValue=%d (self=%p)",
              pchKeyToMatch ? pchKeyToMatch : "(null)", nValueToBeCloseTo, self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_AddRequestLobbyListNearValueFilter(pchKeyToMatch, nValueToBeCloseTo);
+        return;
+    }
     if (g_orig_VTable_AddNearValueFilter && self) {
         g_orig_VTable_AddNearValueFilter(self, pchKeyToMatch, nValueToBeCloseTo);
     } else if (g_pfn_AddRequestLobbyListNearValueFilter && self) {
@@ -2435,6 +2453,10 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobby
 static void Hooked_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable(void* self, int nSlotsAvailable) {
     ReFixLog("ISteamMatchmaking::AddRequestLobbyListFilterSlotsAvailable Hook: slots=%d (self=%p)",
              nSlotsAvailable, self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_AddRequestLobbyListFilterSlotsAvailable(nSlotsAvailable);
+        return;
+    }
     if (g_orig_VTable_AddFilterSlotsAvailable && self) {
         g_orig_VTable_AddFilterSlotsAvailable(self, nSlotsAvailable);
     } else if (g_pfn_AddRequestLobbyListFilterSlotsAvailable && self) {
@@ -2448,6 +2470,10 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobby
 static void Hooked_ISteamMatchmaking_AddRequestLobbyListDistanceFilter(void* self, int eLobbyDistanceFilter) {
     ReFixLog("ISteamMatchmaking::AddRequestLobbyListDistanceFilter Hook: filter=%d (self=%p)",
              eLobbyDistanceFilter, self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_AddRequestLobbyListDistanceFilter(eLobbyDistanceFilter);
+        return;
+    }
     if (g_orig_VTable_AddDistanceFilter && self) {
         g_orig_VTable_AddDistanceFilter(self, eLobbyDistanceFilter);
     } else if (g_pfn_AddRequestLobbyListDistanceFilter && self) {
@@ -2461,6 +2487,10 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobby
 static void Hooked_ISteamMatchmaking_AddRequestLobbyListResultCountFilter(void* self, int cMaxResults) {
     ReFixLog("ISteamMatchmaking::AddRequestLobbyListResultCountFilter Hook: maxResults=%d (self=%p)",
              cMaxResults, self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_AddRequestLobbyListResultCountFilter(cMaxResults);
+        return;
+    }
     if (g_orig_VTable_AddResultCountFilter && self) {
         g_orig_VTable_AddResultCountFilter(self, cMaxResults);
     } else if (g_pfn_AddRequestLobbyListResultCountFilter && self) {
@@ -2474,6 +2504,10 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobby
 static void Hooked_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter(void* self, uint64_t steamIDLobby) {
     ReFixLog("ISteamMatchmaking::AddRequestLobbyListCompatibleMembersFilter Hook: lobbyID=%llu (self=%p)",
              steamIDLobby, self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_AddRequestLobbyListCompatibleMembersFilter(steamIDLobby);
+        return;
+    }
     if (g_orig_VTable_AddCompatibleMembersFilter && self) {
         g_orig_VTable_AddCompatibleMembersFilter(self, steamIDLobby);
     } else if (g_pfn_AddRequestLobbyListCompatibleMembersFilter && self) {
@@ -2485,9 +2519,16 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_AddRequestLobby
 }
 
 extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyByIndex(void* self, int iLobby) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        uint64_t lobbyID = UnrealSteamEmu::Matchmaking_GetLobbyByIndex(iLobby);
+        ReFixLog("SteamAPI_ISteamMatchmaking_GetLobbyByIndex (LAN): iLobby=%d -> LobbyID=%llu", iLobby, lobbyID);
+        return lobbyID;
+    }
     uint64_t lobbyID = 0;
     if (g_pfn_GetLobbyByIndex && self) {
         lobbyID = g_pfn_GetLobbyByIndex(self, iLobby);
+    } else if (g_orig_VTable_GetLobbyByIndex && self) {
+        lobbyID = g_orig_VTable_GetLobbyByIndex(self, iLobby);
     }
     ReFixLog("SteamAPI_ISteamMatchmaking_GetLobbyByIndex: iLobby=%d -> LobbyID=%llu (self=%p)",
              iLobby, lobbyID, self);
@@ -2495,6 +2536,12 @@ extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyByI
 }
 
 static const char* Hooked_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        const char* val = UnrealSteamEmu::Matchmaking_GetLobbyData(steamIDLobby, pchKey);
+        ReFixLog("ISteamMatchmaking::GetLobbyData Hook (LAN): lobbyID=%llu, key='%s' -> '%s'",
+                 steamIDLobby, pchKey ? pchKey : "(null)", val ? val : "(null)");
+        return val ? val : "";
+    }
     const char* val = "";
     if (g_orig_VTable_GetLobbyData && self) {
         val = g_orig_VTable_GetLobbyData(self, steamIDLobby, pchKey);
@@ -2510,6 +2557,12 @@ extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobby
 }
 
 static int Hooked_ISteamMatchmaking_GetLobbyDataCount(void* self, uint64_t steamIDLobby) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        int count = UnrealSteamEmu::Matchmaking_GetLobbyDataCount(steamIDLobby);
+        ReFixLog("ISteamMatchmaking::GetLobbyDataCount Hook (LAN): lobbyID=%llu -> count=%d",
+                 steamIDLobby, count);
+        return count;
+    }
     int count = 0;
     if (g_orig_VTable_GetLobbyDataCount && self) {
         count = g_orig_VTable_GetLobbyDataCount(self, steamIDLobby);
@@ -2525,6 +2578,12 @@ extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetLobbyDataCoun
 }
 
 static bool Hooked_ISteamMatchmaking_GetLobbyDataByIndex(void* self, uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        bool res = UnrealSteamEmu::Matchmaking_GetLobbyDataByIndex(steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+        ReFixLog("ISteamMatchmaking::GetLobbyDataByIndex Hook (LAN): lobbyID=%llu, index=%d -> res=%d",
+                 steamIDLobby, iLobbyData, res ? 1 : 0);
+        return res;
+    }
     bool res = false;
     if (g_orig_VTable_GetLobbyDataByIndex && self) {
         res = g_orig_VTable_GetLobbyDataByIndex(self, steamIDLobby, iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
@@ -2541,6 +2600,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_GetLobbyDataByI
 
 static uint64_t Hooked_ISteamMatchmaking_RequestLobbyList(void* self) {
     ReFixLog("ISteamMatchmaking::RequestLobbyList Hook called (self=%p)", self);
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        uint64_t hCall = UnrealSteamEmu::Matchmaking_RequestLobbyList();
+        ReFixLog("  -> RequestLobbyList APICall handle (LAN): %llu", hCall);
+        return hCall;
+    }
     if (self) {
         if (g_config.overrideDistanceFilter) {
             if (g_orig_VTable_AddDistanceFilter) {
@@ -2579,10 +2643,16 @@ static uint64_t Hooked_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType,
     int safeMaxMembers = cMaxMembers;
     if (safeMaxMembers <= 0 || safeMaxMembers > 250) {
         safeMaxMembers = 20;
-        ReFixLog("ISteamMatchmaking::CreateLobby Hook called with invalid MaxMembers (%d), adjusted to %d (Type=%d)",
-                 cMaxMembers, safeMaxMembers, eLobbyType);
+        ReFixLog("ISteamMatchmaking::CreateLobby Hook called with invalid MaxMembers (%d), adjusted to %d (Type=%d, self=%p)",
+                 cMaxMembers, safeMaxMembers, eLobbyType, self);
     } else {
-        ReFixLog("ISteamMatchmaking::CreateLobby Hook called (Type=%d, MaxMembers=%d)", eLobbyType, safeMaxMembers);
+        ReFixLog("ISteamMatchmaking::CreateLobby Hook called (Type=%d, MaxMembers=%d, self=%p)", eLobbyType, safeMaxMembers, self);
+    }
+
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        uint64_t hResult = UnrealSteamEmu::Matchmaking_CreateLobby(eLobbyType, safeMaxMembers);
+        ReFixLog("  -> CreateLobby APICall handle (LAN): %llu", hResult);
+        return hResult;
     }
 
     uint64_t hResult = 0;
@@ -2609,6 +2679,12 @@ static uint64_t Hooked_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType,
 }
 
 static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDLobby) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        uint64_t hCall = UnrealSteamEmu::Matchmaking_JoinLobby(steamIDLobby);
+        ReFixLog("ISteamMatchmaking::JoinLobby (LAN): Lobby=%llu -> hCall=%llu", steamIDLobby, hCall);
+        return hCall;
+    }
+
     LoadConfig();
     uint32_t realApp = (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : g_config.maskAppIdNum;
     uint32_t maskApp = g_config.maskAppIdNum;
@@ -2670,6 +2746,10 @@ static bool Hooked_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLo
         }
     }
 
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_SetLobbyData(steamIDLobby, pchKey, pchValue);
+    }
+
     if (g_config.enableLobbyFilter && g_config.lobbyFilterKey[0] != '\0' && g_config.lobbyFilterValue[0] != '\0' && self) {
         if (g_orig_VTable_SetLobbyData) {
             g_orig_VTable_SetLobbyData(self, steamIDLobby, g_config.lobbyFilterKey, g_config.lobbyFilterValue);
@@ -2694,6 +2774,12 @@ static void Hooked_ISteamMatchmaking_LeaveLobby(void* self, uint64_t steamIDLobb
     if (steamIDLobby == g_hostedLobbyID) {
         g_hostedLobbyID = 0;
     }
+
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_LeaveLobby(steamIDLobby);
+        return;
+    }
+
     if (g_orig_VTable_LeaveLobby) {
         g_orig_VTable_LeaveLobby(self, steamIDLobby);
     } else if (g_pfn_LeaveLobby) {
@@ -2705,6 +2791,10 @@ extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_LeaveLobby(void
 }
 
 static bool Hooked_ISteamMatchmaking_InviteUserToLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDInvitee) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_InviteUserToLobby(steamIDLobby, steamIDInvitee);
+    }
+
     bool result = false;
     if (g_orig_VTable_InviteUserToLobby && self)
         result = g_orig_VTable_InviteUserToLobby(self, steamIDLobby, steamIDInvitee);
@@ -2719,6 +2809,10 @@ extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_InviteUserToLob
 }
 
 static const char* Hooked_ISteamMatchmaking_GetLobbyMemberData(void* self, uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetLobbyMemberData(steamIDLobby, steamIDUser, pchKey);
+    }
+
     const char* r = nullptr;
     if (g_orig_VTable_GetLobbyMemberData && self) {
         __try {
@@ -2762,6 +2856,253 @@ extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_JoinLobby(v
 }
 extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
     return Hooked_ISteamMatchmaking_SetLobbyData(self, steamIDLobby, pchKey, pchValue);
+}
+
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetNumLobbyMembers(void* self, uint64_t steamIDLobby) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetNumLobbyMembers(steamIDLobby);
+    }
+    if (EnsureOriginal()) {
+        typedef int (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
+        if (pfn) return pfn(self, steamIDLobby);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex(void* self, uint64_t steamIDLobby, int iMember) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetLobbyMemberByIndex(steamIDLobby, iMember);
+    }
+    if (EnsureOriginal()) {
+        typedef uint64_t (*fn_t)(void*, uint64_t, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex");
+        if (pfn) return pfn(self, steamIDLobby, iMember);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyOwner(void* self, uint64_t steamIDLobby) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetLobbyOwner(steamIDLobby);
+    }
+    if (EnsureOriginal()) {
+        typedef uint64_t (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+        if (pfn) return pfn(self, steamIDLobby);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyOwner(void* self, uint64_t steamIDLobby, uint64_t steamIDNewOwner) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_SetLobbyOwner(steamIDLobby, steamIDNewOwner);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SetLobbyOwner");
+        if (pfn) return pfn(self, steamIDLobby, steamIDNewOwner);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyJoinable(void* self, uint64_t steamIDLobby, bool bLobbyJoinable) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_SetLobbyJoinable(steamIDLobby, bLobbyJoinable);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, bool);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SetLobbyJoinable");
+        if (pfn) return pfn(self, steamIDLobby, bLobbyJoinable);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_SetLobbyMemberData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_SetLobbyMemberData(steamIDLobby, pchKey, pchValue);
+        return;
+    }
+    if (EnsureOriginal()) {
+        typedef void (*fn_t)(void*, uint64_t, const char*, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SetLobbyMemberData");
+        if (pfn) pfn(self, steamIDLobby, pchKey, pchValue);
+    }
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit(void* self, uint64_t steamIDLobby, int cMaxMembers) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_SetLobbyMemberLimit(steamIDLobby, cMaxMembers);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit");
+        if (pfn) return pfn(self, steamIDLobby, cMaxMembers);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit(void* self, uint64_t steamIDLobby) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetLobbyMemberLimit(steamIDLobby);
+    }
+    if (EnsureOriginal()) {
+        typedef int (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit");
+        if (pfn) return pfn(self, steamIDLobby);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLobbyType(void* self, uint64_t steamIDLobby, int eLobbyType) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_SetLobbyType(steamIDLobby, eLobbyType);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SetLobbyType");
+        if (pfn) return pfn(self, steamIDLobby, eLobbyType);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SetLinkedLobby(void* self, uint64_t steamIDLobby, uint64_t steamIDLobbyDependent) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_SetLinkedLobby(steamIDLobby, steamIDLobbyDependent);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SetLinkedLobby");
+        if (pfn) return pfn(self, steamIDLobby, steamIDLobbyDependent);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_DeleteLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_DeleteLobbyData(steamIDLobby, pchKey);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, const char*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_DeleteLobbyData");
+        if (pfn) return pfn(self, steamIDLobby, pchKey);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_SendLobbyChatMsg(void* self, uint64_t steamIDLobby, const void* pvMsgBody, int cubMsgBody) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_SendLobbyChatMsg(steamIDLobby, pvMsgBody, cubMsgBody);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, const void*, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SendLobbyChatMsg");
+        if (pfn) return pfn(self, steamIDLobby, pvMsgBody, cubMsgBody);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetLobbyChatEntry(void* self, uint64_t steamIDLobby, int iChatID, uint64_t* pSteamIDUser, void* pvData, int cubData, int* peChatEntryType) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetLobbyChatEntry(steamIDLobby, iChatID, pSteamIDUser, pvData, cubData, peChatEntryType);
+    }
+    if (EnsureOriginal()) {
+        typedef int (*fn_t)(void*, uint64_t, int, uint64_t*, void*, int, int*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyChatEntry");
+        if (pfn) return pfn(self, steamIDLobby, iChatID, pSteamIDUser, pvData, cubData, peChatEntryType);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_RequestLobbyData(void* self, uint64_t steamIDLobby) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_RequestLobbyData(steamIDLobby);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_RequestLobbyData");
+        if (pfn) return pfn(self, steamIDLobby);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_ISteamMatchmaking_SetLobbyGameServer(void* self, uint64_t steamIDLobby, uint32_t unGameServerIP, uint16_t unGameServerPort, uint64_t steamIDGameServer) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::Matchmaking_SetLobbyGameServer(steamIDLobby, unGameServerIP, unGameServerPort, steamIDGameServer);
+        return;
+    }
+    if (EnsureOriginal()) {
+        typedef void (*fn_t)(void*, uint64_t, uint32_t, uint16_t, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_SetLobbyGameServer");
+        if (pfn) pfn(self, steamIDLobby, unGameServerIP, unGameServerPort, steamIDGameServer);
+    }
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_GetLobbyGameServer(void* self, uint64_t steamIDLobby, uint32_t* punGameServerIP, uint16_t* punGameServerPort, uint64_t* psteamIDGameServer) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetLobbyGameServer(steamIDLobby, punGameServerIP, punGameServerPort, psteamIDGameServer);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, uint32_t*, uint16_t*, uint64_t*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyGameServer");
+        if (pfn) return pfn(self, steamIDLobby, punGameServerIP, punGameServerPort, psteamIDGameServer);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_GetFavoriteGameCount(void* self) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetFavoriteGameCount();
+    }
+    if (EnsureOriginal()) {
+        typedef int (*fn_t)(void*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetFavoriteGameCount");
+        if (pfn) return pfn(self);
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_GetFavoriteGame(void* self, int iGame, uint32_t* pnAppID, uint32_t* pnIP, uint16_t* pnConnPort, uint16_t* pnQueryPort, uint32_t* punFlags, uint32_t* pRTime32LastPlayedOnServer) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_GetFavoriteGame(iGame, pnAppID, pnIP, pnConnPort, pnQueryPort, punFlags, pRTime32LastPlayedOnServer);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, int, uint32_t*, uint32_t*, uint16_t*, uint16_t*, uint32_t*, uint32_t*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetFavoriteGame");
+        if (pfn) return pfn(self, iGame, pnAppID, pnIP, pnConnPort, pnQueryPort, punFlags, pRTime32LastPlayedOnServer);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamMatchmaking_RemoveFavoriteGame(void* self, uint32_t nAppID, uint32_t nIP, uint16_t nConnPort, uint16_t nQueryPort, uint32_t unFlags) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_RemoveFavoriteGame(nAppID, nIP, nConnPort, nQueryPort, unFlags);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint32_t, uint32_t, uint16_t, uint16_t, uint32_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamMatchmaking_RemoveFavoriteGame");
+        if (pfn) return pfn(self, nAppID, nIP, nConnPort, nQueryPort, unFlags);
+    }
+    return false;
 }
 
 static void* Intercept_RequestServerList4(
@@ -2814,6 +3155,45 @@ extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* se
     ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
              targetApp, g_config.engineType.c_str(), ReFix::NetworkModeManager::IsGoldbergBackendActive() ? "Goldberg" : "Valve");
     return targetApp;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamUtils_IsAPICallCompleted(void* self, uint64_t hSteamAPICall, bool* pbFailed) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::IsAPICallCompleted(hSteamAPICall, pbFailed);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, bool*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamUtils_IsAPICallCompleted");
+        if (pfn) return pfn(self, hSteamAPICall, pbFailed);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) int SteamAPI_ISteamUtils_GetAPICallFailureReason(void* self, uint64_t hSteamAPICall) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetAPICallFailureReason(hSteamAPICall);
+    }
+    if (EnsureOriginal()) {
+        typedef int (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamUtils_GetAPICallFailureReason");
+        if (pfn) return pfn(self, hSteamAPICall);
+    }
+    return -1; // k_ESteamAPICallFailureNone
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamUtils_GetAPICallResult(void* self, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::GetAPICallResult(hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, void*, int, int, bool*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamUtils_GetAPICallResult");
+        if (pfn) return pfn(self, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
+    }
+    return false;
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_ISteamUser_BLoggedOn(void* self) {
@@ -4688,6 +5068,9 @@ extern "C" __declspec(dllexport) int SteamAPI_ISteamGameServer_UserHasLicenseFor
 extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_AddFavoriteGame(
     void* self, uint32_t nAppID, uint32_t nIP, uint16_t nConnPort,
     uint16_t nQueryPort, uint32_t unFlags, uint32_t rTime32) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Matchmaking_AddFavoriteGame(nAppID, nIP, nConnPort, nQueryPort, unFlags, rTime32);
+    }
     LoadConfig();
     if (!g_pfn_AddFavoriteGame) return 0;
     return g_pfn_AddFavoriteGame(self, g_maskAppIdNum, nIP, nConnPort, nQueryPort, unFlags, rTime32);
@@ -4706,6 +5089,13 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
         DispatchPendingAuthCallbacks();
     }
     ReFixLog("SteamAPI_RunCallbacks: done");
+}
+
+extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_Init() {
+    ReFixLog("SteamAPI_ManualDispatch_Init called");
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::ManualDispatch_Init();
+    }
 }
 
 static int s_manualRunFrameLogged = 0;
@@ -4767,6 +5157,18 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
         bool res = UnrealSteamEmu::ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
         if (res) {
             s_lastManualCallbackWasSynthetic.store(false);
+            if (pCallbackMsg) {
+                auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+                if (msg->m_iCallback == 703 && msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamAPICallCompleted_t)) {
+                    auto* pCallComp = (ReFix_SteamAPICallCompleted_t*)msg->m_pubParam;
+                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 703 (SteamAPICallCompleted_t) -> hAsyncCall=%llu, iCallback=%d",
+                             pCallComp->m_hAsyncCall, pCallComp->m_iCallback);
+                } else if (msg->m_iCallback == 504) {
+                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 504 (LobbyEnter_t)");
+                } else if (msg->m_iCallback == 513) {
+                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 513 (LobbyCreated_t)");
+                }
+            }
             return true;
         }
     }
@@ -5708,196 +6110,175 @@ extern "C" __declspec(dllexport) bool SteamGameServer_BSecure() {
     return true;
 }
 
+static FARPROC LookupLanExport(const char* name) {
+    static const std::unordered_map<std::string, FARPROC> s_lanExports = {
+        { "SteamClient", (FARPROC)SteamClient },
+        { "SteamAPI_GetHSteamUser", (FARPROC)SteamAPI_GetHSteamUser },
+        { "GetHSteamUser", (FARPROC)SteamAPI_GetHSteamUser },
+        { "SteamAPI_GetHSteamPipe", (FARPROC)SteamAPI_GetHSteamPipe },
+        { "GetHSteamPipe", (FARPROC)SteamAPI_GetHSteamPipe },
+        { "SteamAPI_Init", (FARPROC)SteamAPI_Init },
+        { "SteamAPI_InitSafe", (FARPROC)SteamAPI_InitSafe },
+        { "SteamAPI_InitFlat", (FARPROC)SteamAPI_InitFlat },
+        { "SteamAPI_Shutdown", (FARPROC)SteamAPI_Shutdown },
+        { "SteamAPI_RunCallbacks", (FARPROC)SteamAPI_RunCallbacks },
+        { "SteamAPI_RegisterCallback", (FARPROC)SteamAPI_RegisterCallback },
+        { "SteamAPI_RegisterCallResult", (FARPROC)SteamAPI_RegisterCallResult },
+        { "SteamAPI_UnregisterCallback", (FARPROC)SteamAPI_UnregisterCallback },
+        { "SteamAPI_UnregisterCallResult", (FARPROC)SteamAPI_UnregisterCallResult },
+        { "SteamAPI_ReleaseCurrentThreadMemory", (FARPROC)SteamAPI_ReleaseCurrentThreadMemory },
+        { "SteamAPI_IsSteamRunning", (FARPROC)SteamAPI_IsSteamRunning },
+        { "SteamAPI_RestartAppIfNecessary", (FARPROC)SteamAPI_RestartAppIfNecessary },
+        { "SteamInternal_ContextInit", (FARPROC)SteamInternal_ContextInit },
+        { "SteamInternal_FindOrCreateGameServerInterface", (FARPROC)SteamInternal_FindOrCreateGameServerInterface },
+        { "SteamAPI_SteamFriends_v017", (FARPROC)SteamAPI_SteamFriends_v017 },
+        { "SteamAPI_SteamUser_v021", (FARPROC)SteamAPI_SteamUser_v021 },
+        { "SteamAPI_SteamApps_v008", (FARPROC)SteamAPI_SteamApps_v008 },
+        { "SteamAPI_SteamUtils_v010", (FARPROC)SteamAPI_SteamUtils_v010 },
+        { "SteamAPI_SteamMatchmaking_v009", (FARPROC)SteamAPI_SteamMatchmaking_v009 },
+        { "SteamAPI_SteamMatchmakingServers_v002", (FARPROC)SteamAPI_SteamMatchmakingServers_v002 },
+        { "SteamAPI_SteamNetworking_v006", (FARPROC)SteamAPI_SteamNetworking_v006 },
+        { "SteamAPI_SteamUserStats_v012", (FARPROC)SteamAPI_SteamUserStats_v012 },
+        { "SteamAPI_ISteamClient_GetISteamGenericInterface", (FARPROC)SteamAPI_ISteamClient_GetISteamGenericInterface },
+        { "SteamAPI_ISteamClient_GetISteamUser", (FARPROC)SteamAPI_ISteamClient_GetISteamUser },
+        { "SteamAPI_ISteamClient_GetISteamFriends", (FARPROC)SteamAPI_ISteamClient_GetISteamFriends },
+        { "SteamAPI_ISteamClient_GetISteamUtils", (FARPROC)SteamAPI_ISteamClient_GetISteamUtils },
+        { "SteamAPI_ISteamClient_GetISteamMatchmaking", (FARPROC)SteamAPI_ISteamClient_GetISteamMatchmaking },
+        { "SteamAPI_ISteamClient_GetISteamMatchmakingServers", (FARPROC)SteamAPI_ISteamClient_GetISteamMatchmakingServers },
+        { "SteamAPI_ISteamClient_GetISteamApps", (FARPROC)SteamAPI_ISteamClient_GetISteamApps },
+        { "SteamAPI_ISteamClient_GetISteamNetworking", (FARPROC)SteamAPI_ISteamClient_GetISteamNetworking },
+        { "SteamAPI_ISteamClient_CreateSteamPipe", (FARPROC)SteamAPI_ISteamClient_CreateSteamPipe },
+        { "SteamAPI_ISteamClient_ConnectToGlobalUser", (FARPROC)SteamAPI_ISteamClient_ConnectToGlobalUser },
+        { "SteamAPI_ISteamClient_CreateLocalUser", (FARPROC)SteamAPI_ISteamClient_CreateLocalUser },
+        { "SteamAPI_ISteamClient_BReleaseSteamPipe", (FARPROC)SteamAPI_ISteamClient_BReleaseSteamPipe },
+        { "SteamAPI_ISteamClient_ReleaseUser", (FARPROC)SteamAPI_ISteamClient_ReleaseUser },
+        { "SteamAPI_ISteamClient_BShutdownIfAllPipesClosed", (FARPROC)SteamAPI_ISteamClient_BShutdownIfAllPipesClosed },
+        { "SteamAPI_ISteamClient_GetISteamUserStats", (FARPROC)SteamAPI_ISteamClient_GetISteamUserStats },
+        { "SteamAPI_ISteamClient_GetISteamRemoteStorage", (FARPROC)SteamAPI_ISteamClient_GetISteamRemoteStorage },
+        { "SteamAPI_ISteamClient_GetISteamScreenshots", (FARPROC)SteamAPI_ISteamClient_GetISteamScreenshots },
+        { "SteamAPI_ISteamClient_GetISteamHTTP", (FARPROC)SteamAPI_ISteamClient_GetISteamHTTP },
+        { "SteamAPI_ISteamClient_GetISteamUGC", (FARPROC)SteamAPI_ISteamClient_GetISteamUGC },
+        { "SteamAPI_ISteamClient_GetISteamInput", (FARPROC)SteamAPI_ISteamClient_GetISteamInput },
+        { "SteamAPI_ISteamClient_GetISteamInventory", (FARPROC)SteamAPI_ISteamClient_GetISteamInventory },
+        { "SteamAPI_ISteamClient_GetISteamGameSearch", (FARPROC)SteamAPI_ISteamClient_GetISteamGameSearch },
+        { "SteamAPI_ISteamClient_GetISteamMusic", (FARPROC)SteamAPI_ISteamClient_GetISteamMusic },
+        { "SteamAPI_ISteamClient_GetISteamMusicRemote", (FARPROC)SteamAPI_ISteamClient_GetISteamMusicRemote },
+        { "SteamAPI_ISteamClient_GetISteamHTMLSurface", (FARPROC)SteamAPI_ISteamClient_GetISteamHTMLSurface },
+        { "SteamAPI_ISteamClient_GetISteamVideo", (FARPROC)SteamAPI_ISteamClient_GetISteamVideo },
+        { "SteamAPI_ISteamClient_GetISteamParentalSettings", (FARPROC)SteamAPI_ISteamClient_GetISteamParentalSettings },
+        { "SteamAPI_ISteamClient_GetISteamParties", (FARPROC)SteamAPI_ISteamClient_GetISteamParties },
+        { "SteamAPI_ISteamClient_GetISteamRemotePlay", (FARPROC)SteamAPI_ISteamClient_GetISteamRemotePlay },
+        { "SteamAPI_ISteamClient_GetISteamAppList", (FARPROC)SteamAPI_ISteamClient_GetISteamAppList },
+        { "SteamAPI_ISteamClient_GetISteamController", (FARPROC)SteamAPI_ISteamClient_GetISteamController },
+        { "SteamAPI_SteamGameSearch_v001", (FARPROC)SteamAPI_SteamGameSearch_v001 },
+        { "SteamAPI_SteamAppList_v001", (FARPROC)SteamAPI_SteamAppList_v001 },
+        { "SteamAPI_SteamMusic_v001", (FARPROC)SteamAPI_SteamMusic_v001 },
+        { "SteamAPI_SteamMusicRemote_v001", (FARPROC)SteamAPI_SteamMusicRemote_v001 },
+        { "SteamAPI_SteamHTMLSurface_v005", (FARPROC)SteamAPI_SteamHTMLSurface_v005 },
+        { "SteamAPI_SteamVideo_v002", (FARPROC)SteamAPI_SteamVideo_v007 },
+        { "SteamAPI_SteamVideo_v007", (FARPROC)SteamAPI_SteamVideo_v007 },
+        { "SteamAPI_SteamParentalSettings_v001", (FARPROC)SteamAPI_SteamParentalSettings_v001 },
+        { "SteamAPI_SteamParties_v002", (FARPROC)SteamAPI_SteamParties_v002 },
+        { "SteamAPI_SteamRemotePlay_v001", (FARPROC)SteamAPI_SteamRemotePlay_v001 },
+        { "SteamAPI_SteamRemotePlay_v002", (FARPROC)SteamAPI_SteamRemotePlay_v001 },
+        { "SteamAPI_SteamHTTP_v003", (FARPROC)SteamAPI_SteamHTTP_v003 },
+        { "SteamAPI_SteamController_v008", (FARPROC)SteamAPI_SteamController_v008 },
+        { "SteamAPI_SteamInventory_v003", (FARPROC)SteamAPI_SteamInventory_v003 },
+        { "SteamAPI_SteamScreenshots_v003", (FARPROC)SteamAPI_SteamScreenshots_v003 },
+        { "SteamAPI_SteamTimeline_v004", (FARPROC)SteamAPI_SteamTimeline_v004 },
+        { "SteamGameServer_RunCallbacks", (FARPROC)SteamGameServer_RunCallbacks },
+        { "SteamGameServer_Shutdown", (FARPROC)SteamGameServer_Shutdown },
+        { "SteamGameServer_GetHSteamUser", (FARPROC)SteamGameServer_GetHSteamUser },
+        { "SteamGameServer_GetHSteamPipe", (FARPROC)SteamGameServer_GetHSteamPipe },
+        { "SteamGameServer_GetSteamID", (FARPROC)SteamGameServer_GetSteamID },
+        { "SteamAPI_ISteamFriends_GetPersonaName", (FARPROC)SteamAPI_ISteamFriends_GetPersonaName },
+        { "SteamAPI_ISteamFriends_GetPersonaState", (FARPROC)SteamAPI_ISteamFriends_GetPersonaState },
+        { "SteamAPI_ISteamFriends_GetFriendPersonaName", (FARPROC)SteamAPI_ISteamFriends_GetFriendPersonaName },
+        { "SteamAPI_ISteamFriends_GetSmallFriendAvatar", (FARPROC)SteamAPI_ISteamFriends_GetSmallFriendAvatar },
+        { "SteamAPI_ISteamFriends_GetMediumFriendAvatar", (FARPROC)SteamAPI_ISteamFriends_GetMediumFriendAvatar },
+        { "SteamAPI_ISteamFriends_GetLargeFriendAvatar", (FARPROC)SteamAPI_ISteamFriends_GetLargeFriendAvatar },
+        { "SteamAPI_ISteamFriends_SetRichPresence", (FARPROC)SteamAPI_ISteamFriends_SetRichPresence },
+        { "SteamAPI_ISteamFriends_ClearRichPresence", (FARPROC)SteamAPI_ISteamFriends_ClearRichPresence },
+        { "SteamAPI_ISteamUser_GetSteamID", (FARPROC)SteamAPI_ISteamUser_GetSteamID },
+        { "SteamAPI_ISteamUser_BLoggedOn", (FARPROC)SteamAPI_ISteamUser_BLoggedOn },
+        { "SteamAPI_ISteamUtils_GetImageSize", (FARPROC)SteamAPI_ISteamUtils_GetImageSize },
+        { "SteamAPI_ISteamUtils_GetImageRGBA", (FARPROC)SteamAPI_ISteamUtils_GetImageRGBA },
+        { "SteamAPI_ISteamUserStats_RequestCurrentStats", (FARPROC)SteamAPI_ISteamUserStats_RequestCurrentStats },
+        { "SteamAPI_ISteamRemoteStorage_FileWrite", (FARPROC)SteamAPI_ISteamRemoteStorage_FileWrite },
+        { "SteamAPI_ISteamRemoteStorage_FileRead", (FARPROC)SteamAPI_ISteamRemoteStorage_FileRead },
+        { "SteamAPI_ISteamRemoteStorage_FileExists", (FARPROC)SteamAPI_ISteamRemoteStorage_FileExists },
+        { "SteamAPI_ISteamRemoteStorage_GetFileSize", (FARPROC)SteamAPI_ISteamRemoteStorage_GetFileSize },
+        { "SteamAPI_ISteamRemoteStorage_FileDelete", (FARPROC)SteamAPI_ISteamRemoteStorage_FileDelete },
+        { "SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount", (FARPROC)SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount },
+        { "SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp", (FARPROC)SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp },
+        { "SteamAPI_ISteamRemoteStorage_GetQuota", (FARPROC)SteamAPI_ISteamRemoteStorage_GetQuota },
+        { "SteamAPI_ISteamMatchmaking_GetFavoriteGameCount", (FARPROC)SteamAPI_ISteamMatchmaking_GetFavoriteGameCount },
+        { "SteamAPI_ISteamMatchmaking_GetFavoriteGame", (FARPROC)SteamAPI_ISteamMatchmaking_GetFavoriteGame },
+        { "SteamAPI_ISteamMatchmaking_AddFavoriteGame", (FARPROC)SteamAPI_ISteamMatchmaking_AddFavoriteGame },
+        { "SteamAPI_ISteamMatchmaking_RemoveFavoriteGame", (FARPROC)SteamAPI_ISteamMatchmaking_RemoveFavoriteGame },
+        { "SteamAPI_ISteamMatchmaking_RequestLobbyList", (FARPROC)SteamAPI_ISteamMatchmaking_RequestLobbyList },
+        { "SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter", (FARPROC)SteamAPI_ISteamMatchmaking_AddRequestLobbyListStringFilter },
+        { "SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter", (FARPROC)SteamAPI_ISteamMatchmaking_AddRequestLobbyListNumericalFilter },
+        { "SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter", (FARPROC)SteamAPI_ISteamMatchmaking_AddRequestLobbyListNearValueFilter },
+        { "SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable", (FARPROC)SteamAPI_ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable },
+        { "SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter", (FARPROC)SteamAPI_ISteamMatchmaking_AddRequestLobbyListDistanceFilter },
+        { "SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter", (FARPROC)SteamAPI_ISteamMatchmaking_AddRequestLobbyListResultCountFilter },
+        { "SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter", (FARPROC)SteamAPI_ISteamMatchmaking_AddRequestLobbyListCompatibleMembersFilter },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyByIndex", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyByIndex },
+        { "SteamAPI_ISteamMatchmaking_CreateLobby", (FARPROC)SteamAPI_ISteamMatchmaking_CreateLobby },
+        { "SteamAPI_ISteamMatchmaking_JoinLobby", (FARPROC)SteamAPI_ISteamMatchmaking_JoinLobby },
+        { "SteamAPI_ISteamMatchmaking_LeaveLobby", (FARPROC)SteamAPI_ISteamMatchmaking_LeaveLobby },
+        { "SteamAPI_ISteamMatchmaking_InviteUserToLobby", (FARPROC)SteamAPI_ISteamMatchmaking_InviteUserToLobby },
+        { "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers", (FARPROC)SteamAPI_ISteamMatchmaking_GetNumLobbyMembers },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyData", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyData },
+        { "SteamAPI_ISteamMatchmaking_SetLobbyData", (FARPROC)SteamAPI_ISteamMatchmaking_SetLobbyData },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyDataCount", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyDataCount },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex },
+        { "SteamAPI_ISteamMatchmaking_DeleteLobbyData", (FARPROC)SteamAPI_ISteamMatchmaking_DeleteLobbyData },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyMemberData", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyMemberData },
+        { "SteamAPI_ISteamMatchmaking_SetLobbyMemberData", (FARPROC)SteamAPI_ISteamMatchmaking_SetLobbyMemberData },
+        { "SteamAPI_ISteamMatchmaking_SendLobbyChatMsg", (FARPROC)SteamAPI_ISteamMatchmaking_SendLobbyChatMsg },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyChatEntry", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyChatEntry },
+        { "SteamAPI_ISteamMatchmaking_RequestLobbyData", (FARPROC)SteamAPI_ISteamMatchmaking_RequestLobbyData },
+        { "SteamAPI_ISteamMatchmaking_SetLobbyGameServer", (FARPROC)SteamAPI_ISteamMatchmaking_SetLobbyGameServer },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyGameServer", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyGameServer },
+        { "SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit", (FARPROC)SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit },
+        { "SteamAPI_ISteamMatchmaking_SetLobbyType", (FARPROC)SteamAPI_ISteamMatchmaking_SetLobbyType },
+        { "SteamAPI_ISteamMatchmaking_SetLobbyJoinable", (FARPROC)SteamAPI_ISteamMatchmaking_SetLobbyJoinable },
+        { "SteamAPI_ISteamMatchmaking_GetLobbyOwner", (FARPROC)SteamAPI_ISteamMatchmaking_GetLobbyOwner },
+        { "SteamAPI_ISteamMatchmaking_SetLobbyOwner", (FARPROC)SteamAPI_ISteamMatchmaking_SetLobbyOwner },
+        { "SteamAPI_ISteamMatchmaking_SetLinkedLobby", (FARPROC)SteamAPI_ISteamMatchmaking_SetLinkedLobby },
+        { "SteamAPI_ISteamMatchmakingServers_RequestInternetServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestInternetServerList },
+        { "SteamAPI_ISteamMatchmakingServers_RequestFavoritesServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestFavoritesServerList },
+        { "SteamAPI_ISteamMatchmakingServers_RequestFriendsServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestFriendsServerList },
+        { "SteamAPI_ISteamMatchmakingServers_RequestHistoryServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestHistoryServerList },
+        { "SteamAPI_ISteamMatchmakingServers_RequestSpectatorServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestSpectatorServerList },
+        { "SteamAPI_ISteamMatchmakingServers_RequestLANServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestLANServerList },
+        { "SteamAPI_ISteamUtils_GetAppID", (FARPROC)SteamAPI_ISteamUtils_GetAppID },
+        { "SteamAPI_ISteamUtils_IsAPICallCompleted", (FARPROC)SteamAPI_ISteamUtils_IsAPICallCompleted },
+        { "SteamAPI_ISteamUtils_GetAPICallFailureReason", (FARPROC)SteamAPI_ISteamUtils_GetAPICallFailureReason },
+        { "SteamAPI_ISteamUtils_GetAPICallResult", (FARPROC)SteamAPI_ISteamUtils_GetAPICallResult },
+        { "SteamAPI_ManualDispatch_Init", (FARPROC)SteamAPI_ManualDispatch_Init },
+        { "SteamAPI_ManualDispatch_RunFrame", (FARPROC)SteamAPI_ManualDispatch_RunFrame },
+        { "SteamAPI_ManualDispatch_GetNextCallback", (FARPROC)SteamAPI_ManualDispatch_GetNextCallback },
+        { "SteamAPI_ManualDispatch_FreeLastCallback", (FARPROC)SteamAPI_ManualDispatch_FreeLastCallback },
+        { "SteamAPI_ManualDispatch_GetAPICallResult", (FARPROC)SteamAPI_ManualDispatch_GetAPICallResult }
+    };
+
+    auto it = s_lanExports.find(name);
+    if (it != s_lanExports.end()) {
+        return it->second;
+    }
+    return (FARPROC)SafeUnsupportedExportStub;
+}
+
 static void InitializeLanForwardTable() {
     for (int i = 0; i < STEAM_FORWARD_COUNT; i++) {
         const char* name = g_forwardNames[i];
         if (!name) continue;
-
-        if (strcmp(name, "SteamClient") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamClient;
-        } else if (strcmp(name, "SteamAPI_GetHSteamUser") == 0 || strcmp(name, "GetHSteamUser") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_GetHSteamUser;
-        } else if (strcmp(name, "SteamAPI_GetHSteamPipe") == 0 || strcmp(name, "GetHSteamPipe") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_GetHSteamPipe;
-        } else if (strcmp(name, "SteamAPI_RegisterCallback") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_RegisterCallback;
-        } else if (strcmp(name, "SteamAPI_RegisterCallResult") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_RegisterCallResult;
-        } else if (strcmp(name, "SteamAPI_UnregisterCallback") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_UnregisterCallback;
-        } else if (strcmp(name, "SteamAPI_UnregisterCallResult") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_UnregisterCallResult;
-        } else if (strcmp(name, "SteamAPI_ReleaseCurrentThreadMemory") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ReleaseCurrentThreadMemory;
-        } else if (strcmp(name, "SteamAPI_IsSteamRunning") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_IsSteamRunning;
-        } else if (strcmp(name, "SteamAPI_RestartAppIfNecessary") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_RestartAppIfNecessary;
-        } else if (strcmp(name, "SteamInternal_ContextInit") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamInternal_ContextInit;
-        } else if (strcmp(name, "SteamInternal_FindOrCreateGameServerInterface") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamInternal_FindOrCreateGameServerInterface;
-        } else if (strcmp(name, "SteamAPI_SteamFriends_v017") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamFriends_v017;
-        } else if (strcmp(name, "SteamAPI_SteamUser_v021") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamUser_v021;
-        } else if (strcmp(name, "SteamAPI_SteamApps_v008") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamApps_v008;
-        } else if (strcmp(name, "SteamAPI_SteamUtils_v010") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamUtils_v010;
-        } else if (strcmp(name, "SteamAPI_SteamMatchmaking_v009") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamMatchmaking_v009;
-        } else if (strcmp(name, "SteamAPI_SteamMatchmakingServers_v002") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamMatchmakingServers_v002;
-        } else if (strcmp(name, "SteamAPI_SteamNetworking_v006") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamNetworking_v006;
-        } else if (strcmp(name, "SteamAPI_SteamUserStats_v012") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamUserStats_v012;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamGenericInterface") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamGenericInterface;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamUser") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamUser;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamFriends") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamFriends;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamUtils") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamUtils;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamMatchmaking") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamMatchmaking;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamMatchmakingServers") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamMatchmakingServers;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamApps") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamApps;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamNetworking") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamNetworking;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_CreateSteamPipe") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_CreateSteamPipe;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_ConnectToGlobalUser") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_ConnectToGlobalUser;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_CreateLocalUser") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_CreateLocalUser;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_BReleaseSteamPipe") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_BReleaseSteamPipe;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_ReleaseUser") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_ReleaseUser;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_BShutdownIfAllPipesClosed") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_BShutdownIfAllPipesClosed;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamUserStats") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamUserStats;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamRemoteStorage") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamRemoteStorage;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamScreenshots") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamScreenshots;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamHTTP") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamHTTP;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamUGC") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamUGC;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamInput") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamInput;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamInventory") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamInventory;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamGameSearch") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamGameSearch;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamMusic") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamMusic;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamMusicRemote") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamMusicRemote;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamHTMLSurface") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamHTMLSurface;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamVideo") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamVideo;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamParentalSettings") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamParentalSettings;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamParties") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamParties;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamRemotePlay") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamRemotePlay;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamAppList") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamAppList;
-        } else if (strcmp(name, "SteamAPI_ISteamClient_GetISteamController") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamClient_GetISteamController;
-        } else if (strcmp(name, "SteamAPI_SteamGameSearch_v001") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamGameSearch_v001;
-        } else if (strcmp(name, "SteamAPI_SteamAppList_v001") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamAppList_v001;
-        } else if (strcmp(name, "SteamAPI_SteamMusic_v001") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamMusic_v001;
-        } else if (strcmp(name, "SteamAPI_SteamMusicRemote_v001") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamMusicRemote_v001;
-        } else if (strcmp(name, "SteamAPI_SteamHTMLSurface_v005") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamHTMLSurface_v005;
-        } else if (strcmp(name, "SteamAPI_SteamVideo_v002") == 0 || strcmp(name, "SteamAPI_SteamVideo_v007") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamVideo_v007;
-        } else if (strcmp(name, "SteamAPI_SteamParentalSettings_v001") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamParentalSettings_v001;
-        } else if (strcmp(name, "SteamAPI_SteamParties_v002") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamParties_v002;
-        } else if (strcmp(name, "SteamAPI_SteamRemotePlay_v001") == 0 || strcmp(name, "SteamAPI_SteamRemotePlay_v002") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamRemotePlay_v001;
-        } else if (strcmp(name, "SteamAPI_SteamHTTP_v003") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamHTTP_v003;
-        } else if (strcmp(name, "SteamAPI_SteamController_v008") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamController_v008;
-        } else if (strcmp(name, "SteamAPI_SteamInventory_v003") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamInventory_v003;
-        } else if (strcmp(name, "SteamAPI_SteamScreenshots_v003") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamScreenshots_v003;
-        } else if (strcmp(name, "SteamAPI_SteamTimeline_v004") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_SteamTimeline_v004;
-        } else if (strcmp(name, "SteamGameServer_RunCallbacks") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamGameServer_RunCallbacks;
-        } else if (strcmp(name, "SteamGameServer_Shutdown") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamGameServer_Shutdown;
-        } else if (strcmp(name, "SteamGameServer_GetHSteamUser") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamGameServer_GetHSteamUser;
-        } else if (strcmp(name, "SteamGameServer_GetHSteamPipe") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamGameServer_GetHSteamPipe;
-        } else if (strcmp(name, "SteamGameServer_GetSteamID") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamGameServer_GetSteamID;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_GetPersonaName") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_GetPersonaName;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_GetPersonaState") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_GetPersonaState;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_GetFriendPersonaName") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_GetFriendPersonaName;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_GetSmallFriendAvatar") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_GetSmallFriendAvatar;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_GetMediumFriendAvatar") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_GetMediumFriendAvatar;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_GetLargeFriendAvatar") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_GetLargeFriendAvatar;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_SetRichPresence") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_SetRichPresence;
-        } else if (strcmp(name, "SteamAPI_ISteamFriends_ClearRichPresence") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamFriends_ClearRichPresence;
-        } else if (strcmp(name, "SteamAPI_ISteamUser_GetSteamID") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamUser_GetSteamID;
-        } else if (strcmp(name, "SteamAPI_ISteamUser_BLoggedOn") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamUser_BLoggedOn;
-        } else if (strcmp(name, "SteamAPI_ISteamUtils_GetImageSize") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamUtils_GetImageSize;
-        } else if (strcmp(name, "SteamAPI_ISteamUtils_GetImageRGBA") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamUtils_GetImageRGBA;
-        } else if (strcmp(name, "SteamAPI_ISteamUserStats_RequestCurrentStats") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamUserStats_RequestCurrentStats;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_FileWrite") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_FileWrite;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_FileRead") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_FileRead;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_FileExists") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_FileExists;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_GetFileSize") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_GetFileSize;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_FileDelete") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_FileDelete;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp;
-        } else if (strcmp(name, "SteamAPI_ISteamRemoteStorage_GetQuota") == 0) {
-            g_steamProcs[i] = (FARPROC)SteamAPI_ISteamRemoteStorage_GetQuota;
-        } else {
-            g_steamProcs[i] = (FARPROC)SafeUnsupportedExportStub;
-        }
+        g_steamProcs[i] = LookupLanExport(name);
     }
     ReFixLog("InitializeLanForwardTable: Forward table hardened for LAN (zero-crash fallback installed)");
 }

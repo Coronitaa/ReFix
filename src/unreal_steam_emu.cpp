@@ -681,7 +681,6 @@ namespace UnrealSteamEmu {
         item.isGameServer = false;
 
         g_callbackQueue.push_back(item);
-        g_manualCallbackQueue.push_back(item);
     }
 
     bool IsAPICallCompleted(uint64_t hAPICall, bool* pbFailed) {
@@ -703,7 +702,16 @@ namespace UnrealSteamEmu {
             size_t copyLen = (std::min)((size_t)cubCallback, it->second.data.size());
             memcpy(pCallback, it->second.data.data(), copyLen);
         }
-        return !it->second.failed;
+        return true;
+    }
+
+    int GetAPICallFailureReason(uint64_t hAPICall) {
+        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+        auto it = g_callResultMap.find(hAPICall);
+        if (it == g_callResultMap.end()) return 2; // k_ESteamAPICallFailureInvalidHandle
+        if (!it->second.completed) return -1;     // k_ESteamAPICallFailureNone
+        if (it->second.failed) return 1;          // k_ESteamAPICallFailureNetworkFailure
+        return -1;                                // k_ESteamAPICallFailureNone
     }
 
     // =========================================================================
@@ -1190,6 +1198,17 @@ namespace UnrealSteamEmu {
             int ret = recvfrom(g_udpSocket, recvBuf, sizeof(recvBuf), 0, (sockaddr*)&fromAddr, &fromLen);
             if (ret <= 0) break;
             g_legacyRecvFromCount.fetch_add(1);
+
+            // Filter out canonical LAN transport wire packets (which share port 47584 with SO_REUSEADDR)
+            if (ret >= (int)sizeof(refix::lan::WireHeader)) {
+                const auto* wireHdr = reinterpret_cast<const refix::lan::WireHeader*>(recvBuf);
+                if (wireHdr->magic == refix::lan::REFIX_WIRE_MAGIC &&
+                    wireHdr->version == refix::lan::REFIX_WIRE_VERSION &&
+                    wireHdr->msgType >= 1 && wireHdr->msgType <= 6 &&
+                    ret == (int)(sizeof(refix::lan::WireHeader) + wireHdr->payloadLen)) {
+                    continue; // Handled by canonical LAN transport, bypass legacy decoder
+                }
+            }
 
             if (ret >= (int)sizeof(NetPacketHeader)) {
                 NetPacketHeader* hdr = (NetPacketHeader*)recvBuf;
@@ -1916,13 +1935,14 @@ namespace UnrealSteamEmu {
                 }
             }
 
-            // 2. Process generic Callbacks
+            // 2. Process generic Callbacks (strictly after CallResults to preserve lifecycle ordering)
             for (auto it = g_callbackQueue.begin(); it != g_callbackQueue.end(); ) {
-                if (now >= it->triggerTime) {
+                if (!it->isGameServer && now >= it->triggerTime) {
                     auto range = g_clientCallbacks.equal_range(it->iCallback);
                     for (auto cbIt = range.first; cbIt != range.second; ++cbIt) {
                         if (cbIt->second) cbToDispatch.push_back({ cbIt->second, it->data });
                     }
+                    g_manualCallbackQueue.push_back(*it);
                     it = g_callbackQueue.erase(it);
                 } else {
                     ++it;
@@ -1975,6 +1995,12 @@ namespace UnrealSteamEmu {
         }
     }
 
+    void ManualDispatch_Init() {
+        ReFixLog("[UnrealSteamEmu] ManualDispatch_Init called");
+        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+        g_manualCallbackQueue.clear();
+    }
+
     void ManualDispatch_RunFrame(int32_t hSteamPipe) {
         RunCallbacks();
     }
@@ -1989,6 +2015,8 @@ namespace UnrealSteamEmu {
         msg->m_iCallback = item.iCallback;
         msg->m_pubParam = item.data.data();
         msg->m_cubParam = (int)item.data.size();
+        ReFixLog("[UnrealSteam] ManualDispatch_GetNextCallback: Delivering callback %d (size=%zu, queueRemaining=%zu)",
+                 item.iCallback, item.data.size(), g_manualCallbackQueue.size());
         return true;
     }
 
@@ -2000,7 +2028,10 @@ namespace UnrealSteamEmu {
     }
 
     bool ManualDispatch_GetAPICallResult(int32_t hSteamPipe, uint64_t hSteamAPICall, void *pCallback, int cubCallback, int iCallbackExpected, bool *pbFailed) {
-        return GetAPICallResult(hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
+        bool res = GetAPICallResult(hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
+        ReFixLog("[UnrealSteam] ManualDispatch_GetAPICallResult: hCall=%llu, iExpected=%d -> res=%d, bFailed=%d",
+                 hSteamAPICall, iCallbackExpected, res ? 1 : 0, (pbFailed && *pbFailed) ? 1 : 0);
+        return res;
     }
 
     // =========================================================================
@@ -2518,7 +2549,7 @@ namespace UnrealSteamEmu {
             return UnrealSteamEmu::IsAPICallCompleted(hSteamAPICall, pbFailed);
         }
         virtual ESteamAPICallFailure GetAPICallFailureReason(SteamAPICall_t hSteamAPICall) override {
-            return k_ESteamAPICallFailureNone;
+            return (ESteamAPICallFailure)UnrealSteamEmu::GetAPICallFailureReason(hSteamAPICall);
         }
         virtual bool GetAPICallResult(SteamAPICall_t hSteamAPICall, void *pCallback, int cubCallback, int iCallbackExpected, bool *pbFailed) override {
             return UnrealSteamEmu::GetAPICallResult(hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
@@ -2723,8 +2754,8 @@ namespace UnrealSteamEmu {
             cbResp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseSuccess;
             PostCallback(LobbyEnter_t::k_iCallback, &cbResp, sizeof(cbResp));
 
-            ReFixLog("[UnrealSteam] CreateLobby: Created Lobby %llu (coreId='%s', max=%d, owner=%llu)",
-                     lID, coreLobbyId.c_str(), cMaxMembers, g_localSteamID);
+            ReFixLog("[UnrealSteam] CreateLobby: Created Lobby %llu (coreId='%s', max=%d, owner=%llu, hCall=%llu)",
+                     lID, coreLobbyId.c_str(), cMaxMembers, g_localSteamID, hCall);
             return hCall;
         }
 
@@ -5431,11 +5462,133 @@ namespace UnrealSteamEmu {
         }
     }
 
+    uint64_t Matchmaking_CreateLobby(int eLobbyType, int cMaxMembers) {
+        return g_steamMatchmakingInstance.CreateLobby((ELobbyType)eLobbyType, cMaxMembers);
+    }
+    uint64_t Matchmaking_JoinLobby(uint64_t steamIDLobby) {
+        return g_steamMatchmakingInstance.JoinLobby(CSteamID(steamIDLobby));
+    }
+    void Matchmaking_LeaveLobby(uint64_t steamIDLobby) {
+        g_steamMatchmakingInstance.LeaveLobby(CSteamID(steamIDLobby));
+    }
+    bool Matchmaking_SetLobbyData(uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
+        return g_steamMatchmakingInstance.SetLobbyData(CSteamID(steamIDLobby), pchKey, pchValue);
+    }
+    const char* Matchmaking_GetLobbyData(uint64_t steamIDLobby, const char* pchKey) {
+        return g_steamMatchmakingInstance.GetLobbyData(CSteamID(steamIDLobby), pchKey);
+    }
+    int Matchmaking_GetLobbyDataCount(uint64_t steamIDLobby) {
+        return g_steamMatchmakingInstance.GetLobbyDataCount(CSteamID(steamIDLobby));
+    }
+    bool Matchmaking_GetLobbyDataByIndex(uint64_t steamIDLobby, int iLobbyData, char* pchKey, int cchKeyBufferSize, char* pchValue, int cchValueBufferSize) {
+        return g_steamMatchmakingInstance.GetLobbyDataByIndex(CSteamID(steamIDLobby), iLobbyData, pchKey, cchKeyBufferSize, pchValue, cchValueBufferSize);
+    }
+    uint64_t Matchmaking_RequestLobbyList() {
+        return g_steamMatchmakingInstance.RequestLobbyList();
+    }
+    void Matchmaking_AddRequestLobbyListStringFilter(const char* pchKeyToMatch, const char* pchValueToMatch, int eComparisonType) {
+        g_steamMatchmakingInstance.AddRequestLobbyListStringFilter(pchKeyToMatch, pchValueToMatch, (ELobbyComparison)eComparisonType);
+    }
+    void Matchmaking_AddRequestLobbyListNumericalFilter(const char* pchKeyToMatch, int nValueToMatch, int eComparisonType) {
+        g_steamMatchmakingInstance.AddRequestLobbyListNumericalFilter(pchKeyToMatch, nValueToMatch, (ELobbyComparison)eComparisonType);
+    }
+    void Matchmaking_AddRequestLobbyListNearValueFilter(const char* pchKeyToMatch, int nValueToBeCloseTo) {
+        g_steamMatchmakingInstance.AddRequestLobbyListNearValueFilter(pchKeyToMatch, nValueToBeCloseTo);
+    }
+    void Matchmaking_AddRequestLobbyListFilterSlotsAvailable(int nSlotsAvailable) {
+        g_steamMatchmakingInstance.AddRequestLobbyListFilterSlotsAvailable(nSlotsAvailable);
+    }
+    void Matchmaking_AddRequestLobbyListDistanceFilter(int eLobbyDistanceFilter) {
+        g_steamMatchmakingInstance.AddRequestLobbyListDistanceFilter((ELobbyDistanceFilter)eLobbyDistanceFilter);
+    }
+    void Matchmaking_AddRequestLobbyListResultCountFilter(int cMaxResults) {
+        g_steamMatchmakingInstance.AddRequestLobbyListResultCountFilter(cMaxResults);
+    }
+    void Matchmaking_AddRequestLobbyListCompatibleMembersFilter(uint64_t steamIDLobby) {
+        g_steamMatchmakingInstance.AddRequestLobbyListCompatibleMembersFilter(CSteamID(steamIDLobby));
+    }
+    uint64_t Matchmaking_GetLobbyByIndex(int iLobby) {
+        return g_steamMatchmakingInstance.GetLobbyByIndex(iLobby).ConvertToUint64();
+    }
+    int Matchmaking_GetNumLobbyMembers(uint64_t steamIDLobby) {
+        return g_steamMatchmakingInstance.GetNumLobbyMembers(CSteamID(steamIDLobby));
+    }
+    uint64_t Matchmaking_GetLobbyMemberByIndex(uint64_t steamIDLobby, int iMember) {
+        return g_steamMatchmakingInstance.GetLobbyMemberByIndex(CSteamID(steamIDLobby), iMember).ConvertToUint64();
+    }
+    uint64_t Matchmaking_GetLobbyOwner(uint64_t steamIDLobby) {
+        return g_steamMatchmakingInstance.GetLobbyOwner(CSteamID(steamIDLobby)).ConvertToUint64();
+    }
+    bool Matchmaking_SetLobbyOwner(uint64_t steamIDLobby, uint64_t steamIDNewOwner) {
+        return g_steamMatchmakingInstance.SetLobbyOwner(CSteamID(steamIDLobby), CSteamID(steamIDNewOwner));
+    }
+    bool Matchmaking_SetLobbyJoinable(uint64_t steamIDLobby, bool bLobbyJoinable) {
+        return g_steamMatchmakingInstance.SetLobbyJoinable(CSteamID(steamIDLobby), bLobbyJoinable);
+    }
+    const char* Matchmaking_GetLobbyMemberData(uint64_t steamIDLobby, uint64_t steamIDUser, const char* pchKey) {
+        return g_steamMatchmakingInstance.GetLobbyMemberData(CSteamID(steamIDLobby), CSteamID(steamIDUser), pchKey);
+    }
+    void Matchmaking_SetLobbyMemberData(uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
+        g_steamMatchmakingInstance.SetLobbyMemberData(CSteamID(steamIDLobby), pchKey, pchValue);
+    }
+    bool Matchmaking_InviteUserToLobby(uint64_t steamIDLobby, uint64_t steamIDInvitee) {
+        return g_steamMatchmakingInstance.InviteUserToLobby(CSteamID(steamIDLobby), CSteamID(steamIDInvitee));
+    }
+    bool Matchmaking_SetLobbyMemberLimit(uint64_t steamIDLobby, int cMaxMembers) {
+        return g_steamMatchmakingInstance.SetLobbyMemberLimit(CSteamID(steamIDLobby), cMaxMembers);
+    }
+    int Matchmaking_GetLobbyMemberLimit(uint64_t steamIDLobby) {
+        return g_steamMatchmakingInstance.GetLobbyMemberLimit(CSteamID(steamIDLobby));
+    }
+    bool Matchmaking_SetLobbyType(uint64_t steamIDLobby, int eLobbyType) {
+        return g_steamMatchmakingInstance.SetLobbyType(CSteamID(steamIDLobby), (ELobbyType)eLobbyType);
+    }
+    bool Matchmaking_SetLinkedLobby(uint64_t steamIDLobby, uint64_t steamIDLobbyDependent) {
+        return g_steamMatchmakingInstance.SetLinkedLobby(CSteamID(steamIDLobby), CSteamID(steamIDLobbyDependent));
+    }
+    bool Matchmaking_DeleteLobbyData(uint64_t steamIDLobby, const char* pchKey) {
+        return g_steamMatchmakingInstance.DeleteLobbyData(CSteamID(steamIDLobby), pchKey);
+    }
+    bool Matchmaking_SendLobbyChatMsg(uint64_t steamIDLobby, const void* pvMsgBody, int cubMsgBody) {
+        return g_steamMatchmakingInstance.SendLobbyChatMsg(CSteamID(steamIDLobby), pvMsgBody, cubMsgBody);
+    }
+    int Matchmaking_GetLobbyChatEntry(uint64_t steamIDLobby, int iChatID, uint64_t* pSteamIDUser, void* pvData, int cubData, int* peChatEntryType) {
+        CSteamID user;
+        int res = g_steamMatchmakingInstance.GetLobbyChatEntry(CSteamID(steamIDLobby), iChatID, &user, pvData, cubData, (EChatEntryType*)peChatEntryType);
+        if (pSteamIDUser) *pSteamIDUser = user.ConvertToUint64();
+        return res;
+    }
+    bool Matchmaking_RequestLobbyData(uint64_t steamIDLobby) {
+        return g_steamMatchmakingInstance.RequestLobbyData(CSteamID(steamIDLobby));
+    }
+    void Matchmaking_SetLobbyGameServer(uint64_t steamIDLobby, uint32_t unGameServerIP, uint16_t unGameServerPort, uint64_t steamIDGameServer) {
+        g_steamMatchmakingInstance.SetLobbyGameServer(CSteamID(steamIDLobby), unGameServerIP, unGameServerPort, CSteamID(steamIDGameServer));
+    }
+    bool Matchmaking_GetLobbyGameServer(uint64_t steamIDLobby, uint32_t* punGameServerIP, uint16_t* punGameServerPort, uint64_t* psteamIDGameServer) {
+        CSteamID gs;
+        bool res = g_steamMatchmakingInstance.GetLobbyGameServer(CSteamID(steamIDLobby), punGameServerIP, punGameServerPort, &gs);
+        if (psteamIDGameServer) *psteamIDGameServer = gs.ConvertToUint64();
+        return res;
+    }
+    int Matchmaking_GetFavoriteGameCount() {
+        return g_steamMatchmakingInstance.GetFavoriteGameCount();
+    }
+    bool Matchmaking_GetFavoriteGame(int iGame, uint32_t* pnAppID, uint32_t* pnIP, uint16_t* pnConnPort, uint16_t* pnQueryPort, uint32_t* punFlags, uint32_t* pRTime32LastPlayedOnServer) {
+        return g_steamMatchmakingInstance.GetFavoriteGame(iGame, (AppId_t*)pnAppID, (uint32*)pnIP, (uint16*)pnConnPort, (uint16*)pnQueryPort, (uint32*)punFlags, (uint32*)pRTime32LastPlayedOnServer);
+    }
+    int Matchmaking_AddFavoriteGame(uint32_t nAppID, uint32_t nIP, uint16_t nConnPort, uint16_t nQueryPort, uint32_t unFlags, uint32_t rTime32) {
+        return g_steamMatchmakingInstance.AddFavoriteGame(nAppID, nIP, nConnPort, nQueryPort, unFlags, rTime32);
+    }
+    bool Matchmaking_RemoveFavoriteGame(uint32_t nAppID, uint32_t nIP, uint16_t nConnPort, uint16_t nQueryPort, uint32_t unFlags) {
+        return g_steamMatchmakingInstance.RemoveFavoriteGame(nAppID, nIP, nConnPort, nQueryPort, unFlags);
+    }
+
     bool Initialize() {
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             if (g_bInitialized) return true;
             g_bInitialized = true;
+            g_manualCallbackQueue.clear();
         }
 
         LoadConfig();
@@ -5758,6 +5911,7 @@ namespace UnrealSteamEmu {
         g_serverCallbacks.clear();
         g_callResultListeners.clear();
         g_callbackQueue.clear();
+        g_manualCallbackQueue.clear();
         g_callResultMap.clear();
         g_lobbies.clear();
         g_peers.clear();
