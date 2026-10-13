@@ -65,6 +65,7 @@
 #include "lan_core/refix_lan_firewall.h"
 #include "lan_core/refix_lan_core.h"
 #include "steam_lobby_mapping.h"
+#include "steam_p2p_hook.h"
 
 class CCallbackMgr {
 public:
@@ -1200,11 +1201,11 @@ namespace UnrealSteamEmu {
             g_legacyRecvFromCount.fetch_add(1);
 
             // Filter out canonical LAN transport wire packets (which share port 47584 with SO_REUSEADDR)
+            // Any packet with REFIX_WIRE_MAGIC and matching payload length is canonical and MUST bypass legacy decoder.
             if (ret >= (int)sizeof(refix::lan::WireHeader)) {
                 const auto* wireHdr = reinterpret_cast<const refix::lan::WireHeader*>(recvBuf);
                 if (wireHdr->magic == refix::lan::REFIX_WIRE_MAGIC &&
                     wireHdr->version == refix::lan::REFIX_WIRE_VERSION &&
-                    wireHdr->msgType >= 1 && wireHdr->msgType <= 6 &&
                     ret == (int)(sizeof(refix::lan::WireHeader) + wireHdr->payloadLen)) {
                     continue; // Handled by canonical LAN transport, bypass legacy decoder
                 }
@@ -1262,7 +1263,6 @@ namespace UnrealSteamEmu {
                                         lob.members.push_back(lOwner);
                                     }
                                     std::string line;
-                                    bool hasUpdates = false;
                                     while (std::getline(ss, line)) {
                                         size_t eqPos = line.find('=');
                                         if (eqPos != std::string::npos && eqPos > 0) {
@@ -2728,6 +2728,24 @@ namespace UnrealSteamEmu {
             lob.joinable = true;
             lob.members.push_back(g_localSteamID);
             lob.lastSeen = std::chrono::steady_clock::now();
+
+            // Pre-populate canonical network attributes in LAN Core and local cache
+            auto localEp = refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint();
+            std::string localEpStr = localEp.ToString();
+            std::string localIpStr = (localEp.ipv4 != 0) ? localEpStr : "127.0.0.1";
+            size_t colonPos = localIpStr.find(':');
+            if (colonPos != std::string::npos) localIpStr = localIpStr.substr(0, colonPos);
+
+            lob.data["HostAddress"] = localIpStr;
+            lob.data["SERVER_IP"] = localIpStr;
+            lob.data["ServerAddress"] = localIpStr;
+            lob.data["Port"] = std::to_string(localEp.port != 0 ? localEp.port : 27015);
+
+            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "HostAddress", refix::lan::AttributeValue(localIpStr));
+            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "SERVER_IP", refix::lan::AttributeValue(localIpStr));
+
+            SteamP2PHook::RegisterPeer(g_localSteamID, (localEp.ipv4 != 0) ? localEp.ipv4 : 0x7F000001, localEp.port);
+
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 g_lobbies[lID] = lob;
@@ -3055,8 +3073,26 @@ namespace UnrealSteamEmu {
         }
 
         virtual CSteamID GetLobbyOwner(CSteamID steamIDLobby) override {
-            auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
-            if (it != g_lobbies.end()) return CSteamID(it->second.owner);
+            uint64_t lID = steamIDLobby.ConvertToUint64();
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
+                if (rec) {
+                    if (rec->ownerPeerId == refix::lan::ILanCore::Get().Identity().GetLocalPeerId()) {
+                        return CSteamID(g_localSteamID);
+                    }
+                    auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(rec->ownerPeerId);
+                    if (pInfo && pInfo->externalId.numericId != 0) {
+                        return CSteamID(pInfo->externalId.numericId);
+                    }
+                    if (rec->ownerPeerId.low != 0) {
+                        return CSteamID(rec->ownerPeerId.low);
+                    }
+                }
+            }
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            auto it = g_lobbies.find(lID);
+            if (it != g_lobbies.end() && it->second.owner != 0) return CSteamID(it->second.owner);
             return CSteamID(g_localSteamID);
         }
 
@@ -5583,6 +5619,25 @@ namespace UnrealSteamEmu {
         return g_steamMatchmakingInstance.RemoveFavoriteGame(nAppID, nIP, nConnPort, nQueryPort, unFlags);
     }
 
+    bool Networking_SendP2PPacket(uint64_t steamIDRemote, const void* pubData, uint32_t cubData, int eP2PSendType, int nChannel) {
+        return g_steamNetworkingInstance.SendP2PPacket(CSteamID(steamIDRemote), pubData, cubData, (EP2PSend)eP2PSendType, nChannel);
+    }
+    bool Networking_IsP2PPacketAvailable(uint32_t* pcubMsgSize, int nChannel) {
+        return g_steamNetworkingInstance.IsP2PPacketAvailable(pcubMsgSize, nChannel);
+    }
+    bool Networking_ReadP2PPacket(void* pubDest, uint32_t cubDest, uint32_t* pcubMsgSize, uint64_t* psteamIDRemote, int nChannel) {
+        CSteamID remote;
+        bool ok = g_steamNetworkingInstance.ReadP2PPacket(pubDest, cubDest, pcubMsgSize, &remote, nChannel);
+        if (ok && psteamIDRemote) *psteamIDRemote = remote.ConvertToUint64();
+        return ok;
+    }
+    bool Networking_AcceptP2PSessionWithUser(uint64_t steamIDRemote) {
+        return g_steamNetworkingInstance.AcceptP2PSessionWithUser(CSteamID(steamIDRemote));
+    }
+    bool Networking_CloseP2PSessionWithUser(uint64_t steamIDRemote) {
+        return g_steamNetworkingInstance.CloseP2PSessionWithUser(CSteamID(steamIDRemote));
+    }
+
     bool Initialize() {
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -5636,6 +5691,7 @@ namespace UnrealSteamEmu {
                 if (it != g_peers.end()) {
                     it->second.personaName = pInfo->displayName;
                 }
+                SteamP2PHook::RegisterPeer(sid, pInfo->endpoint.ipv4, pInfo->endpoint.port);
                 ReFixLog("[UnrealSteam] LanCore PeerDiscovered: steamID=%llu (%s) at %s",
                          sid, pInfo->displayName.c_str(), pInfo->endpoint.ToString().c_str());
             }

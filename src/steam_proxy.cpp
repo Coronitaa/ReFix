@@ -1272,6 +1272,15 @@ extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* se
 extern "C" __declspec(dllexport) bool SteamAPI_ISteamUtils_IsAPICallCompleted(void* self, uint64_t hSteamAPICall, bool* pbFailed);
 extern "C" __declspec(dllexport) int SteamAPI_ISteamUtils_GetAPICallFailureReason(void* self, uint64_t hSteamAPICall);
 extern "C" __declspec(dllexport) bool SteamAPI_ISteamUtils_GetAPICallResult(void* self, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamUtils_GetIPCountry(void* self);
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamUtils_GetSteamUILanguage(void* self);
+extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetSecondsSinceAppActive(void* self);
+extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetServerRealTime(void* self);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_SendP2PPacket(void* self, uint64_t steamIDRemote, const void* pubData, uint32_t cubData, int eP2PSendType, int nChannel);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_IsP2PPacketAvailable(void* self, uint32_t* pcubMsgSize, int nChannel);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_ReadP2PPacket(void* self, void* pubDest, uint32_t cubDest, uint32_t* pcubMsgSize, uint64_t* psteamIDRemote, int nChannel);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_AcceptP2PSessionWithUser(void* self, uint64_t steamIDRemote);
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_CloseP2PSessionWithUser(void* self, uint64_t steamIDRemote);
 
 typedef void (*fn_SteamAPI_Shutdown_t)();
 static fn_SteamAPI_Shutdown_t g_pfn_Shutdown = nullptr;
@@ -3194,6 +3203,107 @@ extern "C" __declspec(dllexport) bool SteamAPI_ISteamUtils_GetAPICallResult(void
         if (pfn) return pfn(self, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
     }
     return false;
+}
+
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamUtils_GetIPCountry(void* self) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return "US";
+    }
+    if (EnsureOriginal()) {
+        typedef const char* (*fn_t)(void*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamUtils_GetIPCountry");
+        if (pfn) return pfn(self);
+    }
+    return "US";
+}
+
+extern "C" __declspec(dllexport) const char* SteamAPI_ISteamUtils_GetSteamUILanguage(void* self) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return "english";
+    }
+    if (EnsureOriginal()) {
+        typedef const char* (*fn_t)(void*);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamUtils_GetSteamUILanguage");
+        if (pfn) return pfn(self);
+    }
+    return "english";
+}
+
+extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetSecondsSinceAppActive(void* self) {
+    static auto s_appStart = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    return (uint32_t)std::chrono::duration_cast<std::chrono::seconds>(now - s_appStart).count();
+}
+
+extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetServerRealTime(void* self) {
+    return (uint32_t)time(nullptr);
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_SendP2PPacket(void* self, uint64_t steamIDRemote, const void* pubData, uint32_t cubData, int eP2PSendType, int nChannel) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Networking_SendP2PPacket(steamIDRemote, pubData, cubData, eP2PSendType, nChannel);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t, const void*, uint32_t, int, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamNetworking_SendP2PPacket");
+        if (pfn) return pfn(self, steamIDRemote, pubData, cubData, eP2PSendType, nChannel);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_IsP2PPacketAvailable(void* self, uint32_t* pcubMsgSize, int nChannel) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Networking_IsP2PPacketAvailable(pcubMsgSize, nChannel);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint32_t*, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamNetworking_IsP2PPacketAvailable");
+        if (pfn) return pfn(self, pcubMsgSize, nChannel);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_ReadP2PPacket(void* self, void* pubDest, uint32_t cubDest, uint32_t* pcubMsgSize, uint64_t* psteamIDRemote, int nChannel) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Networking_ReadP2PPacket(pubDest, cubDest, pcubMsgSize, psteamIDRemote, nChannel);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, void*, uint32_t, uint32_t*, uint64_t*, int);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamNetworking_ReadP2PPacket");
+        if (pfn) return pfn(self, pubDest, cubDest, pcubMsgSize, psteamIDRemote, nChannel);
+    }
+    return false;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_AcceptP2PSessionWithUser(void* self, uint64_t steamIDRemote) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Networking_AcceptP2PSessionWithUser(steamIDRemote);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamNetworking_AcceptP2PSessionWithUser");
+        if (pfn) return pfn(self, steamIDRemote);
+    }
+    return true;
+}
+
+extern "C" __declspec(dllexport) bool SteamAPI_ISteamNetworking_CloseP2PSessionWithUser(void* self, uint64_t steamIDRemote) {
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        return UnrealSteamEmu::Networking_CloseP2PSessionWithUser(steamIDRemote);
+    }
+    if (EnsureOriginal()) {
+        typedef bool (*fn_t)(void*, uint64_t);
+        static fn_t pfn = nullptr;
+        if (!pfn && g_hOriginalDll) pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamAPI_ISteamNetworking_CloseP2PSessionWithUser");
+        if (pfn) return pfn(self, steamIDRemote);
+    }
+    return true;
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_ISteamUser_BLoggedOn(void* self) {
@@ -6257,9 +6367,18 @@ static FARPROC LookupLanExport(const char* name) {
         { "SteamAPI_ISteamMatchmakingServers_RequestSpectatorServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestSpectatorServerList },
         { "SteamAPI_ISteamMatchmakingServers_RequestLANServerList", (FARPROC)SteamAPI_ISteamMatchmakingServers_RequestLANServerList },
         { "SteamAPI_ISteamUtils_GetAppID", (FARPROC)SteamAPI_ISteamUtils_GetAppID },
+        { "SteamAPI_ISteamUtils_GetIPCountry", (FARPROC)SteamAPI_ISteamUtils_GetIPCountry },
+        { "SteamAPI_ISteamUtils_GetSteamUILanguage", (FARPROC)SteamAPI_ISteamUtils_GetSteamUILanguage },
+        { "SteamAPI_ISteamUtils_GetSecondsSinceAppActive", (FARPROC)SteamAPI_ISteamUtils_GetSecondsSinceAppActive },
+        { "SteamAPI_ISteamUtils_GetServerRealTime", (FARPROC)SteamAPI_ISteamUtils_GetServerRealTime },
         { "SteamAPI_ISteamUtils_IsAPICallCompleted", (FARPROC)SteamAPI_ISteamUtils_IsAPICallCompleted },
         { "SteamAPI_ISteamUtils_GetAPICallFailureReason", (FARPROC)SteamAPI_ISteamUtils_GetAPICallFailureReason },
         { "SteamAPI_ISteamUtils_GetAPICallResult", (FARPROC)SteamAPI_ISteamUtils_GetAPICallResult },
+        { "SteamAPI_ISteamNetworking_SendP2PPacket", (FARPROC)SteamAPI_ISteamNetworking_SendP2PPacket },
+        { "SteamAPI_ISteamNetworking_IsP2PPacketAvailable", (FARPROC)SteamAPI_ISteamNetworking_IsP2PPacketAvailable },
+        { "SteamAPI_ISteamNetworking_ReadP2PPacket", (FARPROC)SteamAPI_ISteamNetworking_ReadP2PPacket },
+        { "SteamAPI_ISteamNetworking_AcceptP2PSessionWithUser", (FARPROC)SteamAPI_ISteamNetworking_AcceptP2PSessionWithUser },
+        { "SteamAPI_ISteamNetworking_CloseP2PSessionWithUser", (FARPROC)SteamAPI_ISteamNetworking_CloseP2PSessionWithUser },
         { "SteamAPI_ManualDispatch_Init", (FARPROC)SteamAPI_ManualDispatch_Init },
         { "SteamAPI_ManualDispatch_RunFrame", (FARPROC)SteamAPI_ManualDispatch_RunFrame },
         { "SteamAPI_ManualDispatch_GetNextCallback", (FARPROC)SteamAPI_ManualDispatch_GetNextCallback },

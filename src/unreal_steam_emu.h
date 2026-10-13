@@ -173,6 +173,13 @@ namespace UnrealSteamEmu {
     bool Matchmaking_RequestLobbyData(uint64_t steamIDLobby);
     void Matchmaking_SetLobbyGameServer(uint64_t steamIDLobby, uint32_t unGameServerIP, uint16_t unGameServerPort, uint64_t steamIDGameServer);
     bool Matchmaking_GetLobbyGameServer(uint64_t steamIDLobby, uint32_t* punGameServerIP, uint16_t* punGameServerPort, uint64_t* psteamIDGameServer);
+
+    // Networking helpers
+    bool Networking_SendP2PPacket(uint64_t steamIDRemote, const void* pubData, uint32_t cubData, int eP2PSendType, int nChannel);
+    bool Networking_IsP2PPacketAvailable(uint32_t* pcubMsgSize, int nChannel);
+    bool Networking_ReadP2PPacket(void* pubDest, uint32_t cubDest, uint32_t* pcubMsgSize, uint64_t* psteamIDRemote, int nChannel);
+    bool Networking_AcceptP2PSessionWithUser(uint64_t steamIDRemote);
+    bool Networking_CloseP2PSessionWithUser(uint64_t steamIDRemote);
     int Matchmaking_GetFavoriteGameCount();
     bool Matchmaking_GetFavoriteGame(int iGame, uint32_t* pnAppID, uint32_t* pnIP, uint16_t* pnConnPort, uint16_t* pnQueryPort, uint32_t* punFlags, uint32_t* pRTime32LastPlayedOnServer);
     int Matchmaking_AddFavoriteGame(uint32_t nAppID, uint32_t nIP, uint16_t nConnPort, uint16_t nQueryPort, uint32_t unFlags, uint32_t rTime32);

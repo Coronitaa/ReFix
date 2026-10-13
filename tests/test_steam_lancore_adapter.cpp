@@ -573,6 +573,21 @@ static bool RunGenericLobbyCreationAuditTests(HMODULE hSteam) {
     const char* val = pfnFlatGetLobbyData(pMatchmaking, steamLobbyId, "GameType");
     TEST_ASSERT(strcmp(val, "LAN_Deathmatch") == 0, "GetLobbyData flat export must return set value");
 
+    // Verify canonical pre-populated networking attributes
+    const char* hostAddr = pfnFlatGetLobbyData(pMatchmaking, steamLobbyId, "HostAddress");
+    TEST_ASSERT(hostAddr && hostAddr[0] != '\0', "HostAddress in created lobby must be pre-populated");
+    const char* serverIp = pfnFlatGetLobbyData(pMatchmaking, steamLobbyId, "SERVER_IP");
+    TEST_ASSERT(serverIp && serverIp[0] != '\0', "SERVER_IP in created lobby must be pre-populated");
+
+    // Verify flat utils exports
+    auto pfnGetIPCountry = (const char* (*)(void*))GetProcAddress(hSteam, "SteamAPI_ISteamUtils_GetIPCountry");
+    TEST_ASSERT(pfnGetIPCountry != nullptr, "SteamAPI_ISteamUtils_GetIPCountry must exist");
+    TEST_ASSERT(strcmp(pfnGetIPCountry(pUtils), "US") == 0, "SteamAPI_ISteamUtils_GetIPCountry must return valid country code");
+
+    auto pfnGetLang = (const char* (*)(void*))GetProcAddress(hSteam, "SteamAPI_ISteamUtils_GetSteamUILanguage");
+    TEST_ASSERT(pfnGetLang != nullptr, "SteamAPI_ISteamUtils_GetSteamUILanguage must exist");
+    TEST_ASSERT(strcmp(pfnGetLang(pUtils), "english") == 0, "SteamAPI_ISteamUtils_GetSteamUILanguage must return language");
+
     // 7. Verify failure behavior for invalid call handle (no fake success)
     bool bBogusFailed = false;
     TEST_ASSERT(!pfnFlatIsAPICallCompleted(pUtils, 0x12345678ULL, &bBogusFailed), "Bogus call handle must not be completed");

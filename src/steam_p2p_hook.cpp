@@ -31,6 +31,7 @@
 #include <string>
 
 #include "steam_p2p_hook.h"
+#include "unreal_steam_emu.h"
 #include "minhook/MinHook.h"
 #include "network/network_mode.h"
 
@@ -278,7 +279,14 @@ static void* ResolveSteamNetworking() {
     if (!hSteam) hSteam = GetModuleHandleA("steam_api64_valve.dll");
     if (!hSteam) hSteam = GetModuleHandleA("steam_api64_o.dll");
     if (!hSteam) hSteam = GetModuleHandleA("steam_api64.dll.valve");
-    if (!hSteam) return nullptr;
+    if (!hSteam) {
+        void* pEmuNet = UnrealSteamEmu::GetSteamNetworking();
+        if (pEmuNet) {
+            SteamP2PHook::Log("ISteamNetworking resolved via UnrealSteamEmu::GetSteamNetworking() -> %p", pEmuNet);
+            return pEmuNet;
+        }
+        return nullptr;
+    }
 
     const char* candidates[] = {
         "SteamAPI_SteamNetworking_v006",
@@ -366,6 +374,12 @@ static void* ResolveSteamNetworking() {
     if (now - s_lastWarn > 2000) {
         s_lastWarn = now;
         SteamP2PHook::Log("WARNING: Could not resolve ISteamNetworking interface (user=%d, pipe=%d)", user, pipe);
+    }
+
+    void* pEmuNet = UnrealSteamEmu::GetSteamNetworking();
+    if (pEmuNet) {
+        SteamP2PHook::Log("ISteamNetworking resolved via UnrealSteamEmu fallback -> %p", pEmuNet);
+        return pEmuNet;
     }
     return nullptr;
 }
