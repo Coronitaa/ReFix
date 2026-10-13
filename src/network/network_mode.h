@@ -28,7 +28,6 @@ public:
     
 private:
     static std::atomic<ReFixNetworkMode> s_mode;
-    static std::atomic<bool> s_externalNetworkingAllowed;
 };
 
 } // namespace ReFix
