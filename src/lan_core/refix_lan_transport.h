@@ -123,6 +123,9 @@ public:
     void SetPeerEndpointValidator(std::function<bool(const PeerId&, const LanEndpoint&)> validator) { m_endpointValidator = std::move(validator); }
     bool AuthorizePeerMigration(const PeerId& peerId, const LanEndpoint& newEndpoint);
 
+    using SocketLifecycleCallback = void (*)(uintptr_t sock, bool isCreated);
+    static void SetGlobalSocketLifecycleCallback(SocketLifecycleCallback cb);
+
 private:
     struct OutboundReliable {
         uint32_t sequence = 0;

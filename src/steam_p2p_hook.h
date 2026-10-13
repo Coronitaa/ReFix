@@ -41,10 +41,19 @@ namespace SteamP2PHook {
     // Flush any pending packets held in Pre-Lobby Hold Buffer.
     void FlushHoldBuffer();
 
+    // Internal sockets (LanTransport data/group sockets, UnrealSteamEmu UDP socket)
+    // are exempt from Winsock redirection, hold buffer, and Internet-Zero synthetic drops.
+    void RegisterInternalSocket(uintptr_t s);
+    void UnregisterInternalSocket(uintptr_t s);
+    bool IsInternalSocket(uintptr_t s);
+
 } // namespace SteamP2PHook
 
 extern "C" {
     __declspec(dllexport) void ReFix_RegisterP2PPeer(uint64_t steamID, uint32_t ipv4_host);
     __declspec(dllexport) void ReFix_RegisterP2PPeerStr(uint64_t steamID, const char* ipStr);
     __declspec(dllexport) uint16_t ReFix_GetBoundGamePort();
+    __declspec(dllexport) void ReFix_RegisterInternalSocket(uintptr_t s);
+    __declspec(dllexport) void ReFix_UnregisterInternalSocket(uintptr_t s);
 }
+

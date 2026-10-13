@@ -198,7 +198,16 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
 }
 
 constexpr uint16_t REFIX_DEFAULT_DISCOVERY_PORT = 47584;
-constexpr uint16_t REFIX_FALLBACK_DISCOVERY_PORTS[] = { 47584, 47585, 47586, 47587 };
+constexpr uint16_t REFIX_FALLBACK_DISCOVERY_PORTS[] = {
+    47584, 47585, 47586, 47587, 47588, 47589, 47590, 47591,
+    47592, 47593, 47594, 47595, 47596, 47597, 47598, 47599
+};
+
+static refix::lan::LanTransport::SocketLifecycleCallback g_socketLifecycleCb = nullptr;
+
+void LanTransport::SetGlobalSocketLifecycleCallback(SocketLifecycleCallback cb) {
+    g_socketLifecycleCb = cb;
+}
 
 // 32-bit generation seed: provides full uint32_t space for ARQ session generation counters.
 // Stream generation correlation uses RFC 1982 modular serial number arithmetic (modulo 2^32 signed half-space).
@@ -213,6 +222,7 @@ LanTransport::LanTransport() {
 LanTransport::~LanTransport() {
     Stop();
 }
+
 
 bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener) {
     if (m_running.load()) return true;
@@ -230,10 +240,10 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     if (m_groupSocket == INVALID_SOCKET) {
         return false;
     }
+    if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, true);
 
-    BOOL reuse = TRUE;
-    setsockopt(m_groupSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
-
+    // Note: Do NOT set SO_REUSEADDR on m_groupSocket: on Windows SO_REUSEADDR allows port hijacking
+    // and causes bind() to falsely report success on busy ports, defeating candidate port fallback.
     BOOL bcast = TRUE;
     setsockopt(m_groupSocket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&bcast), sizeof(bcast));
 
@@ -242,7 +252,7 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     groupSin.sin_family = AF_INET;
     groupSin.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (discoveryPort != 0 && discoveryPort != REFIX_DEFAULT_DISCOVERY_PORT) {
+    if (discoveryPort != 0) {
         groupSin.sin_port = htons(discoveryPort);
         if (bind(m_groupSocket, reinterpret_cast<const sockaddr*>(&groupSin), sizeof(groupSin)) == 0) {
             boundGroup = true;
@@ -251,6 +261,7 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     }
     if (!boundGroup) {
         for (uint16_t candPort : REFIX_FALLBACK_DISCOVERY_PORTS) {
+            if (candPort == discoveryPort) continue;
             groupSin.sin_port = htons(candPort);
             if (bind(m_groupSocket, reinterpret_cast<const sockaddr*>(&groupSin), sizeof(groupSin)) == 0) {
                 boundGroup = true;
@@ -261,6 +272,7 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     }
 
     if (!boundGroup) {
+        if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, false);
         closesocket(m_groupSocket);
         m_groupSocket = INVALID_SOCKET;
         return false;
@@ -306,10 +318,12 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     // 2. Setup Data Socket (Unicast Sender/Receiver with Ephemeral Port)
     m_dataSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (m_dataSocket == INVALID_SOCKET) {
+        if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, false);
         closesocket(m_groupSocket);
         m_groupSocket = INVALID_SOCKET;
         return false;
     }
+    if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_dataSocket, true);
 
     setsockopt(m_dataSocket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&bcast), sizeof(bcast));
     int rcvBufSize = 4 * 1024 * 1024;
@@ -327,6 +341,10 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     dataSin.sin_port = 0; // Request OS ephemeral port!
 
     if (bind(m_dataSocket, reinterpret_cast<const sockaddr*>(&dataSin), sizeof(dataSin)) == SOCKET_ERROR) {
+        if (g_socketLifecycleCb) {
+            g_socketLifecycleCb((uintptr_t)m_groupSocket, false);
+            g_socketLifecycleCb((uintptr_t)m_dataSocket, false);
+        }
         closesocket(m_groupSocket);
         closesocket(m_dataSocket);
         m_groupSocket = INVALID_SOCKET;
@@ -379,15 +397,18 @@ void LanTransport::Stop() {
     }
 
     if (m_groupSocket != INVALID_SOCKET) {
+        if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, false);
         closesocket(m_groupSocket);
         m_groupSocket = INVALID_SOCKET;
     }
 
     if (m_dataSocket != INVALID_SOCKET) {
+        if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_dataSocket, false);
         closesocket(m_dataSocket);
         m_dataSocket = INVALID_SOCKET;
     }
 }
+
 
 void LanTransport::ReactorThreadLoop() {
     uint8_t rxBuf[65536];

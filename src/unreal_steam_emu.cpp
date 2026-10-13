@@ -925,6 +925,7 @@ namespace UnrealSteamEmu {
 
         g_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (g_udpSocket != INVALID_SOCKET) {
+            SteamP2PHook::RegisterInternalSocket((uintptr_t)g_udpSocket);
             g_legacySocketInitialized.store(true);
             BOOL bOpt = TRUE;
             setsockopt(g_udpSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&bOpt, sizeof(bOpt));
@@ -941,7 +942,6 @@ namespace UnrealSteamEmu {
             if (bind(g_udpSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
                 int err = WSAGetLastError();
                 ReFixLog("[UnrealSteam] Warning: Failed to bind legacy UDP socket to port %u (WSAError=%d), attempting ephemeral fallback", g_listenPort, err);
-                // If binding to requested g_listenPort failed, fall back to ephemeral port 0
                 addr.sin_port = 0;
                 if (bind(g_udpSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
                     ReFixLog("[UnrealSteam] Error: Could not bind legacy UDP socket to port %u or ephemeral (WSAError=%d)", g_listenPort, WSAGetLastError());
@@ -961,10 +961,12 @@ namespace UnrealSteamEmu {
                 }
                 ReFixLog("[UnrealSteam] Bound legacy UDP socket to port %u for LAN discovery & P2P (handle=%p)", g_listenPort, (void*)g_udpSocket);
             }
+
         } else {
             ReFixLog("[UnrealSteam] Error: socket(AF_INET, SOCK_DGRAM) failed for legacy UDP socket (WSAError=%d)", WSAGetLastError());
         }
     }
+
 
     static bool IsAllowedLanAddress(const sockaddr* addr) {
         if (!addr) return false;
@@ -1006,10 +1008,14 @@ namespace UnrealSteamEmu {
             }
         }
 
-        std::vector<uint16_t> broadcastPorts = { 47584, 47585, 47586, 47587 };
-        if (g_listenPort != 47584 && g_listenPort != 47585 && g_listenPort != 47586 && g_listenPort != 47587) {
+        std::vector<uint16_t> broadcastPorts;
+        for (uint16_t p = 47584; p <= 47599; ++p) {
+            broadcastPorts.push_back(p);
+        }
+        if (g_listenPort < 47584 || g_listenPort > 47599) {
             broadcastPorts.push_back(g_listenPort);
         }
+
 
         for (const auto& dstIP : destinations) {
             for (uint16_t port : broadcastPorts) {
@@ -5731,6 +5737,16 @@ namespace UnrealSteamEmu {
         }
 
         LoadConfig();
+
+        // Register LanTransport socket lifecycle hook with SteamP2PHook
+        refix::lan::LanTransport::SetGlobalSocketLifecycleCallback([](uintptr_t s, bool isCreated) {
+            if (isCreated) {
+                SteamP2PHook::RegisterInternalSocket(s);
+            } else {
+                SteamP2PHook::UnregisterInternalSocket(s);
+            }
+        });
+
         if (ShouldUseLegacyFallback()) {
             InitSockets();
         }
@@ -6043,6 +6059,7 @@ namespace UnrealSteamEmu {
         if (!g_bInitialized) return;
 
         if (g_udpSocket != INVALID_SOCKET) {
+            SteamP2PHook::UnregisterInternalSocket((uintptr_t)g_udpSocket);
             closesocket(g_udpSocket);
             g_udpSocket = INVALID_SOCKET;
         }

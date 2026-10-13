@@ -26,6 +26,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <deque>
 #include <string>
@@ -126,9 +127,9 @@ static inline SocketServiceType ClassifyPort(uint16_t port) {
 // =============================================================================
 // Wire Protocol & Channels
 // =============================================================================
-// Channels in Steam P2P (ISteamNetworking)
-static const int k_nChannelGame  = 0;
-static const int k_nChannelVoice = 1;
+// Channels in Steam P2P (ISteamNetworking) dedicated for Winsock redirection
+static const int k_nChannelGame  = 250;
+static const int k_nChannelVoice = 251;
 
 #pragma pack(push, 1)
 struct ReFixP2PHeader {
@@ -205,6 +206,29 @@ static std::mutex g_peerMutex;
 static std::unordered_map<uint32_t, uint64_t> g_ipToSteamID;
 static std::unordered_map<uint64_t, uint32_t> g_steamIDToIP;
 static std::unordered_map<uint64_t, uint16_t> g_steamIDToPort;
+
+static std::mutex g_internalSocketsMutex;
+static std::unordered_set<SOCKET> g_internalSockets;
+
+namespace SteamP2PHook {
+    void RegisterInternalSocket(uintptr_t s) {
+        if (s == (uintptr_t)INVALID_SOCKET || s == 0) return;
+        std::lock_guard<std::mutex> lock(g_internalSocketsMutex);
+        g_internalSockets.insert((SOCKET)s);
+    }
+
+    void UnregisterInternalSocket(uintptr_t s) {
+        if (s == (uintptr_t)INVALID_SOCKET || s == 0) return;
+        std::lock_guard<std::mutex> lock(g_internalSocketsMutex);
+        g_internalSockets.erase((SOCKET)s);
+    }
+
+    bool IsInternalSocket(uintptr_t s) {
+        if (s == (uintptr_t)INVALID_SOCKET || s == 0) return false;
+        std::lock_guard<std::mutex> lock(g_internalSocketsMutex);
+        return g_internalSockets.find((SOCKET)s) != g_internalSockets.end();
+    }
+}
 
 // Forward declaration
 static void* ResolveSteamNetworking();
@@ -631,16 +655,11 @@ static bool P2PPumpStep() {
                             pkt.destPort = hdr->dstPort;
                             pkt.service = (hdr->service == 2) ? SocketServiceType::Voice : SocketServiceType::Game;
                         }
-                    } else {
-                        // Unframed / legacy fallback
-                        pkt.data.assign(pktBuf, pktBuf + bytesRead);
-                        pkt.service = (ch == k_nChannelVoice) ? SocketServiceType::Voice : SocketServiceType::Game;
-                        pkt.destPort = (pkt.service == SocketServiceType::Voice) ? 5058 : 7777;
-                        pkt.fromPort = pkt.destPort;
+
+                        // Route packet into isolated per-socket / per-service queue
+                        RouteIncomingPacket(std::move(pkt));
                     }
 
-                    // Route packet into isolated per-socket / per-service queue
-                    RouteIncomingPacket(std::move(pkt));
                 }
             }
         }
@@ -673,6 +692,19 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen)
 {
+    // 1. Bypass any registered internal sockets (LanTransport, UnrealSteamEmu)
+    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+        return g_orig_sendto(s, buf, len, flags, to, tolen);
+    }
+
+    // 2. Defense-in-depth: If payload is already an internal ReFix wire frame or P2P envelope, never intercept
+    if (len >= 4 && buf != nullptr) {
+        uint32_t magic = *reinterpret_cast<const uint32_t*>(buf);
+        if (magic == 0x52464958 || magic == 0x58464552) { // 'RFIX' (0x52464958) or 'REFX' (0x58464552)
+            return g_orig_sendto(s, buf, len, flags, to, tolen);
+        }
+    }
+
     sockaddr_storage connectedPeer{};
     int peerLen = sizeof(connectedPeer);
     if (!to && s != INVALID_SOCKET) {
@@ -687,8 +719,8 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
 
-        // Bypass internal emulator discovery and broadcast ports (47584..47588, 47600)
-        if ((destPort >= 47584 && destPort <= 47588) || destPort == 47600) {
+        // Bypass internal emulator discovery and broadcast ports (all slots 47584..47599, plus 47600)
+        if (destPort >= 47584 && destPort <= 47600) {
             return g_orig_sendto(s, buf, len, flags, to, tolen);
         }
 
@@ -806,6 +838,10 @@ static int WSAAPI Hook_send(SOCKET s, const char* buf, int len, int flags) {
 static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
     struct sockaddr* from, int* fromlen)
 {
+    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+        return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
+    }
+
     RecvPacket pkt;
     bool hasPkt = false;
 
@@ -988,6 +1024,7 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
         std::lock_guard<std::mutex> lg(g_socketMutex);
         for (u_int i = 0; i < inRead.fd_count; ++i) {
             SOCKET s = inRead.fd_array[i];
+            if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) continue;
             auto it = g_socketContexts.find(s);
             if (it != g_socketContexts.end() && !it->second.recvQueue.empty()) {
                 FD_SET(s, &readySet);
@@ -1024,6 +1061,10 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
 // ------ bind (V-04 Port Virtualization) ---------------------------------------
 static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 {
+    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+        return g_orig_bind(s, name, namelen);
+    }
+
     if (name && name->sa_family == AF_INET) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(name);
         uint16_t requestedPort = ntohs(sin->sin_port);
@@ -1089,6 +1130,7 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 // ------ closesocket ----------------------------------------------------------
 static int WSAAPI Hook_closesocket(SOCKET s)
 {
+    SteamP2PHook::UnregisterInternalSocket((uintptr_t)s);
     {
         std::lock_guard<std::mutex> lg(g_socketMutex);
         g_socketContexts.erase(s);
@@ -1098,6 +1140,7 @@ static int WSAAPI Hook_closesocket(SOCKET s)
     }
     return 0;
 }
+
 
 // =============================================================================
 // MinHook Installation & Lifecycle
@@ -1321,4 +1364,13 @@ __declspec(dllexport) void ReFix_RegisterP2PPeerStr(uint64_t steamID, const char
 __declspec(dllexport) uint16_t ReFix_GetBoundGamePort() {
     return SteamP2PHook::GetBoundGamePort();
 }
+
+__declspec(dllexport) void ReFix_RegisterInternalSocket(uintptr_t s) {
+    SteamP2PHook::RegisterInternalSocket(s);
 }
+
+__declspec(dllexport) void ReFix_UnregisterInternalSocket(uintptr_t s) {
+    SteamP2PHook::UnregisterInternalSocket(s);
+}
+}
+
