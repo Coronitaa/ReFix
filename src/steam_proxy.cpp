@@ -2895,7 +2895,9 @@ extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyMem
 
 extern "C" __declspec(dllexport) uint64_t SteamAPI_ISteamMatchmaking_GetLobbyOwner(void* self, uint64_t steamIDLobby) {
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        return UnrealSteamEmu::Matchmaking_GetLobbyOwner(steamIDLobby);
+        uint64_t owner = UnrealSteamEmu::Matchmaking_GetLobbyOwner(steamIDLobby);
+        ReFixLog("ISteamMatchmaking::GetLobbyOwner Hook (LAN): lobbyID=%llu -> owner=%llu", steamIDLobby, owner);
+        return owner;
     }
     if (EnsureOriginal()) {
         typedef uint64_t (*fn_t)(void*, uint64_t);

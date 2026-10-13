@@ -495,18 +495,16 @@ namespace UnrealSteamEmu {
 
         if (envSid[0]) {
             if (_stricmp(envSid, "auto") == 0) {
-                g_localSteamID = GenerateDeterministicSteamID() + slot;
+                g_localSteamID = GenerateDeterministicSteamID();
                 sidSource = "env:auto->GenerateDeterministicSteamID";
-                if (slot > 0) sidSource += "+slot" + std::to_string(slot);
             } else if (_stricmp(envSid, "steam") == 0 || _stricmp(envSid, "client") == 0) {
                 uint64_t scId = TryGetSteamClientActiveSteamID();
                 if (scId != 0) {
                     g_localSteamID = scId;
                     sidSource = "env:steam->SteamClientRegistry";
                 } else {
-                    g_localSteamID = GenerateDeterministicSteamID() + slot;
+                    g_localSteamID = GenerateDeterministicSteamID();
                     sidSource = "env:steam->fallback:GenerateDeterministicSteamID";
-                    if (slot > 0) sidSource += "+slot" + std::to_string(slot);
                 }
             } else {
                 g_localSteamID = _strtoui64(envSid, nullptr, 10);
@@ -541,9 +539,14 @@ namespace UnrealSteamEmu {
         }
 
         if (g_localSteamID == 0) {
-            g_localSteamID = GenerateDeterministicSteamID() + slot;
+            g_localSteamID = GenerateDeterministicSteamID();
             sidSource = bAutoGenExplicitTrue ? "ini:AutoGenerateSteamId=true->GenerateDeterministicSteamID" : "default:GenerateDeterministicSteamID";
-            if (slot > 0) sidSource += "+slot" + std::to_string(slot);
+        }
+
+        // Apply slot offset to SteamID if multi-instance slot > 0 (strictly guaranteed across all sources)
+        if (slot > 0) {
+            g_localSteamID += slot;
+            sidSource += "+slot" + std::to_string(slot);
         }
 
         char envNoLegacy[16] = { 0 };
@@ -564,14 +567,40 @@ namespace UnrealSteamEmu {
         GetPrivateProfileStringA("Unreal.Steam", "Language", "english", buf, sizeof(buf), iniPath.c_str());
         g_language = buf;
 
-        g_listenPort = (uint16_t)GetPrivateProfileIntA("Unreal.Networking", "ListenPort", 47584, iniPath.c_str());
-        if (g_listenPort == 0) g_listenPort = 47584;
+        // Check force_listen_port.txt in steam_settings if present
+        std::vector<std::string> portFiles = {
+            exeDir + "steam_settings\\force_listen_port.txt",
+            exeDir + "..\\steam_settings\\force_listen_port.txt",
+            exeDir + "..\\..\\steam_settings\\force_listen_port.txt",
+            exeDir + "..\\..\\..\\steam_settings\\force_listen_port.txt"
+        };
+        for (const auto& pf : portFiles) {
+            std::ifstream file(pf);
+            if (file.is_open()) {
+                std::string line;
+                if (std::getline(file, line)) {
+                    int p = atoi(line.c_str());
+                    if (p > 0 && p <= 65535) {
+                        g_listenPort = (uint16_t)p;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (g_listenPort == 0) {
+            g_listenPort = (uint16_t)GetPrivateProfileIntA("Unreal.Networking", "ListenPort", 47584, iniPath.c_str());
+            if (g_listenPort == 0) g_listenPort = 47584;
+        }
+
         char envPort[32] = { 0 };
         if (GetEnvironmentVariableA("REFIX_LISTEN_PORT", envPort, sizeof(envPort)) > 0) {
             int p = atoi(envPort);
             if (p > 0 && p <= 65535) g_listenPort = (uint16_t)p;
-        } else if (slot > 0 && g_listenPort == 47584) {
-            g_listenPort = (uint16_t)(47584 + slot);
+        }
+
+        if (slot > 0) {
+            g_listenPort = (uint16_t)(g_listenPort + slot);
             ReFixLog("[ConfigDiag] Multi-instance listen port adjusted to %u for slot %d", g_listenPort, slot);
         }
 
@@ -2779,12 +2808,15 @@ namespace UnrealSteamEmu {
             size_t colonPos = localIpStr.find(':');
             if (colonPos != std::string::npos) localIpStr = localIpStr.substr(0, colonPos);
 
-            lob.data["HostAddress"] = localIpStr;
+            std::string hostSteamIdStr = std::to_string(g_localSteamID);
+            lob.data["HostAddress"] = hostSteamIdStr;
+            lob.data["HostSteamID"] = hostSteamIdStr;
             lob.data["SERVER_IP"] = localIpStr;
             lob.data["ServerAddress"] = localIpStr;
             lob.data["Port"] = std::to_string(localEp.port != 0 ? localEp.port : 27015);
 
-            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "HostAddress", refix::lan::AttributeValue(localIpStr));
+            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "HostAddress", refix::lan::AttributeValue(hostSteamIdStr));
+            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "HostSteamID", refix::lan::AttributeValue(hostSteamIdStr));
             refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "SERVER_IP", refix::lan::AttributeValue(localIpStr));
 
             {
@@ -2800,10 +2832,11 @@ namespace UnrealSteamEmu {
                 BroadcastNetPacket(2, meta.c_str(), meta.size());
             }
 
-            // Post CallResult and Callback
+            // Post CallResult and Callback (both Callback<LobbyCreated_t> and CallResult<LobbyCreated_t> are notified)
             LobbyCreated_t crResp = {};
             crResp.m_eResult = k_EResultOK;
             crResp.m_ulSteamIDLobby = lID;
+            PostCallback(LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp));
             SteamAPICall_t hCall = PostCallResult(LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp));
 
             LobbyEnter_t cbResp = {};
@@ -3125,6 +3158,16 @@ namespace UnrealSteamEmu {
                     auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(rec->ownerPeerId);
                     if (pInfo && pInfo->externalId.numericId != 0) {
                         return CSteamID(pInfo->externalId.numericId);
+                    }
+                    auto itOwnerAttr = rec->attributes.find("__steam_owner");
+                    if (itOwnerAttr != rec->attributes.end() && !itOwnerAttr->second.asString.empty()) {
+                        uint64_t sId = _strtoui64(itOwnerAttr->second.asString.c_str(), nullptr, 10);
+                        if (sId != 0) return CSteamID(sId);
+                    }
+                    auto itHostAddr = rec->attributes.find("HostAddress");
+                    if (itHostAddr != rec->attributes.end() && !itHostAddr->second.asString.empty()) {
+                        uint64_t sId = _strtoui64(itHostAddr->second.asString.c_str(), nullptr, 10);
+                        if (sId != 0) return CSteamID(sId);
                     }
                     if (rec->ownerPeerId.low != 0) {
                         return CSteamID(rec->ownerPeerId.low);

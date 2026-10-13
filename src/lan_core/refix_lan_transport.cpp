@@ -248,7 +248,8 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
             boundGroup = true;
             m_discoveryPort = discoveryPort;
         }
-    } else {
+    }
+    if (!boundGroup) {
         for (uint16_t candPort : REFIX_FALLBACK_DISCOVERY_PORTS) {
             groupSin.sin_port = htons(candPort);
             if (bind(m_groupSocket, reinterpret_cast<const sockaddr*>(&groupSin), sizeof(groupSin)) == 0) {
