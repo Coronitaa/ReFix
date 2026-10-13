@@ -198,7 +198,7 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
 }
 
 constexpr uint16_t REFIX_DEFAULT_DISCOVERY_PORT = 47584;
-constexpr uint16_t REFIX_FALLBACK_DISCOVERY_PORTS[] = { 47584, 47585, 47586 };
+constexpr uint16_t REFIX_FALLBACK_DISCOVERY_PORTS[] = { 47584, 47585, 47586, 47587 };
 
 // 32-bit generation seed: provides full uint32_t space for ARQ session generation counters.
 // Stream generation correlation uses RFC 1982 modular serial number arithmetic (modulo 2^32 signed half-space).

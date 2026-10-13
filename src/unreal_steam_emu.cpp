@@ -135,6 +135,31 @@ namespace UnrealSteamEmu {
 
     static SOCKET g_udpSocket = INVALID_SOCKET;
 
+    static HANDLE g_hSlotMutex = NULL;
+    static int g_instanceSlot = 0;
+
+    static int AcquireInstanceSlot(uint32_t appId) {
+        if (g_hSlotMutex != NULL) {
+            return g_instanceSlot;
+        }
+
+        for (int slot = 0; slot < 16; ++slot) {
+            std::string mutexName = "Local\\ReFix_InstanceSlot_" + std::to_string(appId) + "_" + std::to_string(slot);
+            HANDLE hMutex = CreateMutexA(NULL, TRUE, mutexName.c_str());
+            if (hMutex != NULL) {
+                if (GetLastError() == ERROR_ALREADY_EXISTS) {
+                    CloseHandle(hMutex);
+                    continue;
+                }
+                g_hSlotMutex = hMutex;
+                g_instanceSlot = slot;
+                return slot;
+            }
+        }
+        g_instanceSlot = 0;
+        return 0;
+    }
+
     // Helper: generate stable deterministic SteamID (aligned with deploy_helper.ps1 MachineGuid MD5)
     static uint64_t GenerateDeterministicSteamID() {
         char guidBuf[128] = { 0 };
@@ -325,7 +350,49 @@ namespace UnrealSteamEmu {
             }
         }
 
-        // 1. Read SteamID configuration flags
+        // 1. Resolve AppID first so multi-instance slot mutex can be keyed by AppID
+        std::string appIdSource = "unknown";
+        char bufApp[64];
+        GetPrivateProfileStringA("Unreal.Steam", "AppId", "", bufApp, sizeof(bufApp), iniPath.c_str());
+        if (bufApp[0] && atoi(bufApp) != 0) {
+            g_appID = (uint32_t)atoi(bufApp);
+            appIdSource = "ini:[Unreal.Steam] AppId";
+        } else {
+            GetPrivateProfileStringA("Steam", "RealAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
+            if (bufApp[0] && strcmp(bufApp, "0") != 0) {
+                g_appID = (uint32_t)atoi(bufApp);
+                appIdSource = "ini:[Steam] RealAppId";
+            } else {
+                GetPrivateProfileStringA("Steam", "MaskAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
+                if (bufApp[0] && strcmp(bufApp, "0") != 0) {
+                    g_appID = (uint32_t)atoi(bufApp);
+                    appIdSource = "ini:[Steam] MaskAppId";
+                }
+            }
+        }
+        if (g_appID == 0) {
+            std::string appidTxtPath = exeDir + "steam_appid.txt";
+            std::ifstream af(appidTxtPath);
+            if (af.is_open()) {
+                std::string line;
+                if (std::getline(af, line)) {
+                    uint32_t a = (uint32_t)atoi(line.c_str());
+                    if (a != 0) {
+                        g_appID = a;
+                        appIdSource = "file:" + appidTxtPath;
+                    }
+                }
+            }
+        }
+        if (g_appID == 0) {
+            g_appID = 480;
+            appIdSource = "fallback:default(480)";
+        }
+
+        // 2. Multi-instance slot allocation (supports up to 16 concurrent instances per machine)
+        int slot = AcquireInstanceSlot(g_appID);
+
+        // 3. Read SteamID configuration flags
         char bufAutoGen[16] = { 0 };
         GetPrivateProfileStringA("User", "AutoGenerateSteamId", "", bufAutoGen, sizeof(bufAutoGen), iniPath.c_str());
         if (!bufAutoGen[0]) {
@@ -355,6 +422,7 @@ namespace UnrealSteamEmu {
             bAutoGenExplicitTrue = true;
         }
 
+        // 4. Resolve Persona Name
         std::string nameSource = "fallback:Player";
         char buf[256] = { 0 };
         // Priority 1: [User] Name
@@ -411,7 +479,12 @@ namespace UnrealSteamEmu {
             g_personaName = "Player";
             nameSource = "fallback:Player";
         }
+        if (slot > 0) {
+            g_personaName = g_personaName + "_" + std::to_string(slot + 1);
+            nameSource += "+slot" + std::to_string(slot + 1);
+        }
 
+        // 5. Resolve SteamID (explicit numeric configuration has strict precedence over auto-gen)
         std::string sidSource = "unknown";
         char envSid[64] = { 0 };
         if (GetEnvironmentVariableA("REFIX_STEAM_ID", envSid, sizeof(envSid)) > 0 && envSid[0]) {
@@ -422,16 +495,18 @@ namespace UnrealSteamEmu {
 
         if (envSid[0]) {
             if (_stricmp(envSid, "auto") == 0) {
-                g_localSteamID = GenerateDeterministicSteamID();
+                g_localSteamID = GenerateDeterministicSteamID() + slot;
                 sidSource = "env:auto->GenerateDeterministicSteamID";
+                if (slot > 0) sidSource += "+slot" + std::to_string(slot);
             } else if (_stricmp(envSid, "steam") == 0 || _stricmp(envSid, "client") == 0) {
                 uint64_t scId = TryGetSteamClientActiveSteamID();
                 if (scId != 0) {
                     g_localSteamID = scId;
                     sidSource = "env:steam->SteamClientRegistry";
                 } else {
-                    g_localSteamID = GenerateDeterministicSteamID();
+                    g_localSteamID = GenerateDeterministicSteamID() + slot;
                     sidSource = "env:steam->fallback:GenerateDeterministicSteamID";
+                    if (slot > 0) sidSource += "+slot" + std::to_string(slot);
                 }
             } else {
                 g_localSteamID = _strtoui64(envSid, nullptr, 10);
@@ -440,19 +515,8 @@ namespace UnrealSteamEmu {
         }
 
         if (g_localSteamID == 0) {
-            if (bUseSteamClient) {
-                uint64_t scId = TryGetSteamClientActiveSteamID();
-                if (scId != 0) {
-                    g_localSteamID = scId;
-                    sidSource = "steam_client:HKCU\\Software\\Valve\\Steam";
-                } else {
-                    g_localSteamID = GenerateDeterministicSteamID();
-                    sidSource = "steam_client_not_found->fallback:GenerateDeterministicSteamID";
-                }
-            } else if (bAutoGenExplicitTrue) {
-                g_localSteamID = GenerateDeterministicSteamID();
-                sidSource = "ini:AutoGenerateSteamId=true->GenerateDeterministicSteamID";
-            } else if (bufId[0] && _stricmp(bufId, "auto") != 0 && _stricmp(bufId, "steam") != 0 && _stricmp(bufId, "client") != 0) {
+            // Explicit numeric ID in INI takes precedence before auto-gen
+            if (bufId[0] && _stricmp(bufId, "auto") != 0 && _stricmp(bufId, "steam") != 0 && _stricmp(bufId, "client") != 0) {
                 uint64_t explicitId = _strtoui64(bufId, nullptr, 10);
                 if (explicitId != 0) {
                     g_localSteamID = explicitId;
@@ -461,52 +525,25 @@ namespace UnrealSteamEmu {
             }
         }
 
-        if (g_localSteamID == 0 && !bAutoGenExplicitTrue && goldbergSteamId != 0) {
+        if (g_localSteamID == 0 && goldbergSteamId != 0) {
             g_localSteamID = goldbergSteamId;
             sidSource = "file:" + goldbergSteamIdFile;
         }
 
         if (g_localSteamID == 0) {
-            g_localSteamID = GenerateDeterministicSteamID();
-            sidSource = "default:GenerateDeterministicSteamID";
+            if (bUseSteamClient) {
+                uint64_t scId = TryGetSteamClientActiveSteamID();
+                if (scId != 0) {
+                    g_localSteamID = scId;
+                    sidSource = "steam_client:HKCU\\Software\\Valve\\Steam";
+                }
+            }
         }
 
-        std::string appIdSource = "unknown";
-        char bufApp[64];
-        GetPrivateProfileStringA("Unreal.Steam", "AppId", "", bufApp, sizeof(bufApp), iniPath.c_str());
-        if (bufApp[0] && atoi(bufApp) != 0) {
-            g_appID = (uint32_t)atoi(bufApp);
-            appIdSource = "ini:[Unreal.Steam] AppId";
-        } else {
-            GetPrivateProfileStringA("Steam", "RealAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
-            if (bufApp[0] && strcmp(bufApp, "0") != 0) {
-                g_appID = (uint32_t)atoi(bufApp);
-                appIdSource = "ini:[Steam] RealAppId";
-            } else {
-                GetPrivateProfileStringA("Steam", "MaskAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
-                if (bufApp[0] && strcmp(bufApp, "0") != 0) {
-                    g_appID = (uint32_t)atoi(bufApp);
-                    appIdSource = "ini:[Steam] MaskAppId";
-                }
-            }
-        }
-        if (g_appID == 0) {
-            std::string appidTxtPath = exeDir + "steam_appid.txt";
-            std::ifstream af(appidTxtPath);
-            if (af.is_open()) {
-                std::string line;
-                if (std::getline(af, line)) {
-                    uint32_t a = (uint32_t)atoi(line.c_str());
-                    if (a != 0) {
-                        g_appID = a;
-                        appIdSource = "file:" + appidTxtPath;
-                    }
-                }
-            }
-        }
-        if (g_appID == 0) {
-            g_appID = 480;
-            appIdSource = "fallback:default(480)";
+        if (g_localSteamID == 0) {
+            g_localSteamID = GenerateDeterministicSteamID() + slot;
+            sidSource = bAutoGenExplicitTrue ? "ini:AutoGenerateSteamId=true->GenerateDeterministicSteamID" : "default:GenerateDeterministicSteamID";
+            if (slot > 0) sidSource += "+slot" + std::to_string(slot);
         }
 
         char envNoLegacy[16] = { 0 };
@@ -515,6 +552,7 @@ namespace UnrealSteamEmu {
 
         ReFixLog("[ConfigDiag] ExePath: '%s'", exePath);
         ReFixLog("[ConfigDiag] Selected IniPath: '%s'", iniPath.c_str());
+        ReFixLog("[ConfigDiag] Multi-Instance Slot: %d", slot);
         ReFixLog("[ConfigDiag] SteamID Source: '%s' -> %llu", sidSource.c_str(), g_localSteamID);
         ReFixLog("[ConfigDiag] AppID Source: '%s' -> %u", appIdSource.c_str(), g_appID);
         ReFixLog("[ConfigDiag] Persona Name Source: '%s' -> '%s'", nameSource.c_str(), g_personaName.c_str());
@@ -532,6 +570,9 @@ namespace UnrealSteamEmu {
         if (GetEnvironmentVariableA("REFIX_LISTEN_PORT", envPort, sizeof(envPort)) > 0) {
             int p = atoi(envPort);
             if (p > 0 && p <= 65535) g_listenPort = (uint16_t)p;
+        } else if (slot > 0 && g_listenPort == 47584) {
+            g_listenPort = (uint16_t)(47584 + slot);
+            ReFixLog("[ConfigDiag] Multi-instance listen port adjusted to %u for slot %d", g_listenPort, slot);
         }
 
         GetPrivateProfileStringA("Unreal.Networking", "CustomBroadcasts", "", buf, sizeof(buf), iniPath.c_str());
@@ -936,8 +977,10 @@ namespace UnrealSteamEmu {
             }
         }
 
-        std::vector<uint16_t> broadcastPorts = { 47584, 47585 };
-        if (g_listenPort != 47584 && g_listenPort != 47585) broadcastPorts.push_back(g_listenPort);
+        std::vector<uint16_t> broadcastPorts = { 47584, 47585, 47586, 47587 };
+        if (g_listenPort != 47584 && g_listenPort != 47585 && g_listenPort != 47586 && g_listenPort != 47587) {
+            broadcastPorts.push_back(g_listenPort);
+        }
 
         for (const auto& dstIP : destinations) {
             for (uint16_t port : broadcastPorts) {
@@ -2743,8 +2786,6 @@ namespace UnrealSteamEmu {
 
             refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "HostAddress", refix::lan::AttributeValue(localIpStr));
             refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "SERVER_IP", refix::lan::AttributeValue(localIpStr));
-
-            SteamP2PHook::RegisterPeer(g_localSteamID, (localEp.ipv4 != 0) ? localEp.ipv4 : 0x7F000001, localEp.port);
 
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -5686,6 +5727,7 @@ namespace UnrealSteamEmu {
             auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (pInfo && pInfo->externalId.platform == refix::lan::ExternalPlatform::Steam && pInfo->externalId.numericId != 0) {
                 uint64_t sid = pInfo->externalId.numericId;
+                if (sid == g_localSteamID) return;
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 auto it = g_peers.find(sid);
                 if (it != g_peers.end()) {
@@ -5987,6 +6029,11 @@ namespace UnrealSteamEmu {
             }
             g_connections.clear();
             g_sessionToConnection.clear();
+        }
+
+        if (g_hSlotMutex != NULL) {
+            CloseHandle(g_hSlotMutex);
+            g_hSlotMutex = NULL;
         }
 
         g_bInitialized = false;

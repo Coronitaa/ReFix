@@ -686,6 +686,12 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(to);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
+
+        // Bypass internal emulator discovery and broadcast ports (47584..47588, 47600)
+        if ((destPort >= 47584 && destPort <= 47588) || destPort == 47600) {
+            return g_orig_sendto(s, buf, len, flags, to, tolen);
+        }
+
         SocketServiceType service = ClassifyPort(destPort);
 
         // Update SocketContext
@@ -713,19 +719,21 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
             std::lock_guard<std::mutex> lg(g_peerMutex);
             auto it = g_ipToSteamID.find(destIP);
             if (it != g_ipToSteamID.end()) {
-                steamID = it->second;
-                g_steamIDToPort[steamID] = destPort;
-            } else if ((IsGamePort(destPort) || IsVoicePort(destPort) ||
-                        (destIP & 0xFF000000u) == 0x7F000000u || destIP == 0 ||
-                        (destIP & 0xFFFF0000u) == 0xC0A80000u || (destIP & 0xFF000000u) == 0x0A000000u) &&
-                       g_ipToSteamID.size() == 1) {
-                // If connecting to game/voice port or loopback/private subnet and 1 peer known
-                steamID = g_ipToSteamID.begin()->second;
-                g_steamIDToPort[steamID] = destPort;
+                if (it->second != UnrealSteamEmu::GetLocalSteamID()) {
+                    steamID = it->second;
+                    g_steamIDToPort[steamID] = destPort;
+                }
+            } else if ((IsGamePort(destPort) || IsVoicePort(destPort)) && g_ipToSteamID.size() == 1) {
+                // If connecting to verified game/voice port and exactly 1 peer known
+                uint64_t candidate = g_ipToSteamID.begin()->second;
+                if (candidate != 0 && candidate != UnrealSteamEmu::GetLocalSteamID()) {
+                    steamID = candidate;
+                    g_steamIDToPort[steamID] = destPort;
+                }
             }
         }
 
-        if (steamID != 0) {
+        if (steamID != 0 && steamID != UnrealSteamEmu::GetLocalSteamID()) {
             if (SendP2PWithEnvelope(steamID, s, (const uint8_t*)buf, (uint32_t)len, destPort, service)) {
                 return len;
             }
@@ -1234,6 +1242,7 @@ void Uninstall() {
 
 void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     if (!steamID || !ipv4_host) return;
+    if (steamID == UnrealSteamEmu::GetLocalSteamID()) return;
 
     {
         std::lock_guard<std::mutex> lg(g_peerMutex);
