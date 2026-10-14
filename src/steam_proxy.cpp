@@ -1743,19 +1743,38 @@ static void LoadConfig() {
 
     // [Game]
     char bufGameName[128], bufEngine[64];
-    ReadString("Game", "GameName", "Shift At Midnight", bufGameName, sizeof(bufGameName));
-    ReadString("Game", "EngineType", "Unity", bufEngine, sizeof(bufEngine));
+    ReadString("Game", "GameName", "", bufGameName, sizeof(bufGameName));
+    ReadString("Game", "EngineType", "Auto", bufEngine, sizeof(bufEngine));
     g_config.gameName = bufGameName;
     g_config.engineType = bufEngine;
     g_godotIsEngine = (_stricmp(g_config.engineType.c_str(), "Godot") == 0);
     g_unrealIsEngine = (_stricmp(g_config.engineType.c_str(), "Unreal") == 0);
 
-    // Auto-detect Unreal only if EngineType is "Auto" or empty (NEVER override "Unity" or "Godot")
+    // Auto-detect engine if EngineType is "Auto" or empty
     if (!g_unrealIsEngine && !g_godotIsEngine && (_stricmp(g_config.engineType.c_str(), "Auto") == 0 || g_config.engineType.empty())) {
         if (UnrealDetect_IsUnrealProcess()) {
             g_unrealIsEngine = true;
             g_config.engineType = "Unreal";
             ReFixLog("EngineType auto-detected as Unreal Engine (Winsock P2P hooks will be installed)");
+        } else {
+            // Check for Godot by inspecting .pck files in exe directory
+            char exePath[MAX_PATH] = { 0 };
+            GetModuleFileNameA(NULL, exePath, MAX_PATH);
+            std::string fullPath(exePath);
+            size_t lastSlash = fullPath.find_last_of("\\/");
+            std::string exeDir = (lastSlash != std::string::npos) ? fullPath.substr(0, lastSlash + 1) : "";
+
+            WIN32_FIND_DATAA fd;
+            HANDLE hFind = FindFirstFileA((exeDir + "*.pck").c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                FindClose(hFind);
+                g_godotIsEngine = true;
+                g_config.engineType = "Godot";
+                ReFixLog("EngineType auto-detected as Godot Engine (.pck package found)");
+            } else {
+                g_config.engineType = "Unity";
+                ReFixLog("EngineType defaulted to Unity / Generic Engine");
+            }
         }
     }
 
@@ -2139,14 +2158,14 @@ struct ReFix_SteamRelayNetworkStatus_t {
 static const int k_eRelayAvail_Current = 100;
 static DWORD g_steamInitTick = 0;
 
-static int __fastcall Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus(
-    void* self, void* /*edx*/, void* pDetails)
+static int Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus(
+    void* self, void* pDetails)
 {
     if (g_orig_VTable_GetRelayNetworkStatus)
         g_orig_VTable_GetRelayNetworkStatus(self, pDetails);
     
     DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
-    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
+    int avail = (!ReFix::NetworkModeManager::IsOnline() || elapsed >= 500) ? k_eRelayAvail_Current : 3;
 
     if (pDetails) {
         auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
@@ -3724,10 +3743,11 @@ extern "C" __declspec(dllexport) void* SteamInternal_FindOrCreateUserInterface(u
     }
 
     // In Online mode, query provider (which delegates to original Valve DLL)
-    // BLOCKER 1: STRICT ZERO FALLBACK TO UnrealSteamEmu
     void* iface = provider->FindOrCreateUserInterface(hSteamUser, pszVersion);
     if (!iface) {
-        return nullptr;
+        // Fallback to UnrealSteamEmu for modern interfaces (such as STEAMTIMELINE_INTERFACE_V004)
+        iface = UnrealSteamEmu::FindOrCreateUserInterface(hSteamUser, pszVersion);
+        if (!iface) return nullptr;
     }
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
@@ -3742,10 +3762,10 @@ extern "C" __declspec(dllexport) void* SteamInternal_CreateInterface(const char*
     }
 
     // In Online mode, query provider (which delegates to original Valve DLL)
-    // BLOCKER 1: STRICT ZERO FALLBACK TO UnrealSteamEmu
     void* iface = provider->CreateInterface(pszVersion);
     if (!iface) {
-        return nullptr;
+        iface = UnrealSteamEmu::CreateInterface(pszVersion);
+        if (!iface) return nullptr;
     }
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
@@ -4040,7 +4060,7 @@ static int Intercepted_SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus(void
         g_pfn_Flat_GetRelayNetworkStatus(self, pDetails);
     }
     DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
-    int avail = (elapsed < 500) ? 3 : k_eRelayAvail_Current;
+    int avail = (!ReFix::NetworkModeManager::IsOnline() || elapsed >= 500) ? k_eRelayAvail_Current : 3;
 
     if (pDetails) {
         auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
@@ -4258,6 +4278,10 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
         UnrealSteamEmu::RegisterCallback((CCallbackBase*)pCallback, iCallback);
     } else if (g_pfn_RegisterCallback) {
         g_pfn_RegisterCallback(pCallback, iCallback);
+    } else {
+        // g_pfn_RegisterCallback is null (pre-EnsureOriginal or pending):
+        // Register in UnrealSteamEmu so static callbacks are never dropped
+        UnrealSteamEmu::RegisterCallback((CCallbackBase*)pCallback, iCallback);
     }
 
     if (ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
@@ -4406,8 +4430,8 @@ static bool EnsureOriginal() {
 
     const char* candNames[] = {
         "steam_api64_valve.dll",
-        "steam_api64_o.dll",
         "steam_api64_original.dll",
+        "steam_api64_o.dll",
         "steam_api64.dll.valve"
     };
 
@@ -5006,12 +5030,27 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     }
     
     if (!EnsureOriginal()) {
-        ReFixLog("SteamAPI_Init: EnsureOriginal failed");
-        return false;
+        ReFixLog("SteamAPI_Init: EnsureOriginal failed -> dynamic LAN fallback");
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        auto provider = ReFix::ProviderFactory::GetSteamProvider();
+        bool result = provider ? provider->Init() : UnrealSteamEmu::Initialize();
+        ReFixInitializePost(result);
+        return result;
     }
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     bool result = provider->Init();
     ReFixLog("SteamAPI_Init: provider->Init() result=%d", result);
+    if (!result) {
+        ReFixLog("SteamAPI_Init: provider->Init() returned false -> dynamic LAN fallback");
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        auto lanProvider = ReFix::ProviderFactory::GetSteamProvider();
+        result = lanProvider ? lanProvider->Init() : UnrealSteamEmu::Initialize();
+        ReFixLog("SteamAPI_Init: dynamic LAN fallback result=%d", result);
+    }
     
     ReFixInitializePost(result);
     return result;
@@ -5027,7 +5066,16 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
         ReFixInitializePost(result);
         return result;
     }
-    if (!EnsureOriginal()) return false;
+    if (!EnsureOriginal()) {
+        ReFixLog("SteamAPI_InitSafe: EnsureOriginal failed -> dynamic LAN fallback");
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        auto provider = ReFix::ProviderFactory::GetSteamProvider();
+        bool result = provider ? provider->Init() : UnrealSteamEmu::Initialize();
+        ReFixInitializePost(result);
+        return result;
+    }
     bool result = false;
     if (g_pfn_InitSafe) {
         result = g_pfn_InitSafe();
@@ -5041,6 +5089,15 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
         result = (g_pfn_SteamAPIInit_Internal("", errMsg) == 0);
     }
     ReFixLog("SteamAPI_InitSafe: result=%d", result);
+    if (!result) {
+        ReFixLog("SteamAPI_InitSafe: Online init failed -> dynamic LAN fallback");
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        auto provider = ReFix::ProviderFactory::GetSteamProvider();
+        result = provider ? provider->Init() : UnrealSteamEmu::Initialize();
+        ReFixLog("SteamAPI_InitSafe: dynamic LAN fallback result=%d", result);
+    }
     ReFixInitializePost(result);
     return result;
 }
@@ -5055,8 +5112,13 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
         return ok ? 0 : 1;
     }
     if (!EnsureOriginal()) {
-        if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
-        return 1;
+        ReFixLog("SteamAPI_InitFlat: EnsureOriginal failed -> dynamic LAN fallback");
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        bool ok = UnrealSteamEmu::InitFlat(pOutErrMsg);
+        ReFixInitializePost(ok);
+        return ok ? 0 : 1;
     }
     char localErr[1024] = { 0 };
     char* targetErr = pOutErrMsg ? pOutErrMsg : localErr;
@@ -5074,6 +5136,15 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
         result = ok ? 0 : 1;
     }
     ReFixLog("SteamAPI_InitFlat: result=%d, msg='%s'", result, targetErr);
+    if (result != 0) {
+        ReFixLog("SteamAPI_InitFlat: Online init failed -> dynamic LAN fallback");
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        bool ok = UnrealSteamEmu::InitFlat(targetErr);
+        result = ok ? 0 : 1;
+        ReFixLog("SteamAPI_InitFlat: dynamic LAN fallback result=%d", result);
+    }
     ReFixInitializePost(result == 0);
     return result;
 }
@@ -5129,8 +5200,13 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         return result;
     }
     if (!EnsureOriginal()) {
-        if (pOutErrMsg) strncpy_s(pOutErrMsg, 1024, "ReFix: EnsureOriginal failed", _TRUNCATE);
-        return 1; // k_ESteamAPIInitResult_NoSteamClient
+        ReFixLog("SteamInternal_SteamAPI_Init: EnsureOriginal failed -> dynamic LAN fallback");
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        int result = UnrealSteamEmu::InitInternal(pszInternalCheckInterfaceVersions, pOutErrMsg);
+        ReFixInitializePost(result == 0);
+        return result;
     }
     char localErr[1024] = { 0 };
     char* targetErr = pOutErrMsg ? pOutErrMsg : localErr;
@@ -5148,6 +5224,14 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         result = ok ? 0 : 1;
     }
     ReFixLog("SteamInternal_SteamAPI_Init: result=%d, msg='%s'", result, targetErr);
+    if (result != 0) {
+        ReFixLog("SteamInternal_SteamAPI_Init: Online init failed (code %d: '%s') -> dynamic LAN fallback", result, targetErr);
+        ReFix::NetworkModeManager::SetMode(ReFix::ReFixNetworkMode::Lan);
+        ReFix::ProviderFactory::Reset();
+        InitializeLanForwardTable();
+        result = UnrealSteamEmu::InitInternal(pszInternalCheckInterfaceVersions, targetErr);
+        ReFixLog("SteamInternal_SteamAPI_Init: dynamic LAN fallback result=%d", result);
+    }
     ReFixInitializePost(result == 0);
     return result;
 }
@@ -5510,6 +5594,21 @@ extern "C" __declspec(dllexport) void SteamAPI_UnregisterCallback(void* pCallbac
 extern "C" __declspec(dllexport) void* SteamAPI_SteamUser_v021() {
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     return provider ? provider->GetSteamUser() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamUser_v022() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamUser() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamUser_v023() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? provider->GetSteamUser() : nullptr;
+}
+
+extern "C" __declspec(dllexport) void* SteamAPI_SteamUserStats_v013() {
+    auto provider = ReFix::ProviderFactory::GetSteamProvider();
+    return provider ? UnrealSteamEmu::GetSteamUserStats() : nullptr;
 }
 
 extern "C" __declspec(dllexport) void* SteamAPI_SteamFriends_v017() {
@@ -6385,7 +6484,20 @@ static FARPROC LookupLanExport(const char* name) {
         { "SteamAPI_ManualDispatch_RunFrame", (FARPROC)SteamAPI_ManualDispatch_RunFrame },
         { "SteamAPI_ManualDispatch_GetNextCallback", (FARPROC)SteamAPI_ManualDispatch_GetNextCallback },
         { "SteamAPI_ManualDispatch_FreeLastCallback", (FARPROC)SteamAPI_ManualDispatch_FreeLastCallback },
-        { "SteamAPI_ManualDispatch_GetAPICallResult", (FARPROC)SteamAPI_ManualDispatch_GetAPICallResult }
+        { "SteamAPI_ManualDispatch_GetAPICallResult", (FARPROC)SteamAPI_ManualDispatch_GetAPICallResult },
+        { "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus", (FARPROC)Intercepted_SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus },
+        { "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", (FARPROC)Intercepted_SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess },
+        { "SteamAPI_SteamNetworkingSockets_SteamAPI_v012", (FARPROC)SteamAPI_SteamNetworkingSockets_SteamAPI_v012 },
+        { "SteamAPI_SteamNetworkingUtils_SteamAPI_v004", (FARPROC)SteamAPI_SteamNetworkingUtils_SteamAPI_v004 },
+        { "SteamAPI_SteamNetworkingMessages_SteamAPI_v002", (FARPROC)SteamAPI_SteamNetworkingMessages_SteamAPI_v002 },
+        { "SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012", (FARPROC)SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v012 },
+        { "SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002", (FARPROC)SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002 },
+        { "SteamInternal_CreateInterface", (FARPROC)SteamInternal_CreateInterface },
+        { "SteamInternal_FindOrCreateUserInterface", (FARPROC)SteamInternal_FindOrCreateUserInterface },
+        { "SteamInternal_SteamAPI_Init", (FARPROC)SteamInternal_SteamAPI_Init },
+        { "SteamAPI_SteamUser_v022", (FARPROC)SteamAPI_SteamUser_v022 },
+        { "SteamAPI_SteamUser_v023", (FARPROC)SteamAPI_SteamUser_v023 },
+        { "SteamAPI_SteamUserStats_v013", (FARPROC)SteamAPI_SteamUserStats_v013 }
     };
 
     auto it = s_lanExports.find(name);

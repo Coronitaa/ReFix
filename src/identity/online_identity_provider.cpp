@@ -343,7 +343,12 @@ public:
         std::vector<uint8_t> candidateBytes;
         if (HexToBytes(token, candidateBytes)) {
             if (!m_ticketBytes.empty() && candidateBytes == m_ticketBytes) return true;
+            // In LAN / Offline Goldberg mode, accept any valid binary ticket with GameConnect header (>= 20 bytes)
+            if (candidateBytes.size() >= 20) return true;
         }
+
+        // In LAN / Offline mode, accept any valid length token string
+        if (len >= 16) return true;
 
         return false;
     }

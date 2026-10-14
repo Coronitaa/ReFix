@@ -71,22 +71,13 @@ public:
     bool SendDiscoveryResponse(const LanEndpoint& target, const void* data, size_t len);
     bool SendDiscoveryPacket(MsgType type, const LanEndpoint& target, const void* data, size_t len);
 
+    LanSendResult SendUnreliableDetailed(const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
     bool SendUnreliable(const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
 
     /**
      * Send reliable message.
-     *
-     * Contract:
-     * - Returns true if the message was successfully formatted, initially transmitted over the socket,
-     *   and enqueued in the local ARQ tracking buffer (unackedOutbound).
-     * - Does NOT guarantee immediate delivery to the remote application. Delivery is guaranteed via
-     *   ARQ retransmissions upon receiving remote DataAck or until retry exhaustion triggers OnPeerTimeout().
-     * - Link ACK (DataAck) acknowledges datagram receipt by the peer transport layer.
-     * - API Consumer Acceptance: Messages are delivered via ILanTransportListener::OnInboundData, or
-     *   buffered in m_inboundQueue (capped at 512). If the inbound queue is full in polling mode,
-     *   backpressure is asserted (datagram is NOT acknowledged), forcing sender ARQ retransmissions
-     *   until queue capacity is freed or connection times out.
      */
+    LanSendResult SendReliableDetailed(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
     bool SendReliable(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
 
     // Queue Polling (if caller wants to drain synchronously)
@@ -207,6 +198,8 @@ private:
     SOCKET m_dataSocket = INVALID_SOCKET;
     std::thread m_reactorThread;
 
+    mutable std::recursive_mutex m_lifecycleMutex;
+    mutable std::mutex m_outputMutex;
     mutable std::mutex m_stateMutex;
     std::unordered_map<PeerId, PeerReliabilityState> m_peerStates;
     std::map<std::pair<PeerId, uint32_t>, FragmentAssembler> m_fragmentMap;

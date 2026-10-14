@@ -25,6 +25,7 @@ public:
     // Semantic queries
     static bool IsGoldbergBackendActive();
     static bool IsExternalNetworkingAllowed();
+    static bool IsSteamClientRunning();
     
 private:
     static std::atomic<ReFixNetworkMode> s_mode;

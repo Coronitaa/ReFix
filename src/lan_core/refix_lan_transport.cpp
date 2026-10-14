@@ -225,6 +225,7 @@ LanTransport::~LanTransport() {
 
 
 bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener) {
+    std::lock_guard<std::recursive_mutex> lifeLock(m_lifecycleMutex);
     if (m_running.load()) return true;
 
     m_discoveryPort = discoveryPort;
@@ -378,6 +379,7 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
 }
 
 void LanTransport::Stop() {
+    std::lock_guard<std::recursive_mutex> lifeLock(m_lifecycleMutex);
     if (!m_running.exchange(false)) {
         return;
     }
@@ -393,9 +395,14 @@ void LanTransport::Stop() {
     }
 
     if (m_reactorThread.joinable()) {
-        m_reactorThread.join();
+        if (m_reactorThread.get_id() == std::this_thread::get_id()) {
+            m_reactorThread.detach();
+        } else {
+            m_reactorThread.join();
+        }
     }
 
+    std::lock_guard<std::mutex> outLock(m_outputMutex);
     if (m_groupSocket != INVALID_SOCKET) {
         if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, false);
         closesocket(m_groupSocket);
@@ -1361,20 +1368,26 @@ bool LanTransport::SendDiscoveryResponse(const LanEndpoint& target, const void* 
     return sent > 0;
 }
 
-bool LanTransport::SendUnreliable(const LanEndpoint& target, uint8_t channel, const void* data, size_t len) {
-    if (!LanFirewall::Get().IsAllowedEndpoint(target)) {
-        LanFirewall::Get().RecordBlockedEgress();
-        return false;
+LanSendResult LanTransport::SendUnreliableDetailed(const LanEndpoint& target, uint8_t channel, const void* data, size_t len) {
+    if (!m_running.load() || m_dataSocket == INVALID_SOCKET) {
+        return LanSendResult::SocketClosed;
     }
 
-    // Contract: Unreliable messages are strictly single-datagram MTU-safe.
-    // Payloads exceeding REFIX_MAX_UNRELIABLE_PAYLOAD are unequivocally rejected.
+    if (!target.IsValid()) {
+        return LanSendResult::InvalidParam;
+    }
+
+    if (!LanFirewall::Get().IsAllowedEndpoint(target)) {
+        LanFirewall::Get().RecordBlockedEgress();
+        return LanSendResult::FirewallBlocked;
+    }
+
     if (len > REFIX_MAX_UNRELIABLE_PAYLOAD) {
-        return false;
+        return LanSendResult::MessageTooLarge;
     }
 
     if (len > 0 && data == nullptr) {
-        return false;
+        return LanSendResult::InvalidParam;
     }
 
     std::vector<uint8_t> buffer(sizeof(WireHeader) + len);
@@ -1403,51 +1416,60 @@ bool LanTransport::SendUnreliable(const LanEndpoint& target, uint8_t channel, co
     sin.sin_addr.s_addr = htonl(target.ipv4);
     sin.sin_port = htons(target.port);
 
+    std::lock_guard<std::mutex> outLock(m_outputMutex);
+    if (!m_running.load() || m_dataSocket == INVALID_SOCKET) {
+        return LanSendResult::SocketClosed;
+    }
+
     int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
                       static_cast<int>(buffer.size()), 0,
                       reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
-    return sent > 0;
+    return (sent > 0) ? LanSendResult::Success : LanSendResult::SocketError;
 }
 
-bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len) {
-    if (!targetPeer.IsValid()) {
-        return false;
+bool LanTransport::SendUnreliable(const LanEndpoint& target, uint8_t channel, const void* data, size_t len) {
+    return SendUnreliableDetailed(target, channel, data, len) == LanSendResult::Success;
+}
+
+LanSendResult LanTransport::SendReliableDetailed(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len) {
+    if (!targetPeer.IsValid() || !target.IsValid()) {
+        return LanSendResult::InvalidParam;
     }
 
     if (!LanFirewall::Get().IsAllowedEndpoint(target)) {
         LanFirewall::Get().RecordBlockedEgress();
-        return false;
+        return LanSendResult::FirewallBlocked;
     }
 
     if (len > REFIX_MAX_MESSAGE_SIZE) {
-        return false;
+        return LanSendResult::MessageTooLarge;
     }
 
     if (len > 0 && data == nullptr) {
-        return false;
+        return LanSendResult::InvalidParam;
     }
 
-    if (m_dataSocket == INVALID_SOCKET) {
-        return false;
+    if (!m_running.load() || m_dataSocket == INVALID_SOCKET) {
+        return LanSendResult::SocketClosed;
     }
 
     size_t totalFrags = (len == 0) ? 1 : ((len + REFIX_MAX_FRAGMENT_PAYLOAD - 1) / REFIX_MAX_FRAGMENT_PAYLOAD);
     if (totalFrags == 0 || totalFrags > 255) {
-        return false;
+        return LanSendResult::InvalidParam;
     }
 
     std::lock_guard<std::mutex> lock(m_stateMutex);
     auto now = std::chrono::steady_clock::now();
     auto it = TryAdmitPeerStateLocked(targetPeer, true, now);
     if (it == m_peerStates.end()) {
-        return false;
+        return LanSendResult::PeerTableFull;
     }
     auto& state = it->second;
 
     // P1: ARQ Outbound Window Limit (REFIX_MAX_UNACKED_OUTBOUND = 512 datagrams per peer)
     // Enforce that all fragments can be admitted before allocating sequence numbers or transmitting.
     if (state.unackedOutbound.size() + totalFrags > REFIX_MAX_UNACKED_OUTBOUND) {
-        return false;
+        return LanSendResult::QueueFull;
     }
 
     if (state.localGeneration == 0) {
@@ -1499,15 +1521,25 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
         out.retries = 0;
         state.unackedOutbound.push_back(out);
 
-        int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
+        int sent = 0;
+        {
+            std::lock_guard<std::mutex> outLock(m_outputMutex);
+            if (m_dataSocket == INVALID_SOCKET) {
+                state.unackedOutbound.pop_back();
+                state.nextSequenceOut--;
+                return LanSendResult::SocketClosed;
+            }
+            sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
                           static_cast<int>(buffer.size()), 0,
                           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+        }
+
         if (sent == SOCKET_ERROR) {
             state.unackedOutbound.pop_back();
             state.nextSequenceOut--;
-            return false;
+            return LanSendResult::SocketError;
         }
-        return true;
+        return LanSendResult::Success;
     }
 
     // Application-level fragmentation for payloads > REFIX_MAX_FRAGMENT_PAYLOAD
@@ -1565,25 +1597,44 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
     }
 
     // Attempt initial send of fragment 0. If socket error occurs immediately, rollback without leaking retransmissions.
-    int sent0 = sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[0].packetBytes.data()),
+    int sent0 = 0;
+    {
+        std::lock_guard<std::mutex> outLock(m_outputMutex);
+        if (m_dataSocket == INVALID_SOCKET) {
+            state.nextSequenceOut = startSeq;
+            state.nextMessageIdOut--;
+            return LanSendResult::SocketClosed;
+        }
+        sent0 = sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[0].packetBytes.data()),
                        static_cast<int>(preparedFrags[0].packetBytes.size()), 0,
                        reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    }
+
     if (sent0 == SOCKET_ERROR) {
         state.nextSequenceOut = startSeq;
         state.nextMessageIdOut--;
-        return false;
+        return LanSendResult::SocketError;
     }
 
     // Enqueue all fragments into ARQ unackedOutbound and transmit remaining fragments
     state.unackedOutbound.push_back(preparedFrags[0]);
-    for (size_t i = 1; i < preparedFrags.size(); ++i) {
-        state.unackedOutbound.push_back(preparedFrags[i]);
-        sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[i].packetBytes.data()),
-               static_cast<int>(preparedFrags[i].packetBytes.size()), 0,
-               reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    {
+        std::lock_guard<std::mutex> outLock(m_outputMutex);
+        for (size_t i = 1; i < preparedFrags.size(); ++i) {
+            state.unackedOutbound.push_back(preparedFrags[i]);
+            if (m_dataSocket != INVALID_SOCKET) {
+                sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[i].packetBytes.data()),
+                       static_cast<int>(preparedFrags[i].packetBytes.size()), 0,
+                       reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+            }
+        }
     }
 
-    return true;
+    return LanSendResult::Success;
+}
+
+bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len) {
+    return SendReliableDetailed(targetPeer, target, channel, data, len) == LanSendResult::Success;
 }
 
 bool LanTransport::PollInbound(InboundPacket& outPacket) {

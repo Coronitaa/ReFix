@@ -200,6 +200,17 @@ enum class TrafficType : uint8_t {
     Voice = 3
 };
 
+enum class LanSendResult : uint8_t {
+    Success = 0,
+    QueueFull,          // ARQ outbound window full (>= 512 unacked)
+    PeerTableFull,      // Max peers reached / cannot admit peer
+    SocketClosed,       // Transport not started or socket closed
+    FirewallBlocked,    // Egress blocked by firewall
+    InvalidParam,       // Null buffer, len == 0, invalid target
+    MessageTooLarge,    // Exceeds max payload (256 KB)
+    SocketError         // Winsock error on sendto
+};
+
 } // namespace refix::lan
 
 namespace std {
