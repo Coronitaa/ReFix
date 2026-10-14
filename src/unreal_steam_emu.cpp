@@ -149,6 +149,8 @@ namespace UnrealSteamEmu {
     static SOCKET g_udpSocket = INVALID_SOCKET;
 
     static HANDLE g_hSlotMutex = NULL;
+    static HANDLE g_hPersonaNameMutex = NULL;
+    static HANDLE g_hSteamIdMutex = NULL;
     static int g_instanceSlot = 0;
 
     static int AcquireInstanceSlot(uint32_t appId) {
@@ -511,9 +513,35 @@ namespace UnrealSteamEmu {
             g_personaName = "Player";
             nameSource = "fallback:Player";
         }
-        if (slot > 0) {
-            g_personaName = g_personaName + "_" + std::to_string(slot + 1);
-            nameSource += "+slot" + std::to_string(slot + 1);
+
+        // Deduplicate Persona Name ONLY if an active user in the same game already has this name on this machine/LAN
+        if (g_hPersonaNameMutex != NULL) {
+            CloseHandle(g_hPersonaNameMutex);
+            g_hPersonaNameMutex = NULL;
+        }
+        std::string basePersonaName = g_personaName;
+        int nameSuffix = 1;
+        while (true) {
+            std::string candidateName = (nameSuffix == 1) ? basePersonaName : (basePersonaName + "_" + std::to_string(nameSuffix));
+            std::string safeName = candidateName;
+            for (char& c : safeName) {
+                if (!isalnum((unsigned char)c) && c != '_' && c != '-') c = '_';
+            }
+            char mName[256];
+            snprintf(mName, sizeof(mName), "Local\\ReFix_Name_%u_%s", g_appID, safeName.c_str());
+            g_hPersonaNameMutex = CreateMutexA(NULL, FALSE, mName);
+            if (g_hPersonaNameMutex && GetLastError() != ERROR_ALREADY_EXISTS) {
+                if (nameSuffix > 1) {
+                    nameSource += "+dup" + std::to_string(nameSuffix);
+                }
+                g_personaName = candidateName;
+                break;
+            }
+            if (g_hPersonaNameMutex) {
+                CloseHandle(g_hPersonaNameMutex);
+                g_hPersonaNameMutex = NULL;
+            }
+            nameSuffix++;
         }
 
         // 5. Resolve SteamID (explicit numeric configuration has strict precedence over auto-gen)
@@ -579,6 +607,26 @@ namespace UnrealSteamEmu {
         if (slot > 0) {
             g_localSteamID += slot;
             sidSource += "+slot" + std::to_string(slot);
+        }
+
+        // Guarantee strictly unique SteamID across all local concurrent instances
+        if (g_hSteamIdMutex != NULL) {
+            CloseHandle(g_hSteamIdMutex);
+            g_hSteamIdMutex = NULL;
+        }
+        while (true) {
+            char mName[128];
+            snprintf(mName, sizeof(mName), "Local\\ReFix_SteamID_%llu", (unsigned long long)g_localSteamID);
+            g_hSteamIdMutex = CreateMutexA(NULL, FALSE, mName);
+            if (g_hSteamIdMutex && GetLastError() != ERROR_ALREADY_EXISTS) {
+                break;
+            }
+            if (g_hSteamIdMutex) {
+                CloseHandle(g_hSteamIdMutex);
+                g_hSteamIdMutex = NULL;
+            }
+            g_localSteamID++;
+            sidSource += "+unique_offset";
         }
 
         char envNoLegacy[16] = { 0 };
@@ -786,7 +834,19 @@ namespace UnrealSteamEmu {
         g_callbackQueue.push_back(item);
     }
 
+    static void DrainPendingSearches(bool forceAll = false);
+
     bool IsAPICallCompleted(uint64_t hAPICall, bool* pbFailed) {
+        DrainPendingSearches(false);
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            auto it = g_callResultMap.find(hAPICall);
+            if (it != g_callResultMap.end() && it->second.completed) {
+                if (pbFailed) *pbFailed = it->second.failed;
+                return true;
+            }
+        }
+        DrainPendingSearches(true);
         std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
         auto it = g_callResultMap.find(hAPICall);
         if (it == g_callResultMap.end()) return false;
@@ -878,17 +938,103 @@ namespace UnrealSteamEmu {
     }
 
     static void CompleteCallResult(uint64_t hAPICall, int iCallback, const void* pData, size_t dataSize, bool bFailed) {
-        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-        QueuedCallResultItem item;
-        item.hAPICall = hAPICall;
-        item.iCallback = iCallback;
-        if (pData && dataSize > 0) {
-            item.data.assign((const uint8_t*)pData, (const uint8_t*)pData + dataSize);
+        CCallbackBase* pListener = nullptr;
+        std::vector<uint8_t> listenerData;
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            QueuedCallResultItem item;
+            item.hAPICall = hAPICall;
+            item.iCallback = iCallback;
+            if (pData && dataSize > 0) {
+                item.data.assign((const uint8_t*)pData, (const uint8_t*)pData + dataSize);
+            }
+            item.completed = true;
+            item.failed = bFailed;
+            item.triggerTime = std::chrono::steady_clock::now();
+            g_callResultMap[hAPICall] = item;
+
+            // Trigger SteamAPICallCompleted_t (callback 703)
+            SteamAPICallCompleted_t cc = {};
+            cc.m_hAsyncCall = hAPICall;
+            cc.m_iCallback = iCallback;
+            cc.m_cubParam = (uint32_t)item.data.size();
+
+            // Enqueue into g_manualCallbackQueue for manual dispatch callers
+            QueuedCallbackItem manualItem;
+            manualItem.iCallback = SteamAPICallCompleted_t::k_iCallback;
+            manualItem.data.assign((const uint8_t*)&cc, (const uint8_t*)&cc + sizeof(cc));
+            manualItem.triggerTime = std::chrono::steady_clock::now();
+            manualItem.isGameServer = false;
+            g_manualCallbackQueue.push_back(manualItem);
+
+            // Dispatch directly to standard registered callback listeners
+            auto range = g_clientCallbacks.equal_range(SteamAPICallCompleted_t::k_iCallback);
+            for (auto it = range.first; it != range.second; ++it) {
+                if (it->second) it->second->Run(&cc);
+            }
+
+            auto itListener = g_callResultListeners.find(hAPICall);
+            if (itListener != g_callResultListeners.end() && itListener->second) {
+                pListener = itListener->second;
+                listenerData = item.data;
+                g_callResultListeners.erase(itListener);
+            }
         }
-        item.completed = false;
-        item.failed = bFailed;
-        item.triggerTime = std::chrono::steady_clock::now();
-        g_callResultMap[hAPICall] = item;
+
+        if (pListener) {
+            pListener->Run(listenerData.data(), bFailed, hAPICall);
+        }
+    }
+
+    static void DrainPendingSearches(bool forceAll) {
+        auto now = std::chrono::steady_clock::now();
+        std::vector<PendingSearch> readySearches;
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            for (auto it = g_pendingSearches.begin(); it != g_pendingSearches.end(); ) {
+                if (forceAll || std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 50) {
+                    readySearches.push_back(*it);
+                    it = g_pendingSearches.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        for (const auto& ps : readySearches) {
+            auto matches = refix::lan::ILanCore::Get().Matchmaking().SearchLobbies(ps.criteria);
+            std::vector<uint64_t> matchingLobbyIDs;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                for (const auto& rec : matches) {
+                    uint64_t sId = EnsureSteamLobbyID(rec.lobbyId);
+                    if (sId == 0) continue;
+                    LobbyInfo& lob = g_lobbies[sId];
+                    lob.id = sId;
+                    lob.maxMembers = rec.maxMembers;
+                    lob.joinable = rec.joinable;
+                    lob.lastSeen = now;
+                    for (const auto& [k, v] : rec.attributes) {
+                        lob.data[k] = v.asString;
+                    }
+                    matchingLobbyIDs.push_back(sId);
+                }
+                g_lastMatchmakingResults = matchingLobbyIDs;
+            }
+
+            LobbyMatchList_t resp = {};
+            resp.m_nLobbiesMatching = (uint32_t)matchingLobbyIDs.size();
+            PostCallback(LobbyMatchList_t::k_iCallback, &resp, sizeof(resp));
+            CompleteCallResult(ps.callHandle, LobbyMatchList_t::k_iCallback, &resp, sizeof(resp), false);
+
+            for (uint64_t sId : matchingLobbyIDs) {
+                LobbyDataUpdate_t ldu = {};
+                ldu.m_ulSteamIDLobby = sId;
+                ldu.m_ulSteamIDMember = sId;
+                ldu.m_bSuccess = 1;
+                PostCallback(LobbyDataUpdate_t::k_iCallback, &ldu, sizeof(ldu));
+            }
+        }
     }
 
     struct DiscoveredPeer {
@@ -1356,6 +1502,16 @@ namespace UnrealSteamEmu {
         char debugMsg[128];
     };
 
+    static FnSteamNetConnectionStatusChanged g_pfnConnectionStatusChanged = nullptr;
+
+    void NotifyConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t* pCb) {
+        if (!pCb) return;
+        FnSteamNetConnectionStatusChanged pfn = g_pfnConnectionStatusChanged;
+        if (pfn) {
+            pfn(pCb);
+        }
+    }
+
     static void EnqueueSocketCallbackFromSnapshot(const ConnectionSnapshot& snap) {
         SteamNetConnectionStatusChangedCallback_t cb;
         memset(&cb, 0, sizeof(cb));
@@ -1368,6 +1524,8 @@ namespace UnrealSteamEmu {
         cb.m_info.m_eEndReason = snap.endReason;
         strncpy_s(cb.m_info.m_szEndDebug, sizeof(cb.m_info.m_szEndDebug), snap.debugMsg, _TRUNCATE);
         snprintf(cb.m_info.m_szConnectionDescription, sizeof(cb.m_info.m_szConnectionDescription), "steamid:%llu", (unsigned long long)snap.remoteSteamID.ConvertToUint64());
+
+        NotifyConnectionStatusChanged(&cb);
 
         std::vector<uint8_t> cbData((uint8_t*)&cb, (uint8_t*)&cb + sizeof(cb));
         std::lock_guard<std::recursive_mutex> cbLock(g_emuMutex);
@@ -2527,46 +2685,8 @@ namespace UnrealSteamEmu {
 
         auto now = std::chrono::steady_clock::now();
 
-        // 0a. Process pending async matchmaking searches (gathering window >= 150ms)
-        std::vector<PendingSearch> readySearches;
-        {
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            for (auto it = g_pendingSearches.begin(); it != g_pendingSearches.end(); ) {
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 400) {
-                    readySearches.push_back(*it);
-                    it = g_pendingSearches.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-
-        for (const auto& ps : readySearches) {
-            auto matches = refix::lan::ILanCore::Get().Matchmaking().SearchLobbies(ps.criteria);
-            std::vector<uint64_t> matchingLobbyIDs;
-            {
-                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-                for (const auto& rec : matches) {
-                    uint64_t sId = EnsureSteamLobbyID(rec.lobbyId);
-                    if (sId == 0) continue;
-                    LobbyInfo& lob = g_lobbies[sId];
-                    lob.id = sId;
-                    lob.maxMembers = rec.maxMembers;
-                    lob.joinable = rec.joinable;
-                    lob.lastSeen = now;
-                    for (const auto& [k, v] : rec.attributes) {
-                        lob.data[k] = v.asString;
-                    }
-                    matchingLobbyIDs.push_back(sId);
-                }
-                g_lastMatchmakingResults = matchingLobbyIDs;
-            }
-
-            LobbyMatchList_t resp = {};
-            resp.m_nLobbiesMatching = (uint32_t)matchingLobbyIDs.size();
-            PostCallback(LobbyMatchList_t::k_iCallback, &resp, sizeof(resp));
-            CompleteCallResult(ps.callHandle, LobbyMatchList_t::k_iCallback, &resp, sizeof(resp), false);
-        }
+        // 0a. Process pending async matchmaking searches (gathering window >= 50ms)
+        DrainPendingSearches(false);
 
         // 0b. Process pending join timeouts (> 5000ms)
         {
@@ -3413,7 +3533,9 @@ namespace UnrealSteamEmu {
             return UnrealSteamEmu::GetAPICallResult(hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
         }
 
-        virtual void RunFrame() override {}
+        virtual void RunFrame() override {
+            UnrealSteamEmu::DrainPendingSearches(false);
+        }
         virtual uint32 GetIPCCallCount() override { return 0; }
         virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t pFunction) override {}
         virtual bool IsOverlayEnabled() override { return false; }
@@ -3643,6 +3765,18 @@ namespace UnrealSteamEmu {
             uint64_t lID = steamIDLobby.ConvertToUint64();
             std::string coreLobbyId = GetCoreLobbyId(lID);
 
+            if (coreLobbyId.empty()) {
+                auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                for (const auto& l : allLobbies) {
+                    if (refix::steam::ComputeLobbySteamID(l.lobbyId) == lID ||
+                        refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId) == lID) {
+                        coreLobbyId = l.lobbyId;
+                        refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
+                        break;
+                    }
+                }
+            }
+
             bool isLocalHost = false;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -3792,7 +3926,7 @@ namespace UnrealSteamEmu {
                 if (rec) {
                     auto it = rec->attributes.find(pchKey);
                     if (it != rec->attributes.end()) {
-                        thread_local char buf[512];
+                        thread_local char buf[16384];
                         strncpy_s(buf, sizeof(buf), it->second.asString.c_str(), _TRUNCATE);
                         return buf;
                     }
@@ -3803,7 +3937,7 @@ namespace UnrealSteamEmu {
             if (it != g_lobbies.end()) {
                 auto dIt = it->second.data.find(pchKey);
                 if (dIt != it->second.data.end()) {
-                    thread_local char buf[512];
+                    thread_local char buf[16384];
                     strncpy_s(buf, sizeof(buf), dIt->second.c_str(), _TRUNCATE);
                     return buf;
                 }
@@ -3889,7 +4023,7 @@ namespace UnrealSteamEmu {
                 if (uIt != it->second.memberData.end()) {
                     auto dIt = uIt->second.find(pchKey);
                     if (dIt != uIt->second.end()) {
-                        thread_local char buf[512];
+                        thread_local char buf[16384];
                         strncpy_s(buf, sizeof(buf), dIt->second.c_str(), _TRUNCATE);
                         return buf;
                     }
@@ -3917,7 +4051,41 @@ namespace UnrealSteamEmu {
             return 0;
         }
 
-        virtual bool RequestLobbyData(CSteamID steamIDLobby) override { return true; }
+        virtual bool RequestLobbyData(CSteamID steamIDLobby) override {
+            uint64_t lID = steamIDLobby.ConvertToUint64();
+            if (lID == 0) return false;
+
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            bool found = false;
+            if (!coreLobbyId.empty()) {
+                auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
+                if (rec) {
+                    found = true;
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    LobbyInfo& lob = g_lobbies[lID];
+                    lob.id = lID;
+                    lob.maxMembers = rec->maxMembers;
+                    lob.joinable = rec->joinable;
+                    for (const auto& [k, v] : rec->attributes) {
+                        lob.data[k] = v.asString;
+                    }
+                }
+            }
+            if (!found) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                if (it != g_lobbies.end()) {
+                    found = true;
+                }
+            }
+
+            LobbyDataUpdate_t resp = {};
+            resp.m_ulSteamIDLobby = lID;
+            resp.m_ulSteamIDMember = lID;
+            resp.m_bSuccess = found ? 1 : 0;
+            PostCallback(LobbyDataUpdate_t::k_iCallback, &resp, sizeof(resp));
+            return true;
+        }
 
         virtual void SetLobbyGameServer(CSteamID steamIDLobby, uint32 unGameServerIP, uint16 unGameServerPort, CSteamID steamIDGameServer) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
@@ -5105,6 +5273,17 @@ namespace UnrealSteamEmu {
             return k_EResultNoMatch;
         }
         virtual bool SetConfigValue(ESteamNetworkingConfigValue eValue, ESteamNetworkingConfigScope eScopeType, intptr_t scopeObj, ESteamNetworkingConfigDataType eDataType, const void *pArg) override {
+            if (eValue == k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged) {
+                if (!pArg) {
+                    g_pfnConnectionStatusChanged = nullptr;
+                } else if (eDataType == k_ESteamNetworkingConfig_Ptr) {
+                    g_pfnConnectionStatusChanged = *(FnSteamNetConnectionStatusChanged*)pArg;
+                } else {
+                    g_pfnConnectionStatusChanged = (FnSteamNetConnectionStatusChanged)pArg;
+                }
+                ReFixLog("[UnrealSteam] SetConfigValue: Registered ConnectionStatusChanged callback: %p", (void*)g_pfnConnectionStatusChanged);
+                return true;
+            }
             return true;
         }
         virtual ESteamNetworkingGetConfigValueResult GetConfigValue(ESteamNetworkingConfigValue eValue, ESteamNetworkingConfigScope eScopeType, intptr_t scopeObj, ESteamNetworkingConfigDataType *pOutDataType, void *pResult, size_t *cbResult) override {
@@ -6218,6 +6397,10 @@ namespace UnrealSteamEmu {
         virtual void ReleaseUser(HSteamPipe hSteamPipe, HSteamUser hUser) override {}
 
         virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "SteamUser023") || strstr(pchVersion, "SteamUser022") ||
+                strstr(pchVersion, "STEAMUSER023") || strstr(pchVersion, "STEAMUSER022"))) {
+                return (ISteamUser*)&g_steamUserInstance;
+            }
             if (pchVersion && (strstr(pchVersion, "SteamUser021") || strstr(pchVersion, "SteamUser020") ||
                 strstr(pchVersion, "SteamUser019") || strstr(pchVersion, "SteamUser018") ||
                 strstr(pchVersion, "SteamUser017") || strstr(pchVersion, "SteamUser016") ||
@@ -6319,6 +6502,10 @@ namespace UnrealSteamEmu {
         virtual void ReleaseUser(HSteamPipe hSteamPipe, HSteamUser hUser) override {}
 
         virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "SteamUser023") || strstr(pchVersion, "SteamUser022") ||
+                strstr(pchVersion, "STEAMUSER023") || strstr(pchVersion, "STEAMUSER022"))) {
+                return (ISteamUser*)&g_steamUserInstance;
+            }
             if (pchVersion && (strstr(pchVersion, "SteamUser021") || strstr(pchVersion, "SteamUser020") ||
                 strstr(pchVersion, "SteamUser019") || strstr(pchVersion, "SteamUser018") ||
                 strstr(pchVersion, "SteamUser017") || strstr(pchVersion, "SteamUser016") ||
@@ -6424,6 +6611,9 @@ namespace UnrealSteamEmu {
             return &g_steamClient021Instance;
         if (strstr(pchVersion, "SteamClient") || strstr(pchVersion, "STEAMCLIENT"))
             return &g_steamClientInstance;
+        if (strstr(pchVersion, "SteamUser023") || strstr(pchVersion, "STEAMUSER023") ||
+            strstr(pchVersion, "SteamUser022") || strstr(pchVersion, "STEAMUSER022"))
+            return (ISteamUser*)&g_steamUserInstance;
         if (strstr(pchVersion, "SteamUser021") || strstr(pchVersion, "SteamUser020") ||
             strstr(pchVersion, "SteamUser019") || strstr(pchVersion, "SteamUser018") ||
             strstr(pchVersion, "SteamUser017") || strstr(pchVersion, "SteamUser016") ||
@@ -6814,6 +7004,13 @@ namespace UnrealSteamEmu {
                 SteamP2PHook::RegisterPeer(sid, pInfo->endpoint.ipv4, pInfo->endpoint.port);
                 ReFixLog("[UnrealSteam] LanCore PeerDiscovered: steamID=%llu (%s) at %s",
                          sid, pInfo->displayName.c_str(), pInfo->endpoint.ToString().c_str());
+
+                // Check for persona name collision across LAN
+                if (_stricmp(pInfo->displayName.c_str(), g_personaName.c_str()) == 0 && g_localSteamID > sid) {
+                    g_personaName += "_2";
+                    refix::lan::ILanCore::Get().Identity().SetDisplayName(g_personaName);
+                    ReFixLog("[UnrealSteam] Resolved LAN persona name collision with peer %llu: renamed local player to '%s'", sid, g_personaName.c_str());
+                }
             }
         });
 
@@ -6824,6 +7021,24 @@ namespace UnrealSteamEmu {
                 return;
             }
             ReFixLog("[UnrealSteam] LanCore LobbyCreated: coreId='%s' -> steamID=%llu", ev.lobbyId.c_str(), steamLobbyId);
+
+            auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(ev.lobbyId);
+            if (rec) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                LobbyInfo& lob = g_lobbies[steamLobbyId];
+                lob.id = steamLobbyId;
+                lob.maxMembers = rec->maxMembers;
+                lob.joinable = rec->joinable;
+                lob.lastSeen = std::chrono::steady_clock::now();
+                for (const auto& [k, v] : rec->attributes) {
+                    lob.data[k] = v.asString;
+                }
+            }
+            LobbyDataUpdate_t resp = {};
+            resp.m_ulSteamIDLobby = steamLobbyId;
+            resp.m_ulSteamIDMember = steamLobbyId;
+            resp.m_bSuccess = 1;
+            PostCallback(LobbyDataUpdate_t::k_iCallback, &resp, sizeof(resp));
         });
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyDestroyed, [](const refix::lan::LanEvent& ev) {
@@ -7216,6 +7431,14 @@ namespace UnrealSteamEmu {
         if (g_hSlotMutex != NULL) {
             CloseHandle(g_hSlotMutex);
             g_hSlotMutex = NULL;
+        }
+        if (g_hPersonaNameMutex != NULL) {
+            CloseHandle(g_hPersonaNameMutex);
+            g_hPersonaNameMutex = NULL;
+        }
+        if (g_hSteamIdMutex != NULL) {
+            CloseHandle(g_hSteamIdMutex);
+            g_hSteamIdMutex = NULL;
         }
 
         g_bInitialized = false;

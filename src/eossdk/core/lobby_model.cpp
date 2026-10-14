@@ -181,6 +181,9 @@ bool SearchParameter::Matches(const LobbyRecord& lobby) const {
     } else if (Key == EOS_LOBBY_SEARCH_MINSLOTSAVAILABLE) {
         actual.Type = EOS_ELobbyAttributeType::EOS_AT_INT64;
         actual.AsInt64 = (int64_t)lobby.AvailableSlots();
+    } else if (Key == "UserId" || Key == "userid" || Key == "TargetUserId" || Key == "OwnerUserId" || Key == "owneruserid") {
+        actual.Type = EOS_ELobbyAttributeType::EOS_AT_STRING;
+        actual.AsUtf8 = lobby.OwnerPuid;
     } else {
         // A lobby that does not carry the attribute cannot satisfy a positive
         // filter on it, but it does satisfy "not equal".

@@ -6382,6 +6382,67 @@ extern "C" __declspec(dllexport) bool SteamGameServer_BSecure() {
     return true;
 }
 
+typedef uint32_t HSteamListenSocket;
+typedef uint32_t HSteamNetConnection;
+typedef uint32_t HSteamNetPollGroup;
+
+extern "C" {
+    HSteamListenSocket SteamAPI_ISteamNetworkingSockets_CreateListenSocketIP(void* self, const void* localAddress, int nOptions, const void* pOptions);
+    HSteamNetConnection SteamAPI_ISteamNetworkingSockets_ConnectByIPAddress(void* self, const void* address, int nOptions, const void* pOptions);
+    HSteamListenSocket SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P(void* self, int nLocalVirtualPort, int nOptions, const void* pOptions);
+    HSteamNetConnection SteamAPI_ISteamNetworkingSockets_ConnectP2P(void* self, const void* identityRemote, int nRemoteVirtualPort, int nOptions, const void* pOptions);
+    int SteamAPI_ISteamNetworkingSockets_AcceptConnection(void* self, HSteamNetConnection hConn);
+    bool SteamAPI_ISteamNetworkingSockets_CloseConnection(void* self, HSteamNetConnection hPeer, int nReason, const char* pszDebug, bool bEnableLinger);
+    bool SteamAPI_ISteamNetworkingSockets_CloseListenSocket(void* self, HSteamListenSocket hSocket);
+    bool SteamAPI_ISteamNetworkingSockets_SetConnectionUserData(void* self, HSteamNetConnection hPeer, int64_t nUserData);
+    int64_t SteamAPI_ISteamNetworkingSockets_GetConnectionUserData(void* self, HSteamNetConnection hPeer);
+    void SteamAPI_ISteamNetworkingSockets_SetConnectionName(void* self, HSteamNetConnection hPeer, const char* pszName);
+    bool SteamAPI_ISteamNetworkingSockets_GetConnectionName(void* self, HSteamNetConnection hPeer, char* pszName, int nMaxLen);
+    int SteamAPI_ISteamNetworkingSockets_SendMessageToConnection(void* self, HSteamNetConnection hConn, const void* pData, uint32_t cbData, int nSendFlags, int64_t* pOutMessageNumber);
+    void SteamAPI_ISteamNetworkingSockets_SendMessages(void* self, int nMessages, void* const* pMessages, int64_t* pOutMessageNumberOrResult);
+    int SteamAPI_ISteamNetworkingSockets_FlushMessagesOnConnection(void* self, HSteamNetConnection hConn);
+    int SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection(void* self, HSteamNetConnection hConn, void** ppOutMessages, int nMaxMessages);
+    bool SteamAPI_ISteamNetworkingSockets_GetConnectionInfo(void* self, HSteamNetConnection hConn, void* pInfo);
+    int SteamAPI_ISteamNetworkingSockets_GetConnectionRealTimeStatus(void* self, HSteamNetConnection hConn, void* pStatus, int nLanes, void* pLanes);
+    bool SteamAPI_ISteamNetworkingSockets_GetQuickConnectionStatus(void* self, HSteamNetConnection hConn, void* pStats);
+    int SteamAPI_ISteamNetworkingSockets_GetDetailedConnectionStatus(void* self, HSteamNetConnection hConn, char* pszBuf, int cbBuf);
+    bool SteamAPI_ISteamNetworkingSockets_GetListenSocketAddress(void* self, HSteamListenSocket hSocket, void* address);
+    bool SteamAPI_ISteamNetworkingSockets_CreateSocketPair(void* self, HSteamNetConnection* pOutConnection1, HSteamNetConnection* pOutConnection2, bool bUseNetworkLoopback, const void* pIdentity1, const void* pIdentity2);
+    int SteamAPI_ISteamNetworkingSockets_ConfigureConnectionLanes(void* self, HSteamNetConnection hConn, int nNumLanes, const int* pLanePriorities, const uint16_t* pLaneWeights);
+    bool SteamAPI_ISteamNetworkingSockets_GetIdentity(void* self, void* pIdentity);
+    int SteamAPI_ISteamNetworkingSockets_InitAuthentication(void* self);
+    int SteamAPI_ISteamNetworkingSockets_GetAuthenticationStatus(void* self, void* pDetails);
+    HSteamNetPollGroup SteamAPI_ISteamNetworkingSockets_CreatePollGroup(void* self);
+    bool SteamAPI_ISteamNetworkingSockets_DestroyPollGroup(void* self, HSteamNetPollGroup hPollGroup);
+    bool SteamAPI_ISteamNetworkingSockets_SetConnectionPollGroup(void* self, HSteamNetConnection hConn, HSteamNetPollGroup hPollGroup);
+    int SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnPollGroup(void* self, HSteamNetPollGroup hPollGroup, void** ppOutMessages, int nMaxMessages);
+    bool SteamAPI_ISteamNetworkingSockets_ReceivedRelayAuthTicket(void* self, const void* pvTicket, int cbTicket, void* pOutParsedTicket);
+    int SteamAPI_ISteamNetworkingSockets_FindRelayAuthTicketForServer(void* self, const void* identityGameServer, int nRemoteVirtualPort, void* pOutParsedTicket);
+    HSteamNetConnection SteamAPI_ISteamNetworkingSockets_ConnectToHostedDedicatedServer(void* self, const void* identityTarget, int nRemoteVirtualPort, int nOptions, const void* pOptions);
+    uint16_t SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerPort(void* self);
+    uint32_t SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerPOPID(void* self);
+    int SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerAddress(void* self, void* pRouting);
+    HSteamListenSocket SteamAPI_ISteamNetworkingSockets_CreateHostedDedicatedServerListenSocket(void* self, int nLocalVirtualPort, int nOptions, const void* pOptions);
+    int SteamAPI_ISteamNetworkingSockets_GetGameCoordinatorServerLogin(void* self, void* pLoginInfo, int* pcbSignedBlob, void* pBlob);
+    HSteamNetConnection SteamAPI_ISteamNetworkingSockets_ConnectP2PCustomSignaling(void* self, void* pSignaling, const void* pPeerIdentity, int nRemoteVirtualPort, int nOptions, const void* pOptions);
+    bool SteamAPI_ISteamNetworkingSockets_ReceivedP2PCustomSignal(void* self, const void* pMsg, int cbMsg, void* pContext);
+    bool SteamAPI_ISteamNetworkingSockets_GetCertificateRequest(void* self, int* pcbBlob, void* pBlob, void* errMsg);
+    bool SteamAPI_ISteamNetworkingSockets_SetCertificate(void* self, const void* pCertificate, int cbCertificate, void* errMsg);
+    void SteamAPI_ISteamNetworkingSockets_ResetIdentity(void* self, const void* pIdentity);
+    void SteamAPI_ISteamNetworkingSockets_RunCallbacks(void* self);
+    bool SteamAPI_ISteamNetworkingSockets_BeginAsyncRequestFakeIP(void* self, int nNumPorts);
+    void SteamAPI_ISteamNetworkingSockets_GetFakeIP(void* self, int idxFirstPort, void* pInfo);
+    HSteamListenSocket SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2PFakeIP(void* self, int idxFakePort, int nOptions, const void* pOptions);
+    int SteamAPI_ISteamNetworkingSockets_GetRemoteFakeIPForConnection(void* self, HSteamNetConnection hConn, void* pOutAddr);
+    void* SteamAPI_ISteamNetworkingSockets_CreateFakeUDPPort(void* self, int idxFakeServerPort);
+
+    int64_t SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp(void* self);
+    void SteamAPI_ISteamNetworkingUtils_SetDebugOutputFunction(void* self, int eDetailLevel, void* pfnFunc);
+    bool SteamAPI_ISteamNetworkingUtils_SetConfigValue(void* self, int eValue, int eScopeType, intptr_t scopeObj, int eDataType, const void* pArg);
+    int SteamAPI_ISteamNetworkingUtils_GetConfigValue(void* self, int eValue, int eScopeType, intptr_t scopeObj, int* pOutDataType, void* pResult, size_t* cbResult);
+    void* SteamAPI_ISteamNetworkingUtils_AllocateMessage(void* self, int cbAllocateBuffer);
+}
+
 static FARPROC LookupLanExport(const char* name) {
     static const std::unordered_map<std::string, FARPROC> s_lanExports = {
         { "SteamClient", (FARPROC)SteamClient },
@@ -6558,7 +6619,63 @@ static FARPROC LookupLanExport(const char* name) {
         { "SteamInternal_SteamAPI_Init", (FARPROC)SteamInternal_SteamAPI_Init },
         { "SteamAPI_SteamUser_v022", (FARPROC)SteamAPI_SteamUser_v022 },
         { "SteamAPI_SteamUser_v023", (FARPROC)SteamAPI_SteamUser_v023 },
-        { "SteamAPI_SteamUserStats_v013", (FARPROC)SteamAPI_SteamUserStats_v013 }
+        { "SteamAPI_SteamUserStats_v013", (FARPROC)SteamAPI_SteamUserStats_v013 },
+
+        // Flat ISteamNetworkingSockets APIs (Canonical LanCore / Offline Integration)
+        { "SteamAPI_ISteamNetworkingSockets_CreateListenSocketIP", (FARPROC)SteamAPI_ISteamNetworkingSockets_CreateListenSocketIP },
+        { "SteamAPI_ISteamNetworkingSockets_ConnectByIPAddress", (FARPROC)SteamAPI_ISteamNetworkingSockets_ConnectByIPAddress },
+        { "SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P", (FARPROC)SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P },
+        { "SteamAPI_ISteamNetworkingSockets_ConnectP2P", (FARPROC)SteamAPI_ISteamNetworkingSockets_ConnectP2P },
+        { "SteamAPI_ISteamNetworkingSockets_AcceptConnection", (FARPROC)SteamAPI_ISteamNetworkingSockets_AcceptConnection },
+        { "SteamAPI_ISteamNetworkingSockets_CloseConnection", (FARPROC)SteamAPI_ISteamNetworkingSockets_CloseConnection },
+        { "SteamAPI_ISteamNetworkingSockets_CloseListenSocket", (FARPROC)SteamAPI_ISteamNetworkingSockets_CloseListenSocket },
+        { "SteamAPI_ISteamNetworkingSockets_SetConnectionUserData", (FARPROC)SteamAPI_ISteamNetworkingSockets_SetConnectionUserData },
+        { "SteamAPI_ISteamNetworkingSockets_GetConnectionUserData", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetConnectionUserData },
+        { "SteamAPI_ISteamNetworkingSockets_SetConnectionName", (FARPROC)SteamAPI_ISteamNetworkingSockets_SetConnectionName },
+        { "SteamAPI_ISteamNetworkingSockets_GetConnectionName", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetConnectionName },
+        { "SteamAPI_ISteamNetworkingSockets_SendMessageToConnection", (FARPROC)SteamAPI_ISteamNetworkingSockets_SendMessageToConnection },
+        { "SteamAPI_ISteamNetworkingSockets_SendMessages", (FARPROC)SteamAPI_ISteamNetworkingSockets_SendMessages },
+        { "SteamAPI_ISteamNetworkingSockets_FlushMessagesOnConnection", (FARPROC)SteamAPI_ISteamNetworkingSockets_FlushMessagesOnConnection },
+        { "SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection", (FARPROC)SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection },
+        { "SteamAPI_ISteamNetworkingSockets_GetConnectionInfo", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetConnectionInfo },
+        { "SteamAPI_ISteamNetworkingSockets_GetConnectionRealTimeStatus", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetConnectionRealTimeStatus },
+        { "SteamAPI_ISteamNetworkingSockets_GetQuickConnectionStatus", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetQuickConnectionStatus },
+        { "SteamAPI_ISteamNetworkingSockets_GetDetailedConnectionStatus", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetDetailedConnectionStatus },
+        { "SteamAPI_ISteamNetworkingSockets_GetListenSocketAddress", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetListenSocketAddress },
+        { "SteamAPI_ISteamNetworkingSockets_CreateSocketPair", (FARPROC)SteamAPI_ISteamNetworkingSockets_CreateSocketPair },
+        { "SteamAPI_ISteamNetworkingSockets_ConfigureConnectionLanes", (FARPROC)SteamAPI_ISteamNetworkingSockets_ConfigureConnectionLanes },
+        { "SteamAPI_ISteamNetworkingSockets_GetIdentity", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetIdentity },
+        { "SteamAPI_ISteamNetworkingSockets_InitAuthentication", (FARPROC)SteamAPI_ISteamNetworkingSockets_InitAuthentication },
+        { "SteamAPI_ISteamNetworkingSockets_GetAuthenticationStatus", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetAuthenticationStatus },
+        { "SteamAPI_ISteamNetworkingSockets_CreatePollGroup", (FARPROC)SteamAPI_ISteamNetworkingSockets_CreatePollGroup },
+        { "SteamAPI_ISteamNetworkingSockets_DestroyPollGroup", (FARPROC)SteamAPI_ISteamNetworkingSockets_DestroyPollGroup },
+        { "SteamAPI_ISteamNetworkingSockets_SetConnectionPollGroup", (FARPROC)SteamAPI_ISteamNetworkingSockets_SetConnectionPollGroup },
+        { "SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnPollGroup", (FARPROC)SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnPollGroup },
+        { "SteamAPI_ISteamNetworkingSockets_ReceivedRelayAuthTicket", (FARPROC)SteamAPI_ISteamNetworkingSockets_ReceivedRelayAuthTicket },
+        { "SteamAPI_ISteamNetworkingSockets_FindRelayAuthTicketForServer", (FARPROC)SteamAPI_ISteamNetworkingSockets_FindRelayAuthTicketForServer },
+        { "SteamAPI_ISteamNetworkingSockets_ConnectToHostedDedicatedServer", (FARPROC)SteamAPI_ISteamNetworkingSockets_ConnectToHostedDedicatedServer },
+        { "SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerPort", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerPort },
+        { "SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerPOPID", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerPOPID },
+        { "SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerAddress", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetHostedDedicatedServerAddress },
+        { "SteamAPI_ISteamNetworkingSockets_CreateHostedDedicatedServerListenSocket", (FARPROC)SteamAPI_ISteamNetworkingSockets_CreateHostedDedicatedServerListenSocket },
+        { "SteamAPI_ISteamNetworkingSockets_GetGameCoordinatorServerLogin", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetGameCoordinatorServerLogin },
+        { "SteamAPI_ISteamNetworkingSockets_ConnectP2PCustomSignaling", (FARPROC)SteamAPI_ISteamNetworkingSockets_ConnectP2PCustomSignaling },
+        { "SteamAPI_ISteamNetworkingSockets_ReceivedP2PCustomSignal", (FARPROC)SteamAPI_ISteamNetworkingSockets_ReceivedP2PCustomSignal },
+        { "SteamAPI_ISteamNetworkingSockets_GetCertificateRequest", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetCertificateRequest },
+        { "SteamAPI_ISteamNetworkingSockets_SetCertificate", (FARPROC)SteamAPI_ISteamNetworkingSockets_SetCertificate },
+        { "SteamAPI_ISteamNetworkingSockets_ResetIdentity", (FARPROC)SteamAPI_ISteamNetworkingSockets_ResetIdentity },
+        { "SteamAPI_ISteamNetworkingSockets_RunCallbacks", (FARPROC)SteamAPI_ISteamNetworkingSockets_RunCallbacks },
+        { "SteamAPI_ISteamNetworkingSockets_BeginAsyncRequestFakeIP", (FARPROC)SteamAPI_ISteamNetworkingSockets_BeginAsyncRequestFakeIP },
+        { "SteamAPI_ISteamNetworkingSockets_GetFakeIP", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetFakeIP },
+        { "SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2PFakeIP", (FARPROC)SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2PFakeIP },
+        { "SteamAPI_ISteamNetworkingSockets_GetRemoteFakeIPForConnection", (FARPROC)SteamAPI_ISteamNetworkingSockets_GetRemoteFakeIPForConnection },
+        { "SteamAPI_ISteamNetworkingSockets_CreateFakeUDPPort", (FARPROC)SteamAPI_ISteamNetworkingSockets_CreateFakeUDPPort },
+        // Flat ISteamNetworkingUtils APIs
+        { "SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp", (FARPROC)SteamAPI_ISteamNetworkingUtils_GetLocalTimestamp },
+        { "SteamAPI_ISteamNetworkingUtils_SetDebugOutputFunction", (FARPROC)SteamAPI_ISteamNetworkingUtils_SetDebugOutputFunction },
+        { "SteamAPI_ISteamNetworkingUtils_SetConfigValue", (FARPROC)SteamAPI_ISteamNetworkingUtils_SetConfigValue },
+        { "SteamAPI_ISteamNetworkingUtils_GetConfigValue", (FARPROC)SteamAPI_ISteamNetworkingUtils_GetConfigValue },
+        { "SteamAPI_ISteamNetworkingUtils_AllocateMessage", (FARPROC)SteamAPI_ISteamNetworkingUtils_AllocateMessage }
     };
 
     auto it = s_lanExports.find(name);

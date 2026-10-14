@@ -43,6 +43,8 @@ namespace UnrealSteamEmu {
     void ManualDispatch_FreeLastCallback(int32_t hSteamPipe);
     bool ManualDispatch_GetAPICallResult(int32_t hSteamPipe, uint64_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
 
+    void NotifyConnectionStatusChanged(struct SteamNetConnectionStatusChangedCallback_t* pCb);
+
     // Interface Factory & Accessors
     void* GetGenericInterface(const char* pchVersion);
     void* FindOrCreateUserInterface(int32_t hUser, const char* pszVersion);

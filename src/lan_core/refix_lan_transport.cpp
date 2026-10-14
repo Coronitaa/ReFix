@@ -385,13 +385,16 @@ void LanTransport::Stop() {
     }
 
     // Wake up reactor thread by sending a local ping datagram to ephemeral port
-    if (m_dataSocket != INVALID_SOCKET && m_localDataEndpoint.port != 0) {
-        sockaddr_in loopSin{};
-        loopSin.sin_family = AF_INET;
-        loopSin.sin_addr.s_addr = htonl(0x7F000001);
-        loopSin.sin_port = htons(m_localDataEndpoint.port);
-        char wake = 0;
-        sendto(m_dataSocket, &wake, 1, 0, reinterpret_cast<const sockaddr*>(&loopSin), sizeof(loopSin));
+    if (m_localDataEndpoint.port != 0) {
+        std::lock_guard<std::mutex> outLock(m_outputMutex);
+        if (m_dataSocket != INVALID_SOCKET) {
+            sockaddr_in loopSin{};
+            loopSin.sin_family = AF_INET;
+            loopSin.sin_addr.s_addr = htonl(0x7F000001);
+            loopSin.sin_port = htons(m_localDataEndpoint.port);
+            char wake = 0;
+            sendto(m_dataSocket, &wake, 1, 0, reinterpret_cast<const sockaddr*>(&loopSin), sizeof(loopSin));
+        }
     }
 
     if (m_reactorThread.joinable()) {
@@ -402,17 +405,32 @@ void LanTransport::Stop() {
         }
     }
 
-    std::lock_guard<std::mutex> outLock(m_outputMutex);
-    if (m_groupSocket != INVALID_SOCKET) {
-        if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, false);
-        closesocket(m_groupSocket);
-        m_groupSocket = INVALID_SOCKET;
+    {
+        std::lock_guard<std::mutex> outLock(m_outputMutex);
+        if (m_groupSocket != INVALID_SOCKET) {
+            if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, false);
+            closesocket(m_groupSocket);
+            m_groupSocket = INVALID_SOCKET;
+        }
+
+        if (m_dataSocket != INVALID_SOCKET) {
+            if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_dataSocket, false);
+            closesocket(m_dataSocket);
+            m_dataSocket = INVALID_SOCKET;
+        }
     }
 
-    if (m_dataSocket != INVALID_SOCKET) {
-        if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_dataSocket, false);
-        closesocket(m_dataSocket);
-        m_dataSocket = INVALID_SOCKET;
+    {
+        std::lock_guard<std::mutex> stateLock(m_stateMutex);
+        m_peerStates.clear();
+        m_fragmentMap.clear();
+        m_peerReassemblyBytes.clear();
+        m_globalReassemblyBytes = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
+        m_inboundQueue.clear();
     }
 }
 
@@ -491,7 +509,8 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
 
     PeerId senderPeer = hdr->GetSenderPeerId();
     // Ignore self-announcements
-    if (m_localPeerId.IsValid() && senderPeer == m_localPeerId) {
+    PeerId localId = GetLocalPeerId();
+    if (localId.IsValid() && senderPeer == localId) {
         return;
     }
 
@@ -503,8 +522,9 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
     if (type == MsgType::DiscoveryBeacon || type == MsgType::DiscoveryQuery || type == MsgType::DiscoveryResponse ||
         type == MsgType::LobbyAnnouncement || type == MsgType::LobbyQuery ||
         type == MsgType::LobbyJoinReq || type == MsgType::LobbyJoinResp || type == MsgType::LobbyLeaveReq) {
-        if (m_listener) {
-            m_listener->OnDiscoveryPacket(fromEp, type, payload, payloadLen);
+        auto* listener = m_listener.load();
+        if (listener) {
+            listener->OnDiscoveryPacket(fromEp, type, payload, payloadLen);
         }
         return;
     }
@@ -616,6 +636,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             }
         }
 
+        std::vector<InboundPacket> readyPackets;
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
             auto now = std::chrono::steady_clock::now();
@@ -748,7 +769,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             // In-order packet (seq == state.expectedSequenceIn)
             bool isFrag = ((hdr->flags & FLAG_FRAGMENT) != 0);
             if (!isFrag) {
-                if (!m_listener) {
+                if (!m_listener.load()) {
                     std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
                     if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
                         m_inboundQueueDroppedPackets.fetch_add(1);
@@ -785,16 +806,16 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     pkt.fragTotal = hdr->fragTotal;
                     pkt.generationId = hdr->generationId;
                     pkt.payload.assign(payload, payload + payloadLen);
-                    m_listener->OnInboundData(pkt);
+                    readyPackets.push_back(std::move(pkt));
                 }
                 state.expectedSequenceIn++;
                 // Drain any contiguous candidates retained in outOfOrderInbound
-                DrainRetainedInboundLocked(&state);
-                if (state.timedOut) return;
-                uint32_t ackSeq = state.expectedSequenceIn - 1;
-                uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
-                SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
-                return;
+                DrainRetainedInboundLocked(&state, readyPackets);
+                if (!state.timedOut) {
+                    uint32_t ackSeq = state.expectedSequenceIn - 1;
+                    uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
+                    SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
+                }
             } else {
                 // Fragmented in-order candidate
                 if (state.outOfOrderInbound.size() < 64) {
@@ -814,15 +835,23 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                     state.outOfOrderInbound[seq] = std::move(pkt);
                 }
                 uint32_t prevExpected = state.expectedSequenceIn;
-                DrainRetainedInboundLocked(&state);
-                if (state.timedOut) return;
-                if (state.expectedSequenceIn == prevExpected) {
-                    uint32_t ackSeq = state.expectedSequenceIn - 1;
-                    uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
-                    SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
+                DrainRetainedInboundLocked(&state, readyPackets);
+                if (!state.timedOut) {
+                    if (state.expectedSequenceIn == prevExpected) {
+                        uint32_t ackSeq = state.expectedSequenceIn - 1;
+                        uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
+                        SendAckPacket(state.lastEndpoint, hdr->channel, ackSeq, sackMask, state.remoteGeneration);
+                    }
                 }
             }
         } // release state lock
+
+        auto* listener = m_listener.load();
+        if (listener) {
+            for (const auto& pkt : readyPackets) {
+                listener->OnInboundData(pkt);
+            }
+        }
         return;
     }
 
@@ -846,15 +875,17 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         pkt.fragTotal = 1;
         pkt.payload.assign(payload, payload + payloadLen);
 
-        if (!m_listener) {
+        auto* listener = m_listener.load();
+        if (!listener) {
             std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
             if (m_inboundQueue.size() < REFIX_MAX_INBOUND_QUEUE_SIZE) {
                 m_inboundQueue.push_back(pkt);
             } else {
                 m_inboundQueueDroppedPackets.fetch_add(1);
             }
+        } else {
+            listener->OnInboundData(pkt);
         }
-        if (m_listener) m_listener->OnInboundData(pkt);
         return;
     }
 }
@@ -909,12 +940,15 @@ void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uin
     sin.sin_addr.s_addr = htonl(target.ipv4);
     sin.sin_port = htons(target.port);
 
+    std::lock_guard<std::mutex> outLock(m_outputMutex);
+    if (m_dataSocket == INVALID_SOCKET) return;
+
     sendto(m_dataSocket, reinterpret_cast<const char*>(&hdr), sizeof(hdr), 0,
            reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
 }
 
 void LanTransport::SendDisconnectPacketLocked(const LanEndpoint& target, uint32_t generationId) {
-    if (!target.IsValid() || m_dataSocket == INVALID_SOCKET) return;
+    if (!target.IsValid()) return;
     if (!LanFirewall::Get().IsAllowedEndpoint(target)) return;
 
     WireHeader dHdr{};
@@ -937,6 +971,10 @@ void LanTransport::SendDisconnectPacketLocked(const LanEndpoint& target, uint32_
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = htonl(target.ipv4);
     sin.sin_port = htons(target.port);
+
+    std::lock_guard<std::mutex> outLock(m_outputMutex);
+    if (m_dataSocket == INVALID_SOCKET) return;
+
     sendto(m_dataSocket, reinterpret_cast<const char*>(&dHdr), sizeof(dHdr), 0,
            reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
 }
@@ -952,11 +990,10 @@ uint32_t LanTransport::CalculateSackMask(const std::map<uint32_t, InboundPacket>
     return sackMask;
 }
 
-void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) {
+void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer, std::vector<InboundPacket>& readyPackets) {
     auto drainSingle = [&](const PeerId& peerId, PeerReliabilityState& state) {
         if (state.outOfOrderInbound.empty()) return;
         auto now = std::chrono::steady_clock::now();
-        std::vector<InboundPacket> packetsToNotify;
         bool advanced = false;
 
         while (!state.outOfOrderInbound.empty()) {
@@ -968,7 +1005,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
             bool candIsFrag = ((cand.flags & FLAG_FRAGMENT) != 0);
 
             if (!candIsFrag) {
-                if (!m_listener) {
+                if (!m_listener.load()) {
                     std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
                     if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
                         m_inboundQueueDroppedPackets.fetch_add(1);
@@ -976,7 +1013,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     }
                     m_inboundQueue.push_back(std::move(cand));
                 } else {
-                    packetsToNotify.push_back(std::move(cand));
+                    readyPackets.push_back(std::move(cand));
                 }
                 state.expectedSequenceIn++;
                 advanced = true;
@@ -1103,7 +1140,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     }
                 }
 
-                if (willComplete && !m_listener) {
+                if (willComplete && !m_listener.load()) {
                     std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
                     if (m_inboundQueue.size() >= REFIX_MAX_INBOUND_QUEUE_SIZE) {
                         m_inboundQueueDroppedPackets.fetch_add(1);
@@ -1136,11 +1173,11 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
                     }
                     ReleaseReassemblyContextLocked(itFrag);
 
-                    if (!m_listener) {
+                    if (!m_listener.load()) {
                         std::lock_guard<std::mutex> qlock(m_inboundQueueMutex);
                         m_inboundQueue.push_back(std::move(fullMsg));
                     } else {
-                        packetsToNotify.push_back(std::move(fullMsg));
+                        readyPackets.push_back(std::move(fullMsg));
                     }
                 }
 
@@ -1152,12 +1189,6 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
             uint32_t ackSeq = state.expectedSequenceIn - 1;
             uint32_t sackMask = CalculateSackMask(state.outOfOrderInbound, ackSeq);
             SendAckPacket(state.lastEndpoint, 0, ackSeq, sackMask, state.remoteGeneration);
-        }
-
-        if (m_listener) {
-            for (const auto& p : packetsToNotify) {
-                m_listener->OnInboundData(p);
-            }
         }
     };
 
@@ -1177,6 +1208,7 @@ void LanTransport::DrainRetainedInboundLocked(PeerReliabilityState* targetPeer) 
 
 void LanTransport::CheckRetransmissionsAndTimeouts() {
     std::vector<std::pair<PeerId, LanEndpoint>> timedOutPeers;
+    std::vector<InboundPacket> readyPackets;
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         auto now = std::chrono::steady_clock::now();
@@ -1185,7 +1217,7 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
         PruneExpiredFragmentsLocked(now);
 
         // Attempt drain of any retained packets that became processable
-        DrainRetainedInboundLocked(nullptr);
+        DrainRetainedInboundLocked(nullptr, readyPackets);
 
         for (auto& [peerId, state] : m_peerStates) {
             if (state.timedOut) continue;
@@ -1217,9 +1249,14 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
                     sin.sin_addr.s_addr = htonl(it->target.ipv4);
                     sin.sin_port = htons(it->target.port);
 
-                    sendto(m_dataSocket, reinterpret_cast<const char*>(it->packetBytes.data()),
-                           static_cast<int>(it->packetBytes.size()), 0,
-                           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+                    {
+                        std::lock_guard<std::mutex> outLock(m_outputMutex);
+                        if (m_dataSocket != INVALID_SOCKET) {
+                            sendto(m_dataSocket, reinterpret_cast<const char*>(it->packetBytes.data()),
+                                   static_cast<int>(it->packetBytes.size()), 0,
+                                   reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+                        }
+                    }
                     ++it;
                 } else {
                     ++it;
@@ -1231,23 +1268,28 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
         PruneInactivePeerStatesLocked(now);
     }
 
-    if (m_listener) {
+    auto* listener = m_listener.load();
+    if (listener) {
+        for (const auto& pkt : readyPackets) {
+            listener->OnInboundData(pkt);
+        }
         for (const auto& [pId, target] : timedOutPeers) {
-            m_listener->OnPeerTimeout(pId, target);
+            listener->OnPeerTimeout(pId, target);
         }
     }
 }
 
 bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort) {
-    if (m_dataSocket == INVALID_SOCKET) return false;
-
     std::vector<uint8_t> buffer(sizeof(WireHeader) + len);
     auto* hdr = reinterpret_cast<WireHeader*>(buffer.data());
     hdr->magic = REFIX_WIRE_MAGIC;
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(type);
     hdr->flags = 0;
-    hdr->SetSenderPeerId(m_localPeerId);
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        hdr->SetSenderPeerId(m_localPeerId);
+    }
     hdr->sessionId = 0;
     hdr->channel = 0;
     hdr->fragIndex = 0;
@@ -1261,6 +1303,9 @@ bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size
     if (len > 0 && data) {
         std::memcpy(buffer.data() + sizeof(WireHeader), data, len);
     }
+
+    std::lock_guard<std::mutex> outLock(m_outputMutex);
+    if (!m_running.load() || m_dataSocket == INVALID_SOCKET) return false;
 
     auto sendToPort = [&](uint16_t p) {
         auto sendToTarget = [&](uint32_t ip) {
@@ -1327,7 +1372,10 @@ bool LanTransport::SendDiscoveryPacket(MsgType type, const LanEndpoint& target, 
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(type);
     hdr->flags = 0;
-    hdr->SetSenderPeerId(m_localPeerId);
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        hdr->SetSenderPeerId(m_localPeerId);
+    }
     hdr->channel = 0;
     hdr->payloadLen = static_cast<uint16_t>(len);
 
@@ -1339,6 +1387,9 @@ bool LanTransport::SendDiscoveryPacket(MsgType type, const LanEndpoint& target, 
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = htonl(target.ipv4);
     sin.sin_port = htons(target.port);
+
+    std::lock_guard<std::mutex> outLock(m_outputMutex);
+    if (!m_running.load() || m_dataSocket == INVALID_SOCKET) return false;
 
     int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
                       static_cast<int>(buffer.size()), 0,
@@ -1355,7 +1406,10 @@ bool LanTransport::SendDiscoveryResponse(const LanEndpoint& target, const void* 
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DiscoveryResponse);
     hdr->flags = 0;
-    hdr->SetSenderPeerId(m_localPeerId);
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        hdr->SetSenderPeerId(m_localPeerId);
+    }
     hdr->channel = 0;
     hdr->payloadLen = static_cast<uint16_t>(len);
 
@@ -1367,6 +1421,9 @@ bool LanTransport::SendDiscoveryResponse(const LanEndpoint& target, const void* 
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = htonl(target.ipv4);
     sin.sin_port = htons(target.port);
+
+    std::lock_guard<std::mutex> outLock(m_outputMutex);
+    if (!m_running.load() || m_dataSocket == INVALID_SOCKET) return false;
 
     int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
                       static_cast<int>(buffer.size()), 0,
@@ -1402,7 +1459,10 @@ LanSendResult LanTransport::SendUnreliableDetailed(const LanEndpoint& target, ui
     hdr->version = REFIX_WIRE_VERSION;
     hdr->msgType = static_cast<uint8_t>(MsgType::DataUnreliable);
     hdr->flags = 0;
-    hdr->SetSenderPeerId(m_localPeerId);
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        hdr->SetSenderPeerId(m_localPeerId);
+    }
     hdr->sessionId = 0;
     hdr->channel = channel;
     hdr->fragIndex = 0;
@@ -1644,15 +1704,24 @@ bool LanTransport::SendReliable(const PeerId& targetPeer, const LanEndpoint& tar
 }
 
 bool LanTransport::PollInbound(InboundPacket& outPacket) {
-    std::lock_guard<std::mutex> stateLock(m_stateMutex);
+    std::vector<InboundPacket> readyPackets;
     {
-        std::lock_guard<std::mutex> lock(m_inboundQueueMutex);
-        if (m_inboundQueue.empty()) return false;
-        outPacket = std::move(m_inboundQueue.front());
-        m_inboundQueue.pop_front();
+        std::lock_guard<std::mutex> stateLock(m_stateMutex);
+        {
+            std::lock_guard<std::mutex> lock(m_inboundQueueMutex);
+            if (m_inboundQueue.empty()) return false;
+            outPacket = std::move(m_inboundQueue.front());
+            m_inboundQueue.pop_front();
+        }
+        // Freed capacity in m_inboundQueue: drain any retained in-order packets
+        DrainRetainedInboundLocked(nullptr, readyPackets);
     }
-    // Freed capacity in m_inboundQueue: drain any retained in-order packets
-    DrainRetainedInboundLocked(nullptr);
+    auto* listener = m_listener.load();
+    if (listener) {
+        for (const auto& pkt : readyPackets) {
+            listener->OnInboundData(pkt);
+        }
+    }
     return true;
 }
 
@@ -1778,18 +1847,27 @@ std::string LanTransport::GetDiscoveryStatus() const {
 }
 
 void LanTransport::ResetPeerState(const PeerId& peerId) {
-    std::lock_guard<std::mutex> lock(m_stateMutex);
-    auto it = m_peerStates.find(peerId);
-    if (it != m_peerStates.end()) {
-        if (it->second.lastEndpoint.IsValid()) {
-            SendDisconnectPacketLocked(it->second.lastEndpoint, it->second.localGeneration);
+    std::vector<InboundPacket> readyPackets;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        auto it = m_peerStates.find(peerId);
+        if (it != m_peerStates.end()) {
+            if (it->second.lastEndpoint.IsValid()) {
+                SendDisconnectPacketLocked(it->second.lastEndpoint, it->second.localGeneration);
+            }
+            m_peerStates.erase(it);
         }
-        m_peerStates.erase(it);
-    }
 
-    m_localGenerationCounter.fetch_add(1);
-    CleanupPeerReassemblyLocked(peerId);
-    DrainRetainedInboundLocked(nullptr);
+        m_localGenerationCounter.fetch_add(1);
+        CleanupPeerReassemblyLocked(peerId);
+        DrainRetainedInboundLocked(nullptr, readyPackets);
+    }
+    auto* listener = m_listener.load();
+    if (listener) {
+        for (const auto& pkt : readyPackets) {
+            listener->OnInboundData(pkt);
+        }
+    }
 }
 
 size_t LanTransport::GetPeerStateCount() const {

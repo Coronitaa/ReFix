@@ -55,10 +55,19 @@ public:
     void Stop();
     bool IsRunning() const noexcept { return m_running.load(); }
 
-    void SetListener(ILanTransportListener* listener) { m_listener = listener; }
-    void SetLocalPeerId(const PeerId& id) { m_localPeerId = id; }
-    PeerId GetLocalPeerId() const { return m_localPeerId; }
-    void SetPeerAdmissionFilter(std::function<bool(const PeerId&)> filter) { m_admissionFilter = std::move(filter); }
+    void SetListener(ILanTransportListener* listener) { m_listener.store(listener); }
+    void SetLocalPeerId(const PeerId& id) {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_localPeerId = id;
+    }
+    PeerId GetLocalPeerId() const {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        return m_localPeerId;
+    }
+    void SetPeerAdmissionFilter(std::function<bool(const PeerId&)> filter) {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_admissionFilter = std::move(filter);
+    }
 
     LanEndpoint GetLocalDataEndpoint() const { return m_localDataEndpoint; }
     uint16_t GetDiscoveryPort() const { return m_discoveryPort; }
@@ -111,7 +120,10 @@ public:
     void SetPeerExpectedSequenceInForTesting(const PeerId& peerId, uint32_t seq);
     void SetPeerLocalGenerationForTesting(const PeerId& peerId, uint32_t gen);
 
-    void SetPeerEndpointValidator(std::function<bool(const PeerId&, const LanEndpoint&)> validator) { m_endpointValidator = std::move(validator); }
+    void SetPeerEndpointValidator(std::function<bool(const PeerId&, const LanEndpoint&)> validator) {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_endpointValidator = std::move(validator);
+    }
     bool AuthorizePeerMigration(const PeerId& peerId, const LanEndpoint& newEndpoint);
 
     using SocketLifecycleCallback = void (*)(uintptr_t sock, bool isCreated);
@@ -171,7 +183,7 @@ private:
     void SendAckPacket(const LanEndpoint& target, uint8_t channel, uint32_t ackSeq, uint32_t sackMask, uint32_t generationId = 0);
     void SendDisconnectPacketLocked(const LanEndpoint& target, uint32_t generationId);
     static uint32_t CalculateSackMask(const std::map<uint32_t, InboundPacket>& ooo, uint32_t ackSeq);
-    void DrainRetainedInboundLocked(PeerReliabilityState* targetPeer = nullptr);
+    void DrainRetainedInboundLocked(PeerReliabilityState* targetPeer, std::vector<InboundPacket>& readyPackets);
     void CheckRetransmissionsAndTimeouts();
     bool BroadcastDiscoveryPacket(MsgType type, const void* data, size_t len, uint16_t targetPort = 0);
     void PruneExpiredFragmentsLocked(std::chrono::steady_clock::time_point now);
@@ -190,7 +202,7 @@ private:
     uint16_t m_discoveryPort = 47584;
     PeerId m_localPeerId;
     LanEndpoint m_localDataEndpoint;
-    ILanTransportListener* m_listener = nullptr;
+    std::atomic<ILanTransportListener*> m_listener{nullptr};
     std::function<bool(const PeerId&)> m_admissionFilter;
     std::function<bool(const PeerId&, const LanEndpoint&)> m_endpointValidator;
 
