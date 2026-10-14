@@ -1009,7 +1009,7 @@ public:
                 resp.WriteU64(mySteamId);
                 m_transport.SendDiscoveryResponse(ep.IsValid() ? ep : sender, resp.Data(), resp.Size());
 
-                if (isNewPeer) {
+                if (isNewPeer || type == MsgType::DiscoveryQuery) {
                     m_lobby.BroadcastHostedLobbies();
                 }
             }

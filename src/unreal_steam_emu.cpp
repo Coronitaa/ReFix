@@ -372,14 +372,33 @@ namespace UnrealSteamEmu {
             appIdSource = "ini:[Unreal.Steam] AppId";
         } else {
             GetPrivateProfileStringA("Steam", "RealAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
-            if (bufApp[0] && strcmp(bufApp, "0") != 0) {
+            if (bufApp[0] && strcmp(bufApp, "0") != 0 && strcmp(bufApp, "480") != 0) {
                 g_appID = (uint32_t)atoi(bufApp);
                 appIdSource = "ini:[Steam] RealAppId";
             } else {
-                GetPrivateProfileStringA("Steam", "MaskAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
-                if (bufApp[0] && strcmp(bufApp, "0") != 0) {
-                    g_appID = (uint32_t)atoi(bufApp);
-                    appIdSource = "ini:[Steam] MaskAppId";
+                std::string appidTxtPath = exeDir + "steam_appid.txt";
+                std::ifstream af(appidTxtPath);
+                if (af.is_open()) {
+                    std::string line;
+                    if (std::getline(af, line)) {
+                        uint32_t a = (uint32_t)atoi(line.c_str());
+                        if (a != 0 && a != 480) {
+                            g_appID = a;
+                            appIdSource = "file:" + appidTxtPath;
+                        }
+                    }
+                }
+                if (g_appID == 0) {
+                    if (bufApp[0] && strcmp(bufApp, "0") != 0) {
+                        g_appID = (uint32_t)atoi(bufApp);
+                        appIdSource = "ini:[Steam] RealAppId";
+                    } else {
+                        GetPrivateProfileStringA("Steam", "MaskAppId", "0", bufApp, sizeof(bufApp), iniPath.c_str());
+                        if (bufApp[0] && strcmp(bufApp, "0") != 0) {
+                            g_appID = (uint32_t)atoi(bufApp);
+                            appIdSource = "ini:[Steam] MaskAppId";
+                        }
+                    }
                 }
             }
         }
@@ -2513,7 +2532,7 @@ namespace UnrealSteamEmu {
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             for (auto it = g_pendingSearches.begin(); it != g_pendingSearches.end(); ) {
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 150) {
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 400) {
                     readySearches.push_back(*it);
                     it = g_pendingSearches.erase(it);
                 } else {
@@ -2545,6 +2564,7 @@ namespace UnrealSteamEmu {
 
             LobbyMatchList_t resp = {};
             resp.m_nLobbiesMatching = (uint32_t)matchingLobbyIDs.size();
+            PostCallback(LobbyMatchList_t::k_iCallback, &resp, sizeof(resp));
             CompleteCallResult(ps.callHandle, LobbyMatchList_t::k_iCallback, &resp, sizeof(resp), false);
         }
 
@@ -3264,6 +3284,90 @@ namespace UnrealSteamEmu {
     };
     static CSteamFriendsEmu g_steamFriendsInstance;
 
+    // --- ISteamFriends018 (ABI without SetPersonaName in vtable slot 1) ---
+    class CSteamFriends018Emu : public ISteamFriends {
+    public:
+        virtual const char *GetPersonaName() override { return g_steamFriendsInstance.GetPersonaName(); }
+        virtual EPersonaState GetPersonaState() override { return g_steamFriendsInstance.GetPersonaState(); }
+        virtual int GetFriendCount(int iFriendFlags) override { return g_steamFriendsInstance.GetFriendCount(iFriendFlags); }
+        virtual CSteamID GetFriendByIndex(int iFriend, int iFriendFlags) override { return g_steamFriendsInstance.GetFriendByIndex(iFriend, iFriendFlags); }
+        virtual EFriendRelationship GetFriendRelationship(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetFriendRelationship(steamIDFriend); }
+        virtual EPersonaState GetFriendPersonaState(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetFriendPersonaState(steamIDFriend); }
+        virtual const char *GetFriendPersonaName(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetFriendPersonaName(steamIDFriend); }
+        virtual bool GetFriendGamePlayed(CSteamID steamIDFriend, FriendGameInfo_t *pFriendGameInfo) override { return g_steamFriendsInstance.GetFriendGamePlayed(steamIDFriend, pFriendGameInfo); }
+        virtual const char *GetFriendPersonaNameHistory(CSteamID steamIDFriend, int iPersonaName) override { return g_steamFriendsInstance.GetFriendPersonaNameHistory(steamIDFriend, iPersonaName); }
+        virtual int GetFriendSteamLevel(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetFriendSteamLevel(steamIDFriend); }
+        virtual const char *GetPlayerNickname(CSteamID steamIDPlayer) override { return g_steamFriendsInstance.GetPlayerNickname(steamIDPlayer); }
+        virtual int GetFriendsGroupCount() override { return g_steamFriendsInstance.GetFriendsGroupCount(); }
+        virtual FriendsGroupID_t GetFriendsGroupIDByIndex(int iFG) override { return g_steamFriendsInstance.GetFriendsGroupIDByIndex(iFG); }
+        virtual const char *GetFriendsGroupName(FriendsGroupID_t friendsGroupID) override { return g_steamFriendsInstance.GetFriendsGroupName(friendsGroupID); }
+        virtual int GetFriendsGroupMembersCount(FriendsGroupID_t friendsGroupID) override { return g_steamFriendsInstance.GetFriendsGroupMembersCount(friendsGroupID); }
+        virtual void GetFriendsGroupMembersList(FriendsGroupID_t friendsGroupID, CSteamID *pOutSteamIDMembers, int nMembersCount) override { g_steamFriendsInstance.GetFriendsGroupMembersList(friendsGroupID, pOutSteamIDMembers, nMembersCount); }
+        virtual bool HasFriend(CSteamID steamIDFriend, int iFriendFlags) override { return g_steamFriendsInstance.HasFriend(steamIDFriend, iFriendFlags); }
+        virtual int GetClanCount() override { return g_steamFriendsInstance.GetClanCount(); }
+        virtual CSteamID GetClanByIndex(int iClan) override { return g_steamFriendsInstance.GetClanByIndex(iClan); }
+        virtual const char *GetClanName(CSteamID steamIDClan) override { return g_steamFriendsInstance.GetClanName(steamIDClan); }
+        virtual const char *GetClanTag(CSteamID steamIDClan) override { return g_steamFriendsInstance.GetClanTag(steamIDClan); }
+        virtual bool GetClanActivityCounts(CSteamID steamIDClan, int *pnOnline, int *pnInGame, int *pnChatting) override { return g_steamFriendsInstance.GetClanActivityCounts(steamIDClan, pnOnline, pnInGame, pnChatting); }
+        virtual SteamAPICall_t DownloadClanActivityCounts(CSteamID *psteamIDClans, int cClansToRequest) override { return g_steamFriendsInstance.DownloadClanActivityCounts(psteamIDClans, cClansToRequest); }
+        virtual int GetFriendCountFromSource(CSteamID steamIDSource) override { return g_steamFriendsInstance.GetFriendCountFromSource(steamIDSource); }
+        virtual CSteamID GetFriendFromSourceByIndex(CSteamID steamIDSource, int iFriend) override { return g_steamFriendsInstance.GetFriendFromSourceByIndex(steamIDSource, iFriend); }
+        virtual bool IsUserInSource(CSteamID steamIDUser, CSteamID steamIDSource) override { return g_steamFriendsInstance.IsUserInSource(steamIDUser, steamIDSource); }
+        virtual void SetInGameVoiceSpeaking(CSteamID steamIDUser, bool bSpeaking) override { g_steamFriendsInstance.SetInGameVoiceSpeaking(steamIDUser, bSpeaking); }
+        virtual void ActivateGameOverlay(const char *pchDialog) override { g_steamFriendsInstance.ActivateGameOverlay(pchDialog); }
+        virtual void ActivateGameOverlayToUser(const char *pchDialog, CSteamID steamID) override { g_steamFriendsInstance.ActivateGameOverlayToUser(pchDialog, steamID); }
+        virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override { g_steamFriendsInstance.ActivateGameOverlayToWebPage(pchURL, eMode); }
+        virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override { g_steamFriendsInstance.ActivateGameOverlayToStore(nAppID, eFlag); }
+        virtual void SetPlayedWith(CSteamID steamIDUserPlayedWith) override { g_steamFriendsInstance.SetPlayedWith(steamIDUserPlayedWith); }
+        virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override { g_steamFriendsInstance.ActivateGameOverlayInviteDialog(steamIDLobby); }
+        virtual int GetSmallFriendAvatar(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetSmallFriendAvatar(steamIDFriend); }
+        virtual int GetMediumFriendAvatar(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetMediumFriendAvatar(steamIDFriend); }
+        virtual int GetLargeFriendAvatar(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetLargeFriendAvatar(steamIDFriend); }
+        virtual bool RequestUserInformation(CSteamID steamIDUser, bool bRequireNameOnly) override { return g_steamFriendsInstance.RequestUserInformation(steamIDUser, bRequireNameOnly); }
+        virtual SteamAPICall_t RequestClanOfficerList(CSteamID steamIDClan) override { return g_steamFriendsInstance.RequestClanOfficerList(steamIDClan); }
+        virtual CSteamID GetClanOwner(CSteamID steamIDClan) override { return g_steamFriendsInstance.GetClanOwner(steamIDClan); }
+        virtual int GetClanOfficerCount(CSteamID steamIDClan) override { return g_steamFriendsInstance.GetClanOfficerCount(steamIDClan); }
+        virtual CSteamID GetClanOfficerByIndex(CSteamID steamIDClan, int iOfficer) override { return g_steamFriendsInstance.GetClanOfficerByIndex(steamIDClan, iOfficer); }
+        virtual bool SetRichPresence(const char *pchKey, const char *pchValue) override { return g_steamFriendsInstance.SetRichPresence(pchKey, pchValue); }
+        virtual void ClearRichPresence() override { g_steamFriendsInstance.ClearRichPresence(); }
+        virtual const char *GetFriendRichPresence(CSteamID steamIDFriend, const char *pchKey) override { return g_steamFriendsInstance.GetFriendRichPresence(steamIDFriend, pchKey); }
+        virtual int GetFriendRichPresenceKeyCount(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetFriendRichPresenceKeyCount(steamIDFriend); }
+        virtual const char *GetFriendRichPresenceKeyByIndex(CSteamID steamIDFriend, int iKey) override { return g_steamFriendsInstance.GetFriendRichPresenceKeyByIndex(steamIDFriend, iKey); }
+        virtual void RequestFriendRichPresence(CSteamID steamIDFriend) override { g_steamFriendsInstance.RequestFriendRichPresence(steamIDFriend); }
+        virtual bool InviteUserToGame(CSteamID steamIDFriend, const char *pchConnectString) override { return g_steamFriendsInstance.InviteUserToGame(steamIDFriend, pchConnectString); }
+        virtual int GetCoplayFriendCount() override { return g_steamFriendsInstance.GetCoplayFriendCount(); }
+        virtual CSteamID GetCoplayFriend(int iCoplayFriend) override { return g_steamFriendsInstance.GetCoplayFriend(iCoplayFriend); }
+        virtual AppId_t GetFriendCoplayGame(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetFriendCoplayGame(steamIDFriend); }
+        virtual int GetFriendCoplayTime(CSteamID steamIDFriend) override { return g_steamFriendsInstance.GetFriendCoplayTime(steamIDFriend); }
+        virtual SteamAPICall_t JoinClanChatRoom(CSteamID steamIDClan) override { return g_steamFriendsInstance.JoinClanChatRoom(steamIDClan); }
+        virtual bool LeaveClanChatRoom(CSteamID steamIDClan) override { return g_steamFriendsInstance.LeaveClanChatRoom(steamIDClan); }
+        virtual int GetClanChatMemberCount(CSteamID steamIDClan) override { return g_steamFriendsInstance.GetClanChatMemberCount(steamIDClan); }
+        virtual CSteamID GetChatMemberByIndex(CSteamID steamIDClan, int iUser) override { return g_steamFriendsInstance.GetChatMemberByIndex(steamIDClan, iUser); }
+        virtual bool SendClanChatMessage(CSteamID steamIDClanChat, const char *pchText) override { return g_steamFriendsInstance.SendClanChatMessage(steamIDClanChat, pchText); }
+        virtual int GetClanChatMessage(CSteamID steamIDClanChat, int iMessage, void *prgchText, int cchTextMax, EChatEntryType *peChatEntryType, CSteamID *psteamidChatter) override { return g_steamFriendsInstance.GetClanChatMessage(steamIDClanChat, iMessage, prgchText, cchTextMax, peChatEntryType, psteamidChatter); }
+        virtual bool IsClanChatAdmin(CSteamID steamIDClanChat, CSteamID steamIDUser) override { return g_steamFriendsInstance.IsClanChatAdmin(steamIDClanChat, steamIDUser); }
+        virtual bool IsClanChatWindowOpenInSteam(CSteamID steamIDClanChat) override { return g_steamFriendsInstance.IsClanChatWindowOpenInSteam(steamIDClanChat); }
+        virtual bool OpenClanChatWindowInSteam(CSteamID steamIDClanChat) override { return g_steamFriendsInstance.OpenClanChatWindowInSteam(steamIDClanChat); }
+        virtual bool CloseClanChatWindowInSteam(CSteamID steamIDClanChat) override { return g_steamFriendsInstance.CloseClanChatWindowInSteam(steamIDClanChat); }
+        virtual bool SetListenForFriendsMessages(bool bIntercept) override { return g_steamFriendsInstance.SetListenForFriendsMessages(bIntercept); }
+        virtual bool ReplyToFriendMessage(CSteamID steamIDFriend, const char *pchMsgToSend) override { return g_steamFriendsInstance.ReplyToFriendMessage(steamIDFriend, pchMsgToSend); }
+        virtual int GetFriendMessage(CSteamID steamIDFriend, int iMessageID, void *pvData, int cubData, EChatEntryType *peChatEntryType) override { return g_steamFriendsInstance.GetFriendMessage(steamIDFriend, iMessageID, pvData, cubData, peChatEntryType); }
+        virtual SteamAPICall_t GetFollowerCount(CSteamID steamID) override { return g_steamFriendsInstance.GetFollowerCount(steamID); }
+        virtual SteamAPICall_t IsFollowing(CSteamID steamID) override { return g_steamFriendsInstance.IsFollowing(steamID); }
+        virtual SteamAPICall_t EnumerateFollowingList(uint32 unStartIndex) override { return g_steamFriendsInstance.EnumerateFollowingList(unStartIndex); }
+        virtual bool IsClanPublic(CSteamID steamIDClan) override { return g_steamFriendsInstance.IsClanPublic(steamIDClan); }
+        virtual bool IsClanOfficialGameGroup(CSteamID steamIDClan) override { return g_steamFriendsInstance.IsClanOfficialGameGroup(steamIDClan); }
+        virtual int GetNumChatsWithUnreadPriorityMessages() override { return g_steamFriendsInstance.GetNumChatsWithUnreadPriorityMessages(); }
+        virtual void ActivateGameOverlayRemotePlayTogetherInviteDialog(CSteamID steamIDLobby) override { g_steamFriendsInstance.ActivateGameOverlayRemotePlayTogetherInviteDialog(steamIDLobby); }
+        virtual bool RegisterProtocolInOverlayBrowser(const char *pchProtocol) override { return g_steamFriendsInstance.RegisterProtocolInOverlayBrowser(pchProtocol); }
+        virtual void ActivateGameOverlayInviteDialogConnectString(const char *pchConnectString) override { g_steamFriendsInstance.ActivateGameOverlayInviteDialogConnectString(pchConnectString); }
+        virtual SteamAPICall_t RequestEquippedProfileItems(CSteamID steamID) override { return g_steamFriendsInstance.RequestEquippedProfileItems(steamID); }
+        virtual bool BHasEquippedProfileItem(CSteamID steamID, ECommunityProfileItemType itemType) override { return g_steamFriendsInstance.BHasEquippedProfileItem(steamID, itemType); }
+        virtual const char *GetProfileItemPropertyString(CSteamID steamID, ECommunityProfileItemType itemType, ECommunityProfileItemProperty prop) override { return g_steamFriendsInstance.GetProfileItemPropertyString(steamID, itemType, prop); }
+        virtual uint32 GetProfileItemPropertyUint(CSteamID steamID, ECommunityProfileItemType itemType, ECommunityProfileItemProperty prop) override { return g_steamFriendsInstance.GetProfileItemPropertyUint(steamID, itemType, prop); }
+    };
+    static CSteamFriends018Emu g_steamFriends018Instance;
+
     // --- ISteamUtils ---
     class CSteamUtilsEmu : public ISteamUtils {
     public:
@@ -3665,14 +3769,16 @@ namespace UnrealSteamEmu {
                         }
                     }
                     if (m.peerId.low != 0) {
-                        return CSteamID(m.peerId.low);
+                        return CSteamID(static_cast<uint32_t>(m.peerId.low & 0xFFFFFFFF), k_EUniversePublic, k_EAccountTypeIndividual);
                     }
                 }
             }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             auto it = g_lobbies.find(lID);
             if (it != g_lobbies.end() && iMember >= 0 && iMember < (int)it->second.members.size()) {
-                return CSteamID(it->second.members[iMember]);
+                uint64_t raw = it->second.members[iMember];
+                if ((raw >> 32) == 0) return CSteamID(static_cast<uint32_t>(raw & 0xFFFFFFFF), k_EUniversePublic, k_EAccountTypeIndividual);
+                return CSteamID(raw);
             }
             return CSteamID(g_localSteamID);
         }
@@ -3887,13 +3993,17 @@ namespace UnrealSteamEmu {
                         if (sId != 0) return CSteamID(sId);
                     }
                     if (rec->ownerPeerId.low != 0) {
-                        return CSteamID(rec->ownerPeerId.low);
+                        return CSteamID(static_cast<uint32_t>(rec->ownerPeerId.low & 0xFFFFFFFF), k_EUniversePublic, k_EAccountTypeIndividual);
                     }
                 }
             }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             auto it = g_lobbies.find(lID);
-            if (it != g_lobbies.end() && it->second.owner != 0) return CSteamID(it->second.owner);
+            if (it != g_lobbies.end() && it->second.owner != 0) {
+                uint64_t raw = it->second.owner;
+                if ((raw >> 32) == 0) return CSteamID(static_cast<uint32_t>(raw & 0xFFFFFFFF), k_EUniversePublic, k_EAccountTypeIndividual);
+                return CSteamID(raw);
+            }
             return CSteamID(g_localSteamID);
         }
 
@@ -6129,6 +6239,9 @@ namespace UnrealSteamEmu {
         }
         virtual void SetLocalIPBinding(const SteamIPAddress_t &unIP, uint16 usPort) override {}
         virtual ISteamFriends *GetISteamFriends(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "018") || strstr(pchVersion, "019") || strstr(pchVersion, "020") || strstr(pchVersion, "021"))) {
+                return (ISteamFriends*)&g_steamFriends018Instance;
+            }
             return reinterpret_cast<ISteamFriends*>(&g_steamFriendsInstance);
         }
         virtual ISteamUtils *GetISteamUtils(HSteamPipe hSteamPipe, const char *pchVersion) override {
@@ -6227,6 +6340,9 @@ namespace UnrealSteamEmu {
         }
         virtual void SetLocalIPBinding(const SteamIPAddress_t &unIP, uint16 usPort) override {}
         virtual ISteamFriends *GetISteamFriends(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+            if (pchVersion && (strstr(pchVersion, "018") || strstr(pchVersion, "019") || strstr(pchVersion, "020") || strstr(pchVersion, "021"))) {
+                return (ISteamFriends*)&g_steamFriends018Instance;
+            }
             return reinterpret_cast<ISteamFriends*>(&g_steamFriendsInstance);
         }
         virtual ISteamUtils *GetISteamUtils(HSteamPipe hSteamPipe, const char *pchVersion) override {
@@ -6318,8 +6434,12 @@ namespace UnrealSteamEmu {
             return &g_steamUser021Instance;
         if (strstr(pchVersion, "SteamUser0") || strstr(pchVersion, "STEAMUSER"))
             return &g_steamUserInstance;
-        if (strstr(pchVersion, "SteamFriends") || strstr(pchVersion, "STEAMFRIENDS"))
+        if (strstr(pchVersion, "SteamFriends") || strstr(pchVersion, "STEAMFRIENDS")) {
+            if (strstr(pchVersion, "018") || strstr(pchVersion, "019") || strstr(pchVersion, "020") || strstr(pchVersion, "021")) {
+                return (ISteamFriends*)&g_steamFriends018Instance;
+            }
             return &g_steamFriendsInstance;
+        }
         if (strstr(pchVersion, "SteamUtils") || strstr(pchVersion, "STEAMUTILS"))
             return &g_steamUtilsInstance;
         if (strstr(pchVersion, "SteamMatchMakingServers") || strstr(pchVersion, "STEAMMATCHMAKINGSERVERS") || strstr(pchVersion, "SteamMatchmakingServers"))
@@ -6878,6 +6998,47 @@ namespace UnrealSteamEmu {
                     std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                     LobbyInfo& lob = g_lobbies[steamLobbyId];
                     lob.id = steamLobbyId;
+
+                    auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(ev.lobbyId);
+                    if (rec) {
+                        lob.maxMembers = rec->maxMembers;
+                        lob.joinable = rec->joinable;
+                        lob.lastSeen = std::chrono::steady_clock::now();
+
+                        uint64_t ownerSteamId = 0;
+                        auto itOwnerAttr = rec->attributes.find("__steam_owner");
+                        if (itOwnerAttr != rec->attributes.end() && !itOwnerAttr->second.asString.empty()) {
+                            ownerSteamId = _strtoui64(itOwnerAttr->second.asString.c_str(), nullptr, 10);
+                        }
+
+                        auto ownerInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(rec->ownerPeerId);
+                        if (ownerInfo && ownerInfo->externalId.numericId != 0) {
+                            lob.owner = ownerInfo->externalId.numericId;
+                        } else if (ownerSteamId != 0) {
+                            lob.owner = ownerSteamId;
+                        } else if (rec->ownerPeerId.low != 0) {
+                            lob.owner = rec->ownerPeerId.low;
+                        }
+
+                        lob.members.clear();
+                        for (const auto& m : rec->members) {
+                            auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(m.peerId);
+                            if (mInfo && mInfo->externalId.numericId != 0) {
+                                if (std::find(lob.members.begin(), lob.members.end(), mInfo->externalId.numericId) == lob.members.end()) {
+                                    lob.members.push_back(mInfo->externalId.numericId);
+                                }
+                            } else if (m.peerId.low != 0) {
+                                if (std::find(lob.members.begin(), lob.members.end(), m.peerId.low) == lob.members.end()) {
+                                    lob.members.push_back(m.peerId.low);
+                                }
+                            }
+                        }
+
+                        for (const auto& [k, v] : rec->attributes) {
+                            lob.data[k] = v.asString;
+                        }
+                    }
+
                     if (std::find(lob.members.begin(), lob.members.end(), g_localSteamID) == lob.members.end()) {
                         lob.members.push_back(g_localSteamID);
                     }

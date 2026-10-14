@@ -5,6 +5,9 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <vector>
+#include <algorithm>
 
 namespace refix {
 
@@ -31,10 +34,105 @@ Transport& Transport::Get() { static Transport t; return t; }
 
 namespace {
 
-// Best-effort local IPv4, used only so peers on other machines have an address
-// to answer to. A failure here degrades to loopback, which still works for two
-// instances on one PC.
+// Best-effort local IPv4 with adapter scoring to penalize virtual adapters (e.g. VirtualBox)
 uint32_t DiscoverLocalIpv4() {
+    ULONG outBufLen = 15000;
+    std::vector<uint8_t> buffer(outBufLen);
+    PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+
+    ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    DWORD ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &outBufLen);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(outBufLen);
+        pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+        ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &outBufLen);
+    }
+
+    struct Candidate {
+        uint32_t ip; // host byte order
+        int score;
+    };
+    std::vector<Candidate> candidates;
+
+    if (ret == NO_ERROR) {
+        for (PIP_ADAPTER_ADDRESSES curr = pAddresses; curr != nullptr; curr = curr->Next) {
+            if (curr->OperStatus != IfOperStatusUp) continue;
+            if (curr->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+
+            std::string nameLower;
+            if (curr->FriendlyName) {
+                int len = WideCharToMultiByte(CP_UTF8, 0, curr->FriendlyName, -1, nullptr, 0, nullptr, nullptr);
+                if (len > 0) {
+                    nameLower.resize(len - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, curr->FriendlyName, -1, &nameLower[0], len, nullptr, nullptr);
+                    std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+                }
+            }
+            std::string descLower;
+            if (curr->Description) {
+                int len = WideCharToMultiByte(CP_UTF8, 0, curr->Description, -1, nullptr, 0, nullptr, nullptr);
+                if (len > 0) {
+                    descLower.resize(len - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, curr->Description, -1, &descLower[0], len, nullptr, nullptr);
+                    std::transform(descLower.begin(), descLower.end(), descLower.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+                }
+            }
+
+            bool isVirtual = false;
+            const char* vKeywords[] = {
+                "virtual", "vbox", "vmware", "hyper-v", "wsl", "docker",
+                "tap", "tun", "tailscale", "zerotier", "wireguard", "vpn", "host-only"
+            };
+            for (const char* kw : vKeywords) {
+                if (nameLower.find(kw) != std::string::npos || descLower.find(kw) != std::string::npos) {
+                    isVirtual = true;
+                    break;
+                }
+            }
+
+            bool hasGateway = (curr->FirstGatewayAddress != nullptr);
+
+            for (PIP_ADAPTER_UNICAST_ADDRESS u = curr->FirstUnicastAddress; u != nullptr; u = u->Next) {
+                if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+                auto* sin = reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);
+                uint32_t ip = ntohl(sin->sin_addr.s_addr);
+
+                if ((ip & 0xFF000000) == 0x7F000000) continue; // Loopback
+
+                bool isRfc1918 = ((ip & 0xFF000000) == 0x0A000000) ||   // 10.0.0.0/8
+                                 ((ip & 0xFFF00000) == 0xAC100000) ||   // 172.16.0.0/12
+                                 ((ip & 0xFFFF0000) == 0xC0A80000);     // 192.168.0.0/16
+                bool isApipa = ((ip & 0xFFFF0000) == 0xA9FE0000);       // 169.254.0.0/16
+                bool isVBoxDefault = ((ip & 0xFFFFFF00) == 0xC0A83800); // 192.168.56.0/24
+
+                int score = 0;
+                if (curr->IfType == IF_TYPE_ETHERNET_CSMACD && !isVirtual) {
+                    score += 100;
+                } else if (curr->IfType == IF_TYPE_IEEE80211 && !isVirtual) {
+                    score += 90;
+                } else if (!isVirtual) {
+                    score += 50;
+                } else {
+                    score -= 100;
+                }
+
+                if (hasGateway) score += 40;
+                if (isRfc1918) score += 30;
+                if (isApipa) score -= 50;
+                if (isVBoxDefault) score -= 150;
+
+                candidates.push_back({ip, score});
+            }
+        }
+    }
+
+    if (!candidates.empty()) {
+        std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+            return a.score > b.score;
+        });
+        return htonl(candidates.front().ip);
+    }
+
     char host[256] = {0};
     if (gethostname(host, sizeof(host)) != 0) return htonl(INADDR_LOOPBACK);
 
@@ -103,7 +201,19 @@ bool Transport::Start() {
         ga.sin_family = AF_INET;
         ga.sin_addr.s_addr = htonl(INADDR_ANY);
         ga.sin_port = htons(m_groupPort);
-        if (bind(g, (sockaddr*)&ga, sizeof(ga)) != 0) {
+        bool boundGroup = (bind(g, (sockaddr*)&ga, sizeof(ga)) == 0);
+        if (!boundGroup) {
+            for (uint16_t altPort = 47585; altPort <= 47589; ++altPort) {
+                ga.sin_port = htons(altPort);
+                if (bind(g, (sockaddr*)&ga, sizeof(ga)) == 0) {
+                    m_groupPort = altPort;
+                    boundGroup = true;
+                    RFLOG(Net, "Transport: discovery bound to fallback port %u", altPort);
+                    break;
+                }
+            }
+        }
+        if (!boundGroup) {
             RFLOG(Net, "Transport: discovery bind(%u) failed (%d)", m_groupPort, WSAGetLastError());
             closesocket(g);
             g = INVALID_SOCKET;
@@ -179,7 +289,7 @@ bool Transport::SendTo(const Endpoint& to, const void* data, size_t len) {
 bool Transport::SendToGroup(const void* data, size_t len) {
     if (!m_running) return false;
 
-    auto blast = [&](uint32_t addr) {
+    auto blastPort = [&](uint32_t addr, uint16_t port) {
         if (!refix::lan::LanFirewall::Get().IsAllowedIpv4(ntohl(addr))) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
             return false;
@@ -187,9 +297,19 @@ bool Transport::SendToGroup(const void* data, size_t len) {
         sockaddr_in a{};
         a.sin_family = AF_INET;
         a.sin_addr.s_addr = addr;
-        a.sin_port = htons(m_groupPort);
+        a.sin_port = htons(port);
         return sendto((SOCKET)m_socket, (const char*)data, (int)len, 0,
                       (sockaddr*)&a, sizeof(a)) == (int)len;
+    };
+
+    auto blast = [&](uint32_t addr) {
+        bool res = blastPort(addr, m_groupPort);
+        for (uint16_t alt = 47584; alt <= 47589; ++alt) {
+            if (alt != m_groupPort) {
+                blastPort(addr, alt);
+            }
+        }
+        return res;
     };
 
     // Multicast is the primary channel (it reaches other instances on this
@@ -198,6 +318,13 @@ bool Transport::SendToGroup(const void* data, size_t len) {
     // announcements are harmless, a missed lobby is not.
     bool any = blast(m_groupAddr);
     any = blast(htonl(INADDR_BROADCAST)) || any;
+    any = blast(htonl(INADDR_LOOPBACK)) || any;
+    if (m_local.Ipv4 != 0 && m_local.Ipv4 != htonl(INADDR_LOOPBACK)) {
+        blast(m_local.Ipv4);
+        uint32_t hostIp = ntohl(m_local.Ipv4);
+        uint32_t subnetBcast = htonl((hostIp & 0xFFFFFF00) | 0x000000FF);
+        blast(subnetBcast);
+    }
     for (uint32_t extra : m_extraBroadcasts) any = blast(extra) || any;
     return any;
 }

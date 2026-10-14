@@ -46,7 +46,7 @@ static bool IsAllowedLanEndpoint(const sockaddr* addr) {
 }
 
 static bool IsPhotonEgressAllowed(uint16_t port) {
-    if (port == 27000 || port == 5055 || port == 5056 || port == 443) {
+    if ((port >= 27000 && port <= 27100) || (port >= 5055 && port <= 5058) || (port >= 9090 && port <= 9093) || port == 443) {
         static int s_photonAllowed = -1;
         if (s_photonAllowed == -1) {
             char buf[64] = {0};

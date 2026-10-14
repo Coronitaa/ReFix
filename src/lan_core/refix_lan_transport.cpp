@@ -243,8 +243,8 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     }
     if (g_socketLifecycleCb) g_socketLifecycleCb((uintptr_t)m_groupSocket, true);
 
-    // Note: Do NOT set SO_REUSEADDR on m_groupSocket: on Windows SO_REUSEADDR allows port hijacking
-    // and causes bind() to falsely report success on busy ports, defeating candidate port fallback.
+    BOOL reuse = TRUE;
+    setsockopt(m_groupSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
     BOOL bcast = TRUE;
     setsockopt(m_groupSocket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&bcast), sizeof(bcast));
 

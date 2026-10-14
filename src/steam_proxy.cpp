@@ -1791,6 +1791,34 @@ static void LoadConfig() {
     g_config.realAppId = bufReal;
     g_config.realAppIdNum = (uint32_t)atoi(bufReal);
 
+    // If RealAppId is empty, 0, or default 480, check steam_appid.txt for game's actual AppID
+    if (g_config.realAppId.empty() || g_config.realAppId == "0" || g_config.realAppId == "480") {
+        std::string txtPaths[] = { GetExeDir() + "steam_appid.txt", GetProxyDllDir() + "steam_appid.txt", ".\\steam_appid.txt" };
+        for (const auto& tp : txtPaths) {
+            FILE* f = nullptr;
+            fopen_s(&f, tp.c_str(), "r");
+            if (f) {
+                char abuf[64] = {0};
+                if (fgets(abuf, sizeof(abuf), f)) {
+                    std::string s(abuf);
+                    s.erase(s.find_last_not_of(" \r\n\t") + 1);
+                    s.erase(0, s.find_first_not_of(" \r\n\t"));
+                    if (!s.empty() && s != "0" && s != "480") {
+                        bool allDigits = true;
+                        for (char c : s) if (!isdigit((unsigned char)c)) { allDigits = false; break; }
+                        if (allDigits) {
+                            g_config.realAppId = s;
+                            g_config.realAppIdNum = (uint32_t)atoi(s.c_str());
+                            fclose(f);
+                            break;
+                        }
+                    }
+                }
+                fclose(f);
+            }
+        }
+    }
+
     g_config.language = bufLang;
     g_config.bypassLicenseCheck = ReadBool("Steam", "BypassLicenseCheck", true);
 
@@ -2016,6 +2044,10 @@ static void EnsureSteamAppIdFile(const char* appIdStr) {
                     if (allDigits) {
                         if (s != "480" && (g_config.realAppId.empty() || g_config.realAppId == "480" || g_config.realAppId == "0")) {
                             g_config.realAppId = s;
+                            g_config.realAppIdNum = (uint32_t)atoi(s.c_str());
+                            g_realAppIdNum = g_config.realAppIdNum;
+                            strcpy_s(g_realAppId, sizeof(g_realAppId), s.c_str());
+                            SetEnvironmentVariableA("SteamAppId", s.c_str());
                             ReFixLog("EnsureSteamAppIdFile: Adopted existing AppID %s from %s", s.c_str(), appIdPath.c_str());
                         }
                         return; // Preserve existing valid steam_appid.txt
@@ -5311,7 +5343,9 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
         DispatchRelayCallbacks();
         DispatchPendingAuthCallbacks();
     }
-    ReFixLog("SteamAPI_RunCallbacks: done");
+    if (s_runCallbacksLogged <= 3) {
+        ReFixLog("SteamAPI_RunCallbacks: done");
+    }
 }
 
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_Init() {
