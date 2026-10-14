@@ -1792,7 +1792,7 @@ static void CaptureSearchParameter(const EOS_Lobby_AttributeData* data) {
     if (!data || !data->Key) return;
     
     for (auto& param : g_capturedSearchParameters) {
-        if (strcmp(param.Key, data->Key) == 0) {
+        if (param.Key && data->Key && strcmp(param.Key, data->Key) == 0) {
             if ((param.ValueType == 3 || param.ValueType == 4) && param.Value.AsUtf8) free((void*)param.Value.AsUtf8);
             param.ValueType = data->ValueType;
             param.Value = data->Value;
@@ -2479,7 +2479,7 @@ static EOS_EResult eos_LobbyDetails_CopyAttributeByKey(void* H, void* O, EOS_Lob
 
     int index = -1;
     for (size_t i = 0; i < g_capturedSearchParameters.size(); i++) {
-        if (strcmp(g_capturedSearchParameters[i].Key, key) == 0) {
+        if (g_capturedSearchParameters[i].Key && key && strcmp(g_capturedSearchParameters[i].Key, key) == 0) {
             index = (int)i;
             break;
         }
@@ -4292,9 +4292,21 @@ static void StartConsoleHotkeyMonitor() {
 // =============================================================================
 static void InitExportNames();
 
+static void CustomInvalidParameterHandler(
+    const wchar_t* expression,
+    const wchar_t* function,
+    const wchar_t* file,
+    unsigned int line,
+    uintptr_t pReserved)
+{
+    // Silently suppress CRT invalid parameter fast-fail (_invoke_watson 0xc0000409)
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
+            _set_invalid_parameter_handler(CustomInvalidParameterHandler);
+            _CrtSetReportMode(_CRT_ASSERT, 0);
             DisableThreadLibraryCalls(hModule);
             InitializeCriticalSection(&g_callbackCS);
             g_csInitialized = true;

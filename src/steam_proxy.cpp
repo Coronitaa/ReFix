@@ -1995,28 +1995,56 @@ static bool InjectSteamOverlay() {
 
 static void EnsureSteamAppIdFile(const char* appIdStr) {
     if (!g_config.autoCreateSteamAppIdFile) return;
-    if (!appIdStr || appIdStr[0] == '\0') appIdStr = "480";
 
-    auto writeAppId = [](const std::string& dir, const char* appid) {
+    auto checkOrWriteAppId = [](const std::string& dir, const char* defaultAppId) {
         if (dir.empty()) return;
         std::string appIdPath = dir + "steam_appid.txt";
+        FILE* fRead = nullptr;
+        fopen_s(&fRead, appIdPath.c_str(), "r");
+        if (fRead) {
+            char buf[64] = {0};
+            if (fgets(buf, sizeof(buf), fRead)) {
+                fclose(fRead);
+                std::string s(buf);
+                s.erase(s.find_last_not_of(" \r\n\t") + 1);
+                s.erase(0, s.find_first_not_of(" \r\n\t"));
+                if (!s.empty() && s != "0") {
+                    bool allDigits = true;
+                    for (char c : s) {
+                        if (!isdigit(static_cast<unsigned char>(c))) { allDigits = false; break; }
+                    }
+                    if (allDigits) {
+                        if (s != "480" && (g_config.realAppId.empty() || g_config.realAppId == "480" || g_config.realAppId == "0")) {
+                            g_config.realAppId = s;
+                            ReFixLog("EnsureSteamAppIdFile: Adopted existing AppID %s from %s", s.c_str(), appIdPath.c_str());
+                        }
+                        return; // Preserve existing valid steam_appid.txt
+                    }
+                }
+            } else {
+                fclose(fRead);
+            }
+        }
+
+        const char* toWrite = (defaultAppId && defaultAppId[0] != '\0') ? defaultAppId : "480";
         FILE* fWrite = nullptr;
         fopen_s(&fWrite, appIdPath.c_str(), "w");
         if (fWrite) {
-            fprintf(fWrite, "%s\n", appid);
+            fprintf(fWrite, "%s\n", toWrite);
             fclose(fWrite);
-            ReFixLog("EnsureSteamAppIdFile: Updated steam_appid.txt (%s) at %s", appid, appIdPath.c_str());
+            ReFixLog("EnsureSteamAppIdFile: Created steam_appid.txt (%s) at %s", toWrite, appIdPath.c_str());
         }
     };
 
-    writeAppId(GetExeDir(), appIdStr);
+    checkOrWriteAppId(GetExeDir(), appIdStr);
     if (GetProxyDllDir() != GetExeDir()) {
-        writeAppId(GetProxyDllDir(), appIdStr);
+        checkOrWriteAppId(GetProxyDllDir(), appIdStr);
     }
 }
 
 static void ApplySteamEnv() {
     LoadConfig();
+    EnsureSteamAppIdFile(nullptr);
     if (ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
         std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
         if (targetApp.empty() || targetApp == "0") targetApp = "480";
@@ -2027,12 +2055,14 @@ static void ApplySteamEnv() {
         EnsureSteamAppIdFile(targetApp.c_str());
         ReFixLog("ApplySteamEnv (Goldberg LAN): AppId=%s", targetApp.c_str());
     } else {
-        SetEnvironmentVariableA("SteamAppId", g_config.maskAppId.c_str());
-        SetEnvironmentVariableA("SteamGameId", g_config.maskAppId.c_str());
-        SetEnvironmentVariableA("SteamOverlayGameId", g_config.maskAppId.c_str());
-        SetEnvironmentVariableA("STEAM_COMPAT_APP_ID", g_config.maskAppId.c_str());
-        EnsureSteamAppIdFile(g_config.maskAppId.c_str());
-        ReFixLog("ApplySteamEnv (Valve Online): MaskAppId=%s", g_config.maskAppId.c_str());
+        std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
+        if (targetApp.empty() || targetApp == "0") targetApp = "480";
+        SetEnvironmentVariableA("SteamAppId", targetApp.c_str());
+        SetEnvironmentVariableA("SteamGameId", targetApp.c_str());
+        SetEnvironmentVariableA("SteamOverlayGameId", targetApp.c_str());
+        SetEnvironmentVariableA("STEAM_COMPAT_APP_ID", targetApp.c_str());
+        EnsureSteamAppIdFile(targetApp.c_str());
+        ReFixLog("ApplySteamEnv (Valve Online): AppId=%s (mask=%s)", targetApp.c_str(), g_config.maskAppId.c_str());
     }
 
     if (!g_config.language.empty()) {
@@ -3346,10 +3376,7 @@ extern "C" __declspec(dllexport) int __cdecl SteamAPI_ISteamFriends_GetPersonaSt
 }
 
 extern "C" __declspec(dllexport) const char* __cdecl SteamAPI_ISteamFriends_GetFriendPersonaName(void* self, uint64_t steamIDFriend) {
-    if (steamIDFriend == UnrealSteamEmu::GetLocalSteamID()) {
-        return UnrealSteamEmu::GetPersonaName();
-    }
-    return "Player";
+    return UnrealSteamEmu::GetFriendPersonaName(steamIDFriend);
 }
 
 extern "C" __declspec(dllexport) int __cdecl SteamAPI_ISteamFriends_GetSmallFriendAvatar(void* self, uint64_t steamIDFriend) {
@@ -3744,11 +3771,11 @@ extern "C" __declspec(dllexport) void* SteamInternal_FindOrCreateUserInterface(u
 
     // In Online mode, query provider (which delegates to original Valve DLL)
     void* iface = provider->FindOrCreateUserInterface(hSteamUser, pszVersion);
-    if (!iface) {
-        // Fallback to UnrealSteamEmu for modern interfaces (such as STEAMTIMELINE_INTERFACE_V004)
+    if (!iface && pszVersion && strstr(pszVersion, "STEAMTIMELINE")) {
+        // Fallback to UnrealSteamEmu only for modern interfaces (such as STEAMTIMELINE_INTERFACE_V004)
         iface = UnrealSteamEmu::FindOrCreateUserInterface(hSteamUser, pszVersion);
-        if (!iface) return nullptr;
     }
+    if (!iface) return nullptr;
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
@@ -3763,10 +3790,10 @@ extern "C" __declspec(dllexport) void* SteamInternal_CreateInterface(const char*
 
     // In Online mode, query provider (which delegates to original Valve DLL)
     void* iface = provider->CreateInterface(pszVersion);
-    if (!iface) {
+    if (!iface && pszVersion && strstr(pszVersion, "STEAMTIMELINE")) {
         iface = UnrealSteamEmu::CreateInterface(pszVersion);
-        if (!iface) return nullptr;
     }
+    if (!iface) return nullptr;
     HookInterfaceByVersion(iface, pszVersion);
     return iface;
 }
@@ -4059,17 +4086,17 @@ static int Intercepted_SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus(void
     if (g_pfn_Flat_GetRelayNetworkStatus) {
         g_pfn_Flat_GetRelayNetworkStatus(self, pDetails);
     }
-    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 1000;
-    int avail = (!ReFix::NetworkModeManager::IsOnline() || elapsed >= 500) ? k_eRelayAvail_Current : 3;
+    DWORD elapsed = (g_steamInitTick != 0) ? (GetTickCount() - g_steamInitTick) : 2000;
+    int avail = (elapsed >= 1500) ? k_eRelayAvail_Current : 2;
 
     if (pDetails) {
         auto* d = static_cast<ReFix_SteamRelayNetworkStatus_t*>(pDetails);
         d->m_eAvail = avail;
-        d->m_bPingMeasurementInProgress = (avail == 3) ? 1 : 0;
+        d->m_bPingMeasurementInProgress = (avail != k_eRelayAvail_Current) ? 1 : 0;
         d->m_eAvailNetworkConfig = avail;
         d->m_eAvailAnyRelay = avail;
         if (d->m_debugMsg[0] == '\0')
-            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == 100) ? "OK (ReFix)" : "Connecting (ReFix)", _TRUNCATE);
+            strncpy_s(d->m_debugMsg, sizeof(d->m_debugMsg), (avail == k_eRelayAvail_Current) ? "OK (ReFix)" : "Waiting (ReFix)", _TRUNCATE);
     }
     return avail;
 }
@@ -6628,9 +6655,21 @@ extern "C" {
     }
 }
 
+static void CustomInvalidParameterHandler(
+    const wchar_t* expression,
+    const wchar_t* function,
+    const wchar_t* file,
+    unsigned int line,
+    uintptr_t pReserved)
+{
+    // Silently suppress CRT invalid parameter fast-fail (_invoke_watson 0xc0000409)
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
+            _set_invalid_parameter_handler(CustomInvalidParameterHandler);
+            _CrtSetReportMode(_CRT_ASSERT, 0);
             g_hSelfModule = hModule;
             DisableThreadLibraryCalls(hModule);
             ApplySteamEnv();

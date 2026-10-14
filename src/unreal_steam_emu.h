@@ -57,6 +57,7 @@ namespace UnrealSteamEmu {
 
     uint64_t GetLocalSteamID();
     const char* GetPersonaName();
+    const char* GetFriendPersonaName(uint64_t steamIDFriend);
     uint32_t GetAppID();
 
     // Direct interface pointers

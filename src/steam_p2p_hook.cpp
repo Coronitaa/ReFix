@@ -45,6 +45,28 @@ static bool IsAllowedLanEndpoint(const sockaddr* addr) {
     return refix::lan::LanFirewall::Get().IsAllowedSockaddr(addr);
 }
 
+static bool IsPhotonEgressAllowed(uint16_t port) {
+    if (port == 27000 || port == 5055 || port == 5056 || port == 443) {
+        static int s_photonAllowed = -1;
+        if (s_photonAllowed == -1) {
+            char buf[64] = {0};
+            char iniPath[MAX_PATH] = {0};
+            GetModuleFileNameA(NULL, iniPath, MAX_PATH);
+            std::string p(iniPath);
+            size_t pos = p.find_last_of("\\/");
+            std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
+            GetPrivateProfileStringA("Photon", "Backend", "", buf, sizeof(buf), ini.c_str());
+            if (_stricmp(buf, "OfficialPhoton") == 0) {
+                s_photonAllowed = 1;
+            } else {
+                s_photonAllowed = 0;
+            }
+        }
+        return s_photonAllowed == 1;
+    }
+    return false;
+}
+
 // =============================================================================
 // ISteamNetworking vtable layout (ISteamNetworking008)
 // =============================================================================
@@ -582,7 +604,8 @@ void SteamP2PHook::FlushHoldBuffer() {
                 k_holdBufferTtlMs, it->destPort);
             if (g_orig_sendto && it->s != INVALID_SOCKET) {
                 if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() &&
-                    !IsAllowedLanEndpoint((const sockaddr*)&it->destAddr)) {
+                    !IsAllowedLanEndpoint((const sockaddr*)&it->destAddr) &&
+                    !IsPhotonEgressAllowed(it->destPort)) {
                     refix::lan::LanFirewall::Get().RecordBlockedEgress();
                 } else {
                     g_orig_sendto(it->s, (const char*)it->data.data(), (int)it->data.size(), it->flags,
@@ -773,7 +796,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         }
 
         // Enforce Internet-Zero BEFORE buffering into Pre-Lobby Hold Buffer
-        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to)) {
+        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to) && !IsPhotonEgressAllowed(destPort)) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
             uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
             SteamP2PHook::Log("[Internet-Zero] BLOCKED sendto to external endpoint %u.%u.%u.%u:%u (synthetic_success, total_blocked=%llu)",
@@ -804,7 +827,11 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
 
     // Fall through to real Winsock for raw packets
     if (to) {
-        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to)) {
+        uint16_t rawPort = 0;
+        if (to->sa_family == AF_INET) {
+            rawPort = ntohs(reinterpret_cast<const sockaddr_in*>(to)->sin_port);
+        }
+        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to) && !IsPhotonEgressAllowed(rawPort)) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
             uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
             char ipStr[64] = "unknown";
@@ -990,7 +1017,8 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
         }
 
         bool isLan = IsAllowedLanEndpoint(name);
-        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !isLan) {
+        bool isPhoton = IsPhotonEgressAllowed(port);
+        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !isLan && !isPhoton) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
             uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
             SteamP2PHook::Log("[Internet-Zero] BLOCKED connect to external endpoint %s:%u (error=WSAEHOSTUNREACH, total_blocked=%llu)",
@@ -999,7 +1027,7 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
             return SOCKET_ERROR;
         } else {
             SteamP2PHook::Log("[Internet-Zero] ALLOWED connect to %s endpoint %s:%u",
-                isLan ? "LAN" : "External", ipStr, port);
+                isLan ? "LAN" : (isPhoton ? "Photon Cloud" : "External"), ipStr, port);
         }
     }
     return g_orig_connect(s, name, namelen);

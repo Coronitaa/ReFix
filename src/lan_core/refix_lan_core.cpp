@@ -994,8 +994,8 @@ public:
                 m_callbacks.PostEvent(ev);
             }
 
-            // If we received a query, send a unicast response back to sender
-            if (type == MsgType::DiscoveryQuery) {
+            // If we received a query, or a beacon from a new peer, send a unicast response back to sender
+            if (type == MsgType::DiscoveryQuery || (type == MsgType::DiscoveryBeacon && isNewPeer)) {
                 ByteWriter resp;
                 resp.WriteString(m_appScope);
                 resp.WritePeerId(m_identity.GetLocalPeerId());
@@ -1008,6 +1008,10 @@ public:
                 }
                 resp.WriteU64(mySteamId);
                 m_transport.SendDiscoveryResponse(ep.IsValid() ? ep : sender, resp.Data(), resp.Size());
+
+                if (isNewPeer) {
+                    m_lobby.BroadcastHostedLobbies();
+                }
             }
         } else if (type == MsgType::LobbyAnnouncement) {
             LobbyRecord rec;
@@ -1046,6 +1050,60 @@ public:
 
             if (!r.HasError()) {
                 m_lobby.ImportRemoteLobby(rec);
+
+                // Auto-register lobby owner and members into m_peers for SteamNetworkingSockets / P2P
+                uint64_t ownerSteamId = 0;
+                auto itOwner = rec.attributes.find("__steam_owner");
+                if (itOwner != rec.attributes.end() && !itOwner->second.asString.empty()) {
+                    try { ownerSteamId = std::stoull(itOwner->second.asString); } catch (...) {}
+                }
+                if (ownerSteamId == 0) {
+                    auto itOwner2 = rec.attributes.find("OWNINGID");
+                    if (itOwner2 != rec.attributes.end() && !itOwner2->second.asString.empty()) {
+                        try { ownerSteamId = std::stoull(itOwner2->second.asString); } catch (...) {}
+                    }
+                }
+                if (ownerSteamId != 0 && rec.ownerPeerId.IsValid()) {
+                    PeerInfo hostInfo;
+                    auto existing = m_peers.FindByPeerId(rec.ownerPeerId);
+                    if (existing) hostInfo = *existing;
+                    else {
+                        hostInfo.peerId = rec.ownerPeerId;
+                        hostInfo.machineId = rec.ownerPeerId.high;
+                        hostInfo.state = PeerTransportState::Discovered;
+                    }
+                    hostInfo.endpoint = rec.hostEndpoint;
+                    hostInfo.externalId.platform = ExternalPlatform::Steam;
+                    hostInfo.externalId.numericId = ownerSteamId;
+                    hostInfo.externalId.stringId = std::to_string(ownerSteamId);
+                    if (hostInfo.displayName.empty()) {
+                        for (const auto& m : rec.members) {
+                            if (m.isOwner || m.peerId == rec.ownerPeerId) {
+                                hostInfo.displayName = m.displayName;
+                                break;
+                            }
+                        }
+                    }
+                    m_peers.RegisterOrUpdatePeer(hostInfo);
+                }
+
+                // Also register all remote members
+                for (const auto& m : rec.members) {
+                    if (m.peerId.IsValid() && m.peerId != m_identity.GetLocalPeerId()) {
+                        PeerInfo memInfo;
+                        auto ex = m_peers.FindByPeerId(m.peerId);
+                        if (ex) memInfo = *ex;
+                        else {
+                            memInfo.peerId = m.peerId;
+                            memInfo.machineId = m.peerId.high;
+                            memInfo.state = PeerTransportState::Discovered;
+                        }
+                        if (m.endpoint.IsValid()) memInfo.endpoint = m.endpoint;
+                        else if (!memInfo.endpoint.IsValid()) memInfo.endpoint = rec.hostEndpoint;
+                        if (!m.displayName.empty()) memInfo.displayName = m.displayName;
+                        m_peers.RegisterOrUpdatePeer(memInfo);
+                    }
+                }
             }
         } else if (type == MsgType::LobbyQuery) {
             auto all = m_lobby.GetAllKnownLobbies();

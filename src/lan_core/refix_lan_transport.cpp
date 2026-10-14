@@ -1280,6 +1280,12 @@ bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size
         sendToTarget(0xFFFFFFFF);
         // 3. Localhost (127.0.0.1)
         sendToTarget(0x7F000001);
+        // 4. Local adapter IP and subnet directed broadcast
+        if (m_localDataEndpoint.ipv4 != 0 && m_localDataEndpoint.ipv4 != 0x7F000001) {
+            sendToTarget(m_localDataEndpoint.ipv4);
+            uint32_t subnetBcast = (m_localDataEndpoint.ipv4 & 0xFFFFFF00) | 0x000000FF;
+            sendToTarget(subnetBcast);
+        }
     };
 
     if (targetPort != 0) {
