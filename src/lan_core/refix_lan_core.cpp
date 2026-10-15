@@ -1101,6 +1101,11 @@ public:
                         if (m.endpoint.IsValid()) memInfo.endpoint = m.endpoint;
                         else if (!memInfo.endpoint.IsValid()) memInfo.endpoint = rec.hostEndpoint;
                         if (!m.displayName.empty()) memInfo.displayName = m.displayName;
+                        memInfo.externalId.platform = ExternalPlatform::Steam;
+                        if (memInfo.externalId.numericId == 0 && m.peerId.low != 0) {
+                            memInfo.externalId.numericId = m.peerId.low;
+                            memInfo.externalId.stringId = std::to_string(m.peerId.low);
+                        }
                         m_peers.RegisterOrUpdatePeer(memInfo);
                     }
                 }

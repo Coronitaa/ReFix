@@ -1912,7 +1912,7 @@ void ReFixLog(const char* fmt, ...) {
     LoadConfig();
     va_list args;
     va_start(args, fmt);
-    char buf[1024];
+    char buf[16384];
     vsprintf_s(buf, sizeof(buf), fmt, args);
     va_end(args);
 
@@ -4008,24 +4008,27 @@ struct PendingAuthCallback {
 static std::vector<PendingAuthCallback> g_pendingAuthCallbacks;
 static std::mutex g_pendingAuthMutex;
 
-static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 1) {
+static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 0) {
     if (!pCallback) return false;
     __try {
         void** vtable = *(void***)pCallback;
         if (!vtable) return false;
 
-        typedef void (*fn_Run0_t)(void* self, void* pvParam);
-        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
-        if (pRun0) {
-            pRun0(pCallback, pData);
+        if (hAPICall != 0) {
+            typedef void (*fn_Run1_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hAPICall);
+            fn_Run1_t pRun1 = (fn_Run1_t)vtable[1];
+            if (pRun1) {
+                pRun1(pCallback, pData, false, hAPICall);
+                return true;
+            }
+        } else {
+            typedef void (*fn_Run0_t)(void* self, void* pvParam);
+            fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
+            if (pRun0) {
+                pRun0(pCallback, pData);
+                return true;
+            }
         }
-
-        typedef void (*fn_Run1_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hAPICall);
-        fn_Run1_t pRun1 = (fn_Run1_t)vtable[1];
-        if (pRun1) {
-            pRun1(pCallback, pData, false, hAPICall);
-        }
-        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         DWORD code = GetExceptionCode();
         ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
@@ -4316,13 +4319,6 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
     if (iCallback == 1281) {
         ReFixLog("  -> Intercepted SteamRelayNetworkStatus_t (1281) callback registration for %p", pCallback);
         TrackRelayCallback(pCallback, iCallback);
-        ReFix_SteamRelayNetworkStatus_t data = {};
-        data.m_eAvail = k_eRelayAvail_Current;
-        data.m_bPingMeasurementInProgress = 0;
-        data.m_eAvailNetworkConfig = k_eRelayAvail_Current;
-        data.m_eAvailAnyRelay = k_eRelayAvail_Current;
-        strncpy_s(data.m_debugMsg, sizeof(data.m_debugMsg), "OK (ReFix)", _TRUNCATE);
-        SafeCallRun(pCallback, &data);
     }
 
     if (iCallback == 333) ReFixLog("  -> Intercepted GameLobbyJoinRequested_t (333)");

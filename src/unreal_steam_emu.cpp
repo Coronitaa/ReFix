@@ -114,6 +114,7 @@ namespace UnrealSteamEmu {
 
     static uint64_t g_localSteamID = 0;
     static std::string g_personaName = "Player";
+    static std::string g_basePersonaName = "Player";
     static uint32_t g_appID = 480;
     static std::string g_language = "english";
     static uint16_t g_listenPort = 47584;
@@ -514,35 +515,7 @@ namespace UnrealSteamEmu {
             nameSource = "fallback:Player";
         }
 
-        // Deduplicate Persona Name ONLY if an active user in the same game already has this name on this machine/LAN
-        if (g_hPersonaNameMutex != NULL) {
-            CloseHandle(g_hPersonaNameMutex);
-            g_hPersonaNameMutex = NULL;
-        }
-        std::string basePersonaName = g_personaName;
-        int nameSuffix = 1;
-        while (true) {
-            std::string candidateName = (nameSuffix == 1) ? basePersonaName : (basePersonaName + "_" + std::to_string(nameSuffix));
-            std::string safeName = candidateName;
-            for (char& c : safeName) {
-                if (!isalnum((unsigned char)c) && c != '_' && c != '-') c = '_';
-            }
-            char mName[256];
-            snprintf(mName, sizeof(mName), "Local\\ReFix_Name_%u_%s", g_appID, safeName.c_str());
-            g_hPersonaNameMutex = CreateMutexA(NULL, FALSE, mName);
-            if (g_hPersonaNameMutex && GetLastError() != ERROR_ALREADY_EXISTS) {
-                if (nameSuffix > 1) {
-                    nameSource += "+dup" + std::to_string(nameSuffix);
-                }
-                g_personaName = candidateName;
-                break;
-            }
-            if (g_hPersonaNameMutex) {
-                CloseHandle(g_hPersonaNameMutex);
-                g_hPersonaNameMutex = NULL;
-            }
-            nameSuffix++;
-        }
+        g_basePersonaName = g_personaName;
 
         // 5. Resolve SteamID (explicit numeric configuration has strict precedence over auto-gen)
         std::string sidSource = "unknown";
@@ -838,15 +811,6 @@ namespace UnrealSteamEmu {
 
     bool IsAPICallCompleted(uint64_t hAPICall, bool* pbFailed) {
         DrainPendingSearches(false);
-        {
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_callResultMap.find(hAPICall);
-            if (it != g_callResultMap.end() && it->second.completed) {
-                if (pbFailed) *pbFailed = it->second.failed;
-                return true;
-            }
-        }
-        DrainPendingSearches(true);
         std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
         auto it = g_callResultMap.find(hAPICall);
         if (it == g_callResultMap.end()) return false;
@@ -959,13 +923,25 @@ namespace UnrealSteamEmu {
             cc.m_iCallback = iCallback;
             cc.m_cubParam = (uint32_t)item.data.size();
 
-            // Enqueue into g_manualCallbackQueue for manual dispatch callers
-            QueuedCallbackItem manualItem;
-            manualItem.iCallback = SteamAPICallCompleted_t::k_iCallback;
-            manualItem.data.assign((const uint8_t*)&cc, (const uint8_t*)&cc + sizeof(cc));
-            manualItem.triggerTime = std::chrono::steady_clock::now();
-            manualItem.isGameServer = false;
-            g_manualCallbackQueue.push_back(manualItem);
+            // Enqueue into g_manualCallbackQueue for manual dispatch callers (deduplicated)
+            bool alreadyInManualQueue = false;
+            for (const auto& q : g_manualCallbackQueue) {
+                if (q.iCallback == SteamAPICallCompleted_t::k_iCallback && q.data.size() >= sizeof(SteamAPICallCompleted_t)) {
+                    const auto* existing = (const SteamAPICallCompleted_t*)q.data.data();
+                    if (existing->m_hAsyncCall == cc.m_hAsyncCall) {
+                        alreadyInManualQueue = true;
+                        break;
+                    }
+                }
+            }
+            if (!alreadyInManualQueue) {
+                QueuedCallbackItem manualItem;
+                manualItem.iCallback = SteamAPICallCompleted_t::k_iCallback;
+                manualItem.data.assign((const uint8_t*)&cc, (const uint8_t*)&cc + sizeof(cc));
+                manualItem.triggerTime = std::chrono::steady_clock::now();
+                manualItem.isGameServer = false;
+                g_manualCallbackQueue.push_back(manualItem);
+            }
 
             // Dispatch directly to standard registered callback listeners
             auto range = g_clientCallbacks.equal_range(SteamAPICallCompleted_t::k_iCallback);
@@ -1026,6 +1002,7 @@ namespace UnrealSteamEmu {
             resp.m_nLobbiesMatching = (uint32_t)matchingLobbyIDs.size();
             PostCallback(LobbyMatchList_t::k_iCallback, &resp, sizeof(resp));
             CompleteCallResult(ps.callHandle, LobbyMatchList_t::k_iCallback, &resp, sizeof(resp), false);
+            ReFixLog("[UnrealSteam] Matchmaking search hCall=%llu completed: found %zu matching lobby(ies)", ps.callHandle, matchingLobbyIDs.size());
 
             for (uint64_t sId : matchingLobbyIDs) {
                 LobbyDataUpdate_t ldu = {};
@@ -2765,13 +2742,25 @@ namespace UnrealSteamEmu {
                         if (it->second) ccToDispatch.push_back({ it->second, cc });
                     }
 
-                    // Enqueue into g_manualCallbackQueue for manual dispatch callers (FIND-03)
-                    QueuedCallbackItem manualItem;
-                    manualItem.iCallback = SteamAPICallCompleted_t::k_iCallback;
-                    manualItem.data.assign((const uint8_t*)&cc, (const uint8_t*)&cc + sizeof(cc));
-                    manualItem.triggerTime = now;
-                    manualItem.isGameServer = false;
-                    g_manualCallbackQueue.push_back(manualItem);
+                    // Enqueue into g_manualCallbackQueue for manual dispatch callers (FIND-03, deduplicated)
+                    bool alreadyInManualQueue = false;
+                    for (const auto& q : g_manualCallbackQueue) {
+                        if (q.iCallback == SteamAPICallCompleted_t::k_iCallback && q.data.size() >= sizeof(SteamAPICallCompleted_t)) {
+                            const auto* existing = (const SteamAPICallCompleted_t*)q.data.data();
+                            if (existing->m_hAsyncCall == cc.m_hAsyncCall) {
+                                alreadyInManualQueue = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!alreadyInManualQueue) {
+                        QueuedCallbackItem manualItem;
+                        manualItem.iCallback = SteamAPICallCompleted_t::k_iCallback;
+                        manualItem.data.assign((const uint8_t*)&cc, (const uint8_t*)&cc + sizeof(cc));
+                        manualItem.triggerTime = now;
+                        manualItem.isGameServer = false;
+                        g_manualCallbackQueue.push_back(manualItem);
+                    }
                 }
             }
 
@@ -3165,10 +3154,15 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t SetPersonaName(const char *pchPersonaName) override {
             if (pchPersonaName && pchPersonaName[0] != '\0') {
                 g_personaName = pchPersonaName;
+                g_basePersonaName = pchPersonaName;
                 SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", g_personaName.c_str());
                 SetEnvironmentVariableA("REFIX_USER_NAME", g_personaName.c_str());
                 SetEnvironmentVariableA("REFIX_USERNAME", g_personaName.c_str());
                 SetEnvironmentVariableA("SteamPersonaName", g_personaName.c_str());
+                if (g_transportMode.load() == TransportMode::Canonical) {
+                    refix::lan::ILanCore::Get().Identity().SetDisplayName(g_personaName);
+                    refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
+                }
             }
             SetPersonaNameResponse_t resp = {};
             resp.m_bSuccess = true;
@@ -3225,6 +3219,26 @@ namespace UnrealSteamEmu {
                 // 2. Check active lobbies in ILanCore
                 auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
                 for (const auto& lob : allLobbies) {
+                    uint64_t ownerSid = 0;
+                    auto itO = lob.attributes.find("__steam_owner");
+                    if (itO != lob.attributes.end() && !itO->second.asString.empty()) {
+                        try { ownerSid = std::stoull(itO->second.asString); } catch (...) {}
+                    }
+                    if (ownerSid == 0) {
+                        auto itO2 = lob.attributes.find("OWNINGID");
+                        if (itO2 != lob.attributes.end() && !itO2->second.asString.empty()) {
+                            try { ownerSid = std::stoull(itO2->second.asString); } catch (...) {}
+                        }
+                    }
+                    if (ownerSid == targetSid) {
+                        for (const auto& mem : lob.members) {
+                            if ((mem.isOwner || mem.peerId == lob.ownerPeerId) && !mem.displayName.empty()) {
+                                thread_local char nameBuf[128];
+                                strncpy_s(nameBuf, sizeof(nameBuf), mem.displayName.c_str(), _TRUNCATE);
+                                return nameBuf;
+                            }
+                        }
+                    }
                     for (const auto& mem : lob.members) {
                         auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(mem.peerId);
                         if ((pInfo && pInfo->externalId.numericId == targetSid) || mem.peerId.low == targetSid) {
@@ -4035,10 +4049,17 @@ namespace UnrealSteamEmu {
         virtual void SetLobbyMemberData(CSteamID steamIDLobby, const char *pchKey, const char *pchValue) override {
             if (!pchKey) return;
             uint64_t lID = steamIDLobby.ConvertToUint64();
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            LobbyInfo& lob = g_lobbies[lID];
-            if (pchValue) lob.memberData[g_localSteamID][pchKey] = pchValue;
-            else lob.memberData[g_localSteamID].erase(pchKey);
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                LobbyInfo& lob = g_lobbies[lID];
+                if (pchValue) lob.memberData[g_localSteamID][pchKey] = pchValue;
+                else lob.memberData[g_localSteamID].erase(pchKey);
+            }
+            LobbyDataUpdate_t resp = {};
+            resp.m_ulSteamIDLobby = lID;
+            resp.m_ulSteamIDMember = g_localSteamID;
+            resp.m_bSuccess = 1;
+            PostCallback(LobbyDataUpdate_t::k_iCallback, &resp, sizeof(resp));
         }
 
         virtual bool SendLobbyChatMsg(CSteamID steamIDLobby, const void *pvMsgBody, int cubMsgBody) override {
@@ -7007,8 +7028,37 @@ namespace UnrealSteamEmu {
 
                 // Check for persona name collision across LAN
                 if (_stricmp(pInfo->displayName.c_str(), g_personaName.c_str()) == 0 && g_localSteamID > sid) {
-                    g_personaName += "_2";
+                    int suffix = 2;
+                    while (true) {
+                        std::string cand = g_basePersonaName + "_" + std::to_string(suffix);
+                        bool taken = false;
+                        for (const auto& peerPair : g_peers) {
+                            if (_stricmp(peerPair.second.personaName.c_str(), cand.c_str()) == 0) {
+                                taken = true;
+                                break;
+                            }
+                        }
+                        if (!taken) {
+                            auto allPeers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+                            for (const auto& p : allPeers) {
+                                if (_stricmp(p.displayName.c_str(), cand.c_str()) == 0) {
+                                    taken = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!taken) {
+                            g_personaName = cand;
+                            break;
+                        }
+                        suffix++;
+                    }
                     refix::lan::ILanCore::Get().Identity().SetDisplayName(g_personaName);
+                    SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", g_personaName.c_str());
+                    SetEnvironmentVariableA("REFIX_USER_NAME", g_personaName.c_str());
+                    SetEnvironmentVariableA("REFIX_USERNAME", g_personaName.c_str());
+                    SetEnvironmentVariableA("SteamPersonaName", g_personaName.c_str());
+                    refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
                     ReFixLog("[UnrealSteam] Resolved LAN persona name collision with peer %llu: renamed local player to '%s'", sid, g_personaName.c_str());
                 }
             }
@@ -7139,6 +7189,12 @@ namespace UnrealSteamEmu {
                 cu.m_ulSteamIDMakingChange = memberSteamId;
                 cu.m_rgfChatMemberStateChange = 0x0001; // k_EChatMemberStateChangeEntered
                 PostCallback(LobbyChatUpdate_t::k_iCallback, &cu, sizeof(cu));
+
+                LobbyDataUpdate_t memUpd = {};
+                memUpd.m_ulSteamIDLobby = steamLobbyId;
+                memUpd.m_ulSteamIDMember = memberSteamId;
+                memUpd.m_bSuccess = 1;
+                PostCallback(LobbyDataUpdate_t::k_iCallback, &memUpd, sizeof(memUpd));
             }
         });
 
@@ -7268,6 +7324,23 @@ namespace UnrealSteamEmu {
                 dataUpd.m_ulSteamIDMember = steamLobbyId;
                 dataUpd.m_bSuccess = 1;
                 PostCallback(LobbyDataUpdate_t::k_iCallback, &dataUpd, sizeof(dataUpd));
+
+                // Also post LobbyDataUpdate_t for each member in the lobby so UI refreshes player cards
+                std::vector<uint64_t> currentMembers;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    auto it = g_lobbies.find(steamLobbyId);
+                    if (it != g_lobbies.end()) {
+                        currentMembers = it->second.members;
+                    }
+                }
+                for (uint64_t memSid : currentMembers) {
+                    LobbyDataUpdate_t memUpd = {};
+                    memUpd.m_ulSteamIDLobby = steamLobbyId;
+                    memUpd.m_ulSteamIDMember = memSid;
+                    memUpd.m_bSuccess = 1;
+                    PostCallback(LobbyDataUpdate_t::k_iCallback, &memUpd, sizeof(memUpd));
+                }
                 ReFixLog("[UnrealSteam] LanCore LobbyJoinResult: Successfully joined lobby %llu (coreId='%s')",
                          steamLobbyId, ev.lobbyId.c_str());
             } else {
