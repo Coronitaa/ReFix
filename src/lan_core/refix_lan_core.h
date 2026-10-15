@@ -214,6 +214,7 @@ struct LanEvent {
         LobbyJoinResult
     } type;
 
+    LanEndpoint endpoint;
     PeerId peerId;
     std::string lobbyId;
     MemberLeaveReason leaveReason = MemberLeaveReason::LeftGracefully;

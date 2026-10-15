@@ -1302,6 +1302,7 @@ public:
     void OnInboundData(const InboundPacket& packet) override {
         LanEvent ev;
         ev.type = LanEvent::Type::DataPacketReceived;
+        ev.endpoint = packet.senderEndpoint;
         ev.peerId = packet.senderPeerId;
         ev.channel = packet.channel;
         ev.payload = packet.payload;

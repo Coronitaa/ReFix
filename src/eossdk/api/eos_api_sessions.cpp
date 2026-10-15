@@ -166,7 +166,7 @@ EOS_SessionDetails_Info* MakeSessionInfo(const LobbyRecord& r) {
         if (hSteam) {
             typedef void (*fn_Reg_t)(uint64_t, uint32_t);
             auto fn = (fn_Reg_t)GetProcAddress(hSteam, "ReFix_RegisterP2PPeer");
-            if (fn) fn(r.OwnerSteamId, r.HostAddress.Ipv4);
+            if (fn) fn(r.OwnerSteamId, _byteswap_ulong(r.HostAddress.Ipv4));
         }
     }
 

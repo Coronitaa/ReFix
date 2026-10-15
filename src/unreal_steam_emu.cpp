@@ -796,6 +796,19 @@ namespace UnrealSteamEmu {
     void PostCallback(int iCallback, const void* pData, size_t dataSize, double delaySeconds) {
         std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
 
+        if (iCallback == LobbyDataUpdate_t::k_iCallback && pData && dataSize >= sizeof(LobbyDataUpdate_t)) {
+            const LobbyDataUpdate_t* newUpdate = (const LobbyDataUpdate_t*)pData;
+            for (const auto& existing : g_callbackQueue) {
+                if (existing.iCallback == LobbyDataUpdate_t::k_iCallback && existing.data.size() >= sizeof(LobbyDataUpdate_t)) {
+                    const LobbyDataUpdate_t* oldUpdate = (const LobbyDataUpdate_t*)existing.data.data();
+                    if (oldUpdate->m_ulSteamIDLobby == newUpdate->m_ulSteamIDLobby &&
+                        oldUpdate->m_ulSteamIDMember == newUpdate->m_ulSteamIDMember) {
+                        return;
+                    }
+                }
+            }
+        }
+
         QueuedCallbackItem item;
         item.iCallback = iCallback;
         if (pData && dataSize > 0) {
@@ -964,12 +977,14 @@ namespace UnrealSteamEmu {
 
     static void DrainPendingSearches(bool forceAll) {
         auto now = std::chrono::steady_clock::now();
-        std::vector<PendingSearch> readySearches;
+        std::vector<std::pair<PendingSearch, std::vector<refix::lan::LobbyRecord>>> readySearches;
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             for (auto it = g_pendingSearches.begin(); it != g_pendingSearches.end(); ) {
-                if (forceAll || std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 50) {
-                    readySearches.push_back(*it);
+                auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count();
+                auto matches = refix::lan::ILanCore::Get().Matchmaking().SearchLobbies(it->criteria);
+                if (forceAll || !matches.empty() || elapsedMs >= 1500) {
+                    readySearches.push_back({ *it, std::move(matches) });
                     it = g_pendingSearches.erase(it);
                 } else {
                     ++it;
@@ -977,8 +992,7 @@ namespace UnrealSteamEmu {
             }
         }
 
-        for (const auto& ps : readySearches) {
-            auto matches = refix::lan::ILanCore::Get().Matchmaking().SearchLobbies(ps.criteria);
+        for (const auto& [ps, matches] : readySearches) {
             std::vector<uint64_t> matchingLobbyIDs;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -1387,6 +1401,7 @@ namespace UnrealSteamEmu {
         uint32_t hostNonce{ 0 };
         int32_t virtualPort{ 0 };
         CSteamID remoteSteamID;
+        refix::lan::LanEndpoint remoteEndpoint;
         ESteamNetworkingConnectionState state;
         ReFixConnSubstate substate;
         int64 userData;
@@ -1596,6 +1611,17 @@ namespace UnrealSteamEmu {
                 }
             }
             if (!targetEp.IsValid()) {
+                std::lock_guard<std::mutex> lock(g_socketsMutex);
+                for (const auto& pair : g_connections) {
+                    if (pair.second.remoteSteamID.ConvertToUint64() == remoteSteamID.ConvertToUint64() && pair.second.remoteEndpoint.IsValid()) {
+                        targetEp = pair.second.remoteEndpoint;
+                        targetPeerId.low = remoteSteamID.ConvertToUint64();
+                        break;
+                    }
+                }
+            }
+
+            if (!targetEp.IsValid()) {
                 uint64_t targetSid = remoteSteamID.ConvertToUint64();
                 auto allLobbies = core.Lobby().GetAllKnownLobbies();
                 for (const auto& lob : allLobbies) {
@@ -1615,6 +1641,23 @@ namespace UnrealSteamEmu {
                         targetPeerId = lob.ownerPeerId;
                         break;
                     }
+
+                    for (const auto& mem : lob.members) {
+                        uint64_t memSid = 0;
+                        auto itM = mem.attributes.find("__steam_member");
+                        if (itM != mem.attributes.end() && !itM->second.asString.empty()) {
+                            try { memSid = std::stoull(itM->second.asString); } catch (...) {}
+                        }
+                        if (memSid == 0) {
+                            memSid = mem.peerId.low != 0 ? mem.peerId.low : mem.peerId.high;
+                        }
+                        if (memSid == targetSid && mem.endpoint.IsValid()) {
+                            targetEp = mem.endpoint;
+                            targetPeerId = mem.peerId;
+                            break;
+                        }
+                    }
+                    if (targetEp.IsValid()) break;
                 }
             }
 
@@ -1716,7 +1759,7 @@ namespace UnrealSteamEmu {
         }
     }
 
-    static void ProcessRfxsPacket(uint64_t senderSteamId, const uint8_t* payload, size_t payloadLen) {
+    static void ProcessRfxsPacket(uint64_t senderSteamId, const uint8_t* payload, size_t payloadLen, const refix::lan::LanEndpoint& remoteEndpoint = {}) {
         if (!payload || payloadLen < 5) return;
         uint32_t magic = *(const uint32_t*)payload;
         if (magic != k_nRfxsMagic) return;
@@ -1789,6 +1832,7 @@ namespace UnrealSteamEmu {
                     conn.hostNonce = hostNonce;
                     conn.virtualPort = hs->virtualPort;
                     conn.m_hListenSocket = matchingListen;
+                    conn.remoteEndpoint = remoteEndpoint;
                     conn.substate = ReFixConnSubstate::Connecting_WaitingDiscovery;
 
                     snap.handle = hConn;
@@ -1820,6 +1864,9 @@ namespace UnrealSteamEmu {
                             if (pair.second.state == k_ESteamNetworkingConnectionState_Connecting) {
                                 hClientConn = pair.first;
                                 pair.second.hostNonce = acc->hostNonce;
+                                if (remoteEndpoint.IsValid()) {
+                                    pair.second.remoteEndpoint = remoteEndpoint;
+                                }
                                 pair.second.state = k_ESteamNetworkingConnectionState_Connected;
                                 pair.second.substate = ReFixConnSubstate::Connected;
 
@@ -7369,7 +7416,8 @@ namespace UnrealSteamEmu {
                 senderSteamId = ev.peerId.low != 0 ? ev.peerId.low : ev.peerId.high;
             }
 
-            if (ev.channel == 250 || (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == k_nRfxsMagic)) {
+            bool isRfxs = (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == k_nRfxsMagic);
+            if (isRfxs) {
                 if (ev.payload.size() >= sizeof(RfxsHandshake) && ev.payload[4] == 0x01) {
                     const RfxsHandshake* hs = (const RfxsHandshake*)ev.payload.data();
                     if (hs->clientSteamId != 0) {
@@ -7383,6 +7431,9 @@ namespace UnrealSteamEmu {
                             pInfoRecord.machineId = ev.peerId.high;
                             pInfoRecord.state = refix::lan::PeerTransportState::Connected;
                         }
+                        if (ev.endpoint.IsValid()) {
+                            pInfoRecord.endpoint = ev.endpoint;
+                        }
                         pInfoRecord.externalId.platform = refix::lan::ExternalPlatform::Steam;
                         pInfoRecord.externalId.numericId = hs->clientSteamId;
                         pInfoRecord.externalId.stringId = std::to_string(hs->clientSteamId);
@@ -7393,12 +7444,12 @@ namespace UnrealSteamEmu {
                         DiscoveredPeer& dp = g_peers[hs->clientSteamId];
                         dp.steamID = hs->clientSteamId;
                         dp.personaName = pInfoRecord.displayName.empty() ? "ReFix Peer" : pInfoRecord.displayName;
-                        dp.ip = pInfoRecord.endpoint.ipv4;
-                        dp.port = pInfoRecord.endpoint.port;
+                        dp.ip = ev.endpoint.ipv4 != 0 ? ev.endpoint.ipv4 : pInfoRecord.endpoint.ipv4;
+                        dp.port = ev.endpoint.port != 0 ? ev.endpoint.port : pInfoRecord.endpoint.port;
                         dp.lastSeen = std::chrono::steady_clock::now();
                     }
                 }
-                ProcessRfxsPacket(senderSteamId, ev.payload.data(), ev.payload.size());
+                ProcessRfxsPacket(senderSteamId, ev.payload.data(), ev.payload.size(), ev.endpoint);
                 return;
             }
 

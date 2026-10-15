@@ -311,4 +311,171 @@ __declspec(dllexport) void SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess
     if (u) u->InitRelayNetworkAccess();
 }
 
+// --- SteamAPI_SteamNetworkingIdentity Flat Wrappers ---
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_Clear(SteamNetworkingIdentity* self) {
+    if (self) self->Clear();
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_SetSteamID(SteamNetworkingIdentity* self, uint64_t steamID) {
+    if (self) self->SetSteamID(CSteamID(steamID));
+}
+
+__declspec(dllexport) uint64_t SteamAPI_SteamNetworkingIdentity_GetSteamID64(const SteamNetworkingIdentity* self) {
+    return self ? self->GetSteamID64() : 0;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_SetSteamID64(SteamNetworkingIdentity* self, uint64_t steamID) {
+    if (self) self->SetSteamID64(steamID);
+}
+
+__declspec(dllexport) uint64_t SteamAPI_SteamNetworkingIdentity_GetSteamID(const SteamNetworkingIdentity* self) {
+    return self ? self->GetSteamID().ConvertToUint64() : 0;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_SetIPv4Addr(SteamNetworkingIdentity* self, uint32_t nIPv4, uint16_t nPort) {
+    if (self) self->SetIPv4Addr(nIPv4, nPort);
+}
+
+__declspec(dllexport) uint32_t SteamAPI_SteamNetworkingIdentity_GetIPv4(const SteamNetworkingIdentity* self) {
+    return self ? self->GetIPv4() : 0;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_SetIPAddr(SteamNetworkingIdentity* self, const SteamNetworkingIPAddr* addr) {
+    if (self && addr) self->SetIPAddr(*addr);
+}
+
+__declspec(dllexport) const SteamNetworkingIPAddr* SteamAPI_SteamNetworkingIdentity_GetIPAddr(const SteamNetworkingIdentity* self) {
+    return self ? self->GetIPAddr() : nullptr;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_SetLocalHost(SteamNetworkingIdentity* self) {
+    if (self) self->SetLocalHost();
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_IsLocalHost(const SteamNetworkingIdentity* self) {
+    return self ? self->IsLocalHost() : false;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_IsInvalid(const SteamNetworkingIdentity* self) {
+    return self ? self->IsInvalid() : true;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_IsEqualTo(const SteamNetworkingIdentity* self, const SteamNetworkingIdentity* x) {
+    if (!self || !x) return self == x;
+    return *self == *x;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_ToString(const SteamNetworkingIdentity* self, char* buf, uint32_t cbBuf) {
+    if (self && buf && cbBuf > 0) self->ToString(buf, cbBuf);
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_ParseString(SteamNetworkingIdentity* self, const char* pszStr) {
+    return (self && pszStr) ? self->ParseString(pszStr) : false;
+}
+
+__declspec(dllexport) ESteamNetworkingFakeIPType SteamAPI_SteamNetworkingIdentity_GetFakeIPType(const SteamNetworkingIdentity* self) {
+    return self ? self->GetFakeIPType() : k_ESteamNetworkingFakeIPType_Invalid;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_IsFakeIP(const SteamNetworkingIdentity* self) {
+    return self ? self->IsFakeIP() : false;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_SetXboxPairwiseID(SteamNetworkingIdentity* self, const char* pszString) {
+    return (self && pszString) ? self->SetXboxPairwiseID(pszString) : false;
+}
+
+__declspec(dllexport) const char* SteamAPI_SteamNetworkingIdentity_GetXboxPairwiseID(const SteamNetworkingIdentity* self) {
+    return self ? self->GetXboxPairwiseID() : nullptr;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_SetPSNID(SteamNetworkingIdentity* self, uint64_t id) {
+    if (self) self->SetPSNID(id);
+}
+
+__declspec(dllexport) uint64_t SteamAPI_SteamNetworkingIdentity_GetPSNID(const SteamNetworkingIdentity* self) {
+    return self ? self->GetPSNID() : 0;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIdentity_SetStadiaID(SteamNetworkingIdentity* self, uint64_t id) {
+    if (self) self->SetStadiaID(id);
+}
+
+__declspec(dllexport) uint64_t SteamAPI_SteamNetworkingIdentity_GetStadiaID(const SteamNetworkingIdentity* self) {
+    return self ? self->GetStadiaID() : 0;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_SetGenericString(SteamNetworkingIdentity* self, const char* pszString) {
+    return (self && pszString) ? self->SetGenericString(pszString) : false;
+}
+
+__declspec(dllexport) const char* SteamAPI_SteamNetworkingIdentity_GetGenericString(const SteamNetworkingIdentity* self) {
+    return self ? self->GetGenericString() : nullptr;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIdentity_SetGenericBytes(SteamNetworkingIdentity* self, const void* data, size_t cbLen) {
+    return (self && data) ? self->SetGenericBytes(data, cbLen) : false;
+}
+
+__declspec(dllexport) const uint8_t* SteamAPI_SteamNetworkingIdentity_GetGenericBytes(const SteamNetworkingIdentity* self, int* pcbLen) {
+    int dummy = 0;
+    return self ? self->GetGenericBytes(pcbLen ? *pcbLen : dummy) : nullptr;
+}
+
+// --- SteamAPI_SteamNetworkingIPAddr Flat Wrappers ---
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIPAddr_Clear(SteamNetworkingIPAddr* self) {
+    if (self) self->Clear();
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIPAddr_IsIPv6AllZeros(const SteamNetworkingIPAddr* self) {
+    return self ? self->IsIPv6AllZeros() : true;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIPAddr_SetIPv6(SteamNetworkingIPAddr* self, const uint8_t* ipv6, uint16_t nPort) {
+    if (self && ipv6) self->SetIPv6(ipv6, nPort);
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIPAddr_SetIPv4(SteamNetworkingIPAddr* self, uint32_t nIP, uint16_t nPort) {
+    if (self) self->SetIPv4(nIP, nPort);
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIPAddr_IsIPv4(const SteamNetworkingIPAddr* self) {
+    return self ? self->IsIPv4() : false;
+}
+
+__declspec(dllexport) uint32_t SteamAPI_SteamNetworkingIPAddr_GetIPv4(const SteamNetworkingIPAddr* self) {
+    return self ? self->GetIPv4() : 0;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIPAddr_SetIPv6LocalHost(SteamNetworkingIPAddr* self, uint16_t nPort) {
+    if (self) self->SetIPv6LocalHost(nPort);
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIPAddr_IsLocalHost(const SteamNetworkingIPAddr* self) {
+    return self ? self->IsLocalHost() : false;
+}
+
+__declspec(dllexport) void SteamAPI_SteamNetworkingIPAddr_ToString(const SteamNetworkingIPAddr* self, char* buf, size_t cbBuf, bool bWithPort) {
+    if (self && buf && cbBuf > 0) self->ToString(buf, cbBuf, bWithPort);
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIPAddr_ParseString(SteamNetworkingIPAddr* self, const char* pszStr) {
+    return (self && pszStr) ? self->ParseString(pszStr) : false;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIPAddr_IsEqualTo(const SteamNetworkingIPAddr* self, const SteamNetworkingIPAddr* x) {
+    if (!self || !x) return self == x;
+    return *self == *x;
+}
+
+__declspec(dllexport) ESteamNetworkingFakeIPType SteamAPI_SteamNetworkingIPAddr_GetFakeIPType(const SteamNetworkingIPAddr* self) {
+    return self ? self->GetFakeIPType() : k_ESteamNetworkingFakeIPType_Invalid;
+}
+
+__declspec(dllexport) bool SteamAPI_SteamNetworkingIPAddr_IsFakeIP(const SteamNetworkingIPAddr* self) {
+    return self ? self->IsFakeIP() : false;
+}
+
 } // extern "C"

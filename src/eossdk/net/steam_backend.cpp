@@ -256,7 +256,7 @@ static void NotifyP2PHookOfPeer(uint64_t steamId, uint32_t ipv4) {
     if (hSteam) {
         typedef void (*fn_Reg_t)(uint64_t, uint32_t);
         auto fn = (fn_Reg_t)GetProcAddress(hSteam, "ReFix_RegisterP2PPeer");
-        if (fn) fn(steamId, ipv4);
+        if (fn) fn(steamId, _byteswap_ulong(ipv4));
     }
 }
 
@@ -296,16 +296,39 @@ bool SteamBackend::Start() {
     if (m_gameAppId.empty() || m_gameAppId == "480")
         m_gameAppId = cfg.GetString("Steam", "WorkshopAppId", "");
     if (m_gameAppId.empty() || m_gameAppId == "480") {
-        std::string gameName = cfg.GetString("Game", "GameName", "");
-        if (!gameName.empty() && gameName != "DefaultGame" && gameName != "Shift At Midnight") {
+        FILE* f = nullptr;
+        fopen_s(&f, "steam_appid.txt", "r");
+        if (f) {
+            char buf[64] = {0};
+            if (fgets(buf, sizeof(buf), f)) {
+                char* p = buf;
+                while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+                char* end = p;
+                while (*end >= '0' && *end <= '9') end++;
+                *end = '\0';
+                if (*p && strcmp(p, "480") != 0 && strcmp(p, "0") != 0) {
+                    m_gameAppId = p;
+                    RFLOG(Net, "SteamBackend: RealAppId loaded from steam_appid.txt -> %s", m_gameAppId.c_str());
+                }
+            }
+            fclose(f);
+        }
+    }
+    if (m_gameAppId.empty() || m_gameAppId == "480") {
+        char exePath[MAX_PATH] = {0};
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        char* exeName = strrchr(exePath, '\\');
+        if (!exeName) exeName = strrchr(exePath, '/');
+        exeName = exeName ? exeName + 1 : exePath;
+        if (exeName && *exeName) {
             uint32_t hash = 2166136261u;
-            for (char c : gameName) {
-                hash ^= (uint8_t)tolower(c);
+            for (const char* p = exeName; *p; ++p) {
+                hash ^= (uint8_t)tolower(*p);
                 hash *= 16777619u;
             }
             uint32_t synthAppId = 1000000u + (hash % 8000000u);
             m_gameAppId = std::to_string(synthAppId);
-            RFLOG(Net, "SteamBackend: RealAppId derived from GameName '%s' -> %s", gameName.c_str(), m_gameAppId.c_str());
+            RFLOG(Net, "SteamBackend: RealAppId derived from Executable '%s' -> %s", exeName, m_gameAppId.c_str());
         }
     }
 

@@ -4018,16 +4018,20 @@ static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 0) {
             typedef void (*fn_Run1_t)(void* self, void* pvParam, bool bIOFailure, uint64_t hAPICall);
             fn_Run1_t pRun1 = (fn_Run1_t)vtable[1];
             if (pRun1) {
-                pRun1(pCallback, pData, false, hAPICall);
-                return true;
+                __try {
+                    pRun1(pCallback, pData, false, hAPICall);
+                    return true;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    ReFixLog("SafeCallRun: vtable[1] faulted (code 0x%08X), falling back to vtable[0]", GetExceptionCode());
+                }
             }
-        } else {
-            typedef void (*fn_Run0_t)(void* self, void* pvParam);
-            fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
-            if (pRun0) {
-                pRun0(pCallback, pData);
-                return true;
-            }
+        }
+        
+        typedef void (*fn_Run0_t)(void* self, void* pvParam);
+        fn_Run0_t pRun0 = (fn_Run0_t)vtable[0];
+        if (pRun0) {
+            pRun0(pCallback, pData);
+            return true;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         DWORD code = GetExceptionCode();
@@ -4250,7 +4254,7 @@ static void DispatchPendingAuthCallbacks() {
                 memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
             }
 
-            if (SafeCallRun(item.pCallback, &data, handle)) {
+            if (SafeCallRun(item.pCallback, &data, 0)) {
                 ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched GetTicketForWebApiResponse_t (168, handle=%u) to %p", handle, item.pCallback);
             }
         } else if (item.iCallback == 163) {
@@ -4262,7 +4266,7 @@ static void DispatchPendingAuthCallbacks() {
             data.m_hAuthTicket = handle;
             data.m_eResult = 1; // k_EResultOK
 
-            if (SafeCallRun(item.pCallback, &data, handle)) {
+            if (SafeCallRun(item.pCallback, &data, 0)) {
                 ReFixLog("DispatchPendingAuthCallbacks: Successfully dispatched GetAuthSessionTicketResponse_t (163, handle=%u) to %p", handle, item.pCallback);
             }
         }
@@ -4363,7 +4367,7 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
                 if (data.m_cubTicket > 0 && data.m_cubTicket <= sizeof(data.m_rgubTicket)) {
                     memcpy(data.m_rgubTicket, g_lastAuthTicketData.data(), data.m_cubTicket);
                 }
-                if (SafeCallRun(pCallback, &data, handle)) {
+                if (SafeCallRun(pCallback, &data, 0)) {
                     ReFixLog("  -> Runtime: Immediately dispatched GetTicketForWebApiResponse_t (168, handle=%u) to %p", handle, pCallback);
                 }
             } else {
@@ -6437,6 +6441,49 @@ extern "C" {
     bool SteamAPI_ISteamNetworkingUtils_SetConfigValue(void* self, int eValue, int eScopeType, intptr_t scopeObj, int eDataType, const void* pArg);
     int SteamAPI_ISteamNetworkingUtils_GetConfigValue(void* self, int eValue, int eScopeType, intptr_t scopeObj, int* pOutDataType, void* pResult, size_t* cbResult);
     void* SteamAPI_ISteamNetworkingUtils_AllocateMessage(void* self, int cbAllocateBuffer);
+
+    // Flat SteamNetworkingIdentity and SteamNetworkingIPAddr exports
+    void SteamAPI_SteamNetworkingIdentity_Clear(void* self);
+    void SteamAPI_SteamNetworkingIdentity_SetSteamID(void* self, uint64_t steamID);
+    uint64_t SteamAPI_SteamNetworkingIdentity_GetSteamID64(const void* self);
+    void SteamAPI_SteamNetworkingIdentity_SetSteamID64(void* self, uint64_t steamID);
+    uint64_t SteamAPI_SteamNetworkingIdentity_GetSteamID(const void* self);
+    void SteamAPI_SteamNetworkingIdentity_SetIPv4Addr(void* self, uint32_t nIPv4, uint16_t nPort);
+    uint32_t SteamAPI_SteamNetworkingIdentity_GetIPv4(const void* self);
+    void SteamAPI_SteamNetworkingIdentity_SetIPAddr(void* self, const void* addr);
+    const void* SteamAPI_SteamNetworkingIdentity_GetIPAddr(const void* self);
+    void SteamAPI_SteamNetworkingIdentity_SetLocalHost(void* self);
+    bool SteamAPI_SteamNetworkingIdentity_IsLocalHost(const void* self);
+    bool SteamAPI_SteamNetworkingIdentity_IsInvalid(const void* self);
+    bool SteamAPI_SteamNetworkingIdentity_IsEqualTo(const void* self, const void* x);
+    void SteamAPI_SteamNetworkingIdentity_ToString(const void* self, char* buf, uint32_t cbBuf);
+    bool SteamAPI_SteamNetworkingIdentity_ParseString(void* self, const char* pszStr);
+    int SteamAPI_SteamNetworkingIdentity_GetFakeIPType(const void* self);
+    bool SteamAPI_SteamNetworkingIdentity_IsFakeIP(const void* self);
+    bool SteamAPI_SteamNetworkingIdentity_SetXboxPairwiseID(void* self, const char* pszString);
+    const char* SteamAPI_SteamNetworkingIdentity_GetXboxPairwiseID(const void* self);
+    void SteamAPI_SteamNetworkingIdentity_SetPSNID(void* self, uint64_t id);
+    uint64_t SteamAPI_SteamNetworkingIdentity_GetPSNID(const void* self);
+    void SteamAPI_SteamNetworkingIdentity_SetStadiaID(void* self, uint64_t id);
+    uint64_t SteamAPI_SteamNetworkingIdentity_GetStadiaID(const void* self);
+    bool SteamAPI_SteamNetworkingIdentity_SetGenericString(void* self, const char* pszString);
+    const char* SteamAPI_SteamNetworkingIdentity_GetGenericString(const void* self);
+    bool SteamAPI_SteamNetworkingIdentity_SetGenericBytes(void* self, const void* data, size_t cbLen);
+    const uint8_t* SteamAPI_SteamNetworkingIdentity_GetGenericBytes(const void* self, int* pcbLen);
+
+    void SteamAPI_SteamNetworkingIPAddr_Clear(void* self);
+    bool SteamAPI_SteamNetworkingIPAddr_IsIPv6AllZeros(const void* self);
+    void SteamAPI_SteamNetworkingIPAddr_SetIPv6(void* self, const uint8_t* ipv6, uint16_t nPort);
+    void SteamAPI_SteamNetworkingIPAddr_SetIPv4(void* self, uint32_t nIP, uint16_t nPort);
+    bool SteamAPI_SteamNetworkingIPAddr_IsIPv4(const void* self);
+    uint32_t SteamAPI_SteamNetworkingIPAddr_GetIPv4(const void* self);
+    void SteamAPI_SteamNetworkingIPAddr_SetIPv6LocalHost(void* self, uint16_t nPort);
+    bool SteamAPI_SteamNetworkingIPAddr_IsLocalHost(const void* self);
+    void SteamAPI_SteamNetworkingIPAddr_ToString(const void* self, char* buf, size_t cbBuf, bool bWithPort);
+    bool SteamAPI_SteamNetworkingIPAddr_ParseString(void* self, const char* pszStr);
+    bool SteamAPI_SteamNetworkingIPAddr_IsEqualTo(const void* self, const void* x);
+    int SteamAPI_SteamNetworkingIPAddr_GetFakeIPType(const void* self);
+    bool SteamAPI_SteamNetworkingIPAddr_IsFakeIP(const void* self);
 }
 
 static FARPROC LookupLanExport(const char* name) {
@@ -6671,7 +6718,50 @@ static FARPROC LookupLanExport(const char* name) {
         { "SteamAPI_ISteamNetworkingUtils_SetDebugOutputFunction", (FARPROC)SteamAPI_ISteamNetworkingUtils_SetDebugOutputFunction },
         { "SteamAPI_ISteamNetworkingUtils_SetConfigValue", (FARPROC)SteamAPI_ISteamNetworkingUtils_SetConfigValue },
         { "SteamAPI_ISteamNetworkingUtils_GetConfigValue", (FARPROC)SteamAPI_ISteamNetworkingUtils_GetConfigValue },
-        { "SteamAPI_ISteamNetworkingUtils_AllocateMessage", (FARPROC)SteamAPI_ISteamNetworkingUtils_AllocateMessage }
+        { "SteamAPI_ISteamNetworkingUtils_AllocateMessage", (FARPROC)SteamAPI_ISteamNetworkingUtils_AllocateMessage },
+
+        // Flat SteamNetworkingIdentity and SteamNetworkingIPAddr exports
+        { "SteamAPI_SteamNetworkingIdentity_Clear", (FARPROC)SteamAPI_SteamNetworkingIdentity_Clear },
+        { "SteamAPI_SteamNetworkingIdentity_SetSteamID", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetSteamID },
+        { "SteamAPI_SteamNetworkingIdentity_GetSteamID64", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetSteamID64 },
+        { "SteamAPI_SteamNetworkingIdentity_SetSteamID64", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetSteamID64 },
+        { "SteamAPI_SteamNetworkingIdentity_GetSteamID", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetSteamID },
+        { "SteamAPI_SteamNetworkingIdentity_SetIPv4Addr", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetIPv4Addr },
+        { "SteamAPI_SteamNetworkingIdentity_GetIPv4", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetIPv4 },
+        { "SteamAPI_SteamNetworkingIdentity_SetIPAddr", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetIPAddr },
+        { "SteamAPI_SteamNetworkingIdentity_GetIPAddr", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetIPAddr },
+        { "SteamAPI_SteamNetworkingIdentity_SetLocalHost", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetLocalHost },
+        { "SteamAPI_SteamNetworkingIdentity_IsLocalHost", (FARPROC)SteamAPI_SteamNetworkingIdentity_IsLocalHost },
+        { "SteamAPI_SteamNetworkingIdentity_IsInvalid", (FARPROC)SteamAPI_SteamNetworkingIdentity_IsInvalid },
+        { "SteamAPI_SteamNetworkingIdentity_IsEqualTo", (FARPROC)SteamAPI_SteamNetworkingIdentity_IsEqualTo },
+        { "SteamAPI_SteamNetworkingIdentity_ToString", (FARPROC)SteamAPI_SteamNetworkingIdentity_ToString },
+        { "SteamAPI_SteamNetworkingIdentity_ParseString", (FARPROC)SteamAPI_SteamNetworkingIdentity_ParseString },
+        { "SteamAPI_SteamNetworkingIdentity_GetFakeIPType", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetFakeIPType },
+        { "SteamAPI_SteamNetworkingIdentity_IsFakeIP", (FARPROC)SteamAPI_SteamNetworkingIdentity_IsFakeIP },
+        { "SteamAPI_SteamNetworkingIdentity_SetXboxPairwiseID", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetXboxPairwiseID },
+        { "SteamAPI_SteamNetworkingIdentity_GetXboxPairwiseID", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetXboxPairwiseID },
+        { "SteamAPI_SteamNetworkingIdentity_SetPSNID", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetPSNID },
+        { "SteamAPI_SteamNetworkingIdentity_GetPSNID", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetPSNID },
+        { "SteamAPI_SteamNetworkingIdentity_SetStadiaID", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetStadiaID },
+        { "SteamAPI_SteamNetworkingIdentity_GetStadiaID", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetStadiaID },
+        { "SteamAPI_SteamNetworkingIdentity_SetGenericString", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetGenericString },
+        { "SteamAPI_SteamNetworkingIdentity_GetGenericString", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetGenericString },
+        { "SteamAPI_SteamNetworkingIdentity_SetGenericBytes", (FARPROC)SteamAPI_SteamNetworkingIdentity_SetGenericBytes },
+        { "SteamAPI_SteamNetworkingIdentity_GetGenericBytes", (FARPROC)SteamAPI_SteamNetworkingIdentity_GetGenericBytes },
+
+        { "SteamAPI_SteamNetworkingIPAddr_Clear", (FARPROC)SteamAPI_SteamNetworkingIPAddr_Clear },
+        { "SteamAPI_SteamNetworkingIPAddr_IsIPv6AllZeros", (FARPROC)SteamAPI_SteamNetworkingIPAddr_IsIPv6AllZeros },
+        { "SteamAPI_SteamNetworkingIPAddr_SetIPv6", (FARPROC)SteamAPI_SteamNetworkingIPAddr_SetIPv6 },
+        { "SteamAPI_SteamNetworkingIPAddr_SetIPv4", (FARPROC)SteamAPI_SteamNetworkingIPAddr_SetIPv4 },
+        { "SteamAPI_SteamNetworkingIPAddr_IsIPv4", (FARPROC)SteamAPI_SteamNetworkingIPAddr_IsIPv4 },
+        { "SteamAPI_SteamNetworkingIPAddr_GetIPv4", (FARPROC)SteamAPI_SteamNetworkingIPAddr_GetIPv4 },
+        { "SteamAPI_SteamNetworkingIPAddr_SetIPv6LocalHost", (FARPROC)SteamAPI_SteamNetworkingIPAddr_SetIPv6LocalHost },
+        { "SteamAPI_SteamNetworkingIPAddr_IsLocalHost", (FARPROC)SteamAPI_SteamNetworkingIPAddr_IsLocalHost },
+        { "SteamAPI_SteamNetworkingIPAddr_ToString", (FARPROC)SteamAPI_SteamNetworkingIPAddr_ToString },
+        { "SteamAPI_SteamNetworkingIPAddr_ParseString", (FARPROC)SteamAPI_SteamNetworkingIPAddr_ParseString },
+        { "SteamAPI_SteamNetworkingIPAddr_IsEqualTo", (FARPROC)SteamAPI_SteamNetworkingIPAddr_IsEqualTo },
+        { "SteamAPI_SteamNetworkingIPAddr_GetFakeIPType", (FARPROC)SteamAPI_SteamNetworkingIPAddr_GetFakeIPType },
+        { "SteamAPI_SteamNetworkingIPAddr_IsFakeIP", (FARPROC)SteamAPI_SteamNetworkingIPAddr_IsFakeIP }
     };
 
     auto it = s_lanExports.find(name);
