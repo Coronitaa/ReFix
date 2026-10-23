@@ -345,6 +345,45 @@ void* Intercept_SteamNetworkingSockets_v008() {
     return ptr;
 }
 
+void* Intercept_SteamNetworkingSockets_Generic(const char* pszVersion) {
+    NotifySocketsPathDetected();
+    if (!g_hOriginalDll) return nullptr;
+
+    if (pszVersion && pszVersion[0]) {
+        auto pfn = (fn_SteamNetworkingSockets_v008_t)GetProcAddress(g_hOriginalDll, pszVersion);
+        if (pfn) return pfn();
+    }
+
+    static const char* s_fallbacks[] = {
+        "SteamAPI_SteamNetworkingSockets_SteamAPI_v012",
+        "SteamAPI_SteamNetworkingSockets_SteamAPI_v011",
+        "SteamAPI_SteamNetworkingSockets_SteamAPI_v010",
+        "SteamAPI_SteamNetworkingSockets_v009",
+        "SteamAPI_SteamNetworkingSockets_v008",
+        "SteamNetworkingSockets"
+    };
+    for (const char* name : s_fallbacks) {
+        auto pfn = (fn_SteamNetworkingSockets_v008_t)GetProcAddress(g_hOriginalDll, name);
+        if (pfn) {
+            void* res = pfn();
+            if (res) return res;
+        }
+    }
+    return nullptr;
+}
+
+void* Intercept_SteamNetworkingSockets_v012() {
+    return Intercept_SteamNetworkingSockets_Generic("SteamAPI_SteamNetworkingSockets_SteamAPI_v012");
+}
+
+void* Intercept_SteamNetworkingUtils_v004() {
+    if (g_hOriginalDll) {
+        auto pfn = (fn_SteamNetworkingUtils_v003_t)GetProcAddress(g_hOriginalDll, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004");
+        if (pfn) return pfn();
+    }
+    return Intercept_SteamNetworkingUtils_v003();
+}
+
 void* Intercept_SteamNetworkingUtils_v003() {
     if (!s_orig_SteamNetworkingUtils_v003) {
         if (g_hOriginalDll) {

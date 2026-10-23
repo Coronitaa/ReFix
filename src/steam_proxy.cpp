@@ -1673,6 +1673,7 @@ struct ReFixConfig {
     bool enableLog = true;
     bool enableConsole = false;
     bool enableServerBrowser = true;
+    bool enableMockAuth = true;
 };
 
 static ReFixConfig g_config;
@@ -1835,10 +1836,15 @@ static void LoadConfig() {
     g_enableLogAllowed = g_config.enableLog;
     g_config.enableConsole = ReadBool("Debug", "EnableConsole", false);
     g_config.enableServerBrowser = ReadBool("Debug", "EnableServerBrowser", true);
+
+    // [CloudAuth]
+    g_config.enableMockAuth = ReadBool("CloudAuth", "EnableMockAuth", true);
 }
 
 void ReFixLog(const char* fmt, ...) {
-    LoadConfig();
+    if (!g_configLoaded) LoadConfig();
+    if (!g_enableLogAllowed) return;
+
     va_list args;
     va_start(args, fmt);
     char buf[1024];
@@ -1850,8 +1856,6 @@ void ReFixLog(const char* fmt, ...) {
         printf("[SteamProxy] %s\n", buf);
         fflush(stdout);
     }
-
-    if (!g_enableLogAllowed) return;
 
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
@@ -2802,8 +2806,12 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
     uint32_t targetApp = GetResolvedAppID();
-    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
-             targetApp, g_config.engineType.c_str(), g_isGoldbergMode ? "Goldberg" : "Valve");
+    static bool s_logged = false;
+    if (!s_logged) {
+        s_logged = true;
+        ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
+                 targetApp, g_config.engineType.c_str(), g_isGoldbergMode ? "Goldberg" : "Valve");
+    }
     return targetApp;
 }
 
@@ -2974,7 +2982,7 @@ static std::vector<uint8_t> GenerateDummyAuthTicket() {
     memcpy(ticket.data() + 12, &steam_id, 8);
     memcpy(ticket.data() + 20, &date, 4);
 
-    uint32_t appId = g_maskAppIdNum ? g_maskAppIdNum : 480;
+    uint32_t appId = g_config.realAppIdNum ? g_config.realAppIdNum : (g_maskAppIdNum ? g_maskAppIdNum : 480);
     memcpy(ticket.data() + 24, &appId, 4);
     uint32_t ip = 0x0100007F; // 127.0.0.1
     memcpy(ticket.data() + 28, &ip, 4);
@@ -3032,8 +3040,10 @@ static uint32_t Hooked_VTable_GetAuthTicketForWebApi(void* self, const char* pch
     if (g_lastAuthTicketData.empty()) {
         g_lastAuthTicketData = GenerateDummyAuthTicket();
     }
-    DispatchAuthCallbacksImmediately(168);
-    DispatchAuthCallbacksImmediately(163);
+    if (g_config.enableMockAuth) {
+        DispatchAuthCallbacksImmediately(168);
+        DispatchAuthCallbacksImmediately(163);
+    }
     return handle;
 }
 
@@ -3103,6 +3113,9 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
         HookVTableMethod(iface, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
         HookVTableMethod(iface, 16, (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame);
         HookVTableMethod(iface, 43, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
+    }
+    else if (strstr(pszVersion, "SteamNetworkingSockets") || strstr(pszVersion, "SteamNetworkingUtils")) {
+        SteamNetCompat::NotifySocketsPathDetected();
     }
 }
 
@@ -4212,9 +4225,17 @@ static bool EnsureOriginal() {
         if (idxSocketsV8 >= 0) {
             g_steamProcs[idxSocketsV8] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingSockets_v008;
         }
+        int idxSocketsV12 = FindSteamExportIndex("SteamAPI_SteamNetworkingSockets_SteamAPI_v012");
+        if (idxSocketsV12 >= 0) {
+            g_steamProcs[idxSocketsV12] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingSockets_v012;
+        }
         int idxUtilsV3 = FindSteamExportIndex("SteamAPI_SteamNetworkingUtils_v003");
         if (idxUtilsV3 >= 0) {
             g_steamProcs[idxUtilsV3] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingUtils_v003;
+        }
+        int idxUtilsV4 = FindSteamExportIndex("SteamAPI_SteamNetworkingUtils_SteamAPI_v004");
+        if (idxUtilsV4 >= 0) {
+            g_steamProcs[idxUtilsV4] = (FARPROC)SteamNetCompat::Intercept_SteamNetworkingUtils_v004;
         }
     }
 
@@ -4283,8 +4304,8 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
-        if (g_unrealIsEngine && !g_isGoldbergMode) {
+        // Install Winsock -> Steam P2P redirect hooks (for non-Godot engines in Valve Online mode)
+        if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
             ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
             // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
@@ -4421,9 +4442,10 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (ONLY for Unreal Engine in Valve Online mode)
-        if (g_unrealIsEngine && !g_isGoldbergMode) {
+        // Install Winsock -> Steam P2P redirect hooks (for non-Godot engines in Valve Online mode)
+        if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
+            ReFixLog("SteamInternal_SteamAPI_Init: Steam P2P Winsock hooks installed");
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         } else {
@@ -4602,6 +4624,13 @@ extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWe
     ReFixLog("SteamAPI_ISteamUser_GetAuthTicketForWebApi ('%s'): handle=%u", pchIdentity ? pchIdentity : "", handle);
     if (handle != 0) {
         g_lastAuthTicketHandle = handle;
+    }
+    if (g_lastAuthTicketData.empty()) {
+        g_lastAuthTicketData = GenerateDummyAuthTicket();
+    }
+    if (g_config.enableMockAuth) {
+        DispatchAuthCallbacksImmediately(168);
+        DispatchAuthCallbacksImmediately(163);
     }
     return handle;
 }

@@ -36,3 +36,5 @@ Desktop.ini
 *.cer
 *.crt
 sign_dlls.ps1
+
+graphify-out/

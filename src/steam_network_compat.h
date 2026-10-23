@@ -38,7 +38,10 @@ bool Intercept_CloseConnection(void* self, uint32_t hConn, int nReason, const ch
 
 // Fallback interface accessors
 void* Intercept_SteamNetworkingSockets_v008();
+void* Intercept_SteamNetworkingSockets_v012();
+void* Intercept_SteamNetworkingSockets_Generic(const char* pszVersion);
 void* Intercept_SteamNetworkingUtils_v003();
+void* Intercept_SteamNetworkingUtils_v004();
 
 // Reset on SteamAPI_Shutdown
 void Shutdown();
