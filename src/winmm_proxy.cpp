@@ -9,6 +9,7 @@
 #include <sstream>
 #include <cstdio>
 #include <stdint.h>
+#include <intrin.h>
 #pragma comment(lib, "advapi32.lib")
 
 #define WINMM_FORWARD_COUNT 182
@@ -371,6 +372,85 @@ static bool g_enableConsoleAllowed = false;
 static bool g_enableServerBrowserAllowed = false;
 static bool g_enableLogAllowed = false;
 
+
+typedef struct _REFIX_UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} REFIX_UNICODE_STRING;
+
+static std::wstring g_syntheticCmdLineW;
+static std::string g_syntheticCmdLineA;
+static bool g_cmdLineInjected = false;
+
+static void InjectProcessCommandLine(const char* appendCmd) {
+    if (g_cmdLineInjected) return;
+    if (!appendCmd || appendCmd[0] == '\0') return;
+
+    HMODULE hKBase = GetModuleHandleA("KernelBase.dll");
+    if (!hKBase) hKBase = LoadLibraryA("KernelBase.dll");
+    if (!hKBase) return;
+
+    uint8_t* pKB_W = (uint8_t*)GetProcAddress(hKBase, "GetCommandLineW");
+    uint8_t* pKB_A = (uint8_t*)GetProcAddress(hKBase, "GetCommandLineA");
+    if (!pKB_W || !pKB_A) return;
+
+    if (pKB_W[0] != 0x48 || pKB_W[1] != 0x8B || pKB_W[2] != 0x05 || pKB_W[7] != 0xC3) return;
+    if (pKB_A[0] != 0x48 || pKB_A[1] != 0x8B || pKB_A[2] != 0x05 || pKB_A[7] != 0xC3) return;
+
+    int32_t dispW = *(int32_t*)(pKB_W + 3);
+    wchar_t** ppGlobalW = (wchar_t**)(pKB_W + 7 + dispW);
+
+    int32_t dispA = *(int32_t*)(pKB_A + 3);
+    char** ppGlobalA = (char**)(pKB_A + 7 + dispA);
+
+    wchar_t* origW = (ppGlobalW && *ppGlobalW) ? *ppGlobalW : (wchar_t*)L"";
+    char* origA = (ppGlobalA && *ppGlobalA) ? *ppGlobalA : (char*)"";
+
+    std::wstring curW = origW;
+    std::string curA = origA;
+
+    std::string firstToken = appendCmd;
+    size_t sp = firstToken.find(' ');
+    if (sp != std::string::npos) firstToken = firstToken.substr(0, sp);
+    std::wstring firstTokenW(firstToken.begin(), firstToken.end());
+
+    if (!firstTokenW.empty() && curW.find(firstTokenW) != std::wstring::npos) {
+        g_cmdLineInjected = true;
+        return;
+    }
+
+    std::string appendStr = appendCmd;
+    std::wstring toAppendW(appendStr.begin(), appendStr.end());
+    g_syntheticCmdLineW = curW + L" " + toAppendW;
+    g_syntheticCmdLineA = curA + " " + appendStr;
+
+    DWORD oldProtect = 0;
+    if (VirtualProtect(ppGlobalW, sizeof(wchar_t*), PAGE_READWRITE, &oldProtect)) {
+        *ppGlobalW = (wchar_t*)g_syntheticCmdLineW.c_str();
+        VirtualProtect(ppGlobalW, sizeof(wchar_t*), oldProtect, &oldProtect);
+    }
+    if (VirtualProtect(ppGlobalA, sizeof(char*), PAGE_READWRITE, &oldProtect)) {
+        *ppGlobalA = (char*)g_syntheticCmdLineA.c_str();
+        VirtualProtect(ppGlobalA, sizeof(char*), oldProtect, &oldProtect);
+    }
+
+#ifdef _WIN64
+    uint8_t* pPeb = (uint8_t*)__readgsqword(0x60);
+    if (pPeb) {
+        uint8_t* pParams = *(uint8_t**)(pPeb + 0x20);
+        if (pParams) {
+            REFIX_UNICODE_STRING* pCmd = (REFIX_UNICODE_STRING*)(pParams + 0x70);
+            pCmd->Buffer = (PWSTR)g_syntheticCmdLineW.c_str();
+            pCmd->Length = (USHORT)(g_syntheticCmdLineW.length() * sizeof(wchar_t));
+            pCmd->MaximumLength = (USHORT)((g_syntheticCmdLineW.length() + 1) * sizeof(wchar_t));
+        }
+    }
+#endif
+
+    g_cmdLineInjected = true;
+}
+
 static void LoadAndApplyConfig() {
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
@@ -398,6 +478,12 @@ static void LoadAndApplyConfig() {
 
     // --- Mode Config ---
     char mode[64] = "valve";
+    char appendCmd[512] = "";
+    GetPrivateProfileStringA("Steam", "AppendCommandLine", "", appendCmd, sizeof(appendCmd), iniPath.c_str());
+    if (appendCmd[0] != '\0') {
+        InjectProcessCommandLine(appendCmd);
+    }
+
     GetPrivateProfileStringA("Online", "Mode", "valve", mode, sizeof(mode), iniPath.c_str());
 
     // --- Debug & UI Config ---

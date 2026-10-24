@@ -102,6 +102,19 @@ static inline bool IsGamePort(uint16_t port) {
     return false;
 }
 
+static inline bool GetPreserveLoopbackConfig() {
+    static int s_preserve = -1;
+    if (s_preserve == -1) {
+        char buf[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, buf, MAX_PATH);
+        std::string p(buf);
+        size_t pos = p.find_last_of("\\/");
+        std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
+        s_preserve = GetPrivateProfileIntA("P2P", "PreserveLoopback", 1, ini.c_str());
+    }
+    return s_preserve != 0;
+}
+
 static inline SocketServiceType ClassifyPort(uint16_t port) {
     if (IsVoicePort(port)) return SocketServiceType::Voice;
     if (IsGamePort(port)) return SocketServiceType::Game;
@@ -674,7 +687,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
                 steamID = it->second;
                 g_steamIDToPort[steamID] = destPort;
             } else if ((IsGamePort(destPort) || IsVoicePort(destPort) ||
-                        (destIP & 0xFF000000u) == 0x7F000000u || destIP == 0 ||
+                        (!GetPreserveLoopbackConfig() && (destIP & 0xFF000000u) == 0x7F000000u) || destIP == 0 ||
                         (destIP & 0xFFFF0000u) == 0xC0A80000u || (destIP & 0xFF000000u) == 0x0A000000u) &&
                        g_ipToSteamID.size() == 1) {
                 // If connecting to game/voice port or loopback/private subnet and 1 peer known
@@ -692,7 +705,8 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
 
         // If no peer is known yet, but it's a Game or Voice port, buffer in Pre-Lobby Hold Buffer (V-02)
         // for P2P correlation while continuing raw Winsock transmission.
-        if (service != SocketServiceType::Unknown || IsGamePort(destPort)) {
+        bool isLoopback = ((destIP & 0xFF000000u) == 0x7F000000u);
+        if (!(isLoopback && GetPreserveLoopbackConfig()) && (service != SocketServiceType::Unknown || IsGamePort(destPort))) {
             std::lock_guard<std::mutex> lg(g_holdBufferMutex);
             if (g_holdBuffer.size() < k_maxHoldBufferSize) {
                 BufferedHoldPacket hpkt;
