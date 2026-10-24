@@ -50,8 +50,8 @@ static const int kUiPhase_EnterNemoLand = 12;
 typedef void (*fn_SelectServer_OnApplyButtonClick_t)(void* self, void* method);
 static fn_SelectServer_OnApplyButtonClick_t g_orig_SelectServer_OnApplyButtonClick = nullptr;
 
-typedef void (*fn_SelectServer_OnCellViewClick_t)(void* self, void* cellView, int dataIndex, void* method);
-static fn_SelectServer_OnCellViewClick_t g_orig_SelectServer_OnCellViewClick = nullptr;
+typedef void (*fn_SelectServer_OnCellViewSelect_t)(void* self, void* cellView, int dataIndex, void* method);
+static fn_SelectServer_OnCellViewSelect_t g_orig_SelectServer_OnCellViewSelect = nullptr;
 
 typedef void (*fn_Departure_Depart_t)(void* self, void* onComplete, void* method);
 static fn_Departure_Depart_t g_orig_Departure_Depart = nullptr;
@@ -144,6 +144,20 @@ static void* GetMenuSceneLoaderInstance() {
     return nullptr;
 }
 
+static void* ResolveRealCodePointer(void* pCode) {
+    if (!pCode) return nullptr;
+    uint8_t* p = (uint8_t*)pCode;
+    for (int i = 0; i < 32; i++) {
+        if (p[i] != 0xCC && p[i] != 0x90 && p[i] != 0xFA) {
+            if (i > 0) {
+                ReFixLog("[IL2CPP] Advanced code pointer from %p to %p (+%d bytes padding skipped)", pCode, p + i, i);
+            }
+            return (void*)(p + i);
+        }
+    }
+    return pCode;
+}
+
 static bool ActivateP2PModeInternal() {
     EnsureThreadAttached();
 
@@ -202,9 +216,13 @@ static bool SetCanEnterNemoLandOnInstance(void* instance, bool canEnter) {
     if (methodSetCanEnter) {
         void* args[1] = { &canEnter };
         void* exc = nullptr;
-        g_pfn_runtime_invoke(methodSetCanEnter, instance, args, &exc);
-        if (!exc) {
-            ReFixLog("[IL2CPP] MenuSceneLoader.set_canEnterNemoLand(%s) executed on instance %p", canEnter ? "true" : "false", instance);
+        __try {
+            g_pfn_runtime_invoke(methodSetCanEnter, instance, args, &exc);
+            if (!exc) {
+                ReFixLog("[IL2CPP] MenuSceneLoader.set_canEnterNemoLand(%s) executed on instance %p", canEnter ? "true" : "false", instance);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReFixLog("[IL2CPP] Exception absorbed in MenuSceneLoader.set_canEnterNemoLand");
         }
     }
 
@@ -214,9 +232,13 @@ static bool SetCanEnterNemoLandOnInstance(void* instance, bool canEnter) {
         bool val = true;
         void* args[1] = { &val };
         void* exc = nullptr;
-        g_pfn_runtime_invoke(methodSetPlat, instance, args, &exc);
-        if (!exc) {
-            ReFixLog("[IL2CPP] MenuSceneLoader.set_platformInitSuccess(true) executed on instance %p", instance);
+        __try {
+            g_pfn_runtime_invoke(methodSetPlat, instance, args, &exc);
+            if (!exc) {
+                ReFixLog("[IL2CPP] MenuSceneLoader.set_platformInitSuccess(true) executed on instance %p", instance);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReFixLog("[IL2CPP] Exception absorbed in MenuSceneLoader.set_platformInitSuccess");
         }
     }
 
@@ -226,7 +248,14 @@ static bool SetCanEnterNemoLandOnInstance(void* instance, bool canEnter) {
         bool val = true;
         void* args[1] = { &val };
         void* exc = nullptr;
-        g_pfn_runtime_invoke(methodSetAwake, instance, args, &exc);
+        __try {
+            g_pfn_runtime_invoke(methodSetAwake, instance, args, &exc);
+            if (!exc) {
+                ReFixLog("[IL2CPP] MenuSceneLoader.set_isAwakeComplete(true) executed on instance %p", instance);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReFixLog("[IL2CPP] Exception absorbed in MenuSceneLoader.set_isAwakeComplete");
+        }
     }
 
     return true;
@@ -251,12 +280,16 @@ static bool TransitionToMainMenuInternal() {
             int phase = kUiPhase_EnterNemoLand;
             void* args[1] = { &phase };
             void* exc = nullptr;
-            g_pfn_runtime_invoke(methodTrySetPhase, loaderInst, args, &exc);
-            if (!exc) {
-                ReFixLog("[IL2CPP] MenuSceneLoader.TrySetUiPhase(12: EnterNemoLand) executed successfully! (targetObj=%p)", loaderInst);
-                anySuccess = true;
-            } else {
-                ReFixLog("[IL2CPP] MenuSceneLoader.TrySetUiPhase exception %p", exc);
+            __try {
+                g_pfn_runtime_invoke(methodTrySetPhase, loaderInst, args, &exc);
+                if (!exc) {
+                    ReFixLog("[IL2CPP] MenuSceneLoader.TrySetUiPhase(12: EnterNemoLand) executed successfully! (targetObj=%p)", loaderInst);
+                    anySuccess = true;
+                } else {
+                    ReFixLog("[IL2CPP] MenuSceneLoader.TrySetUiPhase exception %p", exc);
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReFixLog("[IL2CPP] Exception absorbed in MenuSceneLoader.TrySetUiPhase");
             }
         }
     }
@@ -269,12 +302,16 @@ static bool TransitionToMainMenuInternal() {
             int phase = kUiPhase_EnterNemoLand;
             void* args[1] = { &phase };
             void* exc = nullptr;
-            g_pfn_runtime_invoke(methodSetUiPhase, nullptr, args, &exc);
-            if (!exc) {
-                ReFixLog("[IL2CPP] Recreate.LaunchUiPhase.set_uiPhase(12: EnterNemoLand) invoked successfully -> NemoLand Hall loading!");
-                anySuccess = true;
-            } else {
-                ReFixLog("[IL2CPP] Recreate.LaunchUiPhase.set_uiPhase exception %p", exc);
+            __try {
+                g_pfn_runtime_invoke(methodSetUiPhase, nullptr, args, &exc);
+                if (!exc) {
+                    ReFixLog("[IL2CPP] Recreate.LaunchUiPhase.set_uiPhase(12: EnterNemoLand) invoked successfully -> NemoLand Hall loading!");
+                    anySuccess = true;
+                } else {
+                    ReFixLog("[IL2CPP] Recreate.LaunchUiPhase.set_uiPhase exception %p", exc);
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReFixLog("[IL2CPP] Exception absorbed in Recreate.LaunchUiPhase.set_uiPhase");
             }
         }
     }
@@ -314,8 +351,12 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
             bool busy = false;
             void* args[1] = { &busy };
             void* exc = nullptr;
-            g_pfn_runtime_invoke(methodSetBusy, nullptr, args, &exc);
-            ReFixLog("[IL2CPP] TrailBlazer.set_isBusy(false) executed");
+            __try {
+                g_pfn_runtime_invoke(methodSetBusy, nullptr, args, &exc);
+                ReFixLog("[IL2CPP] TrailBlazer.set_isBusy(false) executed");
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReFixLog("[IL2CPP] Exception absorbed in TrailBlazer.set_isBusy");
+            }
         }
     }
 
@@ -327,8 +368,12 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
             void* methodHide = g_pfn_class_get_method_from_name(klassSelectServer, "Hide", 0);
             if (methodHide) {
                 void* exc = nullptr;
-                g_pfn_runtime_invoke(methodHide, selectServerSelf, nullptr, &exc);
-                ReFixLog("[IL2CPP] SelectServerPaneUi.Hide() executed");
+                __try {
+                    g_pfn_runtime_invoke(methodHide, selectServerSelf, nullptr, &exc);
+                    ReFixLog("[IL2CPP] SelectServerPaneUi.Hide() executed");
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    ReFixLog("[IL2CPP] Exception absorbed in SelectServerPaneUi.Hide");
+                }
             }
 
             // Call OnInterruptionWithdrawn(true)
@@ -338,8 +383,12 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
                 bool ok = true;
                 void* args[1] = { &ok };
                 void* exc = nullptr;
-                g_pfn_runtime_invoke(methodWithdrawn, selectServerSelf, args, &exc);
-                ReFixLog("[IL2CPP] SelectServerPaneUi.OnInterruptionWithdrawn(true) executed");
+                __try {
+                    g_pfn_runtime_invoke(methodWithdrawn, selectServerSelf, args, &exc);
+                    ReFixLog("[IL2CPP] SelectServerPaneUi.OnInterruptionWithdrawn(true) executed");
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    ReFixLog("[IL2CPP] Exception absorbed in SelectServerPaneUi.OnInterruptionWithdrawn");
+                }
             }
 
             // Direct notify phase changed to EnterNemoLand (12)
@@ -349,8 +398,12 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
                 int phase = kUiPhase_EnterNemoLand;
                 void* args[1] = { &phase };
                 void* exc = nullptr;
-                g_pfn_runtime_invoke(methodPhaseChanged, selectServerSelf, args, &exc);
-                ReFixLog("[IL2CPP] Dispatched OnUiPhaseChanged(12: EnterNemoLand) to SelectServerPaneUi");
+                __try {
+                    g_pfn_runtime_invoke(methodPhaseChanged, selectServerSelf, args, &exc);
+                    ReFixLog("[IL2CPP] Dispatched OnUiPhaseChanged(12: EnterNemoLand) to SelectServerPaneUi");
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    ReFixLog("[IL2CPP] Exception absorbed in SelectServerPaneUi.OnUiPhaseChanged");
+                }
             }
         }
     }
@@ -419,17 +472,17 @@ static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
     ConnectToP2PAndEnterMainMenu(self);
 }
 
-// Hooked SelectServerPaneUi.OnCellViewClick
-// When user clicks ANY server row in the list, update visual selection, then route to P2P!
-static void Hooked_SelectServer_OnCellViewClick(void* self, void* cellView, int dataIndex, void* method) {
-    ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnCellViewClick: row %d clicked! <<<", dataIndex);
+// Hooked SelectServerPaneUi.OnCellViewSelect
+// When user clicks/selects ANY server row in the list, update visual selection, then route to P2P!
+static void Hooked_SelectServer_OnCellViewSelect(void* self, void* cellView, int dataIndex, void* method) {
+    ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnCellViewSelect: row %d clicked! <<<", dataIndex);
 
     // Call original first to let the UI update its radio button / selection
-    if (g_orig_SelectServer_OnCellViewClick) {
+    if (g_orig_SelectServer_OnCellViewSelect) {
         __try {
-            g_orig_SelectServer_OnCellViewClick(self, cellView, dataIndex, method);
+            g_orig_SelectServer_OnCellViewSelect(self, cellView, dataIndex, method);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            ReFixLog("[IL2CPP] Handled exception in SelectServerPaneUi.OnCellViewClick");
+            ReFixLog("[IL2CPP] Handled exception in SelectServerPaneUi.OnCellViewSelect");
         }
     }
 
@@ -599,7 +652,7 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     if (klassSelectServer) {
         void* methodApply = g_pfn_class_get_method_from_name(klassSelectServer, "OnApplyButtonClick", 0);
         if (methodApply) {
-            void* pCode = *(void**)methodApply;
+            void* pCode = ResolveRealCodePointer(*(void**)methodApply);
             if (pCode) {
                 if (MH_CreateHook(pCode, (void*)Hooked_SelectServer_OnApplyButtonClick, (void**)&g_orig_SelectServer_OnApplyButtonClick) == MH_OK) {
                     MH_EnableHook(pCode);
@@ -608,14 +661,14 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
             }
         }
 
-        // Hook SelectServerPaneUi.OnCellViewClick (param_count = 2)
-        void* methodCellClick = g_pfn_class_get_method_from_name(klassSelectServer, "OnCellViewClick", 2);
-        if (methodCellClick) {
-            void* pCode = *(void**)methodCellClick;
+        // Hook SelectServerPaneUi.OnCellViewSelect (param_count = 2)
+        void* methodCellSelect = g_pfn_class_get_method_from_name(klassSelectServer, "OnCellViewSelect", 2);
+        if (methodCellSelect) {
+            void* pCode = ResolveRealCodePointer(*(void**)methodCellSelect);
             if (pCode) {
-                if (MH_CreateHook(pCode, (void*)Hooked_SelectServer_OnCellViewClick, (void**)&g_orig_SelectServer_OnCellViewClick) == MH_OK) {
+                if (MH_CreateHook(pCode, (void*)Hooked_SelectServer_OnCellViewSelect, (void**)&g_orig_SelectServer_OnCellViewSelect) == MH_OK) {
                     MH_EnableHook(pCode);
-                    ReFixLog("[IL2CPP] Hooked SelectServerPaneUi.OnCellViewClick at %p", pCode);
+                    ReFixLog("[IL2CPP] Hooked SelectServerPaneUi.OnCellViewSelect at %p", pCode);
                 }
             }
         }
@@ -626,7 +679,7 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     if (klassDeparture) {
         void* methodDepart = g_pfn_class_get_method_from_name(klassDeparture, "Depart", 1);
         if (methodDepart) {
-            void* pCode = *(void**)methodDepart;
+            void* pCode = ResolveRealCodePointer(*(void**)methodDepart);
             if (pCode) {
                 if (MH_CreateHook(pCode, (void*)Hooked_Departure_Depart, (void**)&g_orig_Departure_Depart) == MH_OK) {
                     MH_EnableHook(pCode);
