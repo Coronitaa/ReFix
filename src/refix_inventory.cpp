@@ -738,6 +738,7 @@ typedef SteamAPICall_t (*fn_ISteamInventory_StartPurchase_t)(void* self, const S
 static fn_ISteamInventory_GetResultStatus_t g_orig_GetResultStatus = nullptr;
 static fn_ISteamInventory_GetResultItems_t g_orig_GetResultItems = nullptr;
 static fn_ISteamInventory_GetResultTimestamp_t g_orig_GetResultTimestamp = nullptr;
+static fn_ISteamInventory_CheckResultSteamID_t g_orig_CheckResultSteamID = nullptr;
 static fn_ISteamInventory_DestroyResult_t g_orig_DestroyResult = nullptr;
 static fn_ISteamInventory_GetAllItems_t g_orig_GetAllItems = nullptr;
 static fn_ISteamInventory_GetItemsByID_t g_orig_GetItemsByID = nullptr;
@@ -772,6 +773,14 @@ static uint32_t Hooked_VTable_GetResultTimestamp(void* self, SteamInventoryResul
     }
     if (g_orig_GetResultTimestamp) return g_orig_GetResultTimestamp(self, resultHandle);
     return (uint32_t)time(nullptr);
+}
+
+static bool Hooked_VTable_CheckResultSteamID(void* self, SteamInventoryResult_t resultHandle, uint64_t steamIDExpected) {
+    if (g_enableLocalInventory) {
+        return CheckResultSteamID(resultHandle, steamIDExpected);
+    }
+    if (g_orig_CheckResultSteamID) return g_orig_CheckResultSteamID(self, resultHandle, steamIDExpected);
+    return true;
 }
 
 static void Hooked_VTable_DestroyResult(void* self, SteamInventoryResult_t resultHandle) {
@@ -871,6 +880,7 @@ void HookISteamInventory(void* pInterface, const char* pszVersion) {
     HookVTableMethod(pInterface, 0, (void*)Hooked_VTable_GetResultStatus, (void**)&g_orig_GetResultStatus);
     HookVTableMethod(pInterface, 1, (void*)Hooked_VTable_GetResultItems, (void**)&g_orig_GetResultItems);
     HookVTableMethod(pInterface, 3, (void*)Hooked_VTable_GetResultTimestamp, (void**)&g_orig_GetResultTimestamp);
+    HookVTableMethod(pInterface, 4, (void*)Hooked_VTable_CheckResultSteamID, (void**)&g_orig_CheckResultSteamID);
     HookVTableMethod(pInterface, 5, (void*)Hooked_VTable_DestroyResult, (void**)&g_orig_DestroyResult);
     HookVTableMethod(pInterface, 6, (void*)Hooked_VTable_GetAllItems, (void**)&g_orig_GetAllItems);
     HookVTableMethod(pInterface, 7, (void*)Hooked_VTable_GetItemsByID, (void**)&g_orig_GetItemsByID);

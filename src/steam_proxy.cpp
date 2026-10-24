@@ -41,6 +41,7 @@
 #define STEAM_API_FUNCTIONS_IMPL 1
 #endif
 #include "refix_inventory.h"
+#include "refix_il2cpp.h"
 
 #define STEAM_FORWARD_COUNT 1141
 
@@ -3526,7 +3527,7 @@ static bool FetchUrlWinHttp(const std::string& url, int& statusCode, std::string
                                      WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
 
-    WinHttpSetTimeouts(hSession, 2500, 2500, 2500, 2500);
+    WinHttpSetTimeouts(hSession, 300, 300, 300, 300);
 
     INTERNET_PORT port = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
     DWORD flags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
@@ -3682,7 +3683,18 @@ static bool Common_SendHTTPRequest(void* self, uint32_t hRequest, uint64_t* pCal
     req.callHandle = callHandle;
     g_httpCallToRequest[callHandle] = hRequest;
 
-    if (isInitCode || g_config.httpProxyEnabled) {
+    if (isInitCode || req.url.find("init_code") != std::string::npos ||
+        req.url.find("partyanimals") != std::string::npos ||
+        req.url.find("recreate") != std::string::npos ||
+        req.url.find("amazonaws") != std::string::npos) {
+        // Instant synthetic response: bypass official AWS cloud and eliminate startup stall
+        req.statusCode = 200;
+        req.responseBody = g_config.httpInitCodeOverride;
+        req.completed = true;
+        req.success = true;
+        ReFixLog("ISteamHTTP::SendHTTPRequest: Instant synthetic override for hRequest=%u (url='%s')",
+                 hRequest, req.url.c_str());
+    } else if (g_config.httpProxyEnabled) {
         int statusCode = 200;
         std::string body;
         if (!FetchUrlWinHttp(req.url, statusCode, body) || statusCode != 200 || body.empty()) {
@@ -5621,6 +5633,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         }
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
+        ReFixIL2CPP::Initialize();
     }
     return result;
 }
@@ -5646,6 +5659,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
         CapturePersonaName();
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
+        ReFixIL2CPP::Initialize();
     }
     return result;
 }
@@ -5682,6 +5696,7 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
         }
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
+        ReFixIL2CPP::Initialize();
     }
     return result;
 }
@@ -5696,6 +5711,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitAnonymousUser() {
         CapturePersonaName();
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
+        ReFixIL2CPP::Initialize();
     }
     return result;
 }
@@ -5759,6 +5775,7 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         }
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
+        ReFixIL2CPP::Initialize();
     }
 
     return result;
@@ -6102,8 +6119,18 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(
                          reqH, status, (uint32_t)body.size(), reqCopy.url.c_str());
             }
         } else {
-            // Unmonitored Steam internal HTTP request: preserve caller's handles and context!
-            if (pCallback && cubCallback >= (int)sizeof(ReFix_HTTPRequestCompleted_t)) {
+            // Unmonitored Steam internal HTTP request: override failure so Steamworks doesn't abort
+            if (!res || (pbFailed && *pbFailed)) {
+                res = true;
+                if (pbFailed) *pbFailed = false;
+                if (pCallback && cubCallback >= (int)sizeof(ReFix_HTTPRequestCompleted_t)) {
+                    auto* cb = (ReFix_HTTPRequestCompleted_t*)pCallback;
+                    cb->m_bRequestSuccessful = true;
+                    cb->m_eStatusCode = 200;
+                    cb->m_unBodySize = (uint32_t)g_config.httpInitCodeOverride.size();
+                }
+                ReFixLog("ManualDispatch_GetAPICallResult: Overrode unmonitored Callback 2101 failure -> res=1, bFailed=0, status=200");
+            } else if (pCallback && cubCallback >= (int)sizeof(ReFix_HTTPRequestCompleted_t)) {
                 auto* cb = (ReFix_HTTPRequestCompleted_t*)pCallback;
                 ReFixLog("ManualDispatch_GetAPICallResult: Callback 2101 (pass-through) -> res=%d, bFailed=%d, hReq=%u, ctx=%llu, status=%d, bodySize=%u",
                          (int)res, (pbFailed ? (int)*pbFailed : -1), cb->m_hRequest, cb->m_ulContextValue, cb->m_eStatusCode, cb->m_unBodySize);
@@ -6208,6 +6235,7 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
         }
     }
     SteamNetCompat::Shutdown();
+    ReFixIL2CPP::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);
     SteamP2PHook::Uninstall();
@@ -6233,11 +6261,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             DisableThreadLibraryCalls(hModule);
             ApplySteamEnv();
             EnsureOriginal();
+            ReFixIL2CPP::Initialize();
             break;
         case DLL_PROCESS_DETACH:
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
-            SteamP2PHook::Uninstall();
+            if (!lpReserved) {
+                ReFixIL2CPP::Shutdown();
+                SteamP2PHook::Uninstall();
+            }
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary
             // during DLL_PROCESS_DETACH. Calling COM/FreeLibrary in DllMain violates loader lock
             // and causes crashes on process exit. OS cleans up process memory safely.

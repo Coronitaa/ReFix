@@ -753,15 +753,7 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
     SteamP2PHook::Log("P2P pump thread started");
 
     while (g_pumpRunning.load(std::memory_order_relaxed)) {
-        __try {
-            P2PPumpStep();
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            DWORD exCode = GetExceptionCode();
-            SteamP2PHook::Log("P2PPumpThread: Caught structured exception 0x%08X - recovering after 10ms", exCode);
-            Sleep(10);
-            continue;
-        }
-
+        P2PPumpStep();
         Sleep(1); // 1ms polling
     }
 
@@ -955,13 +947,37 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
     return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
 }
 
-// ------ connect --------------------------------------------------------------
-static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namelen)
+// ------ connect & WSAConnect -------------------------------------------------
+typedef int (WSAAPI* fn_WSAConnect_t)(SOCKET s, const struct sockaddr* name, int namelen,
+    LPWSABUF lpCallerData, LPWSABUF lpCalleeData, LPQOS lpSQOS, LPQOS lpGQOS);
+static fn_WSAConnect_t g_orig_WSAConnect = nullptr;
+
+static inline bool GetFastCloudFailConfig() {
+    static int s_fastFail = -1;
+    if (s_fastFail == -1) {
+        char buf[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, buf, MAX_PATH);
+        std::string p(buf);
+        size_t pos = p.find_last_of("\\/");
+        std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
+        char val[32] = { 0 };
+        GetPrivateProfileStringA("P2P", "FastCloudFail", "true", val, sizeof(val), ini.c_str());
+        s_fastFail = (_stricmp(val, "true") == 0 || strcmp(val, "1") == 0 || _stricmp(val, "yes") == 0) ? 1 : 0;
+    }
+    return s_fastFail != 0;
+}
+
+static bool HandleConnectFilter(SOCKET s, const struct sockaddr* name, int namelen)
 {
     if (name && namelen >= (int)sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(name);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
+
+        SteamP2PHook::Log("connect: socket=%llu -> %u.%u.%u.%u:%u",
+            (unsigned long long)s,
+            (destIP >> 24) & 0xFF, (destIP >> 16) & 0xFF,
+            (destIP >> 8) & 0xFF, destIP & 0xFF, destPort);
 
         {
             std::lock_guard<std::mutex> lg(g_socketMutex);
@@ -981,10 +997,68 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
 
         if (steamID != 0 && g_pSteamNetworking) {
             ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, steamID);
-            SteamP2PHook::Log("Hook_connect: P2P session accepted for SteamID=%llu", steamID);
+            SteamP2PHook::Log("ConnectFilter: P2P session accepted for SteamID=%llu", steamID);
+        }
+
+        // Fast-fail cloud TCP HTTP/HTTPS probes in P2P/Offline mode to eliminate 16-21s TCP SYN freeze
+        bool isLoopback = ((destIP & 0xFF000000u) == 0x7F000000u);
+        if (!isLoopback && GetFastCloudFailConfig() && (destPort == 443 || destPort == 80)) {
+            int sockType = 0;
+            int optLen = sizeof(sockType);
+            if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&sockType, &optLen) == 0 && sockType == SOCK_STREAM) {
+                SteamP2PHook::Log("ConnectFilter: Fast-failing TCP cloud probe to %u.%u.%u.%u:%u to prevent TCP freeze",
+                    (destIP >> 24) & 0xFF, (destIP >> 16) & 0xFF,
+                    (destIP >> 8) & 0xFF, destIP & 0xFF, destPort);
+                return false; // Fast-fail
+            }
         }
     }
-    return g_orig_connect(s, name, namelen);
+    return true; // Proceed normally
+}
+
+static thread_local bool s_inConnect = false;
+
+struct ConnectReentrancyGuard {
+    bool& flag;
+    ConnectReentrancyGuard(bool& f) : flag(f) { flag = true; }
+    ~ConnectReentrancyGuard() { flag = false; }
+};
+
+static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namelen)
+{
+    if (s_inConnect) {
+        return g_orig_connect ? g_orig_connect(s, name, namelen) : SOCKET_ERROR;
+    }
+    ConnectReentrancyGuard guard(s_inConnect);
+
+    if (!HandleConnectFilter(s, name, namelen)) {
+        WSASetLastError(WSAECONNREFUSED);
+        return SOCKET_ERROR;
+    }
+
+    return g_orig_connect ? g_orig_connect(s, name, namelen) : SOCKET_ERROR;
+}
+
+static int WSAAPI Hook_WSAConnect(SOCKET s, const struct sockaddr* name, int namelen,
+    LPWSABUF lpCallerData, LPWSABUF lpCalleeData, LPQOS lpSQOS, LPQOS lpGQOS)
+{
+    if (s_inConnect) {
+        if (g_orig_WSAConnect) {
+            return g_orig_WSAConnect(s, name, namelen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS);
+        }
+        return SOCKET_ERROR;
+    }
+    ConnectReentrancyGuard guard(s_inConnect);
+
+    if (!HandleConnectFilter(s, name, namelen)) {
+        WSASetLastError(WSAECONNREFUSED);
+        return SOCKET_ERROR;
+    }
+
+    if (g_orig_WSAConnect) {
+        return g_orig_WSAConnect(s, name, namelen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS);
+    }
+    return SOCKET_ERROR;
 }
 
 // ------ select ---------------------------------------------------------------
@@ -1166,6 +1240,14 @@ void Install(void* hSteamOriginal) {
         if (MH_CreateHook(target, (void*)Hook_connect, (void**)&g_orig_connect) == MH_OK)
             MH_EnableHook(target);
         Log("connect hook: %s", g_orig_connect ? "OK" : "FAIL");
+    }
+
+    // Hook WSAConnect
+    {
+        void* target = GetProcAddress(hWs2, "WSAConnect");
+        if (target && MH_CreateHook(target, (void*)Hook_WSAConnect, (void**)&g_orig_WSAConnect) == MH_OK)
+            MH_EnableHook(target);
+        Log("WSAConnect hook: %s", g_orig_WSAConnect ? "OK" : "FAIL");
     }
 
     // Hook select
