@@ -19,6 +19,8 @@ typedef const char* (*fn_il2cpp_image_get_name)(void* image);
 typedef void* (*fn_il2cpp_class_from_name)(void* image, const char* namespaze, const char* name);
 typedef void* (*fn_il2cpp_class_get_method_from_name)(void* klass, const char* name, int argsCount);
 typedef void* (*fn_il2cpp_runtime_invoke)(void* method, void* obj, void** params, void** exc);
+typedef void* (*fn_il2cpp_class_get_type)(void* klass);
+typedef void* (*fn_il2cpp_type_get_object)(void* type);
 
 // Resolved function pointers
 static fn_il2cpp_domain_get g_pfn_domain_get = nullptr;
@@ -29,6 +31,8 @@ static fn_il2cpp_image_get_name g_pfn_image_get_name = nullptr;
 static fn_il2cpp_class_from_name g_pfn_class_from_name = nullptr;
 static fn_il2cpp_class_get_method_from_name g_pfn_class_get_method_from_name = nullptr;
 static fn_il2cpp_runtime_invoke g_pfn_runtime_invoke = nullptr;
+static fn_il2cpp_class_get_type g_pfn_class_get_type = nullptr;
+static fn_il2cpp_type_get_object g_pfn_type_get_object = nullptr;
 
 static std::atomic<bool> g_initialized{ false };
 static std::atomic<bool> g_watcherRunning{ false };
@@ -63,9 +67,6 @@ static fn_MenuSceneLoader_get_platformInitSuccess_t g_orig_MenuSceneLoader_get_p
 
 typedef bool (*fn_MenuSceneLoader_get_isAwakeComplete_t)(void* self, void* method);
 static fn_MenuSceneLoader_get_isAwakeComplete_t g_orig_MenuSceneLoader_get_isAwakeComplete = nullptr;
-
-typedef bool (*fn_MenuSceneLoader_get_existInterruption_t)(void* self, void* method);
-static fn_MenuSceneLoader_get_existInterruption_t g_orig_MenuSceneLoader_get_existInterruption = nullptr;
 
 typedef void (*fn_MenuSceneLoader_RequestInterruption_t)(void* self, void* interruption, void* arg2, void* method);
 static fn_MenuSceneLoader_RequestInterruption_t g_orig_MenuSceneLoader_RequestInterruption = nullptr;
@@ -108,6 +109,37 @@ static void* FindClassAcrossImages(const char* namespaze, const char* name) {
             s_classCache[key] = klass;
             return klass;
         }
+    }
+    return nullptr;
+}
+
+static void* GetMenuSceneLoaderInstance() {
+    void* inst = g_pMenuSceneLoaderInstance.load();
+    if (inst) return inst;
+
+    EnsureThreadAttached();
+    void* klassLoader = FindClassAcrossImages("", "MenuSceneLoader");
+    if (!klassLoader) klassLoader = FindClassAcrossImages("Recreate", "MenuSceneLoader");
+    if (!klassLoader || !g_pfn_class_get_type || !g_pfn_type_get_object) return nullptr;
+
+    void* klassUnityObj = FindClassAcrossImages("UnityEngine", "Object");
+    if (!klassUnityObj) return nullptr;
+
+    void* methodFind = g_pfn_class_get_method_from_name(klassUnityObj, "FindObjectOfType", 1);
+    if (!methodFind) return nullptr;
+
+    void* type = g_pfn_class_get_type(klassLoader);
+    if (!type) return nullptr;
+    void* typeObj = g_pfn_type_get_object(type);
+    if (!typeObj) return nullptr;
+
+    void* args[1] = { typeObj };
+    void* exc = nullptr;
+    void* res = g_pfn_runtime_invoke(methodFind, nullptr, args, &exc);
+    if (!exc && res) {
+        g_pMenuSceneLoaderInstance.store(res);
+        ReFixLog("[IL2CPP] Successfully discovered MenuSceneLoader instance via FindObjectOfType: %p", res);
+        return res;
     }
     return nullptr;
 }
@@ -205,19 +237,23 @@ static bool TransitionToMainMenuInternal() {
 
     bool anySuccess = false;
 
+    void* loaderInst = g_pMenuSceneLoaderInstance.load();
+    if (!loaderInst) {
+        loaderInst = GetMenuSceneLoaderInstance();
+    }
+
     // 1. Invoke MenuSceneLoader.TrySetUiPhase(12) [EnterNemoLand = 12] (targetObj passed when available)
     void* klassLoader = FindClassAcrossImages("", "MenuSceneLoader");
     if (!klassLoader) klassLoader = FindClassAcrossImages("Recreate", "MenuSceneLoader");
-    if (klassLoader) {
+    if (klassLoader && loaderInst) {
         void* methodTrySetPhase = g_pfn_class_get_method_from_name(klassLoader, "TrySetUiPhase", 1);
         if (methodTrySetPhase) {
             int phase = kUiPhase_EnterNemoLand;
             void* args[1] = { &phase };
             void* exc = nullptr;
-            void* targetObj = g_pMenuSceneLoaderInstance.load();
-            g_pfn_runtime_invoke(methodTrySetPhase, targetObj, args, &exc);
+            g_pfn_runtime_invoke(methodTrySetPhase, loaderInst, args, &exc);
             if (!exc) {
-                ReFixLog("[IL2CPP] MenuSceneLoader.TrySetUiPhase(12: EnterNemoLand) executed successfully! (targetObj=%p)", targetObj);
+                ReFixLog("[IL2CPP] MenuSceneLoader.TrySetUiPhase(12: EnterNemoLand) executed successfully! (targetObj=%p)", loaderInst);
                 anySuccess = true;
             } else {
                 ReFixLog("[IL2CPP] MenuSceneLoader.TrySetUiPhase exception %p", exc);
@@ -248,6 +284,12 @@ static bool TransitionToMainMenuInternal() {
 
 // Master connection function: called on server click, confirm/apply, or depart
 static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
+    static std::atomic<bool> s_connecting{ false };
+    if (s_connecting.exchange(true)) {
+        ReFixLog("[IL2CPP] ConnectToP2PAndEnterMainMenu already in progress; skipping duplicate trigger");
+        return;
+    }
+
     ReFixLog("[IL2CPP] ===================================================================");
     ReFixLog("[IL2CPP] Master Connection Triggered: Bypassing AWS cloud -> Steam P2P SDR");
     ReFixLog("[IL2CPP] ===================================================================");
@@ -255,8 +297,11 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
     // 1. Enable local P2P mode & fake data
     ActivateP2PModeInternal();
 
-    // 2. Set MenuSceneLoader flags on captured instance
+    // 2. Set MenuSceneLoader flags on captured or discovered instance
     void* loaderInst = g_pMenuSceneLoaderInstance.load();
+    if (!loaderInst) {
+        loaderInst = GetMenuSceneLoaderInstance();
+    }
     if (loaderInst) {
         SetCanEnterNemoLandOnInstance(loaderInst, true);
     }
@@ -274,10 +319,30 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
         }
     }
 
-    // 4. Notify SelectServerPaneUi directly of phase change to EnterNemoLand (12)
+    // 4. Close SelectServerPaneUi cleanly if instance is available
     if (selectServerSelf) {
         void* klassSelectServer = FindClassAcrossImages("HeoUi.Launch.SelectServer", "SelectServerPaneUi");
         if (klassSelectServer) {
+            // Call Hide() to dismiss dialog
+            void* methodHide = g_pfn_class_get_method_from_name(klassSelectServer, "Hide", 0);
+            if (methodHide) {
+                void* exc = nullptr;
+                g_pfn_runtime_invoke(methodHide, selectServerSelf, nullptr, &exc);
+                ReFixLog("[IL2CPP] SelectServerPaneUi.Hide() executed");
+            }
+
+            // Call OnInterruptionWithdrawn(true)
+            void* methodWithdrawn = g_pfn_class_get_method_from_name(klassSelectServer,
+                "MenuSceneLoader.IInterruptCallback.OnInterruptionWithdrawn", 1);
+            if (methodWithdrawn) {
+                bool ok = true;
+                void* args[1] = { &ok };
+                void* exc = nullptr;
+                g_pfn_runtime_invoke(methodWithdrawn, selectServerSelf, args, &exc);
+                ReFixLog("[IL2CPP] SelectServerPaneUi.OnInterruptionWithdrawn(true) executed");
+            }
+
+            // Direct notify phase changed to EnterNemoLand (12)
             void* methodPhaseChanged = g_pfn_class_get_method_from_name(klassSelectServer,
                 "Recreate.LaunchUiPhase.IUiPhaseCallback.OnUiPhaseChanged", 1);
             if (methodPhaseChanged) {
@@ -296,7 +361,7 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
 
 // Hooked MenuSceneLoader.Awake - captures active loader instance
 static void Hooked_MenuSceneLoader_Awake(void* self, void* method) {
-    g_pMenuSceneLoaderInstance.store(self);
+    if (self) g_pMenuSceneLoaderInstance.store(self);
     ReFixLog("[IL2CPP] >>> MenuSceneLoader.Awake: Captured instance %p <<<", self);
 
     if (g_orig_MenuSceneLoader_Awake) {
@@ -311,29 +376,35 @@ static void Hooked_MenuSceneLoader_Awake(void* self, void* method) {
     SetCanEnterNemoLandOnInstance(self, true);
 }
 
-// Hooked MenuSceneLoader.get_canEnterNemoLand - always true
+// Hooked MenuSceneLoader.get_canEnterNemoLand - always true, captures instance
 static bool Hooked_MenuSceneLoader_get_canEnterNemoLand(void* self, void* method) {
+    if (self) g_pMenuSceneLoaderInstance.store(self);
     return true;
 }
 
-// Hooked MenuSceneLoader.get_platformInitSuccess - always true
+// Hooked MenuSceneLoader.get_platformInitSuccess - always true, captures instance
 static bool Hooked_MenuSceneLoader_get_platformInitSuccess(void* self, void* method) {
+    if (self) g_pMenuSceneLoaderInstance.store(self);
     return true;
 }
 
-// Hooked MenuSceneLoader.get_isAwakeComplete - always true
+// Hooked MenuSceneLoader.get_isAwakeComplete - always true, captures instance
 static bool Hooked_MenuSceneLoader_get_isAwakeComplete(void* self, void* method) {
+    if (self) g_pMenuSceneLoaderInstance.store(self);
     return true;
 }
 
-// Hooked MenuSceneLoader.get_existInterruption - always false (no error blocking)
-static bool Hooked_MenuSceneLoader_get_existInterruption(void* self, void* method) {
-    return false;
-}
-
-// Hooked MenuSceneLoader.RequestInterruption - suppress error dialog popups
+// Hooked MenuSceneLoader.RequestInterruption - captures instance and forwards to game UI
 static void Hooked_MenuSceneLoader_RequestInterruption(void* self, void* interruption, void* arg2, void* method) {
-    ReFixLog("[IL2CPP] MenuSceneLoader.RequestInterruption intercepted and suppressed");
+    if (self) g_pMenuSceneLoaderInstance.store(self);
+    ReFixLog("[IL2CPP] MenuSceneLoader.RequestInterruption called on instance %p (interruption=%p) -> dispatching to game UI", self, interruption);
+    if (g_orig_MenuSceneLoader_RequestInterruption) {
+        __try {
+            g_orig_MenuSceneLoader_RequestInterruption(self, interruption, arg2, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReFixLog("[IL2CPP] Exception absorbed in MenuSceneLoader.RequestInterruption");
+        }
+    }
 }
 
 // Hooked P2PRoomUtils.IsP2PMode - always true
@@ -402,6 +473,8 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     g_pfn_class_from_name = (fn_il2cpp_class_from_name)GetProcAddress(hGA, "il2cpp_class_from_name");
     g_pfn_class_get_method_from_name = (fn_il2cpp_class_get_method_from_name)GetProcAddress(hGA, "il2cpp_class_get_method_from_name");
     g_pfn_runtime_invoke = (fn_il2cpp_runtime_invoke)GetProcAddress(hGA, "il2cpp_runtime_invoke");
+    g_pfn_class_get_type = (fn_il2cpp_class_get_type)GetProcAddress(hGA, "il2cpp_class_get_type");
+    g_pfn_type_get_object = (fn_il2cpp_type_get_object)GetProcAddress(hGA, "il2cpp_type_get_object");
 
     if (!g_pfn_domain_get || !g_pfn_thread_attach || !g_pfn_domain_get_assemblies ||
         !g_pfn_assembly_get_image || !g_pfn_class_from_name || !g_pfn_class_get_method_from_name) {
@@ -506,16 +579,6 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
             if (pCode && MH_CreateHook(pCode, (void*)Hooked_MenuSceneLoader_get_isAwakeComplete, (void**)&g_orig_MenuSceneLoader_get_isAwakeComplete) == MH_OK) {
                 MH_EnableHook(pCode);
                 ReFixLog("[IL2CPP] Hooked MenuSceneLoader.get_isAwakeComplete at %p", pCode);
-            }
-        }
-
-        // get_existInterruption (param_count = 0)
-        void* methodInterr = g_pfn_class_get_method_from_name(klassLoader, "get_existInterruption", 0);
-        if (methodInterr) {
-            void* pCode = *(void**)methodInterr;
-            if (pCode && MH_CreateHook(pCode, (void*)Hooked_MenuSceneLoader_get_existInterruption, (void**)&g_orig_MenuSceneLoader_get_existInterruption) == MH_OK) {
-                MH_EnableHook(pCode);
-                ReFixLog("[IL2CPP] Hooked MenuSceneLoader.get_existInterruption at %p", pCode);
             }
         }
 
