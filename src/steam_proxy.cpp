@@ -31,6 +31,16 @@
 #include <intrin.h>
 #include "steam_network_compat.h"
 #include "minhook/MinHook.h"
+#ifndef STEAM_WIN32
+#define STEAM_WIN32 1
+#endif
+#ifndef STEAM_API_EXPORTS
+#define STEAM_API_EXPORTS 1
+#endif
+#ifndef STEAM_API_FUNCTIONS_IMPL
+#define STEAM_API_FUNCTIONS_IMPL 1
+#endif
+#include "refix_inventory.h"
 
 #define STEAM_FORWARD_COUNT 1141
 
@@ -1862,6 +1872,7 @@ static void LoadConfig() {
     char bufInitCode[128] = "jdjq9esdDJa0sBduoXo/fOHvfPtsm0E3CYp2asHLlp0=";
     ReadString("HTTP", "InitCodeOverride", "jdjq9esdDJa0sBduoXo/fOHvfPtsm0E3CYp2asHLlp0=", bufInitCode, sizeof(bufInitCode));
     g_config.httpInitCodeOverride = bufInitCode;
+    ReFixInventory::Initialize(ini);
 }
 
 void ReFixLog(const char* fmt, ...) {
@@ -2214,7 +2225,7 @@ static int __fastcall Hooked_ISteamNetworkingSockets_GetAuthenticationStatus(voi
     return k_eRelayAvail_Current; // 100
 }
 
-static bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, void** ppOriginalFn) {
+bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, void** ppOriginalFn) {
     if (!pInterface) return false;
     void** vtable = *(void***)pInterface;
     if (!vtable || !vtable[vtableIndex]) return false;
@@ -3807,6 +3818,162 @@ static void HookISteamHTTP(void* iface, const char* pszVersion) {
     ReFixLog("HookISteamHTTP: Installed VTable hooks for %p (version='%s')", iface, pszVersion ? pszVersion : "unknown");
 }
 
+typedef void* (*fn_ISteamClient_GetISteamInventory_t)(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion);
+static fn_ISteamClient_GetISteamInventory_t g_pfn_Flat_GetISteamInventory = nullptr;
+
+static void* Hooked_Flat_GetISteamInventory(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion) {
+    void* iface = g_pfn_Flat_GetISteamInventory ? g_pfn_Flat_GetISteamInventory(self, hSteamUser, hSteamPipe, pchVersion) : nullptr;
+    ReFixInventory::HookISteamInventory(iface, pchVersion ? pchVersion : "GetISteamInventory");
+    return iface;
+}
+
+static EResult Hooked_Flat_ISteamInventory_GetResultStatus(void* self, SteamInventoryResult_t resultHandle) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GetResultStatus(resultHandle);
+    }
+    typedef EResult (*fn_t)(void*, SteamInventoryResult_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_GetResultStatus");
+    if (s_orig) return s_orig(self, resultHandle);
+    return k_EResultOK;
+}
+
+static bool Hooked_Flat_ISteamInventory_GetResultItems(void* self, SteamInventoryResult_t resultHandle, SteamItemDetails_t* pOutItemsArray, uint32_t* punOutItemsArraySize) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GetResultItems(resultHandle, pOutItemsArray, punOutItemsArraySize);
+    }
+    typedef bool (*fn_t)(void*, SteamInventoryResult_t, SteamItemDetails_t*, uint32_t*);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_GetResultItems");
+    if (s_orig) return s_orig(self, resultHandle, pOutItemsArray, punOutItemsArraySize);
+    return false;
+}
+
+static uint32_t Hooked_Flat_ISteamInventory_GetResultTimestamp(void* self, SteamInventoryResult_t resultHandle) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GetResultTimestamp(resultHandle);
+    }
+    typedef uint32_t (*fn_t)(void*, SteamInventoryResult_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_GetResultTimestamp");
+    if (s_orig) return s_orig(self, resultHandle);
+    return (uint32_t)time(nullptr);
+}
+
+static bool Hooked_Flat_ISteamInventory_CheckResultSteamID(void* self, SteamInventoryResult_t resultHandle, uint64_t steamIDExpected) {
+    return true;
+}
+
+static void Hooked_Flat_ISteamInventory_DestroyResult(void* self, SteamInventoryResult_t resultHandle) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        ReFixInventory::DestroyResult(resultHandle);
+        return;
+    }
+    typedef void (*fn_t)(void*, SteamInventoryResult_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_DestroyResult");
+    if (s_orig) s_orig(self, resultHandle);
+}
+
+static bool Hooked_Flat_ISteamInventory_GetAllItems(void* self, SteamInventoryResult_t* pResultHandle) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GetAllItems(pResultHandle);
+    }
+    typedef bool (*fn_t)(void*, SteamInventoryResult_t*);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_GetAllItems");
+    if (s_orig) return s_orig(self, pResultHandle);
+    return false;
+}
+
+static bool Hooked_Flat_ISteamInventory_GetItemsByID(void* self, SteamInventoryResult_t* pResultHandle, const SteamItemInstanceID_t* pInstanceIDs, uint32_t unCountInstanceIDs) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GetItemsByID(pResultHandle, pInstanceIDs, unCountInstanceIDs);
+    }
+    typedef bool (*fn_t)(void*, SteamInventoryResult_t*, const SteamItemInstanceID_t*, uint32_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_GetItemsByID");
+    if (s_orig) return s_orig(self, pResultHandle, pInstanceIDs, unCountInstanceIDs);
+    return false;
+}
+
+static bool Hooked_Flat_ISteamInventory_GenerateItems(void* self, SteamInventoryResult_t* pResultHandle, const SteamItemDef_t* pArrayItemDefs, const uint32_t* punArrayQuantity, uint32_t unArrayLength) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GenerateItems(pResultHandle, pArrayItemDefs, punArrayQuantity, unArrayLength);
+    }
+    typedef bool (*fn_t)(void*, SteamInventoryResult_t*, const SteamItemDef_t*, const uint32_t*, uint32_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_GenerateItems");
+    if (s_orig) return s_orig(self, pResultHandle, pArrayItemDefs, punArrayQuantity, unArrayLength);
+    return false;
+}
+
+static bool Hooked_Flat_ISteamInventory_ConsumeItem(void* self, SteamInventoryResult_t* pResultHandle, SteamItemInstanceID_t itemConsume, uint32_t unQuantity) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::ConsumeItem(pResultHandle, itemConsume, unQuantity);
+    }
+    typedef bool (*fn_t)(void*, SteamInventoryResult_t*, SteamItemInstanceID_t, uint32_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_ConsumeItem");
+    if (s_orig) return s_orig(self, pResultHandle, itemConsume, unQuantity);
+    return false;
+}
+
+static bool Hooked_Flat_ISteamInventory_ExchangeItems(void* self, SteamInventoryResult_t* pResultHandle, const SteamItemDef_t* pArrayGenerate, const uint32_t* punArrayGenerateQuantity, uint32_t unArrayGenerateLength, const SteamItemInstanceID_t* pArrayDestroy, const uint32_t* punArrayDestroyQuantity, uint32_t unArrayDestroyLength) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::ExchangeItems(pResultHandle, pArrayGenerate, punArrayGenerateQuantity, unArrayGenerateLength, pArrayDestroy, punArrayDestroyQuantity, unArrayDestroyLength);
+    }
+    typedef bool (*fn_t)(void*, SteamInventoryResult_t*, const SteamItemDef_t*, const uint32_t*, uint32_t, const SteamItemInstanceID_t*, const uint32_t*, uint32_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_ExchangeItems");
+    if (s_orig) return s_orig(self, pResultHandle, pArrayGenerate, punArrayGenerateQuantity, unArrayGenerateLength, pArrayDestroy, punArrayDestroyQuantity, unArrayDestroyLength);
+    return false;
+}
+
+static bool Hooked_Flat_ISteamInventory_TriggerItemDrop(void* self, SteamInventoryResult_t* pResultHandle, SteamItemDef_t dropListDefinition) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::TriggerItemDrop(pResultHandle, dropListDefinition);
+    }
+    typedef bool (*fn_t)(void*, SteamInventoryResult_t*, SteamItemDef_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_TriggerItemDrop");
+    if (s_orig) return s_orig(self, pResultHandle, dropListDefinition);
+    return false;
+}
+
+static SteamAPICall_t Hooked_Flat_ISteamInventory_StartPurchase(void* self, const SteamItemDef_t* pArrayItemDefs, const uint32_t* punArrayQuantity, uint32_t unArrayLength) {
+    if (ReFixInventory::IsStoreEmulationEnabled()) {
+        uint64_t orderId = 0;
+        return ReFixInventory::ProcessStartPurchase(pArrayItemDefs, punArrayQuantity, unArrayLength, orderId);
+    }
+    typedef SteamAPICall_t (*fn_t)(void*, const SteamItemDef_t*, const uint32_t*, uint32_t);
+    static fn_t s_orig = nullptr;
+    if (!s_orig) s_orig = (fn_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamInventory_StartPurchase");
+    if (s_orig) return s_orig(self, pArrayItemDefs, punArrayQuantity, unArrayLength);
+    return 0;
+}
+
+static bool Hooked_Flat_ISteamInventory_LoadItemDefinitions(void* self) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::LoadItemDefinitions();
+    }
+    return true;
+}
+
+static bool Hooked_Flat_ISteamInventory_GetItemDefinitionIDs(void* self, SteamItemDef_t* pItemDefIDs, uint32_t* punItemDefIDsArraySize) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GetItemDefinitionIDs(pItemDefIDs, punItemDefIDsArraySize);
+    }
+    return false;
+}
+
+static bool Hooked_Flat_ISteamInventory_GetItemDefinitionProperty(void* self, SteamItemDef_t iDefinition, const char* pchPropertyName, char* pchValueBuffer, uint32_t* punValueBufferSizeOut) {
+    if (ReFixInventory::IsLocalInventoryEnabled()) {
+        return ReFixInventory::GetItemDefinitionProperty(iDefinition, pchPropertyName, pchValueBuffer, punValueBufferSizeOut);
+    }
+    return false;
+}
+
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (!iface || !pszVersion) return;
     if (strstr(pszVersion, "SteamMatchMakingServers") || strstr(pszVersion, "SteamMatchmakingServers")) {
@@ -3856,6 +4023,9 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     }
     else if (strstr(pszVersion, "SteamHTTP")) {
         HookISteamHTTP(iface, pszVersion);
+    }
+    else if (strstr(pszVersion, "STEAMINVENTORY") || strstr(pszVersion, "SteamInventory")) {
+        ReFixInventory::HookISteamInventory(iface, pszVersion);
     }
 }
 
@@ -4190,6 +4360,51 @@ struct ReFix_LobbyMatchList_t {
 };
 #pragma pack(pop)
 
+struct ReFix_QueuedCallback {
+    int32_t m_hSteamUser;
+    int32_t m_iCallback;
+    std::vector<uint8_t> m_data;
+};
+static std::mutex g_queuedCallbacksMutex;
+static std::vector<ReFix_QueuedCallback> g_queuedCallbacks;
+
+void ReFix_PostCallback(int32_t iCallback, const void* pData, size_t size, int32_t hSteamUser) {
+    if (!pData || size == 0) return;
+    {
+        std::lock_guard<std::mutex> lock(g_queuedCallbacksMutex);
+        if (g_queuedCallbacks.size() >= 256) {
+            ReFixLog("ReFix_PostCallback: Cap limit reached (256 items) - discarding oldest queued callback");
+            g_queuedCallbacks.erase(g_queuedCallbacks.begin());
+        }
+        ReFix_QueuedCallback item;
+        item.m_hSteamUser = hSteamUser;
+        item.m_iCallback = iCallback;
+        item.m_data.assign((const uint8_t*)pData, (const uint8_t*)pData + size);
+        g_queuedCallbacks.push_back(std::move(item));
+    }
+    ReFixLog("ReFix_PostCallback: Queued Callback %d (size=%zu bytes, user=%d)", iCallback, size, hSteamUser);
+
+    std::vector<GodotCallbackEntry> snapshot;
+    {
+        std::lock_guard<std::mutex> lg(g_callbackMutex);
+        snapshot = g_registeredCallbacks;
+    }
+    for (auto& entry : snapshot) {
+        if (entry.iCallback == iCallback && entry.pCallback) {
+            SafeCallRun(entry.pCallback, (void*)pData);
+        }
+    }
+}
+
+void ReFix_QueueSyntheticAPICall(uint64_t callHandle, int iCallback, uint32_t cubParam) {
+    QueueSyntheticAPICall(callHandle, iCallback, cubParam);
+}
+
+uint32_t ReFix_GetRealAppID() {
+    LoadConfig();
+    return (g_config.realAppIdNum != 0) ? g_config.realAppIdNum : (g_config.maskAppIdNum != 0 ? g_config.maskAppIdNum : 480);
+}
+
 static std::atomic<bool> g_syntheticRelayPending{ false };
 static ReFix_SteamRelayNetworkStatus_t g_syntheticRelayData = {};
 
@@ -4464,6 +4679,7 @@ static void Intercepted_SteamAPI_UnregisterCallback(void* pCallback) {
             }
         }
     }
+    UntrackCallback(pCallback);
     if (g_pfn_UnregisterCallback) {
         g_pfn_UnregisterCallback(pCallback);
     }
@@ -4491,6 +4707,11 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
     // Track callbacks for Godot LobbyEnter_t synthesis
     if (g_godotIsEngine && (iCallback == LobbyEnter_t::k_iCallback || iCallback == 333 || iCallback == 337)) {
         TrackCallback(pCallback, iCallback);
+    }
+
+    if (iCallback == 152 || (iCallback >= 1000 && iCallback <= 1005)) {
+        TrackCallback(pCallback, iCallback);
+        ReFixLog("  -> Intercepted Store/Inventory callback %d registration for %p", iCallback, pCallback);
     }
 
     if (g_pfn_RegisterCallback) g_pfn_RegisterCallback(pCallback, iCallback);
@@ -5164,6 +5385,38 @@ static bool EnsureOriginal() {
         ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamClient_GetISteamHTTP");
     }
 
+    int idxGetClientInventory = FindSteamExportIndex("SteamAPI_ISteamClient_GetISteamInventory");
+    if (idxGetClientInventory >= 0 && g_steamProcs[idxGetClientInventory]) {
+        g_pfn_Flat_GetISteamInventory = (fn_ISteamClient_GetISteamInventory_t)g_steamProcs[idxGetClientInventory];
+        g_steamProcs[idxGetClientInventory] = (FARPROC)Hooked_Flat_GetISteamInventory;
+        ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamClient_GetISteamInventory");
+    }
+
+#define HOOK_INV_EXPORT(name, hookFn) do { \
+        int idx = FindSteamExportIndex(name); \
+        if (idx >= 0) { \
+            g_steamProcs[idx] = (FARPROC)hookFn; \
+            ReFixLog("EnsureOriginal: Intercepted flat export " name); \
+        } \
+    } while(0)
+
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GetResultStatus", Hooked_Flat_ISteamInventory_GetResultStatus);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GetResultItems", Hooked_Flat_ISteamInventory_GetResultItems);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GetResultTimestamp", Hooked_Flat_ISteamInventory_GetResultTimestamp);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_CheckResultSteamID", Hooked_Flat_ISteamInventory_CheckResultSteamID);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_DestroyResult", Hooked_Flat_ISteamInventory_DestroyResult);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GetAllItems", Hooked_Flat_ISteamInventory_GetAllItems);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GetItemsByID", Hooked_Flat_ISteamInventory_GetItemsByID);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GenerateItems", Hooked_Flat_ISteamInventory_GenerateItems);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_ConsumeItem", Hooked_Flat_ISteamInventory_ConsumeItem);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_ExchangeItems", Hooked_Flat_ISteamInventory_ExchangeItems);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_TriggerItemDrop", Hooked_Flat_ISteamInventory_TriggerItemDrop);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_StartPurchase", Hooked_Flat_ISteamInventory_StartPurchase);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_LoadItemDefinitions", Hooked_Flat_ISteamInventory_LoadItemDefinitions);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GetItemDefinitionIDs", Hooked_Flat_ISteamInventory_GetItemDefinitionIDs);
+    HOOK_INV_EXPORT("SteamAPI_ISteamInventory_GetItemDefinitionProperty", Hooked_Flat_ISteamInventory_GetItemDefinitionProperty);
+#undef HOOK_INV_EXPORT
+
     int idxGetClientUser = FindSteamExportIndex("SteamAPI_ISteamClient_GetISteamUser");
     if (idxGetClientUser >= 0 && g_steamProcs[idxGetClientUser]) {
         g_pfn_Flat_GetISteamUser = (fn_ISteamClient_GetISteamUser_t)g_steamProcs[idxGetClientUser];
@@ -5538,6 +5791,8 @@ extern "C" __declspec(dllexport) int SteamAPI_ISteamMatchmaking_AddFavoriteGame(
     return g_pfn_AddFavoriteGame(self, g_maskAppIdNum, nIP, nConnPort, nQueryPort, unFlags, rTime32);
 }
 
+static int s_manualRunFrameLogged = 0;
+
 extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     PatchPartyAnimalsOwnership();
     if (s_runCallbacksLogged++ < 3) {
@@ -5546,9 +5801,32 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (g_pfn_RunCallbacks) g_pfn_RunCallbacks();
     DispatchRelayCallbacks();
     DispatchPendingAuthCallbacks();
+
+    // If manual dispatch is not driving the game loop, drain g_queuedCallbacks into registered listeners
+    if (s_manualRunFrameLogged == 0) {
+        std::vector<ReFix_QueuedCallback> callbacksToDrain;
+        {
+            std::lock_guard<std::mutex> lock(g_queuedCallbacksMutex);
+            if (!g_queuedCallbacks.empty()) {
+                callbacksToDrain = std::move(g_queuedCallbacks);
+                g_queuedCallbacks.clear();
+            }
+        }
+        for (const auto& item : callbacksToDrain) {
+            std::vector<GodotCallbackEntry> snapshot;
+            {
+                std::lock_guard<std::mutex> lg(g_callbackMutex);
+                snapshot = g_registeredCallbacks;
+            }
+            for (auto& entry : snapshot) {
+                if (entry.iCallback == item.m_iCallback && entry.pCallback) {
+                    SafeCallRun(entry.pCallback, (void*)item.m_data.data());
+                }
+            }
+        }
+    }
 }
 
-static int s_manualRunFrameLogged = 0;
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t hSteamPipe) {
     PatchPartyAnimalsOwnership();
     if (s_manualRunFrameLogged++ < 3) {
@@ -5698,6 +5976,31 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                      synthItem.callHandle, synthItem.iCallback);
             return true;
         }
+
+        ReFix_QueuedCallback qItem{};
+        bool hasQ = false;
+        {
+            std::lock_guard<std::mutex> lock(g_queuedCallbacksMutex);
+            if (!g_queuedCallbacks.empty()) {
+                qItem = std::move(g_queuedCallbacks.front());
+                g_queuedCallbacks.erase(g_queuedCallbacks.begin());
+                hasQ = true;
+            }
+        }
+        if (hasQ) {
+            s_lastManualCallbackWasSynthetic.store(true);
+            static std::vector<uint8_t> s_activeCallbackPayload;
+            s_activeCallbackPayload = std::move(qItem.m_data);
+
+            auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+            msg->m_hSteamUser = qItem.m_hSteamUser;
+            msg->m_iCallback = qItem.m_iCallback;
+            msg->m_pubParam = s_activeCallbackPayload.data();
+            msg->m_cubParam = (int32_t)s_activeCallbackPayload.size();
+            ReFixLog("ManualDispatch_GetNextCallback: Delivered queued Callback %d (size=%d)",
+                     msg->m_iCallback, msg->m_cubParam);
+            return true;
+        }
     }
     return false;
 }
@@ -5741,6 +6044,19 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(
                 *(int32_t*)pCallback = 1; // k_EResultOK
             }
             ReFixLog("ManualDispatch_GetAPICallResult: Overrode Callback 154 (EncryptedAppTicketResponse_t) -> res=1, bFailed=0, m_eResult=1 (k_EResultOK)");
+        }
+    }
+    if (iCallbackExpected == 1004) { // SteamInventoryStartPurchaseResult_t
+        if (!res || (pbFailed && *pbFailed)) {
+            res = true;
+            if (pbFailed) *pbFailed = false;
+            if (pCallback && cubCallback >= (int)sizeof(SteamInventoryStartPurchaseResult_t)) {
+                auto* pRes = (SteamInventoryStartPurchaseResult_t*)pCallback;
+                pRes->m_result = k_EResultOK;
+                pRes->m_ulOrderID = hSteamAPICall;
+                pRes->m_ulTransID = hSteamAPICall;
+            }
+            ReFixLog("ManualDispatch_GetAPICallResult: Overrode Callback 1004 (SteamInventoryStartPurchaseResult_t) -> res=1, bFailed=0, m_result=1 (k_EResultOK)");
         }
     }
     if (iCallbackExpected == 2101) { // HTTPRequestCompleted_t
@@ -5902,6 +6218,10 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     {
         std::lock_guard<std::mutex> lg(g_callbackMutex);
         g_registeredCallbacks.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lg(g_queuedCallbacksMutex);
+        g_queuedCallbacks.clear();
     }
     SafeBackendShutdown();
 }

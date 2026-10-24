@@ -5,6 +5,7 @@ EXPORTS
     ReFix_RegisterP2PPeer
     ReFix_RegisterP2PPeerStr
     ReFix_GetBoundGamePort
+    ReFix_IsSDRAvailable
     GetHSteamPipe=GetHSteamPipe_proxy
     GetHSteamUser=GetHSteamUser_proxy
     SteamAPI_GetHSteamPipe=SteamAPI_GetHSteamPipe_proxy

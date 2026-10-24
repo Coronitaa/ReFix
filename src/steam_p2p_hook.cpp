@@ -32,6 +32,23 @@
 
 #include "steam_p2p_hook.h"
 #include "minhook/MinHook.h"
+#include <isteamnetworkingmessages.h>
+#include <isteamnetworkingsockets.h>
+
+// =============================================================================
+// ISteamNetworkingMessages (Valve SDR Modern Transport)
+// =============================================================================
+typedef void* (*fn_SteamNetworkingMessages_t)();
+typedef int (*fn_SendMessageToUser_t)(void* self, const SteamNetworkingIdentity& identityRemote, const void* pubData, uint32_t cubData, int nSendFlags, int nRemoteChannel);
+typedef int (*fn_ReceiveMessagesOnChannel_t)(void* self, int nLocalChannel, SteamNetworkingMessage_t** ppOutMessages, int nMaxMessages);
+typedef bool (*fn_AcceptSessionWithUser_t)(void* self, const SteamNetworkingIdentity& identityRemote);
+typedef bool (*fn_CloseSessionWithUser_t)(void* self, const SteamNetworkingIdentity& identityRemote);
+
+static void* g_pSteamNetworkingMessages = nullptr;
+static fn_SendMessageToUser_t g_pfn_SendMessageToUser = nullptr;
+static fn_ReceiveMessagesOnChannel_t g_pfn_ReceiveMessagesOnChannel = nullptr;
+static fn_AcceptSessionWithUser_t g_pfn_AcceptSessionWithUser = nullptr;
+static fn_CloseSessionWithUser_t g_pfn_CloseSessionWithUser = nullptr;
 
 // =============================================================================
 // ISteamNetworking vtable layout (ISteamNetworking008)
@@ -85,7 +102,7 @@ static inline bool IsVoicePort(uint16_t port) {
     return (port == 5058);
 }
 
-static inline bool IsGamePort(uint16_t port) {
+static inline uint16_t GetConfiguredP2PPort() {
     static uint16_t s_iniPort = 0;
     if (s_iniPort == 0) {
         char buf[MAX_PATH] = { 0 };
@@ -95,7 +112,19 @@ static inline bool IsGamePort(uint16_t port) {
         std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
         s_iniPort = (uint16_t)GetPrivateProfileIntA("P2P", "P2PPort", 7777, ini.c_str());
     }
-    if (port == s_iniPort) return true;
+    return s_iniPort;
+}
+
+static inline uint16_t GetDefaultGamePort() {
+    uint16_t bound = SteamP2PHook::GetBoundGamePort();
+    if (bound != 0) return bound;
+    uint16_t cfg = GetConfiguredP2PPort();
+    return (cfg != 0) ? cfg : 7777;
+}
+
+static inline bool IsGamePort(uint16_t port) {
+    uint16_t iniPort = GetConfiguredP2PPort();
+    if (port == iniPort) return true;
     if (port >= 7770 && port <= 7799) return true;
     if (port >= 27015 && port <= 27035) return true;
     if (port == 5055 || port == 5056) return true;
@@ -369,6 +398,47 @@ static void* ResolveSteamNetworking() {
     return nullptr;
 }
 
+static void* ResolveSteamNetworkingMessages() {
+    HMODULE hSteam = (HMODULE)g_hSteamOriginal;
+    if (!hSteam) hSteam = GetModuleHandleA("steam_api64_valve.dll");
+    if (!hSteam) hSteam = GetModuleHandleA("steam_api64_o.dll");
+    if (!hSteam) hSteam = GetModuleHandleA("steam_api64.dll.valve");
+    if (!hSteam) hSteam = GetModuleHandleA("steam_api64.dll");
+    if (!hSteam) return nullptr;
+
+    FARPROC pProc = GetProcAddress(hSteam, "SteamAPI_SteamNetworkingMessages_v002");
+    if (!pProc) pProc = GetProcAddress(hSteam, "SteamAPI_SteamNetworkingMessages");
+    if (!pProc) pProc = GetProcAddress(hSteam, "SteamNetworkingMessages");
+    void* ptr = nullptr;
+    if (pProc) {
+        auto fn = (fn_SteamNetworkingMessages_t)pProc;
+        ptr = fn();
+    }
+    if (!ptr) {
+        typedef void* (*fn_FindOrCreate_t)(int, const char*);
+        auto pfnFind = (fn_FindOrCreate_t)GetProcAddress(hSteam, "SteamInternal_FindOrCreateUserInterface");
+        auto pfnUser = (fn_GetHSteamUser_t)GetProcAddress(hSteam, "SteamAPI_GetHSteamUser");
+        if (!pfnUser) pfnUser = (fn_GetHSteamUser_t)GetProcAddress(hSteam, "GetHSteamUser");
+        int user = pfnUser ? pfnUser() : 0;
+        if (pfnFind && user) {
+            ptr = pfnFind(user, "SteamNetworkingMessages002");
+        }
+    }
+    if (ptr) {
+        g_pfn_SendMessageToUser = (fn_SendMessageToUser_t)GetProcAddress(hSteam, "SteamAPI_ISteamNetworkingMessages_SendMessageToUser");
+        g_pfn_ReceiveMessagesOnChannel = (fn_ReceiveMessagesOnChannel_t)GetProcAddress(hSteam, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel");
+        g_pfn_AcceptSessionWithUser = (fn_AcceptSessionWithUser_t)GetProcAddress(hSteam, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser");
+        g_pfn_CloseSessionWithUser = (fn_CloseSessionWithUser_t)GetProcAddress(hSteam, "SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser");
+        SteamP2PHook::Log("ISteamNetworkingMessages (SDR) resolved successfully -> %p (Send=%p, Recv=%p)",
+            ptr, g_pfn_SendMessageToUser, g_pfn_ReceiveMessagesOnChannel);
+    }
+    return ptr;
+}
+
+bool SteamP2PHook::IsSDRAvailable() {
+    return (g_pSteamNetworkingMessages != nullptr && g_pfn_SendMessageToUser != nullptr);
+}
+
 // =============================================================================
 // Packet Dispatch & Queue Routing (V-01 Hardening)
 // =============================================================================
@@ -462,15 +532,16 @@ static void RouteIncomingPacket(RecvPacket pkt) {
 }
 
 // =============================================================================
-// Packet Transmission with Framing
+// Packet Transmission with Framing (Valve SDR / Legacy P2P)
 // =============================================================================
 static bool SendP2PWithEnvelope(uint64_t steamID, SOCKET s, const uint8_t* payload,
     uint32_t payloadLen, uint16_t dstPort, SocketServiceType service)
 {
-    if (!g_pSteamNetworking) {
+    if (!g_pSteamNetworkingMessages && !g_pSteamNetworking) {
+        g_pSteamNetworkingMessages = ResolveSteamNetworkingMessages();
         g_pSteamNetworking = ResolveSteamNetworking();
     }
-    if (!g_pSteamNetworking) return false;
+    if (!g_pSteamNetworkingMessages && !g_pSteamNetworking) return false;
 
     // Determine local / source port
     uint16_t srcPort = 0;
@@ -488,7 +559,7 @@ static bool SendP2PWithEnvelope(uint64_t steamID, SOCKET s, const uint8_t* paylo
             srcPort = ntohs(localAddr.sin_port);
         }
         if (srcPort == 0) {
-            srcPort = (service == SocketServiceType::Voice) ? 5058 : 7777;
+            srcPort = (service == SocketServiceType::Voice) ? 5058 : GetDefaultGamePort();
         }
     }
 
@@ -506,10 +577,78 @@ static bool SendP2PWithEnvelope(uint64_t steamID, SOCKET s, const uint8_t* paylo
     }
 
     int channel = (service == SocketServiceType::Voice) ? k_nChannelVoice : k_nChannelGame;
-    EP2PSend sendType = (service == SocketServiceType::Voice) ? k_EP2PSendUnreliableNoDelay : k_EP2PSendUnreliable;
 
-    return ISteamNetworking_SendP2PPacket(g_pSteamNetworking, steamID,
-        wireBuffer.data(), (uint32_t)wireBuffer.size(), sendType, channel);
+    // Modern Steamworks SDR transmission (Valve Steam Datagram Relay)
+    if (g_pSteamNetworkingMessages && g_pfn_SendMessageToUser) {
+        SteamNetworkingIdentity identity;
+        identity.Clear();
+        identity.SetSteamID64(steamID);
+
+        int sendFlags = 1 /* k_nSteamNetworkingSend_UnreliableNoNagle */ | 32 /* k_nSteamNetworkingSend_AutoRestartBrokenSession */;
+        int res = g_pfn_SendMessageToUser(g_pSteamNetworkingMessages, identity, wireBuffer.data(), (uint32_t)wireBuffer.size(), sendFlags, channel);
+        return (res == 1 /* k_EResultOK */);
+    }
+
+    // Fallback: Legacy ISteamNetworking
+    if (g_pSteamNetworking) {
+        EP2PSend sendType = (service == SocketServiceType::Voice) ? k_EP2PSendUnreliableNoDelay : k_EP2PSendUnreliable;
+        return ISteamNetworking_SendP2PPacket(g_pSteamNetworking, steamID,
+            wireBuffer.data(), (uint32_t)wireBuffer.size(), sendType, channel);
+    }
+
+    return false;
+}
+
+static void ProcessRawIncomingPacket(const uint8_t* rawData, uint32_t rawLen, uint64_t fromID, int ch) {
+    if (!rawData || rawLen == 0 || fromID == 0) return;
+
+    // Dynamically assign virtual IP for peer in Spacewar 480 range (10.48.X.Y)
+    {
+        std::lock_guard<std::mutex> lg(g_peerMutex);
+        if (g_steamIDToIP.find(fromID) == g_steamIDToIP.end()) {
+            uint8_t o3 = (uint8_t)((fromID >> 8) & 0xFF);
+            uint8_t o4 = (uint8_t)(fromID & 0xFF);
+            if (o3 == 0 && o4 <= 1) o4 = 2; // reserve 10.48.0.0 and 10.48.0.1
+            uint32_t syntheticIP = (10 << 24) | (48 << 16) | (o3 << 8) | o4; // 10.48.X.Y
+
+            // Resolve hash collision in 10.48.X.Y range
+            while (g_ipToSteamID.find(syntheticIP) != g_ipToSteamID.end() && g_ipToSteamID[syntheticIP] != fromID) {
+                if (++o4 == 255) {
+                    o4 = 1;
+                    if (++o3 == 255) o3 = 1;
+                }
+                syntheticIP = (10 << 24) | (48 << 16) | (o3 << 8) | o4;
+            }
+
+            g_steamIDToIP[fromID]   = syntheticIP;
+            g_ipToSteamID[syntheticIP] = fromID;
+            SteamP2PHook::Log("Dynamic Peer Assigned: SteamID=%llu <-> Virtual IP 10.48.%u.%u",
+                fromID, (syntheticIP >> 8) & 0xFF, syntheticIP & 0xFF);
+        }
+    }
+
+    RecvPacket pkt;
+    pkt.fromSteamID = fromID;
+
+    if (rawLen >= sizeof(ReFixP2PHeader) && *(const uint32_t*)rawData == k_refixP2PMagic) {
+        const ReFixP2PHeader* hdr = reinterpret_cast<const ReFixP2PHeader*>(rawData);
+        uint16_t payloadLen = hdr->payloadLen;
+        if (sizeof(ReFixP2PHeader) + payloadLen <= rawLen) {
+            pkt.data.assign(rawData + sizeof(ReFixP2PHeader), rawData + sizeof(ReFixP2PHeader) + payloadLen);
+        } else {
+            pkt.data.assign(rawData + sizeof(ReFixP2PHeader), rawData + rawLen);
+        }
+        pkt.fromPort = hdr->srcPort;
+        pkt.destPort = hdr->dstPort;
+        pkt.service = (hdr->service == 2) ? SocketServiceType::Voice : SocketServiceType::Game;
+    } else {
+        pkt.data.assign(rawData, rawData + rawLen);
+        pkt.service = (ch == k_nChannelVoice) ? SocketServiceType::Voice : SocketServiceType::Game;
+        pkt.destPort = (pkt.service == SocketServiceType::Voice) ? 5058 : GetDefaultGamePort();
+        pkt.fromPort = pkt.destPort;
+    }
+
+    RouteIncomingPacket(std::move(pkt));
 }
 
 // =============================================================================
@@ -538,13 +677,9 @@ void SteamP2PHook::FlushHoldBuffer() {
             SteamP2PHook::Log("[HoldBuffer] Dispatched held packet (%zu bytes) to SteamID=%llu", it->data.size(), targetSteamID);
             it = g_holdBuffer.erase(it);
         } else if (now - it->timestampMs >= k_holdBufferTtlMs) {
-            // TTL expired (3000 ms) -> fallback to raw Winsock so offline/LAN connections continue
-            SteamP2PHook::Log("[HoldBuffer] TTL expired (%u ms) for packet destined to port %u -> releasing to raw Winsock",
+            // TTL expired (3000 ms) -> packet was already sent to raw Winsock when buffered; drop to avoid duplicate delivery
+            SteamP2PHook::Log("[HoldBuffer] TTL expired (%u ms) for packet destined to port %u -> dropping hold buffer entry",
                 k_holdBufferTtlMs, it->destPort);
-            if (g_orig_sendto && it->s != INVALID_SOCKET) {
-                g_orig_sendto(it->s, (const char*)it->data.data(), (int)it->data.size(), it->flags,
-                    (const sockaddr*)&it->destAddr, sizeof(it->destAddr));
-            }
             it = g_holdBuffer.erase(it);
         } else {
             ++it;
@@ -558,15 +693,40 @@ void SteamP2PHook::FlushHoldBuffer() {
 static bool P2PPumpStep() {
     static uint8_t pktBuf[k_maxPacketSize];
 
-    if (!g_pSteamNetworking) {
+    if (!g_pSteamNetworkingMessages && !g_pSteamNetworking) {
+        g_pSteamNetworkingMessages = ResolveSteamNetworkingMessages();
         g_pSteamNetworking = ResolveSteamNetworking();
     }
 
     // Flush any newly routable or expired packets from Pre-Lobby Hold Buffer
     SteamP2PHook::FlushHoldBuffer();
 
-    if (g_pSteamNetworking && g_pumpRunning.load(std::memory_order_relaxed)) {
-        // Poll Game channel (0) and Voice channel (1) independently
+    if (!g_pumpRunning.load(std::memory_order_relaxed)) return true;
+
+    // 1. Drain modern SDR messages via ISteamNetworkingMessages
+    if (g_pSteamNetworkingMessages && g_pfn_ReceiveMessagesOnChannel) {
+        SteamNetworkingMessage_t* msgs[32];
+        for (int ch : { k_nChannelGame, k_nChannelVoice }) {
+            int numMsgs = g_pfn_ReceiveMessagesOnChannel(g_pSteamNetworkingMessages, ch, msgs, 32);
+            for (int i = 0; i < numMsgs; ++i) {
+                SteamNetworkingMessage_t* msg = msgs[i];
+                if (msg && msg->m_pData && msg->m_cbSize > 0) {
+                    uint64_t fromID = msg->m_identityPeer.GetSteamID64();
+                    if (fromID != 0) {
+                        if (g_pfn_AcceptSessionWithUser) {
+                            g_pfn_AcceptSessionWithUser(g_pSteamNetworkingMessages, msg->m_identityPeer);
+                        }
+                        ProcessRawIncomingPacket((const uint8_t*)msg->m_pData, (uint32_t)msg->m_cbSize, fromID, ch);
+                    }
+                }
+                if (msg) {
+                    msg->Release();
+                }
+            }
+        }
+    }
+    // 2. Fallback to legacy ISteamNetworking packets
+    else if (g_pSteamNetworking) {
         for (int ch : { k_nChannelGame, k_nChannelVoice }) {
             uint32_t pktSize = 0;
             while (g_pumpRunning.load(std::memory_order_relaxed) &&
@@ -574,57 +734,18 @@ static bool P2PPumpStep() {
                    pktSize > 0)
             {
                 if (pktSize > k_maxPacketSize) pktSize = k_maxPacketSize;
-
                 uint64_t fromID = 0;
                 uint32_t bytesRead = 0;
                 bool ok = ISteamNetworking_ReadP2PPacket(g_pSteamNetworking,
                     pktBuf, pktSize, &bytesRead, &fromID, ch);
-
                 if (ok && bytesRead > 0 && fromID != 0) {
                     ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, fromID);
-
-                    // Ensure this peer is registered in synthetic IP mapping
-                    {
-                        std::lock_guard<std::mutex> lg(g_peerMutex);
-                        if (g_steamIDToIP.find(fromID) == g_steamIDToIP.end()) {
-                            uint32_t syntheticIP = 0x7F000001u | (uint32_t)(fromID & 0x00FFFFFFu);
-                            g_steamIDToIP[fromID]   = syntheticIP;
-                            g_ipToSteamID[syntheticIP] = fromID;
-                        }
-                    }
-
-                    // Extract payload and metadata
-                    RecvPacket pkt;
-                    pkt.fromSteamID = fromID;
-
-                    if (bytesRead >= sizeof(ReFixP2PHeader) && *(const uint32_t*)pktBuf == k_refixP2PMagic) {
-                        const ReFixP2PHeader* hdr = reinterpret_cast<const ReFixP2PHeader*>(pktBuf);
-                        uint16_t payloadLen = hdr->payloadLen;
-                        if (sizeof(ReFixP2PHeader) + payloadLen <= bytesRead) {
-                            pkt.data.assign(pktBuf + sizeof(ReFixP2PHeader), pktBuf + sizeof(ReFixP2PHeader) + payloadLen);
-                            pkt.fromPort = hdr->srcPort;
-                            pkt.destPort = hdr->dstPort;
-                            pkt.service = (hdr->service == 2) ? SocketServiceType::Voice : SocketServiceType::Game;
-                        } else {
-                            pkt.data.assign(pktBuf + sizeof(ReFixP2PHeader), pktBuf + bytesRead);
-                            pkt.fromPort = hdr->srcPort;
-                            pkt.destPort = hdr->dstPort;
-                            pkt.service = (hdr->service == 2) ? SocketServiceType::Voice : SocketServiceType::Game;
-                        }
-                    } else {
-                        // Unframed / legacy fallback
-                        pkt.data.assign(pktBuf, pktBuf + bytesRead);
-                        pkt.service = (ch == k_nChannelVoice) ? SocketServiceType::Voice : SocketServiceType::Game;
-                        pkt.destPort = (pkt.service == SocketServiceType::Voice) ? 5058 : 7777;
-                        pkt.fromPort = pkt.destPort;
-                    }
-
-                    // Route packet into isolated per-socket / per-service queue
-                    RouteIncomingPacket(std::move(pkt));
+                    ProcessRawIncomingPacket(pktBuf, bytesRead, fromID, ch);
                 }
             }
         }
     }
+
     return true;
 }
 
@@ -635,7 +756,10 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
         __try {
             P2PPumpStep();
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            break;
+            DWORD exCode = GetExceptionCode();
+            SteamP2PHook::Log("P2PPumpThread: Caught structured exception 0x%08X - recovering after 10ms", exCode);
+            Sleep(10);
+            continue;
         }
 
         Sleep(1); // 1ms polling
@@ -653,7 +777,7 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen)
 {
-    if (to && to->sa_family == AF_INET && len > 0) {
+    if (to && tolen >= (int)sizeof(struct sockaddr_in) && to->sa_family == AF_INET && len > 0) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(to);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
@@ -810,7 +934,7 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
             struct sockaddr_in* sin = reinterpret_cast<struct sockaddr_in*>(from);
             sin->sin_family = AF_INET;
 
-            uint16_t srcPort = pkt.fromPort ? pkt.fromPort : (pkt.service == SocketServiceType::Voice ? 5058 : 7777);
+            uint16_t srcPort = pkt.fromPort ? pkt.fromPort : (pkt.service == SocketServiceType::Voice ? 5058 : GetDefaultGamePort());
             uint32_t srcIP = 0x7F000001u;
             {
                 std::lock_guard<std::mutex> lgPeer(g_peerMutex);
@@ -834,7 +958,7 @@ static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
 // ------ connect --------------------------------------------------------------
 static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namelen)
 {
-    if (name && name->sa_family == AF_INET) {
+    if (name && namelen >= (int)sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(name);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
@@ -918,7 +1042,7 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
 // ------ bind (V-04 Port Virtualization) ---------------------------------------
 static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 {
-    if (name && name->sa_family == AF_INET) {
+    if (name && namelen >= (int)sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(name);
         uint16_t requestedPort = ntohs(sin->sin_port);
         SocketServiceType service = ClassifyPort(requestedPort);
@@ -1094,6 +1218,11 @@ void Uninstall() {
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
 
+    g_pSteamNetworkingMessages = nullptr;
+    g_pfn_SendMessageToUser = nullptr;
+    g_pfn_ReceiveMessagesOnChannel = nullptr;
+    g_pfn_AcceptSessionWithUser = nullptr;
+    g_pfn_CloseSessionWithUser = nullptr;
     g_pSteamNetworking = nullptr;
     g_hooksInstalled = false;
 
@@ -1127,6 +1256,12 @@ void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
         }
     }
 
+    if (g_pSteamNetworkingMessages && g_pfn_AcceptSessionWithUser) {
+        SteamNetworkingIdentity identity;
+        identity.Clear();
+        identity.SetSteamID64(steamID);
+        g_pfn_AcceptSessionWithUser(g_pSteamNetworkingMessages, identity);
+    }
     if (g_pSteamNetworking) {
         ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, steamID);
     }
@@ -1137,7 +1272,8 @@ void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     char ipStr[32];
     uint32_t n = htonl(ipv4_host);
     inet_ntop(AF_INET, &n, ipStr, sizeof(ipStr));
-    Log("RegisterPeer: SteamID=%llu <-> IP=%s (port=%u)", steamID, ipStr, port);
+    Log("RegisterPeer: SteamID=%llu <-> IP=%s (port=%u, SDR=%s)",
+        steamID, ipStr, port, (g_pSteamNetworkingMessages ? "Active" : "Legacy"));
 }
 
 void UnregisterPeer(uint64_t steamID) {
@@ -1160,8 +1296,11 @@ void UnregisterPeer(uint64_t steamID) {
 // Force-resolve ISteamNetworking post SteamAPI_Init
 // =============================================================================
 extern "C" void SteamP2PHook_ForceResolve() {
-    g_pSteamNetworking = nullptr;
+    g_pSteamNetworkingMessages = ResolveSteamNetworkingMessages();
     g_pSteamNetworking = ResolveSteamNetworking();
+    if (g_pSteamNetworkingMessages) {
+        SteamP2PHook::Log("[ForceResolve] ISteamNetworkingMessages (SDR) ready -> %p", g_pSteamNetworkingMessages);
+    }
     if (g_pSteamNetworking) {
         SteamP2PHook::Log("[ForceResolve] ISteamNetworking obtained post-Init -> %p", g_pSteamNetworking);
         using fn_AllowRelay_t = bool(__thiscall*)(void*, bool);
@@ -1169,8 +1308,8 @@ extern "C" void SteamP2PHook_ForceResolve() {
         auto fnRelay = (fn_AllowRelay_t)vt[7]; // vtable index 7 = AllowP2PPacketRelay
         fnRelay(g_pSteamNetworking, true);
         SteamP2PHook::Log("[ForceResolve] AllowP2PPacketRelay(true) called - SDR relay enabled");
-    } else {
-        SteamP2PHook::Log("[ForceResolve] WARNING: ISteamNetworking still not resolved post-Init");
+    } else if (!g_pSteamNetworkingMessages) {
+        SteamP2PHook::Log("[ForceResolve] WARNING: Neither ISteamNetworkingMessages nor ISteamNetworking resolved post-Init");
     }
 }
 
@@ -1189,5 +1328,9 @@ __declspec(dllexport) void ReFix_RegisterP2PPeerStr(uint64_t steamID, const char
 
 __declspec(dllexport) uint16_t ReFix_GetBoundGamePort() {
     return SteamP2PHook::GetBoundGamePort();
+}
+
+__declspec(dllexport) bool ReFix_IsSDRAvailable() {
+    return SteamP2PHook::IsSDRAvailable();
 }
 }
