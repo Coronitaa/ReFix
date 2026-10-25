@@ -43,8 +43,11 @@ Emulator sockets are registered with `SteamP2PHook::ExcludeSocket`. `PreserveLoo
 127/8 destination; before this, sends to 5055/5056 on loopback were tunnelled to the single known lobby peer.
 
 ## Status (2026-10-25)
-- Photon Fusion (Roadside Research, AppId 3643170): connects to the emulated NameServer; room creation no
-  longer crashes. Fusion detected automatically; config is Topology B (ReFixCloud emulator + Steam SDR, port 27015).
+- Photon Fusion (Roadside Research, AppId 3643170, Fusion 2.0.8): hosting works on one PC (Host -> New game
+  loads into the room). The emulator plays Photon Cloud's Fusion room plugin (`pn_fusion`): it confirms the
+  client's Join (event 100 to actor 0) and sends Start pointing at the actor that joined as Server. Shared mode
+  (plugin-simulated) is not supported, and joining as a second PC is not yet tested. Fusion detected
+  automatically; config is Topology B (ReFixCloud emulator + Steam SDR, port 27015).
 - R.E.P.O. (Mono, PUN 2 + Voice): hosting works on one PC. The lobby loads, the room and voice room are created on
   the emulator, and START GAME loads a level. Not yet tested across two PCs.
 - Mono games load steam_api64 late, which is too late for the Steam overlay to hook D3D11. Deploy ReFix's
