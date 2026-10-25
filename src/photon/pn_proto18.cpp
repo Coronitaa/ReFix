@@ -184,6 +184,12 @@ Raw Str(const std::string& utf8) {
     return r + utf8;
 }
 
+Raw ByteArray(const std::string& bytes) {
+    Raw r(1, (char)kByteArray);
+    PutVarU32(r, (uint32_t)bytes.size());
+    return r + bytes;
+}
+
 Raw IntArray(const std::vector<int32_t>& v) {
     Raw r(1, (char)kCompressedIntArray);
     PutVarU32(r, (uint32_t)v.size());
@@ -221,6 +227,15 @@ bool AsInt(const Raw& raw, int64_t& out) {
 bool AsString(const Raw& raw, std::string& out) {
     Reader r(raw);
     if (r.U8() != kString) return false;
+    uint32_t n = r.VarU32();
+    if (!r.Has(n)) return false;
+    out.assign((const char*)r.data + r.pos, n);
+    return true;
+}
+
+bool AsBytes(const Raw& raw, std::string& out) {
+    Reader r(raw);
+    if (r.U8() != kByteArray) return false;
     uint32_t n = r.VarU32();
     if (!r.Has(n)) return false;
     out.assign((const char*)r.data + r.pos, n);

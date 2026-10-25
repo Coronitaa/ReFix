@@ -54,6 +54,7 @@ Raw Bool(bool v);
 Raw Byte(uint8_t v);
 Raw Short(int16_t v);
 Raw Str(const std::string& utf8);
+Raw ByteArray(const std::string& bytes);  // byte[]
 Raw Null();
 Raw IntArray(const std::vector<int32_t>& v);
 Raw StrArray(const std::vector<std::string>& v);
@@ -61,6 +62,7 @@ Raw StrArray(const std::vector<std::string>& v);
 // --- Interpreting raws -------------------------------------------------------------------------------------
 bool AsInt(const Raw& raw, int64_t& out);         // any integer/byte/short encoding
 bool AsString(const Raw& raw, std::string& out);
+bool AsBytes(const Raw& raw, std::string& out);       // byte[]
 bool AsBool(const Raw& raw, bool& out);
 bool AsIntArray(const Raw& raw, std::vector<int32_t>& out); // CompressedIntArray / Array of ints / ObjectArray
 bool IsNull(const Raw& raw);

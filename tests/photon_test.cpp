@@ -2,6 +2,7 @@
 // Build & run: tests\run_photon_tests.bat
 #include "../src/photon/pn_crypto.h"
 #include "../src/photon/pn_enet.h"
+#include "../src/photon/pn_fusion.h"
 #include "../src/photon/pn_proto18.h"
 #include "../src/photon/pn_server.h"
 #include <cstdarg>
@@ -281,6 +282,66 @@ static void TestCreatorEntersClosedRoom() {
     CHECK(b.Take(3, 226, p, &rc) && rc == 32764);
 }
 
+// Join request captured from Roadside Research (Fusion 2.0.8, protocol V1_6_0) creating a host room.
+static const std::string kFusionHostJoin = std::string(
+    "\x01\x0a\x02\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 28);
+
+static void TestFusionJoinCodec() {
+    PnFusion::Header h;
+    PnFusion::Join j;
+    CHECK(PnFusion::ParseJoin(kFusionHostJoin, h, j));
+    CHECK(h.protocolVersion == 10 && h.versionMajor == 2 && h.versionMinor == 0 && h.versionBuild == 8);
+    CHECK(j.type == PnFusion::JOIN_REQUEST && j.gameMode == PnFusion::GAME_MODE_CLIENT_SERVER);
+    CHECK(j.peerMode == PnFusion::PEER_SERVER && j.joinRequests == 0 && j.playerRef == 0);
+    CHECK(!j.uniqueId.present && !j.encryptionKey.present && !j.encryptionKeySecret.present);
+    CHECK(PnFusion::BuildJoin(h, j) == kFusionHostJoin);
+
+    // Unaligned fields after a present byte[] survive a round trip.
+    j.uniqueId = { true, std::string("\x01\xff\x80", 3) };
+    j.playerRef = -5;
+    j.encryptionKeySecret = { true, "k" };
+    PnFusion::Header h2;
+    PnFusion::Join j2;
+    std::string buf = PnFusion::BuildJoin(h, j);
+    CHECK(buf.size() % 4 == 0);
+    CHECK(PnFusion::ParseJoin(buf, h2, j2) && j2.uniqueId.bytes == j.uniqueId.bytes && j2.playerRef == -5);
+    CHECK(!j2.encryptionKey.present && j2.encryptionKeySecret.bytes == "k");
+}
+
+// The emulator plays Photon Cloud's Fusion plugin: a Join request sent to the server actor is confirmed to
+// the sender only, from actor 0, with its PlayerRef.
+static void TestFusionPluginConfirmsJoin() {
+    PnServer::Environment env;
+    env.localUserId = "100";
+    env.masterAddress = "127.0.0.1:27001";
+    env.localGameAddress = "127.0.0.1:27002";
+    env.gameAddress = [](const std::string&) { return std::string(); };
+    env.newRoomName = [] { return std::string("100-r"); };
+    env.joinableRooms = [] { return std::vector<std::string>(); };
+    env.roomHosted = [](const std::string&, bool) {};
+    env.log = NoLog;
+    PnServer::Emulator emu(env);
+
+    FakeClient a, b;
+    emu.OnConnect(1, PnServer::Role::Game, "100", a.Sink());
+    emu.OnConnect(2, PnServer::Role::Game, "200", b.Sink());
+    for (uint64_t k : { 1, 2 }) emu.OnMessage(k, Init("app"), true, 0);
+    emu.OnMessage(1, Request(227, { { 255, Str("f") } }), true, 0);
+    emu.OnMessage(2, Request(226, { { 255, Str("f") } }), true, 0);
+    b.inbox.clear();
+
+    emu.OnMessage(1, Request(253, { { 244, Byte(100) }, { 245, ByteArray(kFusionHostJoin) }, { 252, IntArray({ 0 }) } }), true, 0);
+    Params p;
+    int64_t sender = -1;
+    std::string data;
+    CHECK(a.Take(4, 100, p) && AsInt(p[254], sender) && sender == 0 && AsBytes(p[245], data));
+    PnFusion::Header h;
+    PnFusion::Join j;
+    CHECK(PnFusion::ParseJoin(data, h, j) && h.protocolVersion == 10 && h.versionBuild == 8);
+    CHECK(j.type == PnFusion::JOIN_CONFIRMATION && j.peerMode == PnFusion::PEER_SERVER && j.playerRef == 1);
+    CHECK(!b.Take(4, 100, p));
+}
+
 int main() {
     TestScalarsRoundTrip();
     TestSkipComplexValues();
@@ -291,6 +352,8 @@ int main() {
     TestGameServerRoomFlow();
     TestMasterRoutesJoinsToHost();
     TestCreatorEntersClosedRoom();
+    TestFusionJoinCodec();
+    TestFusionPluginConfirmsJoin();
     std::printf(g_failures ? "%d FAILURE(S)\n" : "ALL PHOTON TESTS PASSED\n", g_failures);
     return g_failures ? 1 : 0;
 }

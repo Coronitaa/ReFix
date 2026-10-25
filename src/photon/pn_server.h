@@ -87,6 +87,9 @@ private:
 
     void EnterRoom(Peer& peer, uint64_t key, uint8_t op, const PnProto18::Params& params);
     void RaiseEvent(Peer& peer, const PnProto18::Params& params, bool reliable, uint8_t channel);
+    void HandleFusionProtocol(Peer& peer, const PnProto18::Raw& data);
+    void LogEventSample(const Peer& peer, uint8_t code, int64_t receivers, const std::vector<int32_t>& targets,
+                        const PnProto18::Params& params);
     void SetProperties(Peer& peer, const PnProto18::Params& params);
     void ChangeGroups(Peer& peer, const PnProto18::Params& params);
     void LeaveRoom(uint64_t key, bool sendResponse);
@@ -101,6 +104,7 @@ private:
     Environment m_env;
     std::map<uint64_t, Peer> m_peers;
     std::map<std::string, std::unique_ptr<Room>> m_rooms; // key: appId + '\n' + name
+    int m_sampledEvents = 0;
 };
 
 } // namespace PnServer

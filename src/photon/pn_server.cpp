@@ -1,7 +1,9 @@
 #include "pn_server.h"
 #include "pn_crypto.h"
+#include "pn_fusion.h"
 #include <windows.h>
 #include <algorithm>
+#include <cstdio>
 
 namespace PnServer {
 
@@ -316,6 +318,51 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
               room.actors.size(), room.master);
 }
 
+// Photon Cloud runs a "Fusion" plugin in Fusion rooms that answers the protocol messages clients send to the
+// server actor; the client times out without them. Join is confirmed to the sender with its PlayerRef.
+void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
+    std::string buffer;
+    PnFusion::Header header;
+    PnFusion::Join join;
+    if (!AsBytes(data, buffer) || !PnFusion::ParseJoin(buffer, header, join) || join.type != PnFusion::JOIN_REQUEST) {
+        m_env.log("[Photon] Fusion: unhandled protocol message %d from actor %d (%zu bytes)", PnFusion::FirstMessageId(buffer),
+                  peer.actor, buffer.size());
+        return;
+    }
+    join.type = PnFusion::JOIN_CONFIRMATION;
+    join.playerRef = peer.actor;
+    Params ev = { { P_ACTOR_NR, Int(PnFusion::SERVER_ACTOR) },
+                  { PnFusion::P_FUSION_DATA, ByteArray(PnFusion::BuildJoin(header, join)) } };
+    SendEvent(*peer.room, peer.actor, PnFusion::EV_PROTOCOL, ev, true, 0);
+    m_env.log("[Photon] Fusion: confirmed join of actor %d (mode %u, peer %u, protocol %u, Fusion %d.%d.%d)", peer.actor,
+              join.gameMode, join.peerMode, header.protocolVersion, header.versionMajor, header.versionMinor,
+              header.versionBuild);
+}
+
+// Diagnostic: the first events of each session, with their parameter codes and a hex prefix of each value, so
+// server-plugin protocols (e.g. Photon Fusion's handshake to the server actor) can be read from ReFix.log.
+void Emulator::LogEventSample(const Peer& peer, uint8_t code, int64_t receivers, const std::vector<int32_t>& targets,
+                              const Params& params) {
+    constexpr int kMaxSampledEvents = 24;
+    constexpr size_t kMaxHexBytes = 96;
+    if (m_sampledEvents >= kMaxSampledEvents) return;
+    m_sampledEvents++;
+    std::string detail;
+    char buf[8];
+    for (const auto& [key, value] : params) {
+        std::snprintf(buf, sizeof(buf), " %u=", key);
+        detail += buf;
+        for (size_t i = 0; i < value.size() && i < kMaxHexBytes; i++) {
+            std::snprintf(buf, sizeof(buf), "%02x", (uint8_t)value[i]);
+            detail += buf;
+        }
+        if (value.size() > kMaxHexBytes) detail += "..";
+    }
+    m_env.log("[Photon] Event %u from actor %d (receivers %lld, %zu targets%s%d):%s", code, peer.actor,
+              (long long)receivers, targets.size(), targets.empty() ? "" : " first ", targets.empty() ? 0 : targets[0],
+              detail.c_str());
+}
+
 void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8_t channel) {
     if (!peer.room) return;
     Room& room = *peer.room;
@@ -327,6 +374,11 @@ void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8
     Raw data = dataIt != params.end() ? dataIt->second : Raw();
     std::vector<int32_t> targets;
     if (params.count(P_ACTOR_LIST)) AsIntArray(params.at(P_ACTOR_LIST), targets);
+    LogEventSample(peer, code, receivers, targets, params);
+    if (code == PnFusion::EV_PROTOCOL && targets.size() == 1 && targets[0] == PnFusion::SERVER_ACTOR) {
+        HandleFusionProtocol(peer, data);
+        return;
+    }
 
     if (cache == CACHE_REMOVE) { RemoveFromCache(room, code, targets, data); return; }
     if (cache == CACHE_REMOVE_LEFT) {
