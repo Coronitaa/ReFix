@@ -199,16 +199,50 @@ void Tick() {
     if (GetTickCount() - g_engagedTick.load() > kMonitorWindowMs) g_finished.store(true);
 }
 
-void MainThreadTick() {
+static void ApplyLanFlag() {
     // Lan mode also needs StaticGameInfo.isLanMode (as the studio's own LAN test path sets it): with a fake
     // account id, LocalPlayerData only creates the Player scope when isEditorOrLanMode is true. The setter
     // re-initializes ServerAgent, so it must run on the Unity main thread.
-    if (!g_engaged.load() || g_targetMode.load() != kModeLan || g_lanFlagApplied.exchange(true)) return;
+    if (g_targetMode.load() != kModeLan || g_lanFlagApplied.exchange(true)) return;
     void* klass = ReFixIL2CPPScene::FindClassByName("", "StaticGameInfo");
     bool applied = ReFixIL2CPPScene::InvokeStaticBoolSetter(klass, "set_isLanMode", true);
     bool readback = false;
     ReFixIL2CPPScene::InvokeStaticBoolGetter(klass, "get_isLanMode", &readback);
     ReFixLog("[PA-Offline] StaticGameInfo.set_isLanMode(true) %s (readback %d)", applied ? "invoked" : "FAILED", readback);
+}
+
+// First-launch profile steps of LaunchSequenceManager (PartyAnimals.Ui.dll) open mandatory modals
+// ("choose your name", "choose avatar") unless the account reports them as done. Confirming them calls
+// the backend, which Lan mode refuses, so they could never close. Both flags are local-only.
+struct ProfileStep {
+    const char* ns;
+    const char* className;
+    const char* markMethod;
+    const char* doneGetter;
+    bool done;
+};
+
+static ProfileStep g_profileSteps[] = {
+    { "Recreate.Service.Account", "AccountNameManager", "MarkDisplayNameChanged", "get_isDisplayNameChanged", false },
+    { "Recreate.Service.Personalization", "AvatarSettingManager", "MarkPortraitChanged", "get_isPortraitChanged", false },
+};
+
+static void SkipFirstLaunchProfileSteps() {
+    for (ProfileStep& step : g_profileSteps) {
+        if (step.done) continue;
+        void* manager = AutoSingleton(step.ns, step.className);
+        if (!manager) continue; // PartyAnimals.Service.dll not initialized yet
+        step.done = true;
+        ReFixIL2CPPScene::CallObjectGetter(manager, step.markMethod);
+        ReFixLog("[PA-Offline] %s.%s() -> %s=%d", step.className, step.markMethod, step.doneGetter + 4,
+                 ReadBool(manager, step.doneGetter));
+    }
+}
+
+void MainThreadTick() {
+    if (!g_engaged.load()) return;
+    ApplyLanFlag();
+    SkipFirstLaunchProfileSteps();
 }
 
 bool IsEngaged() {
