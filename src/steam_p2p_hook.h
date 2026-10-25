@@ -41,6 +41,10 @@ namespace SteamP2PHook {
     // Flush any pending packets held in Pre-Lobby Hold Buffer.
     void FlushHoldBuffer();
 
+    // Sockets owned by other ReFix services bypass this layer (call right after socket(), before bind()).
+    void ExcludeSocket(uintptr_t s);
+    void IncludeSocket(uintptr_t s);
+
     // Query if Steamworks SDR transport (ISteamNetworkingMessages) is active
     bool IsSDRAvailable();
 

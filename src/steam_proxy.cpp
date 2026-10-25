@@ -43,6 +43,7 @@
 #include "refix_inventory.h"
 #include "refix_il2cpp.h"
 #include "refix_steam_flat.h"
+#include "photon/pn_p2p.h"
 
 #define STEAM_FORWARD_COUNT 1141
 
@@ -5626,6 +5627,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         // Install Winsock -> Steam P2P redirect hooks (for non-Godot engines in Valve Online mode)
         if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
+            ReFixPhotonP2P::Initialize();
             ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
             // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
             extern void SteamP2PHook_ForceResolve();
@@ -5693,6 +5695,7 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
         CapturePersonaName();
         if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
+            ReFixPhotonP2P::Initialize();
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();
         }
@@ -5769,6 +5772,7 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         // Install Winsock -> Steam P2P redirect hooks (for non-Godot engines in Valve Online mode)
         if (!g_godotIsEngine && !g_isGoldbergMode) {
             SteamP2PHook::Install(g_hOriginalDll);
+            ReFixPhotonP2P::Initialize();
             ReFixLog("SteamInternal_SteamAPI_Init: Steam P2P Winsock hooks installed");
             extern void SteamP2PHook_ForceResolve();
             SteamP2PHook_ForceResolve();

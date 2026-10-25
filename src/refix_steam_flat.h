@@ -24,6 +24,9 @@ namespace ReFixSteamFlat {
     // Rich presence `key` of one user (friends only; empty when unknown).
     std::string FriendRichPresence(uint64_t steamID, const char* key);
 
+    // Owner of a Steam lobby the local user can see (0 when unknown).
+    uint64_t LobbyOwner(uint64_t lobbyId);
+
     // Unreliable, no-Nagle send over Steam Datagram Relay on `channel`.
     bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel);
 

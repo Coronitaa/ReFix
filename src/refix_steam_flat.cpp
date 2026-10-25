@@ -29,11 +29,13 @@ typedef void (*fn_RequestFriendRichPresence_t)(void* self, uint64_t friendID);
 typedef int (*fn_SendMessageToUser_t)(void* self, const SteamNetworkingIdentity& id, const void* data, uint32_t size, int flags, int channel);
 typedef int (*fn_ReceiveMessagesOnChannel_t)(void* self, int channel, SteamNetworkingMessage_t** out, int max);
 typedef bool (*fn_AcceptSessionWithUser_t)(void* self, const SteamNetworkingIdentity& id);
+typedef uint64_t (*fn_GetLobbyOwner_t)(void* self, uint64_t lobbyId);
 
 struct Api {
     void* user = nullptr;
     void* friends = nullptr;
     void* messages = nullptr;
+    void* matchmaking = nullptr;
     fn_GetSteamID_t getSteamID = nullptr;
     fn_SetRichPresence_t setRichPresence = nullptr;
     fn_GetFriendCount_t getFriendCount = nullptr;
@@ -43,6 +45,7 @@ struct Api {
     fn_SendMessageToUser_t sendMessageToUser = nullptr;
     fn_ReceiveMessagesOnChannel_t receiveMessagesOnChannel = nullptr;
     fn_AcceptSessionWithUser_t acceptSessionWithUser = nullptr;
+    fn_GetLobbyOwner_t getLobbyOwner = nullptr;
 };
 
 std::mutex g_apiMutex;
@@ -103,6 +106,9 @@ Api ResolveApi() {
     if (!g_api.user) g_api.user = Interface(steam, kUser, "SteamUser023");
     if (!g_api.friends) g_api.friends = Interface(steam, kFriends, "SteamFriends017");
     if (!g_api.messages) g_api.messages = Interface(steam, kMessages, "SteamNetworkingMessages002");
+    static const char* kMatchmaking[] = { "SteamAPI_SteamMatchmaking_v009", nullptr };
+    if (!g_api.matchmaking) g_api.matchmaking = Interface(steam, kMatchmaking, "SteamMatchMaking009");
+    g_api.getLobbyOwner = Export<fn_GetLobbyOwner_t>(steam, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     g_api.getSteamID = Export<fn_GetSteamID_t>(steam, "SteamAPI_ISteamUser_GetSteamID");
     g_api.setRichPresence = Export<fn_SetRichPresence_t>(steam, "SteamAPI_ISteamFriends_SetRichPresence");
     g_api.getFriendCount = Export<fn_GetFriendCount_t>(steam, "SteamAPI_ISteamFriends_GetFriendCount");
@@ -175,6 +181,11 @@ std::vector<FriendPresence> FriendsWithRichPresence(const char* key) {
         if (!value.empty()) out.push_back({ id, value });
     }
     return out;
+}
+
+uint64_t LobbyOwner(uint64_t lobbyId) {
+    Api api = ResolveApi();
+    return api.matchmaking && api.getLobbyOwner && lobbyId ? api.getLobbyOwner(api.matchmaking, lobbyId) : 0;
 }
 
 bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel) {

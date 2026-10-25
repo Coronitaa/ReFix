@@ -26,6 +26,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <deque>
 #include <string>
@@ -229,6 +230,14 @@ static HANDLE g_pumpThread       = nullptr;
 static std::atomic<uint16_t> g_virtualizedGamePort{ 0 };
 
 static std::mutex g_peerMutex;
+
+// Sockets owned by other ReFix services (e.g. the Photon emulator) bypass this layer entirely.
+static std::mutex g_excludedMutex;
+static std::unordered_set<SOCKET> g_excludedSockets;
+static bool IsExcludedSocket(SOCKET s) {
+    std::lock_guard<std::mutex> lg(g_excludedMutex);
+    return g_excludedSockets.count(s) != 0;
+}
 static std::unordered_map<uint32_t, uint64_t> g_ipToSteamID;
 static std::unordered_map<uint64_t, uint32_t> g_steamIDToIP;
 static std::unordered_map<uint64_t, uint16_t> g_steamIDToPort;
@@ -433,6 +442,16 @@ static void* ResolveSteamNetworkingMessages() {
             ptr, g_pfn_SendMessageToUser, g_pfn_ReceiveMessagesOnChannel);
     }
     return ptr;
+}
+
+void SteamP2PHook::ExcludeSocket(SOCKET s) {
+    std::lock_guard<std::mutex> lg(g_excludedMutex);
+    g_excludedSockets.insert(s);
+}
+
+void SteamP2PHook::IncludeSocket(SOCKET s) {
+    std::lock_guard<std::mutex> lg(g_excludedMutex);
+    g_excludedSockets.erase(s);
 }
 
 bool SteamP2PHook::IsSDRAvailable() {
@@ -769,6 +788,7 @@ static DWORD WINAPI P2PPumpThread(LPVOID) {
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen)
 {
+    if (IsExcludedSocket(s)) return g_orig_sendto(s, buf, len, flags, to, tolen);
     if (to && tolen >= (int)sizeof(struct sockaddr_in) && to->sa_family == AF_INET && len > 0) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(to);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
@@ -794,9 +814,11 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
             }
         }
 
-        // Check if destination resolves to a known peer
+        // Check if destination resolves to a known peer. Loopback traffic stays local when PreserveLoopback is
+        // on (local services such as emulators listen on game/voice ports too).
         uint64_t steamID = 0;
-        {
+        bool preserveLocal = ((destIP & 0xFF000000u) == 0x7F000000u) && GetPreserveLoopbackConfig();
+        if (!preserveLocal) {
             std::lock_guard<std::mutex> lg(g_peerMutex);
             auto it = g_ipToSteamID.find(destIP);
             if (it != g_ipToSteamID.end()) {
@@ -847,6 +869,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
 static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
     struct sockaddr* from, int* fromlen)
 {
+    if (IsExcludedSocket(s)) return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
     RecvPacket pkt;
     bool hasPkt = false;
 
@@ -1116,6 +1139,7 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
 // ------ bind (V-04 Port Virtualization) ---------------------------------------
 static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 {
+    if (IsExcludedSocket(s)) return g_orig_bind(s, name, namelen);
     if (name && namelen >= (int)sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(name);
         uint16_t requestedPort = ntohs(sin->sin_port);
@@ -1173,6 +1197,10 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 // ------ closesocket ----------------------------------------------------------
 static int WSAAPI Hook_closesocket(SOCKET s)
 {
+    {
+        std::lock_guard<std::mutex> lg(g_excludedMutex);
+        g_excludedSockets.erase(s); // handles are reused
+    }
     {
         std::lock_guard<std::mutex> lg(g_socketMutex);
         g_socketContexts.erase(s);
