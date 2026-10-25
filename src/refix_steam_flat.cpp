@@ -61,17 +61,28 @@ T Export(HMODULE module, const char* name) {
 typedef int (*fn_GetHSteamUser_t)();
 typedef void* (*fn_FindOrCreateUserInterface_t)(int hSteamUser, const char* version);
 
-// Flat accessor first; then the internal lookup with the interface version string, which also works when
-// the game initialized Steam in a way the versioned flat accessors do not see.
-void* Interface(HMODULE module, const char* const* accessors, const char* version) {
-    for (; *accessors; accessors++) {
-        auto fn = Export<fn_GetInterface_t>(module, *accessors);
-        if (void* ptr = fn ? fn() : nullptr) return ptr;
-    }
+// One interface version: the flat accessor exported by the SDK that matches it, and its version string.
+struct InterfaceVersion {
+    const char* accessor;
+    const char* version;
+};
+
+// The SteamAPI_ISteamX_* flat thunks dispatch through the vtable layout of the SDK the DLL was built with, so
+// the interface object must be that exact version: asking steamclient for an older one (e.g. SteamFriends017
+// from a v018 DLL) returns a different vtable and the thunks jump to the wrong slot. Only versions whose
+// accessor this DLL exports are used; the internal lookup by version string covers games that initialized
+// Steam in a way the flat accessors do not see. Versions are listed newest first.
+void* Interface(HMODULE module, const InterfaceVersion* versions) {
     auto getUser = Export<fn_GetHSteamUser_t>(module, "SteamAPI_GetHSteamUser");
     auto find = Export<fn_FindOrCreateUserInterface_t>(module, "SteamInternal_FindOrCreateUserInterface");
     int user = getUser ? getUser() : 0;
-    return find && user ? find(user, version) : nullptr;
+    for (const InterfaceVersion* v = versions; v->accessor; v++) {
+        auto fn = Export<fn_GetInterface_t>(module, v->accessor);
+        if (!fn) continue; // this DLL's flat thunks do not match this version
+        if (void* ptr = fn()) return ptr;
+        if (void* ptr = find && user ? find(user, v->version) : nullptr) return ptr;
+    }
+    return nullptr;
 }
 
 bool HasSteamUser(HMODULE module) {
@@ -102,14 +113,19 @@ Api ResolveApi() {
     s_lastAttempt = now;
     HMODULE steam = InitializedSteamModule();
     if (!steam) return g_api; // Steam not initialized yet
-    static const char* kUser[] = { "SteamAPI_SteamUser_v023", "SteamAPI_SteamUser_v022", "SteamAPI_SteamUser_v021", nullptr };
-    static const char* kFriends[] = { "SteamAPI_SteamFriends_v017", nullptr };
-    static const char* kMessages[] = { "SteamAPI_SteamNetworkingMessages_SteamAPI_v002", "SteamAPI_SteamNetworkingMessages_v002", nullptr };
-    if (!g_api.user) g_api.user = Interface(steam, kUser, "SteamUser023");
-    if (!g_api.friends) g_api.friends = Interface(steam, kFriends, "SteamFriends017");
-    if (!g_api.messages) g_api.messages = Interface(steam, kMessages, "SteamNetworkingMessages002");
-    static const char* kMatchmaking[] = { "SteamAPI_SteamMatchmaking_v009", nullptr };
-    if (!g_api.matchmaking) g_api.matchmaking = Interface(steam, kMatchmaking, "SteamMatchMaking009");
+    static const InterfaceVersion kUser[] = { { "SteamAPI_SteamUser_v023", "SteamUser023" },
+                                              { "SteamAPI_SteamUser_v022", "SteamUser022" },
+                                              { "SteamAPI_SteamUser_v021", "SteamUser021" }, { nullptr, nullptr } };
+    static const InterfaceVersion kFriends[] = { { "SteamAPI_SteamFriends_v018", "SteamFriends018" },
+                                                 { "SteamAPI_SteamFriends_v017", "SteamFriends017" }, { nullptr, nullptr } };
+    static const InterfaceVersion kMessages[] = {
+        { "SteamAPI_SteamNetworkingMessages_SteamAPI_v002", "SteamNetworkingMessages002" },
+        { "SteamAPI_SteamNetworkingMessages_v002", "SteamNetworkingMessages002" }, { nullptr, nullptr } };
+    static const InterfaceVersion kMatchmaking[] = { { "SteamAPI_SteamMatchmaking_v009", "SteamMatchMaking009" }, { nullptr, nullptr } };
+    if (!g_api.user) g_api.user = Interface(steam, kUser);
+    if (!g_api.friends) g_api.friends = Interface(steam, kFriends);
+    if (!g_api.messages) g_api.messages = Interface(steam, kMessages);
+    if (!g_api.matchmaking) g_api.matchmaking = Interface(steam, kMatchmaking);
     g_api.getLobbyOwner = Export<fn_GetLobbyOwner_t>(steam, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     g_api.getSteamID = Export<fn_GetSteamID_t>(steam, "SteamAPI_ISteamUser_GetSteamID");
     g_api.setRichPresence = Export<fn_SetRichPresence_t>(steam, "SteamAPI_ISteamFriends_SetRichPresence");
