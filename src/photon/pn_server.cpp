@@ -282,9 +282,10 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
         m_env.log("[Photon] Room '%s' created (app %.8s..., max %d)", name.c_str(), peer.appId.c_str(), (int)maxPlayers);
     }
     Room& room = *it->second;
+    // IsOpen only gates later joins: like Photon Cloud, the creator always enters (Fusion creates rooms closed).
     bool open = true;
     if (const Raw* v = room.props.Find(Byte(GP_IS_OPEN))) AsBool(*v, open);
-    if (!open) { Respond(peer, op, ERR_GAME_CLOSED, {}, "Game closed"); return; }
+    if (!open && exists) { Respond(peer, op, ERR_GAME_CLOSED, {}, "Game closed"); return; }
     if (room.maxPlayers > 0 && (int32_t)room.actors.size() >= room.maxPlayers) { Respond(peer, op, ERR_GAME_FULL, {}, "Game full"); return; }
 
     Actor actor;

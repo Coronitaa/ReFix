@@ -251,6 +251,36 @@ static void TestMasterRoutesJoinsToHost() {
     CHECK(m.Take(3, 225, p, &rc) && rc == 0 && AsString(p[255], addr) && addr == "remote");
 }
 
+// Fusion creates its room closed (IsOpen=false) and opens it later; the creator must still enter it, while
+// other players are refused until it opens.
+static void TestCreatorEntersClosedRoom() {
+    PnServer::Environment env;
+    env.localUserId = "100";
+    env.masterAddress = "127.0.0.1:27001";
+    env.localGameAddress = "127.0.0.1:27002";
+    env.gameAddress = [](const std::string&) { return std::string(); };
+    env.newRoomName = [] { return std::string("100-r"); };
+    env.joinableRooms = [] { return std::vector<std::string>(); };
+    env.roomHosted = [](const std::string&, bool) {};
+    env.log = NoLog;
+    PnServer::Emulator emu(env);
+
+    FakeClient a, b;
+    emu.OnConnect(1, PnServer::Role::Game, "100", a.Sink());
+    emu.OnConnect(2, PnServer::Role::Game, "200", b.Sink());
+    for (uint64_t k : { 1, 2 }) emu.OnMessage(k, Init("app"), true, 0);
+
+    Table closed;
+    closed.Set(Byte(253), Bool(false));
+    emu.OnMessage(1, Request(226, { { 255, Str("fusion") }, { 248, closed.Encode() }, { 215, Byte(1) } }), true, 0);
+    Params p;
+    int16_t rc = -1;
+    int64_t actor;
+    CHECK(a.Take(3, 226, p, &rc) && rc == 0 && AsInt(p[254], actor) && actor == 1);
+    emu.OnMessage(2, Request(226, { { 255, Str("fusion") } }), true, 0);
+    CHECK(b.Take(3, 226, p, &rc) && rc == 32764);
+}
+
 int main() {
     TestScalarsRoundTrip();
     TestSkipComplexValues();
@@ -260,6 +290,7 @@ int main() {
     TestCrypto();
     TestGameServerRoomFlow();
     TestMasterRoutesJoinsToHost();
+    TestCreatorEntersClosedRoom();
     std::printf(g_failures ? "%d FAILURE(S)\n" : "ALL PHOTON TESTS PASSED\n", g_failures);
     return g_failures ? 1 : 0;
 }
