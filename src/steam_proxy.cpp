@@ -5824,6 +5824,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (g_pfn_RunCallbacks) g_pfn_RunCallbacks();
     DispatchRelayCallbacks();
     DispatchPendingAuthCallbacks();
+    ReFixSteamFlat::ServiceMainThread(); // refresh friend/presence caches on the main thread
 
     // If manual dispatch is not driving the game loop, drain g_queuedCallbacks into registered listeners
     if (s_manualRunFrameLogged == 0) {
@@ -5858,6 +5859,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
     if (g_pfn_ManualDispatch_RunFrame) g_pfn_ManualDispatch_RunFrame(hSteamPipe);
     DispatchPendingAuthCallbacks();
     ReFixIL2CPP::Update();
+    ReFixSteamFlat::ServiceMainThread(); // refresh friend/presence caches on the main thread
 }
 
 static std::atomic<bool> s_lastManualCallbackWasSynthetic{ false };

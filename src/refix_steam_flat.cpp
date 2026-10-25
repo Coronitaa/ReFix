@@ -5,6 +5,8 @@
 #include <isteamnetworkingmessages.h>
 #include <cstdlib>
 #include <mutex>
+#include <map>
+#include <algorithm>
 
 extern void ReFixLog(const char* fmt, ...);
 extern HMODULE g_hOriginalDll;
@@ -139,12 +141,18 @@ SteamNetworkingIdentity Identity(uint64_t steamID) {
     return id;
 }
 
-std::vector<uint64_t> ImmediateFriends(const Api& api) {
-    std::vector<uint64_t> out;
-    if (!api.friends || !api.getFriendCount || !api.getFriendByIndex) return out;
-    int count = api.getFriendCount(api.friends, kFriendFlagImmediate);
-    for (int i = 0; i < count; i++) out.push_back(api.getFriendByIndex(api.friends, i, kFriendFlagImmediate));
-    return out;
+// --- Main-thread-marshaled friend/presence cache ----------------------------------------------------------
+// ISteamFriends enumeration (GetFriendByIndex) crashes the Valve DLL when called off the game's main thread
+// while the game is also using Steam (reliably during Photon room creation). So every ISteamFriends read
+// happens on the game's main thread in ServiceMainThread(); worker threads (the Photon pump, the PA relay)
+// only touch these caches. Local rich-presence writes are queued and applied on the main thread too.
+namespace {
+std::mutex g_cacheMutex;
+std::vector<std::string> g_watchedKeys;                              // presence keys worker threads asked about
+std::map<std::string, std::vector<FriendPresence>> g_presenceCache;  // key -> matching friends (last refresh)
+std::vector<uint64_t> g_friendIdsCache;                              // immediate friend SteamIDs (last refresh)
+std::map<std::string, std::string> g_pendingPresence;                // queued local SetRichPresence writes
+bool g_pendingPresenceDirty = false;
 }
 
 } // namespace
@@ -160,9 +168,12 @@ uint64_t LocalSteamID() {
 }
 
 bool SetRichPresence(const char* key, const std::string& value) {
-    Api api = ResolveApi();
-    if (!api.friends || !api.setRichPresence) return false;
-    return api.setRichPresence(api.friends, key, value.empty() ? nullptr : value.c_str());
+    // Queue the write; it is applied on the game's main thread in ServiceMainThread() to avoid touching
+    // ISteamFriends from a worker thread.
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    g_pendingPresence[key ? key : ""] = value;
+    g_pendingPresenceDirty = true;
+    return true;
 }
 
 std::string FriendRichPresence(uint64_t steamID, const char* key) {
@@ -173,14 +184,13 @@ std::string FriendRichPresence(uint64_t steamID, const char* key) {
 }
 
 std::vector<FriendPresence> FriendsWithRichPresence(const char* key) {
-    std::vector<FriendPresence> out;
-    Api api = ResolveApi();
-    for (uint64_t id : ImmediateFriends(api)) {
-        if (api.requestFriendRichPresence) api.requestFriendRichPresence(api.friends, id);
-        std::string value = FriendRichPresence(id, key);
-        if (!value.empty()) out.push_back({ id, value });
-    }
-    return out;
+    // Lock-free of Steam: returns the cache last refreshed on the main thread, and registers the key so the
+    // next ServiceMainThread() refresh picks it up.
+    std::string k = key ? key : "";
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    if (std::find(g_watchedKeys.begin(), g_watchedKeys.end(), k) == g_watchedKeys.end()) g_watchedKeys.push_back(k);
+    auto it = g_presenceCache.find(k);
+    return it != g_presenceCache.end() ? it->second : std::vector<FriendPresence>{};
 }
 
 uint64_t LobbyOwner(uint64_t lobbyId) {
@@ -228,9 +238,54 @@ void OnSessionRequestCallback(const void* param, int32_t size) {
 }
 
 void AcceptFriendSessions() {
-    Api api = ResolveApi();
-    for (uint64_t id : ImmediateFriends(api)) {
+    std::vector<uint64_t> ids;
+    { std::lock_guard<std::mutex> lock(g_cacheMutex); ids = g_friendIdsCache; }
+    for (uint64_t id : ids) {
         if (AcceptSession(id)) ReFixLog("[SteamFlat] Accepted pending session from friend %llu", (unsigned long long)id);
+    }
+}
+
+void ServiceMainThread() {
+    // MUST run on the game's main thread (called from the Steam callback pumps). Applies queued rich-presence
+    // writes and refreshes the friend/presence caches that worker threads read.
+    Api api = ResolveApi();
+    if (!api.friends) return;
+
+    std::map<std::string, std::string> writes;
+    {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        if (g_pendingPresenceDirty) { writes.swap(g_pendingPresence); g_pendingPresenceDirty = false; }
+    }
+    if (api.setRichPresence)
+        for (const auto& kv : writes)
+            api.setRichPresence(api.friends, kv.first.c_str(), kv.second.empty() ? nullptr : kv.second.c_str());
+
+    static DWORD lastRefresh = 0;
+    DWORD now = GetTickCount();
+    if (lastRefresh && now - lastRefresh < 1000) return; // throttle the enumeration to ~1 Hz
+    lastRefresh = now;
+
+    std::vector<std::string> keys;
+    { std::lock_guard<std::mutex> lock(g_cacheMutex); keys = g_watchedKeys; }
+
+    std::vector<uint64_t> ids;
+    if (api.getFriendCount && api.getFriendByIndex) {
+        int count = api.getFriendCount(api.friends, kFriendFlagImmediate);
+        for (int i = 0; i < count; i++) ids.push_back(api.getFriendByIndex(api.friends, i, kFriendFlagImmediate));
+    }
+    std::map<std::string, std::vector<FriendPresence>> fresh;
+    for (const auto& k : keys) {
+        if (k.empty()) continue;
+        for (uint64_t id : ids) {
+            if (api.requestFriendRichPresence) api.requestFriendRichPresence(api.friends, id);
+            const char* val = api.getFriendRichPresence ? api.getFriendRichPresence(api.friends, id, k.c_str()) : nullptr;
+            if (val && *val) fresh[k].push_back({ id, std::string(val) });
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        g_friendIdsCache.swap(ids);
+        g_presenceCache.swap(fresh);
     }
 }
 
