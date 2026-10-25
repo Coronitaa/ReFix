@@ -70,6 +70,9 @@ namespace ReFixIL2CPPScene {
     // Invokes a parameterless instance getter; false (or nullptr) when it cannot be called or throws.
     void* CallObjectGetter(void* obj, const char* getter);
     bool CallBoolGetter(void* obj, const char* getter, bool* out);
+
+    // Invokes an instance method taking one reference-type argument (e.g. set_displayName(string)).
+    bool CallMethodWithObject(void* obj, const char* method, void* arg);
     bool CallInt32Getter(void* obj, const char* getter, int32_t* out);
 
     // Logs the value (address + runtime class) of a static reference field, e.g. a registration hook.

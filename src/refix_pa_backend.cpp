@@ -4,6 +4,7 @@
 #include <windows.h>
 #include "refix_pa_backend.h"
 #include "refix_il2cpp_scene.h"
+#include "refix_pa_services.h"
 #include "minhook/MinHook.h"
 #include <atomic>
 #include <cstring>
@@ -52,9 +53,16 @@ std::string Printable(const std::string& s) {
 
 Response Dispatch(const Request& req) {
     ReFixLog("[PA-Backend] %s %s%s body=%s", req.method.c_str(), req.host.c_str(), req.path.c_str(), Printable(req.body).c_str());
+    ReFixPAServices::Result served = ReFixPAServices::HandleRequest(req.body);
     Response res;
-    res.status = 503; // same outcome as the unreachable cloud the game saw before
-    res.body = "{\"code\":-1,\"httpStatus\":503,\"result\":null,\"message\":\"ReFix local backend: not implemented\"}";
+    if (served.handled) {
+        res.status = 200;
+        res.body = served.body;
+        return res;
+    }
+    // Not served locally: drop the connection so the game sees the same network failure as the unreachable
+    // cloud. Any HTTP 503 would instead start MaintenanceManager's "scheduled maintenance" screen.
+    res.status = 0;
     return res;
 }
 
@@ -121,7 +129,8 @@ DWORD WINAPI ConnectionThread(LPVOID param) {
             if (n <= 0) break;
             req.body.append(buf, n);
         }
-        SendResponse(s, Dispatch(req));
+        Response res = Dispatch(req);
+        if (res.status != 0) SendResponse(s, res);
     }
     shutdown(s, SD_BOTH);
     closesocket(s);

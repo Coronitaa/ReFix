@@ -1,5 +1,6 @@
 #include "refix_pa_offline.h"
 #include "refix_il2cpp_scene.h"
+#include "refix_pa_services.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
@@ -242,6 +243,19 @@ static void SkipFirstLaunchProfileSteps() {
     }
 }
 
+// Re-apply the name chosen in an earlier session (the local backend persists changeDisplayName).
+static void RestoreStoredDisplayName() {
+    static bool s_restored = false;
+    if (s_restored) return;
+    void* names = AutoSingleton("Recreate.Service.Account", "AccountNameManager");
+    if (!names) return;
+    s_restored = true;
+    std::string stored = ReFixPAServices::StoredDisplayName();
+    if (stored.empty()) return;
+    bool ok = ReFixIL2CPPScene::CallMethodWithObject(names, "set_displayName", ReFixIL2CPPScene::NewString(stored.c_str()));
+    ReFixLog("[PA-Offline] Restored display name '%s' %s", stored.c_str(), ok ? "" : "(FAILED)");
+}
+
 static std::string Base64Url(const std::string& in) {
     static const char* kAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     std::string out;
@@ -309,6 +323,7 @@ void MainThreadTick() {
     if (!g_engaged.load()) return;
     ApplyLanFlag();
     SkipFirstLaunchProfileSteps();
+    RestoreStoredDisplayName();
     InstallLocalCredentials();
 }
 

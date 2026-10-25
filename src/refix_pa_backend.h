@@ -15,7 +15,7 @@ namespace ReFixPABackend {
     };
 
     struct Response {
-        int status = 503;
+        int status = 0; // 0: close the connection without answering (network failure for the game)
         std::string body;
     };
 

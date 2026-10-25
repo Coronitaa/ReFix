@@ -554,6 +554,15 @@ void* CallObjectGetter(void* obj, const char* getter) {
     return api ? CallObject(api, obj, getter) : nullptr;
 }
 
+bool CallMethodWithObject(void* obj, const char* method, void* arg) {
+    const Api* api = GetApi();
+    if (!api || !obj) return false;
+    void* args[1] = { arg }; // reference-type arguments are passed as the object pointer itself
+    bool ok = false;
+    SafeInvoke(api, MethodOf(api, obj, method, 1), obj, args, &ok);
+    return ok;
+}
+
 bool CallBoolGetter(void* obj, const char* getter, bool* out) {
     const Api* api = GetApi();
     return api && CallValue(api, obj, getter, out);
