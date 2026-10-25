@@ -1898,8 +1898,7 @@ void ReFixLog(const char* fmt, ...) {
     size_t pos = logPath.find_last_of("\\/");
     if (pos != std::string::npos) logPath = logPath.substr(0, pos + 1) + "ReFix.log";
 
-    FILE* f = nullptr;
-    fopen_s(&f, logPath.c_str(), "a");
+    FILE* f = _fsopen(logPath.c_str(), "a", _SH_DENYNO);
     if (!f) return;
 
     SYSTEMTIME st;
@@ -5851,6 +5850,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
     }
     if (g_pfn_ManualDispatch_RunFrame) g_pfn_ManualDispatch_RunFrame(hSteamPipe);
     DispatchPendingAuthCallbacks();
+    ReFixIL2CPP::Update();
 }
 
 static std::atomic<bool> s_lastManualCallbackWasSynthetic{ false };

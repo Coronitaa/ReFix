@@ -9,6 +9,9 @@ namespace ReFixIL2CPP {
     // Cleans up IL2CPP hooks and terminates the background watcher thread
     void Shutdown();
 
+    // Per-frame main thread update hook (called from SteamAPI_ManualDispatch_RunFrame)
+    void Update();
+
     // Returns true if GameAssembly.dll and IL2CPP runtime are loaded and active
     bool IsAvailable();
 
