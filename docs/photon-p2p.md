@@ -34,8 +34,12 @@ Emulator sockets are registered with `SteamP2PHook::ExcludeSocket`. `PreserveLoo
 ## Status (2026-10-25)
 - R.E.P.O. (Mono, PUN 2 + Voice): hosting works on one PC. The lobby loads, the room and voice room are created on
   the emulator, and START GAME loads a level. Not yet tested across two PCs.
-- Phasmophobia: not tested. The installed copy only runs through OnlineFix's launcher: the exe has no PE header and
-  global-metadata is zeroed.
+- Mono games load steam_api64 late, which is too late for the Steam overlay to hook D3D11. Deploy ReFix's
+  `winmm.dll` next to the exe as well: it sets the Spacewar environment and injects GameOverlayRenderer64 at
+  process start. Verified in R.E.P.O.: Shift+Tab opens the overlay.
+- Phasmophobia: out of scope. Its integrity checks detect injected modules (e.g. winmm.dll). It then sends a
+  self-report through Cloud Code (`CloudEvents.SelfReport` -> `ModerationModuleBindings.SelfPlayerReport`) and
+  aborts. Making it work would mean evading its anti-cheat, so it is not supported.
 - Tests: `tests\run_photon_tests.bat` (codec, transport, crypto, room flow, master routing).
 
 ## Not implemented
