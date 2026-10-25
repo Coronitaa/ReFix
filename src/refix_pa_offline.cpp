@@ -319,12 +319,55 @@ static void InstallLocalCredentials() {
     ReFixLog("[PA-Offline] Local login credentials %s (accountId=%s)", ok ? "installed" : "FAILED", g_effectiveProfileId.c_str());
 }
 
+// The client config (gateway region + service URLs) is fetched once through ConfigAsyncRetriever.m_ConfigLazy.
+// In login-free mode that fetch never finishes (it started in Steam mode waiting for platform tickets, and
+// the config center is unreachable anyway), so everything awaiting it, e.g. creating a P2P room, hangs.
+// Complete the lazy's completion source with the local backend's config instead; the game's own fetch,
+// if it ever ends, then loses the race harmlessly.
+static void* BuildLocalConfigResult(void* klassResult) {
+    void* result = ReFixIL2CPPScene::NewObject(klassResult);
+    if (!result) return nullptr;
+    ReFixPAServices::ClientConfig config = ReFixPAServices::LocalClientConfig("");
+    int32_t succeeded = 0; // ConfigRetrieverResult.Status.Succeeded
+    bool ok = ReFixIL2CPPScene::SetFieldReference(result, "code", ReFixIL2CPPScene::NewString("0")) &&
+              ReFixIL2CPPScene::SetFieldReference(result, "envName", ReFixIL2CPPScene::NewString("PartyAnimals")) &&
+              ReFixIL2CPPScene::SetFieldReference(result, "gatewayRegion", ReFixIL2CPPScene::NewString(config.gatewayRegion.c_str())) &&
+              ReFixIL2CPPScene::SetFieldValue(result, "status", &succeeded);
+    for (const auto& [field, url] : config.urls) {
+        ok = ReFixIL2CPPScene::SetFieldReference(result, field.c_str(), ReFixIL2CPPScene::NewString(url.c_str())) && ok;
+    }
+    return ok ? result : nullptr;
+}
+
+static void CompleteClientConfig() {
+    static bool s_done = false;
+    if (s_done || !g_credentialsInstalled) return;
+    void* retriever = AutoSingleton("Recreate.Scripts.Network.Account", "ConfigAsyncRetriever");
+    void* klassResult = ReFixIL2CPPScene::FindClassByName("Recreate.Scripts.Network.Account", "ConfigRetrieverResult");
+    if (!retriever || !klassResult) return;
+    s_done = true;
+
+    void* lazy = nullptr;
+    ReFixIL2CPPScene::GetFieldValue(retriever, "m_ConfigLazy", &lazy);
+    if (!lazy) { // not requested yet: create it the way RetrieveConfigAsync would
+        ReFixIL2CPPScene::CallObjectGetter(retriever, "InitConfigAsyncRetriever");
+        ReFixIL2CPPScene::GetFieldValue(retriever, "m_ConfigLazy", &lazy);
+    }
+    void* completion = nullptr;
+    if (lazy) ReFixIL2CPPScene::GetFieldValue(lazy, "completionSource", &completion);
+    void* result = completion ? BuildLocalConfigResult(klassResult) : nullptr;
+    bool ok = result && ReFixIL2CPPScene::CallMethodWithObject(completion, "TrySetResult", result);
+    ReFixLog("[PA-Offline] Client config %s (lazy=%p completionSource=%p)", ok ? "completed locally" : "could NOT be completed",
+             lazy, completion);
+}
+
 void MainThreadTick() {
     if (!g_engaged.load()) return;
     ApplyLanFlag();
     SkipFirstLaunchProfileSteps();
     RestoreStoredDisplayName();
     InstallLocalCredentials();
+    CompleteClientConfig();
 }
 
 bool IsEngaged() {

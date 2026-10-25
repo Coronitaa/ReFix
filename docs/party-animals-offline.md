@@ -29,7 +29,22 @@ Deploy `build\steam_api64.dll` to the game root and `PartyAnimals_Data\Plugins\x
 - Reply `{"code":0,"httpStatus":200,"result":{"<op>":<data>},"message":""}`.
 - Any HTTP 503 => MaintenanceManager maintenance screen (10053). Unhandled ops therefore drop the connection.
 
-## Multiplayer (ServerlessP2P relay) — implemented, cross-PC test pending
+## Client config (ConfigRetrieverResult)
+- ConfigAsyncRetriever.m_ConfigLazy (UniTask AsyncLazy) starts in Steam mode and never finishes offline; anything
+  awaiting it (PingHelperForGateway.GetPingForCurrentRegion -> P2P createRoom) hangs.
+- ReFix completes `m_ConfigLazy.completionSource.TrySetResult(...)` with a local result: code "0", gatewayRegion,
+  service URLs `https://lambda.partyanimalsgame.com/<field>` (routed to the local backend). The backend also answers
+  `{"operation":"request-config-for-client-v3"}` with the same data.
+- `P2PRoomUtils.useFakeData` is now false when `[P2P] LocalBackend` is on (fake data bypassed the backend).
+
+## Hosting is stripped from the shipping client (blocker)
+- `P2PRoomLogic.JoinRoomAsHost` is empty; `StartP2PServer` is intact but uncalled. Calling it works up to
+  `BoltLauncher.StartServer` (relay SERVER_LOGIN ok, applicationType Hybrid), then stalls.
+- `Network.ServerManager` has 21 emptied methods (ConnectRequest, BoltStartDone, OnEvent, Update,
+  SceneLoadLocalDone, DisconnectClient, PaConnected...): the authoritative server logic is not in the client.
+- So a client can create/list rooms and run the client join path, but nobody can host a match.
+
+## Multiplayer (ServerlessP2P relay) — implemented; blocked by stripped hosting (see above)
 - roomId = host SteamID64; roomOwnerId = `fake_<SteamID64>`; listRoom = Steam friends whose rich presence
   `refix_pa_room` = `v1|gamers|isGaming|curMapId|mode|mapList|name`.
 - Relay: virtual peer endpoints 10.80.x.y; Steam envelope `[1=to host|2=to client][Bolt payload]`.
