@@ -1,6 +1,6 @@
-# ReFix v1.3.3 — Universal Multiplayer Fix, Steam & EOS Emulator, and DLC Unlocker
+# ReFix v1.4.0 — Universal Multiplayer Fix, Steam & EOS Emulator, and DLC Unlocker
 
-[![Release](https://img.shields.io/badge/version-v1.3.3-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v1.3.3)
+[![Release](https://img.shields.io/badge/version-v1.4.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v1.4.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![Engines](https://img.shields.io/badge/engines-Unity%20%7C%20Unreal%20%7C%20Godot%20%7C%20Native-green.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -14,7 +14,7 @@ Whether you want to play online with friends over Steam (using Spacewar AppID 48
 
 ## 🔍 How ReFix Compares
 
-| Feature | ReFix v1.3.3 | OnlineFix (online-fix.me) | Goldberg Emulator (gbe_fork) | CODEX Steam Emu | SmartSteamEmu (SSE) |
+| Feature | ReFix v1.4.0 | OnlineFix (online-fix.me) | Goldberg Emulator (gbe_fork) | CODEX Steam Emu | SmartSteamEmu (SSE) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Open Source (Full C++ Source)** | ✅ **Yes (CC BY-NC-SA)** | ❌ Closed / Obfuscated | ✅ Yes (GPL/MIT) | ❌ Closed Source | ❌ Closed / Abandoned |
 | **Steam Online Matchmaking (Spacewar 480)** | ✅ **Yes** | ✅ Yes | ❌ No (LAN only) | ❌ No (Offline only) | ❌ No (LAN only) |
@@ -57,7 +57,7 @@ Whether you want to play online with friends over Steam (using Spacewar AppID 48
 
 ### For Gamers (Automatic 1-Click Setup)
 
-1. Grab the latest **`ReFix_Release_v1.3.3.zip`** from [GitHub Releases](https://github.com/Coronitaa/ReFix/releases/tag/v1.3.3).
+1. Grab the latest **`ReFix_Release_v1.4.0.zip`** from [GitHub Releases](https://github.com/Coronitaa/ReFix/releases/tag/v1.4.0).
 2. Extract the zip to any folder you like.
 3. Run **`AutoDeploy.bat`**:
    - Use the file browser pop-up to select your game directory.

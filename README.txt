@@ -1,8 +1,21 @@
 ====================================================================
-               ReFix Deployment Suite v1.3.3 (Standalone)
+               ReFix Deployment Suite v1.4.0 (Standalone)
 ====================================================================
 
-WHAT'S NEW IN v1.3.3:
+WHAT'S NEW IN v1.4.0:
+- Local Photon Cloud emulator (ReFixCloud): Photon games (PUN 2, Realtime, Voice and Fusion) run with no
+  Photon servers. NameServer, Master and GameServer are emulated on each PC and game traffic travels over
+  Steam P2P (Spacewar 480). Fusion's server-plugin handshake (Join / Start) is emulated too.
+- Smarter auto-decision: AutoDeploy detects Photon (including IL2CPP builds via global-metadata.dat) and
+  writes Backend=ReFixCloud automatically; the emulator stays inert unless the game really contacts Photon.
+- Generic Steam P2P / SDR tunnelling for serverless P2P games, store emulation and offline inventory
+  persistence (ReFix_Inventory.json).
+- Generic IL2CPP bridge: license hotpatch, loopback preservation and fast cloud-failure fallback.
+- AI Bridge and proxy performance work: optimized hot loops and SteamNetworkingSockets v012 support.
+- Stability: fixed a crash on Steamworks 1.60 games caused by an ISteamFriends interface-version mismatch;
+  all ISteamFriends access now runs on the game's main thread.
+
+Carried over from v1.3.3:
 - Universal AutoDeploy Path Robustness: Fixed special character loss ('!', '&', '()', '[]', '^', '%', and Unicode directory paths).
 - Physical Post-Deployment Verification: Every critical file is verified on disk with strict exit code failure reporting.
 - Steamworks SDK 1.60 Full Export Coverage: Added forwarders for modern Steamworks interfaces (1,141 exports total) fixing initialization crashes.
