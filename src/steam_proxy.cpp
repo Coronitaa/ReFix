@@ -1883,7 +1883,9 @@ void ReFixLog(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     char buf[1024];
-    vsprintf_s(buf, sizeof(buf), fmt, args);
+    // Truncate instead of vsprintf_s: an over-long message would trigger the CRT invalid-parameter
+    // handler and fail-fast the whole game process (0xC0000409).
+    _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, args);
     va_end(args);
 
     HWND hCons = GetConsoleWindow();

@@ -1,4 +1,7 @@
 #include "refix_il2cpp.h"
+#include "refix_il2cpp_scene.h"
+#include "refix_pa_offline.h"
+#include "refix_il2cpp_logfwd.h"
 #include "minhook/MinHook.h"
 #include <cstdio>
 #include <atomic>
@@ -100,6 +103,24 @@ static fn_P2PRoomUtils_IsP2PMode_t g_orig_P2PRoomUtils_IsP2PMode = nullptr;
 
 typedef void (*fn_WallBreaker_Awake_t)(void* self, void* method);
 static fn_WallBreaker_Awake_t g_orig_WallBreaker_Awake = nullptr;
+
+// Same register layout works for static (method) and instance (self, method) getters on x64.
+typedef bool (*fn_Bridge_GetBool_t)(void* selfOrMethod, void* method);
+static fn_Bridge_GetBool_t g_orig_Bridge_IsLaunchAnimationDone = nullptr;
+
+// Post-transition diagnostics/safeguards run on the Unity main thread at these offsets.
+static const DWORD kPostTransitionProbeDelaysMs[] = { 500, 3000, 8000, 15000, 30000, 45000, 60000 };
+static const int kPostTransitionProbeCount = sizeof(kPostTransitionProbeDelaysMs) / sizeof(kPostTransitionProbeDelaysMs[0]);
+static const int kFirstScreenCameraSafeguardProbe = 2; // give async hall loading ~8s before forcing a camera
+static std::atomic<DWORD> s_transitionTick{ 0 };
+static std::atomic<int> s_nextPostTransitionProbe{ 0 };
+static std::atomic<bool> s_probeCameraSafeguard{ false };
+static std::atomic<bool> s_offlineProbesArmed{ false };
+
+static const DWORD kWatcherPollMs = 10;
+static const DWORD kWatchdogDelayMs = 25000;
+// MenuSceneLoader interruption id of the TrailBlazer world (server selection) modal
+static const uintptr_t kWorldSelectInterruption = 9;
 
 // Internal helpers
 static bool EnsureThreadAttached() {
@@ -324,14 +345,11 @@ static bool ActivateP2PModeInternal() {
         }
     }
 
-    // SwitchP2PFakeData (param_count = 0, static)
-    void* methodFakeData = g_pfn_class_get_method_from_name(klassUtils, "SwitchP2PFakeData", 0);
-    if (methodFakeData) {
-        void* exc = nullptr;
-        g_pfn_runtime_invoke(methodFakeData, nullptr, nullptr, &exc);
-        if (!exc) {
-            ReFixLog("[IL2CPP] P2PRoomUtils.SwitchP2PFakeData() executed successfully");
-        }
+    // useFakeData = true. Set the field directly: SwitchP2PFakeData() toggles, so calling it on every
+    // activation (startup + transition) would switch fake data back off.
+    bool useFakeData = true;
+    if (ReFixIL2CPPScene::SetStaticFieldValue(klassUtils, "useFakeData", &useFakeData)) {
+        ReFixLog("[IL2CPP] P2PRoomUtils.useFakeData set to true");
     }
 
     // Verify IsP2PMode()
@@ -589,6 +607,141 @@ static void CompleteLoginFlowTree(void* loaderInst) {
     }
 }
 
+// HybridCLR hot-update DLLs register the NemoLand login subtree through the static
+// InjectionNode.flowNodeGetter (set by Recreate.LoadingJit.LoadingUtils.InjectLoadingNode).
+static void LogHotUpdateInjectionState() {
+    ReFixIL2CPPScene::LogManagedAssemblies();
+    ReFixIL2CPPScene::LogClassPresence("Recreate.LoadingJit", "LoadingUtils");
+    ReFixIL2CPPScene::LogStaticReference("Recreate.LoginFlow", "InjectionNode", "flowNodeGetter");
+}
+
+static void LogLoginFlowState(void* loaderInst, const char* label) {
+    if (!loaderInst || !g_pfn_class_get_field_from_name || !g_pfn_field_get_value || !g_pfn_object_get_class) return;
+    void* fTree = g_pfn_class_get_field_from_name(g_pfn_object_get_class(loaderInst), "m_LoginFlowTree");
+    if (!fTree) return;
+    void* treeInst = nullptr;
+    g_pfn_field_get_value(loaderInst, fTree, &treeInst);
+    if (!treeInst) return;
+    void* fRoot = g_pfn_class_get_field_from_name(g_pfn_object_get_class(treeInst), "m_Root");
+    if (!fRoot) return;
+    void* rootNode = nullptr;
+    g_pfn_field_get_value(treeInst, fRoot, &rootNode);
+    ReFixIL2CPPScene::LogFlowNodeTree(label, rootNode);
+}
+
+static void* GetNavigatorBridgeInstance() {
+    void* klassNav = FindClassAcrossImages("Recreate", "NemoLandNavigatorBridge");
+    if (!klassNav) return nullptr;
+    if (g_pfn_runtime_class_init) g_pfn_runtime_class_init(klassNav);
+    void* methodGetBridge = g_pfn_class_get_method_from_name(klassNav, "get_bridge", 0);
+    if (!IsMethodCallable(methodGetBridge)) return nullptr;
+    void* exc = nullptr;
+    void* bridgeInst = nullptr;
+    __try {
+        bridgeInst = g_pfn_runtime_invoke(methodGetBridge, nullptr, nullptr, &exc);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReFixLog("[IL2CPP] Exception calling NemoLandNavigatorBridge.get_bridge");
+        return nullptr;
+    }
+    return exc ? nullptr : bridgeInst;
+}
+
+// Resolves a parameterless INemoLandNavigatorBridge member on the live bridge object. The concrete
+// implementation may live in a HybridCLR hot-update assembly, so dispatch through the interface vtable
+// first, then fall back to the concrete class (implicit or explicit interface implementation).
+static void* ResolveBridgeMethod(void* bridgeInst, const char* methodName) {
+    void* klassIface = FindClassAcrossImages("Recreate", "INemoLandNavigatorBridge");
+    void* ifaceMethod = klassIface ? g_pfn_class_get_method_from_name(klassIface, methodName, 0) : nullptr;
+    if (ifaceMethod && g_pfn_object_get_virtual_method) {
+        void* impl = g_pfn_object_get_virtual_method(bridgeInst, ifaceMethod);
+        if (IsMethodCallable(impl)) return impl;
+    }
+    void* klassConcrete = g_pfn_object_get_class ? g_pfn_object_get_class(bridgeInst) : nullptr;
+    if (!klassConcrete) return nullptr;
+    void* m = g_pfn_class_get_method_from_name(klassConcrete, methodName, 0);
+    if (IsMethodCallable(m)) return m;
+    std::string explicitName = std::string("Recreate.INemoLandNavigatorBridge.") + methodName;
+    m = g_pfn_class_get_method_from_name(klassConcrete, explicitName.c_str(), 0);
+    return IsMethodCallable(m) ? m : nullptr;
+}
+
+static void LogIl2CppException(const char* context, void* exc) {
+    char msg[512] = { 0 };
+    if (exc && g_pfn_format_exception) {
+        __try {
+            g_pfn_format_exception(exc, msg, sizeof(msg) - 1);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    ReFixLog("[IL2CPP] %s threw exception %p: %s", context, exc, msg[0] ? msg : "<unformatted>");
+}
+
+static void* InvokeResolvedMethod(void* method, void* obj, const char* context, bool* ok) {
+    *ok = false;
+    void* exc = nullptr;
+    void* res = nullptr;
+    __try {
+        res = g_pfn_runtime_invoke(method, obj, nullptr, &exc);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReFixLog("[IL2CPP] SEH exception invoking %s", context);
+        return nullptr;
+    }
+    if (exc) {
+        LogIl2CppException(context, exc);
+        return nullptr;
+    }
+    *ok = true;
+    return res;
+}
+
+static bool InvokeBridgeMethod(void* bridgeInst, const char* methodName) {
+    void* method = ResolveBridgeMethod(bridgeInst, methodName);
+    if (!method) {
+        ReFixLog("[IL2CPP] NemoLandNavigatorBridge.%s() could not be resolved to callable code", methodName);
+        return false;
+    }
+    bool ok = false;
+    InvokeResolvedMethod(method, bridgeInst, methodName, &ok);
+    if (ok) ReFixLog("[IL2CPP] NemoLandNavigatorBridge.%s() executed successfully", methodName);
+    return ok;
+}
+
+static void LogBridgeBool(void* bridgeInst, const char* getter) {
+    void* method = ResolveBridgeMethod(bridgeInst, getter);
+    if (!method) return;
+    bool ok = false;
+    void* boxed = InvokeResolvedMethod(method, bridgeInst, getter, &ok);
+    if (!ok || !boxed) return;
+    bool value = *(bool*)((uint8_t*)boxed + sizeof(void*) * 2);
+    ReFixLog("[IL2CPP]   bridge.%s = %s", getter, value ? "true" : "false");
+}
+
+static void LogBridgeString(void* bridgeInst, const char* getter) {
+    void* method = ResolveBridgeMethod(bridgeInst, getter);
+    if (!method) return;
+    bool ok = false;
+    void* str = InvokeResolvedMethod(method, bridgeInst, getter, &ok);
+    if (ok) ReFixLog("[IL2CPP]   bridge.%s = '%s'", getter, ReFixIL2CPPScene::StringToUtf8(str).c_str());
+}
+
+static void LogNavigatorBridgeState(const char* label) {
+    void* bridgeInst = GetNavigatorBridgeInstance();
+    ReFixLog("[IL2CPP] NemoLand bridge state (%s): instance=%p", label, bridgeInst);
+    if (!bridgeInst) return;
+    ReFixIL2CPPScene::LogObjectClass("  bridge class", bridgeInst);
+    LogBridgeBool(bridgeInst, "get_isLoaded");
+    LogBridgeBool(bridgeInst, "get_isLaunchAnimationDone");
+    LogBridgeBool(bridgeInst, "get_isTravelStateInProgress");
+    LogBridgeBool(bridgeInst, "get_isTravelStateCompleted");
+    LogBridgeString(bridgeInst, "get_currZoneString");
+    LogBridgeString(bridgeInst, "get_nextZoneString");
+}
+
+static void ArmPostTransitionProbes(bool cameraSafeguard) {
+    s_probeCameraSafeguard.store(cameraSafeguard);
+    s_nextPostTransitionProbe.store(0);
+    s_transitionTick.store(GetTickCount() | 1); // never 0: 0 means "not armed"
+}
+
 static bool TransitionToMainMenuInternal() {
     EnsureThreadAttached();
 
@@ -598,6 +751,12 @@ static bool TransitionToMainMenuInternal() {
     if (!loaderInst) {
         loaderInst = GetMenuSceneLoaderInstance();
     }
+
+    // 0. Snapshot runtime state so black-screen / stalled-login issues can be diagnosed from ReFix.log
+    LogHotUpdateInjectionState();
+    ReFixIL2CPPScene::LogCameraInventory("pre-transition");
+    LogLoginFlowState(loaderInst, "LoginFlowTree.m_Root (pre-transition)");
+    LogNavigatorBridgeState("pre-transition");
 
     // 1. Setup MenuSceneLoader flags & complete login flow tree
     if (loaderInst) {
@@ -661,63 +820,16 @@ static bool TransitionToMainMenuInternal() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-    // 5. Connect to NemoLandNavigatorBridge and trigger main menu hall zone navigation
+    // 5. Load the NemoLand Hall scene and navigate to the root zone through the live navigator bridge
     ReFixLog("[IL2CPP] Transition: Resolving NemoLandNavigatorBridge.get_bridge()...");
-    void* klassNav = FindClassAcrossImages("Recreate", "NemoLandNavigatorBridge");
-    if (klassNav) {
-        if (g_pfn_runtime_class_init) g_pfn_runtime_class_init(klassNav);
-
-        void* methodGetBridge = g_pfn_class_get_method_from_name(klassNav, "get_bridge", 0);
-        if (IsMethodCallable(methodGetBridge)) {
-            void* excBridge = nullptr;
-            void* bridgeInst = nullptr;
-            __try {
-                bridgeInst = g_pfn_runtime_invoke(methodGetBridge, nullptr, nullptr, &excBridge);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                ReFixLog("[IL2CPP] Exception calling NemoLandNavigatorBridge.get_bridge");
-            }
-
-            if (!excBridge && bridgeInst) {
-                ReFixLog("[IL2CPP] NemoLandNavigatorBridge.get_bridge() returned instance %p", bridgeInst);
-
-                void* klassConcrete = g_pfn_object_get_class ? g_pfn_object_get_class(bridgeInst) : klassNav;
-                void* callLoadHall = g_pfn_class_get_method_from_name(klassConcrete, "LoadHallScene", 0);
-                if (!callLoadHall) callLoadHall = g_pfn_class_get_method_from_name(klassNav, "LoadHallScene", 0);
-
-                if (IsMethodCallable(callLoadHall)) {
-                    void* excL = nullptr;
-                    __try {
-                        g_pfn_runtime_invoke(callLoadHall, bridgeInst, nullptr, &excL);
-                        if (!excL) {
-                            ReFixLog("[IL2CPP] NemoLandNavigatorBridge.LoadHallScene() executed successfully");
-                            anySuccess = true;
-                        } else {
-                            ReFixLog("[IL2CPP] NemoLandNavigatorBridge.LoadHallScene() returned exception %p", excL);
-                        }
-                    } __except (EXCEPTION_EXECUTE_HANDLER) {
-                        ReFixLog("[IL2CPP] Exception invoking NemoLandNavigatorBridge.LoadHallScene()");
-                    }
-                }
-
-                void* callGoRoot = g_pfn_class_get_method_from_name(klassConcrete, "GoToRootZone", 0);
-                if (!callGoRoot) callGoRoot = g_pfn_class_get_method_from_name(klassNav, "GoToRootZone", 0);
-
-                if (IsMethodCallable(callGoRoot)) {
-                    void* excR = nullptr;
-                    __try {
-                        g_pfn_runtime_invoke(callGoRoot, bridgeInst, nullptr, &excR);
-                        if (!excR) {
-                            ReFixLog("[IL2CPP] NemoLandNavigatorBridge.GoToRootZone() executed successfully");
-                            anySuccess = true;
-                        } else {
-                            ReFixLog("[IL2CPP] NemoLandNavigatorBridge.GoToRootZone() returned exception %p", excR);
-                        }
-                    } __except (EXCEPTION_EXECUTE_HANDLER) {
-                        ReFixLog("[IL2CPP] Exception invoking NemoLandNavigatorBridge.GoToRootZone()");
-                    }
-                }
-            }
-        }
+    void* bridgeInst = GetNavigatorBridgeInstance();
+    if (bridgeInst) {
+        ReFixLog("[IL2CPP] NemoLandNavigatorBridge.get_bridge() returned instance %p", bridgeInst);
+        ReFixIL2CPPScene::LogObjectClass("NemoLandNavigatorBridge.bridge", bridgeInst);
+        if (InvokeBridgeMethod(bridgeInst, "LoadHallScene")) anySuccess = true;
+        if (InvokeBridgeMethod(bridgeInst, "GoToRootZone")) anySuccess = true;
+    } else {
+        ReFixLog("[IL2CPP] NemoLandNavigatorBridge.get_bridge() returned null (hot-update bridge not injected yet?)");
     }
 
     // 6. Switch music to Hall via SoundManager
@@ -768,6 +880,7 @@ static bool TransitionToMainMenuInternal() {
     DispatchUiPhaseToAllCallbacks(14);
     DispatchUiPhaseToAllCallbacks(7);
 
+    ArmPostTransitionProbes(true);
     ReFixLog("[IL2CPP] TransitionToMainMenuInternal completed (anySuccess=%s)", anySuccess ? "true" : "false");
     return anySuccess;
 }
@@ -814,6 +927,77 @@ static void ConnectToP2PAndEnterMainMenu(void* selectServerSelf) {
     TransitionToMainMenuInternal();
 }
 
+// Runs staged camera/bridge/login diagnostics after the transition and, once the hall had time to load,
+// guarantees a camera renders to the backbuffer so the screen cannot stay permanently black.
+static void RunPostTransitionProbes() {
+    DWORD start = s_transitionTick.load();
+    if (!start) return;
+    int idx = s_nextPostTransitionProbe.load();
+    if (idx >= kPostTransitionProbeCount) return;
+    DWORD delay = kPostTransitionProbeDelaysMs[idx];
+    if (GetTickCount() - start < delay) return;
+    if (!s_nextPostTransitionProbe.compare_exchange_strong(idx, idx + 1)) return;
+
+    char tag[64];
+    snprintf(tag, sizeof(tag), "post-transition +%lums", delay);
+    LogNavigatorBridgeState(tag);
+    ReFixPAOffline::LogLoadingGate(g_pMenuSceneLoaderInstance.load());
+    ReFixIL2CPPScene::LogCameraInventory(tag);
+    if (s_probeCameraSafeguard.load() && idx >= kFirstScreenCameraSafeguardProbe && !ReFixIL2CPPScene::EnsureScreenCamera()) {
+        ReFixLog("[IL2CPP] Screen camera safeguard (%s): no camera could be activated", tag);
+    }
+    if (idx == kFirstScreenCameraSafeguardProbe) {
+        LogHotUpdateInjectionState();
+        LogLoginFlowState(g_pMenuSceneLoaderInstance.load(), tag);
+    }
+}
+
+// Hooked NemoLandNavigatorBridge.get_isLaunchAnimationDone - once ReFix has driven the launch transition
+// the WallBreaker launch animation is skipped, so report it as done to release the hall camera director.
+static bool Hooked_Bridge_IsLaunchAnimationDone(void* selfOrMethod, void* method) {
+    if (s_hasTransitioned.load()) return true;
+    if (!g_orig_Bridge_IsLaunchAnimationDone) return false;
+    return g_orig_Bridge_IsLaunchAnimationDone(selfOrMethod, method);
+}
+
+// ICF guard: identical-code-folded methods share one body; hooking it would change unrelated methods.
+static bool IsCodeUniqueInClass(void* klass, void* method) {
+    if (!klass || !method || !g_pfn_class_get_methods) return false;
+    void* code = *(void**)method;
+    void* iter = nullptr;
+    void* m = nullptr;
+    while ((m = g_pfn_class_get_methods(klass, &iter)) != nullptr) {
+        if (m != method && *(void**)m == code) return false;
+    }
+    return true;
+}
+
+// Trivial bodies (e.g. "movzx eax, byte [rcx+X]; ret") are folded across unrelated classes by the linker,
+// so a 'ret' within the first few bytes means hooking would also hijack other types' getters.
+static const int kTrivialBodyMaxBytes = 8;
+static bool IsTrivialBody(const void* code) {
+    const uint8_t* p = (const uint8_t*)code;
+    for (int i = 0; i < kTrivialBodyMaxBytes; i++) {
+        if (p[i] == 0xC3) return true;
+    }
+    return false;
+}
+
+static void HookBridgeLaunchAnimationDone() {
+    void* klassNav = FindClassAcrossImages("Recreate", "NemoLandNavigatorBridge");
+    void* method = klassNav ? g_pfn_class_get_method_from_name(klassNav, "get_isLaunchAnimationDone", 0) : nullptr;
+    if (!IsMethodCallable(method)) return;
+    void* pCode = ResolveRealCodePointer(*(void**)method);
+    if (!IsCodeUniqueInClass(klassNav, method) || IsTrivialBody(pCode)) {
+        ReFixLog("[IL2CPP] Skipping NemoLandNavigatorBridge.get_isLaunchAnimationDone hook: body may be shared (ICF)");
+        return;
+    }
+    if (pCode && MH_CreateHook(pCode, (void*)Hooked_Bridge_IsLaunchAnimationDone, (void**)&g_orig_Bridge_IsLaunchAnimationDone) == MH_OK) {
+        MH_EnableHook(pCode);
+        ReFixLog("[IL2CPP] Hooked NemoLandNavigatorBridge.get_isLaunchAnimationDone at %p", pCode);
+    }
+}
+
 // Hooked SoundManager.FixedUpdate - executes queued transition on Unity main thread
 static void Hooked_SoundManager_FixedUpdate(void* self, void* method) {
     if (self) g_pSoundManagerInstance.store(self);
@@ -828,6 +1012,8 @@ static void Hooked_SoundManager_FixedUpdate(void* self, void* method) {
         ReFixLog("[IL2CPP] Executing queued P2P transition on Unity main thread (via SoundManager.FixedUpdate)...");
         ConnectToP2PAndEnterMainMenu(g_pSelectServerPaneUiInstance.load());
     }
+    ReFixPAOffline::MainThreadTick();
+    RunPostTransitionProbes();
 }
 
 // Hooked WallBreaker.Awake - captures active WallBreaker instance
@@ -865,8 +1051,12 @@ static void Hooked_MenuSceneLoader_Awake(void* self, void* method) {
 // Hooked MenuSceneLoader.RequestInterruption - captures instance and forwards to game UI
 static void Hooked_MenuSceneLoader_RequestInterruption(void* self, void* interruption, void* arg2, void* method) {
     if (self) g_pMenuSceneLoaderInstance.store(self);
-    s_interruptionSeen.store(true);
-    s_interruptionTime.store(GetTickCount());
+    // Only the server-selection modal arms the watchdog; earlier interruptions (platform init, hot update)
+    // must not trigger a transition before the hot-update assemblies are loaded.
+    if ((uintptr_t)interruption == kWorldSelectInterruption && !s_interruptionSeen.load()) {
+        s_interruptionTime.store(GetTickCount());
+        s_interruptionSeen.store(true);
+    }
     ReFixLog("[IL2CPP] MenuSceneLoader.RequestInterruption called on instance %p (interruption=%p) -> dispatching to game UI", self, interruption);
     if (g_orig_MenuSceneLoader_RequestInterruption) {
         __try {
@@ -887,6 +1077,11 @@ static bool Hooked_P2PRoomUtils_IsP2PMode(void* method) {
 static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
     if (self) g_pSelectServerPaneUiInstance.store(self);
     ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnApplyButtonClick (Confirm) clicked! <<<");
+    if (ReFixPAOffline::IsEngaged() && g_orig_SelectServer_OnApplyButtonClick) {
+        // Login-free mode: the game's own TrailBlazer flow handles the selection and enters NemoLand.
+        g_orig_SelectServer_OnApplyButtonClick(self, method);
+        return;
+    }
     ConnectToP2PAndEnterMainMenu(self);
 }
 
@@ -906,6 +1101,41 @@ static void Hooked_SelectServer_OnCellViewSelect(void* self, void* cellView, int
     }
 }
 
+
+static bool ReadIniBool(const char* section, const char* key, bool defaultValue) {
+    char buf[MAX_PATH] = { 0 };
+    GetModuleFileNameA(NULL, buf, MAX_PATH);
+    std::string p(buf);
+    size_t pos = p.find_last_of("\\/");
+    std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
+    char val[32] = { 0 };
+    GetPrivateProfileStringA(section, key, defaultValue ? "true" : "false", val, sizeof(val), ini.c_str());
+    return (_stricmp(val, "true") == 0 || strcmp(val, "1") == 0 || _stricmp(val, "yes") == 0);
+}
+
+// If the server-selection modal stays unattended, transition automatically so automated tests /
+// idle users advance. Returns true once the watchdog has fired (or a transition already happened).
+static bool RunTransitionWatchdog() {
+    if (s_hasTransitioned.load()) return true;
+    if (!s_interruptionSeen.load()) return false;
+    DWORD elapsed = GetTickCount() - s_interruptionTime.load();
+    if (elapsed <= kWatchdogDelayMs) return false;
+
+    ReFixLog("[IL2CPP] Auto-transition watchdog triggered (elapsed=%lu ms) -> queueing main-thread NemoLand entrance", elapsed);
+    s_pendingMainThreadTransition.store(true);
+
+    // Wait up to 2 seconds for FixedUpdate to execute the transition on the main thread
+    for (int w = 0; w < 8 && !s_hasTransitioned.load(); w++) {
+        Sleep(250);
+    }
+
+    // If still not executed (e.g. SoundManager not running FixedUpdate yet), fallback to direct call
+    if (!s_hasTransitioned.load()) {
+        ReFixLog("[IL2CPP] Watchdog fallback: executing direct transition from watcher thread...");
+        ConnectToP2PAndEnterMainMenu(g_pSelectServerPaneUiInstance.load());
+    }
+    return true;
+}
 
 static DWORD WINAPI WatcherThreadProc(LPVOID) {
     ReFixLog("[IL2CPP] Watcher thread started, scanning for GameAssembly.dll and IL2CPP runtime...");
@@ -1091,48 +1321,38 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
         }
     }
 
+    // 7. Hook NemoLandNavigatorBridge.get_isLaunchAnimationDone (guarded against ICF-shared bodies)
+    HookBridgeLaunchAnimationDone();
+
+    // 8. Optionally mirror the game's own (encrypted) RecreateLogger output into ReFix.log
+    if (ReadIniBool("P2P", "ForwardGameLog", false)) {
+        ReFixIL2CPPLogForward::Install("Recreate", "RecreateLogger");
+    }
+
     g_initialized.store(true);
     ReFixLog("[IL2CPP] Initialization and hook installation completed successfully.");
 
-    // Auto-transition watchdog: if interruption modal dialog is shown and user doesn't click for 25 seconds,
-    // transition automatically to ensure automated tests / idle users advance smoothly.
+    ReFixPAOffline::Initialize();
+
+    // Drives the offline-login mode switch and, while the game is not on its login-free path, the
+    // auto-transition watchdog for an unattended server-selection modal.
+    bool watchdogDone = false;
     while (g_watcherRunning.load()) {
-        Sleep(250);
-        if (s_hasTransitioned.load()) break;
-
-        if (s_interruptionSeen.load()) {
-            DWORD elapsed = GetTickCount() - s_interruptionTime.load();
-            if (elapsed > 25000 && !s_hasTransitioned.load()) {
-                ReFixLog("[IL2CPP] Auto-transition watchdog triggered (elapsed=%lu ms) -> queueing main-thread NemoLand entrance", elapsed);
-                s_pendingMainThreadTransition.store(true);
-
-                // Wait up to 2 seconds for FixedUpdate to execute the transition on the main thread
-                for (int w = 0; w < 8 && !s_hasTransitioned.load(); w++) {
-                    Sleep(250);
-                }
-
-                // If still not executed (e.g. SoundManager not running FixedUpdate yet), fallback to direct call
-                if (!s_hasTransitioned.load()) {
-                    ReFixLog("[IL2CPP] Watchdog fallback: executing direct transition from watcher thread...");
-                    ConnectToP2PAndEnterMainMenu(g_pSelectServerPaneUiInstance.load());
-                }
-                break;
-            }
+        Sleep(kWatcherPollMs);
+        ReFixPAOffline::Tick();
+        bool engaged = ReFixPAOffline::IsEngaged();
+        if (engaged && !s_offlineProbesArmed.exchange(true)) {
+            ArmPostTransitionProbes(false); // diagnostics only: the game loads the hall itself
         }
+        if (!engaged && !watchdogDone) watchdogDone = RunTransitionWatchdog();
+        if (ReFixPAOffline::IsFinished() && (engaged || watchdogDone)) break;
     }
 
     return 0;
 }
 
 static bool GetEnableIL2CPPBridgeConfig() {
-    char buf[MAX_PATH] = { 0 };
-    GetModuleFileNameA(NULL, buf, MAX_PATH);
-    std::string p(buf);
-    size_t pos = p.find_last_of("\\/");
-    std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
-    char val[32] = { 0 };
-    GetPrivateProfileStringA("P2P", "EnableIL2CPPBridge", "true", val, sizeof(val), ini.c_str());
-    return (_stricmp(val, "true") == 0 || strcmp(val, "1") == 0 || _stricmp(val, "yes") == 0);
+    return ReadIniBool("P2P", "EnableIL2CPPBridge", true);
 }
 
 void Initialize() {
@@ -1172,6 +1392,8 @@ void Update() {
         ReFixLog("[IL2CPP] Executing queued P2P transition on Unity main thread (via Update)...");
         ConnectToP2PAndEnterMainMenu(g_pSelectServerPaneUiInstance.load());
     }
+    ReFixPAOffline::MainThreadTick();
+    RunPostTransitionProbes();
 }
 
 bool IsAvailable() {
