@@ -37,7 +37,6 @@ constexpr uint64_t kRemoteKeyFlag = 1ull << 63;
 constexpr int kMaxDatagram = 65536;
 constexpr int kSelectTimeoutUs = 1000;
 constexpr int kSteamBatch = 64;
-constexpr DWORD kAcceptSweepMs = 2000;
 constexpr uint8_t kForwarderNet0 = 127, kForwarderNet1 = 80;
 constexpr int kRegionPingSize = 13;
 constexpr uint8_t kRegionPingByte = 0x7D;
@@ -300,11 +299,10 @@ void Pump() {
             ++it;
         }
     }
-    static DWORD lastSweep = 0;
-    if (g_photonActive.load(std::memory_order_relaxed) && now - lastSweep >= kAcceptSweepMs) {
-        ReFixSteamFlat::AcceptFriendSessions(); // hosts accept sessions from joining friends
-        lastSweep = now;
-    }
+    // Incoming P2P sessions are accepted reactively: Steam posts SteamNetworkingMessagesSessionRequest_t
+    // (callback 1251), handled on the game's own thread in steam_proxy via ReFixSteamFlat::OnSessionRequestCallback.
+    // We must NOT enumerate the Steam friends list from this background pump thread: doing so races the game's
+    // own Steam calls (e.g. the Steam auth burst during Photon room creation) and crashes inside the Valve DLL.
 }
 
 DWORD WINAPI Thread(LPVOID) {
