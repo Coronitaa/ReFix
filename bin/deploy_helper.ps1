@@ -169,6 +169,8 @@ function Detect-UNAE-Topology {
         } catch {}
     }
 
+    $usesPhoton = $hasPhotonRealtime -or $hasPhoton3Unity -or $hasPhotonVoice -or $hasPhotonFusion -or $il2cppPUN -or $il2cppFusion
+
     # Topologia B: Multiplexado Hibrido (Fusion + nanosockets, Mirror + EOS WebRTC)
     # Se prioriza sobre Topologia C para evitar que juegos hibridos con voz auxiliar
     # (como Dumb Ways to Build) sean erróneamente clasificados como Cloud Relay estricto.
@@ -181,6 +183,7 @@ function Detect-UNAE-Topology {
             Color = "Cyan"
             DirectP2PAllowed = $true
             P2PPort = $port
+            UsesPhoton = $usesPhoton
         }
     } elseif ($hasPhotonRealtime -or $hasPhoton3Unity -or $il2cppPUN -or $hasPhotonVoice) {
         return @{
@@ -190,6 +193,7 @@ function Detect-UNAE-Topology {
             Color = "Yellow"
             DirectP2PAllowed = $false
             P2PPort = "7777"
+            UsesPhoton = $usesPhoton
         }
     } else {
         return @{
@@ -199,6 +203,7 @@ function Detect-UNAE-Topology {
             Color = "Green"
             DirectP2PAllowed = $true
             P2PPort = "7777"
+            UsesPhoton = $usesPhoton
         }
     }
 }
@@ -243,6 +248,10 @@ function Generate-UNAE-ReFixIni {
     $defRegion     = & $Pick "Photon" "DefaultRegion" $regionCandidate
     $bypassVal     = if ($P.DLCMode -eq "none") { "false" } else { "true" }
     $eosMode       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "emulated" } else { "passthrough" }
+    # ReFix decides the Photon backend: a detected Photon stack (PUN2/Realtime/Voice/Fusion) in a
+    # no-third-party mode uses the local emulator (ReFixCloud over Steam P2P); otherwise real Photon.
+    $photonDefault = if ($P.UsesPhoton -and ($P.OnlineMode -in @("valve","goldberg","offline","lan"))) { "ReFixCloud" } else { "OfficialPhoton" }
+    $photonBackend = & $Pick "Photon" "Backend" $photonDefault
     $eosAuth       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
 
     $existingDiscoveryPort = if ($existing.ContainsKey("Network/DiscoveryPort") -and $existing["Network/DiscoveryPort"] -ne "") {
@@ -326,7 +335,7 @@ MaxPacketLossTolerance = 40
 ;   ReFixCloud      - Infraestructura gestionada/local ReFix (Cero costo, alto rendimiento).
 ;   OfficialPhoton  - Conexion a la nube publica de Photon Engine (Requiere AppIDs validos).
 ;   CustomPhoton    - Servidores privados self-hosted (Photon Server / Luxon).
-Backend = OfficialPhoton
+Backend = $photonBackend
 
 ; Clave de Aplicacion desacoplada para Photon Realtime y PUN 2 (Sincronizacion de juego y salas)
 AppIdRealtime = $appIdRealtime
@@ -763,6 +772,7 @@ switch ($OnlineMode) {
             DefaultRegion       = $DefaultRegion
             PhotonRegion        = $PhotonRegion
             P2PPort             = $p2pPortVal
+            UsesPhoton          = $(if ($unaeTopology) { $unaeTopology.UsesPhoton } else { $false })
         }
         Write-Host "  [OK] Configured unified ReFix.ini in $ExeDir" -ForegroundColor Green
     }
@@ -830,6 +840,7 @@ switch ($OnlineMode) {
             DefaultRegion       = $DefaultRegion
             PhotonRegion        = $PhotonRegion
             P2PPort             = $p2pPortVal
+            UsesPhoton          = $(if ($unaeTopology) { $unaeTopology.UsesPhoton } else { $false })
         }
         Write-Host "  [OK] Configured unified ReFix.ini in $ExeDir" -ForegroundColor Green
     }
@@ -1193,6 +1204,7 @@ unlock_all_dlc=$unlockAllDlcStr
         DefaultRegion       = $DefaultRegion
         PhotonRegion        = $PhotonRegion
         P2PPort             = $p2pPortVal
+        UsesPhoton          = $(if ($unaeTopology) { $unaeTopology.UsesPhoton } else { $false })
     }
     Write-Host "  [OK] Written unified ReFix.ini in $ExeDir" -ForegroundColor Green
 

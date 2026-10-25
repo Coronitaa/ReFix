@@ -30,7 +30,8 @@ const uint16_t kMasterPorts[] = { 5055, 27001 };
 const uint16_t kGamePorts[] = { 5056, 27002 };
 constexpr const char* kDefaultHostSuffixes = "photonengine.io;photonengine.com;exitgames.com";
 constexpr const char* kPresenceKey = "refix_photon_room";
-constexpr const char* kP2PBackend = "ReFixP2P";
+constexpr const char* kP2PBackend = "ReFixCloud";     // canonical ecosystem token: local Photon emulator over Steam P2P
+constexpr const char* kP2PBackendLegacy = "ReFixP2P"; // back-compat alias for configs written before the rename
 constexpr uint8_t kToHost = 1, kToClient = 2;  // Steam envelope: [kind][clientPort:2][Photon datagram]
 constexpr uint64_t kSteamIdMin = 76561197960265728ull, kSteamIdMax = 76561202255233023ull;
 constexpr uint64_t kRemoteKeyFlag = 1ull << 63;
@@ -342,8 +343,8 @@ void Initialize() {
     std::string ini = IniPath();
     char backend[64] = { 0 };
     GetPrivateProfileStringA("Photon", "Backend", kP2PBackend, backend, sizeof(backend), ini.c_str());
-    if (_stricmp(backend, kP2PBackend) != 0) {
-        Log("[Photon] Backend '%s' selected in ReFix.ini; P2P emulator off", backend);
+    if (_stricmp(backend, kP2PBackend) != 0 && _stricmp(backend, kP2PBackendLegacy) != 0) {
+        Log("[Photon] Backend '%s' selected in ReFix.ini; local Photon emulator off (real/self-hosted Photon)", backend);
         return;
     }
     char suffixes[512] = { 0 };

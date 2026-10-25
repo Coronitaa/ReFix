@@ -2,7 +2,10 @@
 
 Replaces Photon Cloud for PUN 2 / Photon Realtime games with a local emulator plus Steam P2P (Spacewar 480).
 Works at the network level, so it is independent of Mono vs IL2CPP and of the game's code.
-Enabled with `[Photon] Backend = ReFixP2P` (default) in `ReFix.ini`.
+Enabled with `[Photon] Backend = ReFixCloud` in `ReFix.ini` (legacy alias `ReFixP2P` still works).
+ReFix's deploy tooling (`deploy_helper.ps1`) picks this automatically: when it detects a Photon stack
+(PUN 2 / Realtime / Voice / **Fusion**) and the deploy mode avoids third-party servers (valve / goldberg /
+offline / lan) it writes `Backend = ReFixCloud`; otherwise `OfficialPhoton` (real Photon cloud).
 
 ## How it works
 1. `pn_dns` hooks `getaddrinfo` / `GetAddrInfoW` / `gethostbyname`: `*.photonengine.io`, `*.photonengine.com`,
@@ -27,11 +30,21 @@ Enabled with `[Photon] Backend = ReFixP2P` (default) in `ReFix.ini`.
    3. A Steam lobby ID used as the name, which resolves to the lobby owner. R.E.P.O. uses `<lobbyId>` and `<lobbyId>_voice_`.
    4. A friend whose rich presence `refix_photon_room` equals the room name.
 
+## Session acceptance
+Incoming ISteamNetworkingMessages sessions are accepted **reactively** on the game's own thread:
+`steam_proxy` intercepts `SteamNetworkingMessagesSessionRequest_t` (callback 1251) inside
+`ManualDispatch_GetNextCallback` and calls `ReFixSteamFlat::OnSessionRequestCallback`. The emulator's
+background pump thread must never enumerate the Steam friends list (`GetFriendByIndex`): doing so races
+the game's own Steam calls (e.g. the auth burst during Photon room creation) and crashes inside the
+Valve DLL. The pump only touches Steam once the game is actually using Photon (`g_photonActive`).
+
 ## Interaction with steam_p2p_hook
 Emulator sockets are registered with `SteamP2PHook::ExcludeSocket`. `PreserveLoopback` now protects every
 127/8 destination; before this, sends to 5055/5056 on loopback were tunnelled to the single known lobby peer.
 
 ## Status (2026-10-25)
+- Photon Fusion (Roadside Research, AppId 3643170): connects to the emulated NameServer; room creation no
+  longer crashes. Fusion detected automatically; config is Topology B (ReFixCloud emulator + Steam SDR, port 27015).
 - R.E.P.O. (Mono, PUN 2 + Voice): hosting works on one PC. The lobby loads, the room and voice room are created on
   the emulator, and START GAME loads a level. Not yet tested across two PCs.
 - Mono games load steam_api64 late, which is too late for the Steam overlay to hook D3D11. Deploy ReFix's
