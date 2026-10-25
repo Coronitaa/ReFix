@@ -59,6 +59,9 @@ struct Forwarder {
 };
 
 std::atomic<bool> g_started{ false };
+std::atomic<bool> g_photonActive{ false };  // true once the game actually uses Photon (hit our
+                                            // loopback listeners or hosts a room); gates all background
+                                            // Steam calls so non-Photon games never touch Steamworks here.
 int g_channel = 9;
 uint64_t g_self = 0;
 std::vector<Listener> g_listeners;
@@ -184,6 +187,7 @@ std::vector<std::string> JoinableRooms() {
 }
 
 void RoomHosted(const std::string& name, bool open) {
+    if (open) g_photonActive.store(true, std::memory_order_relaxed);
     ReFixSteamFlat::SetRichPresence(kPresenceKey, open ? name : std::string());
 }
 
@@ -225,6 +229,7 @@ bool IsRegionPing(const char* data, int size) {
 
 void OnListenerDatagram(size_t index, const sockaddr_in& from, const char* data, int size) {
     const Listener& l = g_listeners[index];
+    g_photonActive.store(true, std::memory_order_relaxed); // the game is speaking Photon to us
     SOCKET s = l.socket;
     if (IsRegionPing(data, size)) {
         sendto(s, data, size, 0, (const sockaddr*)&from, sizeof(from));
@@ -281,7 +286,9 @@ void Pump() {
             }
         }
     }
-    while (ReFixSteamFlat::ReceiveMessages(g_channel, kSteamBatch, OnSteamMessage) == kSteamBatch) {}
+    if (g_photonActive.load(std::memory_order_relaxed)) { // only poll Steam once Photon is actually in use
+        while (ReFixSteamFlat::ReceiveMessages(g_channel, kSteamBatch, OnSteamMessage) == kSteamBatch) {}
+    }
 
     DWORD now = GetTickCount();
     for (auto it = g_connections.begin(); it != g_connections.end();) {
@@ -294,8 +301,8 @@ void Pump() {
         }
     }
     static DWORD lastSweep = 0;
-    if (now - lastSweep >= kAcceptSweepMs) { // hosts accept sessions from joining friends
-        ReFixSteamFlat::AcceptFriendSessions();
+    if (g_photonActive.load(std::memory_order_relaxed) && now - lastSweep >= kAcceptSweepMs) {
+        ReFixSteamFlat::AcceptFriendSessions(); // hosts accept sessions from joining friends
         lastSweep = now;
     }
 }
