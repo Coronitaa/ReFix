@@ -42,6 +42,7 @@
 #endif
 #include "refix_inventory.h"
 #include "refix_il2cpp.h"
+#include "refix_steam_flat.h"
 
 #define STEAM_FORWARD_COUNT 1141
 
@@ -5905,6 +5906,8 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 333 (GameLobbyJoinRequested_t)");
                 } else if (msg->m_iCallback == 504) {
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 504 (LobbyEnter_t)");
+                } else if (msg->m_iCallback == 1251) { // SteamNetworkingMessagesSessionRequest_t
+                    ReFixSteamFlat::OnSessionRequestCallback(msg->m_pubParam, msg->m_cubParam);
                 } else if (msg->m_iCallback == 1221) {
                     SteamNetCompat::ProcessConnectionStatusChanged(msg->m_pubParam, msg->m_cubParam);
                 }

@@ -3,6 +3,7 @@
 #include "refix_pa_offline.h"
 #include "refix_il2cpp_logfwd.h"
 #include "refix_pa_backend.h"
+#include "refix_pa_relay.h"
 #include "minhook/MinHook.h"
 #include <cstdio>
 #include <atomic>
@@ -1332,6 +1333,9 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
 
     // 9. Loopback backend answering the game's AWS Lambda requests in login-free mode
     ReFixPABackend::Initialize();
+
+    // 10. ServerlessP2P relay stand-in bridging custom-game rooms over Steam Datagram Relay
+    ReFixPARelay::Initialize();
 
     g_initialized.store(true);
     ReFixLog("[IL2CPP] Initialization and hook installation completed successfully.");
