@@ -122,4 +122,22 @@ std::string BuildJoin(const Header& header, const Join& join) {
     return w.Finish();
 }
 
+bool ParseStart(const std::string& buffer, Header& header, Start& start) {
+    BitReader r(buffer);
+    if (r.U8() != MSG_START) return false;
+    ReadHeader(r, header);
+    start.remoteServerId = r.Bits(32);
+    start.startRequests = r.Bits(32);
+    return r.ok;
+}
+
+std::string BuildStart(const Header& header, const Start& start) {
+    BitWriter w;
+    w.U8(MSG_START);
+    WriteHeader(w, header);
+    w.Bits(start.remoteServerId, 32);
+    w.Bits(start.startRequests, 32);
+    return w.Finish();
+}
+
 } // namespace PnFusion

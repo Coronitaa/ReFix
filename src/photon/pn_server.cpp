@@ -319,7 +319,8 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
 }
 
 // Photon Cloud runs a "Fusion" plugin in Fusion rooms that answers the protocol messages clients send to the
-// server actor; the client times out without them. Join is confirmed to the sender with its PlayerRef.
+// server actor; the client times out without them. Join is confirmed to the sender with its PlayerRef, then
+// Start tells it which actor runs the Fusion server (in client/server mode, the peer that joined as Server).
 void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
     std::string buffer;
     PnFusion::Header header;
@@ -329,14 +330,23 @@ void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
                   peer.actor, buffer.size());
         return;
     }
+    Room& room = *peer.room;
+    if (join.peerMode == PnFusion::PEER_SERVER) room.fusionServer = peer.actor;
     join.type = PnFusion::JOIN_CONFIRMATION;
     join.playerRef = peer.actor;
-    Params ev = { { P_ACTOR_NR, Int(PnFusion::SERVER_ACTOR) },
-                  { PnFusion::P_FUSION_DATA, ByteArray(PnFusion::BuildJoin(header, join)) } };
-    SendEvent(*peer.room, peer.actor, PnFusion::EV_PROTOCOL, ev, true, 0);
-    m_env.log("[Photon] Fusion: confirmed join of actor %d (mode %u, peer %u, protocol %u, Fusion %d.%d.%d)", peer.actor,
-              join.gameMode, join.peerMode, header.protocolVersion, header.versionMajor, header.versionMinor,
-              header.versionBuild);
+    SendFusionMessage(room, peer.actor, PnFusion::BuildJoin(header, join));
+
+    PnFusion::Start start;
+    start.remoteServerId = (uint32_t)(room.fusionServer ? room.fusionServer : room.master);
+    SendFusionMessage(room, peer.actor, PnFusion::BuildStart(header, start));
+    m_env.log("[Photon] Fusion: actor %d joined and started (mode %u, peer %u, server actor %u, protocol %u, Fusion %d.%d.%d)",
+              peer.actor, join.gameMode, join.peerMode, start.remoteServerId, header.protocolVersion,
+              header.versionMajor, header.versionMinor, header.versionBuild);
+}
+
+void Emulator::SendFusionMessage(Room& room, int32_t actor, const std::string& buffer) {
+    Params ev = { { P_ACTOR_NR, Int(PnFusion::SERVER_ACTOR) }, { PnFusion::P_FUSION_DATA, ByteArray(buffer) } };
+    SendEvent(room, actor, PnFusion::EV_PROTOCOL, ev, true, 0);
 }
 
 // Diagnostic: the first events of each session, with their parameter codes and a hex prefix of each value, so
@@ -470,6 +480,7 @@ void Emulator::LeaveRoom(uint64_t key, bool sendResponse) {
     peer.room = nullptr;
     peer.actor = 0;
     room.actors.erase(actor);
+    if (room.fusionServer == actor) room.fusionServer = 0;
     if (room.cleanupCacheOnLeave) {
         room.cache.erase(std::remove_if(room.cache.begin(), room.cache.end(),
                                         [&](const CachedEvent& e) { return !e.global && e.sender == actor; }),

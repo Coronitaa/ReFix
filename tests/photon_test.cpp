@@ -339,7 +339,21 @@ static void TestFusionPluginConfirmsJoin() {
     PnFusion::Join j;
     CHECK(PnFusion::ParseJoin(data, h, j) && h.protocolVersion == 10 && h.versionBuild == 8);
     CHECK(j.type == PnFusion::JOIN_CONFIRMATION && j.peerMode == PnFusion::PEER_SERVER && j.playerRef == 1);
+    PnFusion::Start st;
+    CHECK(a.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st));
+    CHECK(st.remoteServerId == 1 && st.startRequests == 0 && h.versionBuild == 8);
     CHECK(!b.Take(4, 100, p));
+
+    // A client joining later is started against the host's actor.
+    PnFusion::Header ch;
+    PnFusion::Join cj;
+    PnFusion::ParseJoin(kFusionHostJoin, ch, cj);
+    cj.peerMode = PnFusion::PEER_CLIENT;
+    emu.OnMessage(2, Request(253, { { 244, Byte(100) }, { 245, ByteArray(PnFusion::BuildJoin(ch, cj)) }, { 252, IntArray({ 0 }) } }), true, 0);
+    CHECK(b.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseJoin(data, h, j));
+    CHECK(j.type == PnFusion::JOIN_CONFIRMATION && j.peerMode == PnFusion::PEER_CLIENT && j.playerRef == 2);
+    CHECK(b.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st) && st.remoteServerId == 1);
+    CHECK(!a.Take(4, 100, p));
 }
 
 int main() {

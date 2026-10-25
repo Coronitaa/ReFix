@@ -16,7 +16,10 @@ constexpr uint8_t EV_PROTOCOL = 100, EV_DATA = 101, EV_DUMMY = 102;
 constexpr int32_t SERVER_ACTOR = 0;
 constexpr uint8_t P_FUSION_DATA = 245;
 
-constexpr uint8_t MSG_JOIN = 1;
+// Message ids (ProtocolSerializer registration order): 1 Join, 2 NetworkConfigSync, 3 ReflexiveInfo,
+// 4 Disconnect, 5 Start, 6 Snapshot, 7 HostMigration, 8 PlayerRefMapping, 9 ChangeMasterClient,
+// 10 DummyTrafficSync.
+constexpr uint8_t MSG_JOIN = 1, MSG_START = 5;
 constexpr uint8_t JOIN_REQUEST = 1, JOIN_CONFIRMATION = 2;
 constexpr uint8_t PEER_NONE = 0, PEER_SERVER = 1, PEER_CLIENT = 2;
 constexpr uint8_t GAME_MODE_CLIENT_SERVER = 1, GAME_MODE_SHARED = 2;
@@ -43,10 +46,19 @@ struct Join {
     OptionalBytes encryptionKeySecret;  // from protocol V1_5_0 (9)
 };
 
+// Sent by the plugin after Join: the client then initializes its NetworkRunner and, as a client, connects to
+// the peer RemoteServerID (the host's actor number).
+struct Start {
+    uint32_t remoteServerId = 0;
+    uint32_t startRequests = 0;  // StartRequests flags: ConnectToShared 1, WaitForReflexiveInfo 2
+};
+
 // Message id of the first message in the buffer, or -1 when the buffer is empty or truncated.
 int FirstMessageId(const std::string& buffer);
 
 bool ParseJoin(const std::string& buffer, Header& header, Join& join);
 std::string BuildJoin(const Header& header, const Join& join);
+bool ParseStart(const std::string& buffer, Header& header, Start& start);
+std::string BuildStart(const Header& header, const Start& start);
 
 } // namespace PnFusion
