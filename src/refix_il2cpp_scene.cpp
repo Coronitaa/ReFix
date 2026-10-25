@@ -42,6 +42,8 @@ struct Api {
     void* (*class_get_parent)(void*) = nullptr;
     void* (*class_get_field_from_name)(void*, const char*) = nullptr;
     void (*field_get_value)(void*, void*, void*) = nullptr;
+    void (*field_set_value)(void*, void*, void*) = nullptr;
+    void* (*object_new)(void*) = nullptr;
     void (*field_static_get_value)(void*, void*) = nullptr;
     void (*field_static_set_value)(void*, void*) = nullptr;
     int (*field_get_flags)(void*) = nullptr;
@@ -79,6 +81,8 @@ const Api* GetApi() {
         Resolve(ga, g_api.class_get_parent, "il2cpp_class_get_parent");
         Resolve(ga, g_api.class_get_field_from_name, "il2cpp_class_get_field_from_name");
         Resolve(ga, g_api.field_get_value, "il2cpp_field_get_value");
+        Resolve(ga, g_api.field_set_value, "il2cpp_field_set_value");
+        Resolve(ga, g_api.object_new, "il2cpp_object_new");
         Resolve(ga, g_api.field_static_get_value, "il2cpp_field_static_get_value");
         Resolve(ga, g_api.field_static_set_value, "il2cpp_field_static_set_value");
         Resolve(ga, g_api.field_get_flags, "il2cpp_field_get_flags");
@@ -125,6 +129,20 @@ bool SafeGetField(const Api* api, void* obj, const char* fieldName, void* out) {
     if (!field || IsStaticField(api, field)) return false;
     __try {
         api->field_get_value(obj, field, out);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+bool SafeSetField(const Api* api, void* obj, const char* fieldName, void* value) {
+    if (!obj || !api->class_get_field_from_name || !api->field_set_value || !api->field_get_flags) return false;
+    void* klass = api->object_get_class(obj);
+    if (!klass) return false;
+    void* field = api->class_get_field_from_name(klass, fieldName);
+    if (!field || IsStaticField(api, field)) return false;
+    __try {
+        api->field_set_value(obj, field, value);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -449,6 +467,11 @@ void* FindFirstObjectOfType(const char* ns, const char* className) {
     return objects.empty() ? nullptr : objects.front();
 }
 
+void* NewString(const char* utf8) {
+    const Api* api = GetApi();
+    return (api && api->string_new && utf8) ? api->string_new(utf8) : nullptr;
+}
+
 void* NewPinnedString(const char* utf8) {
     const Api* api = GetApi();
     if (!api || !api->string_new || !api->gchandle_new || !utf8) return nullptr;
@@ -493,6 +516,27 @@ std::string ObjectToDisplayString(void* obj) {
     // Exceptions and other objects: managed ToString() (message + stack trace for exceptions).
     void* text = CallObject(api, obj, "ToString");
     return text ? "<" + cls + "> " + ToUtf8(text) : "<" + cls + ">";
+}
+
+void* NewObject(void* klass) {
+    const Api* api = GetApi();
+    if (!api || !api->object_new || !klass) return nullptr;
+    void* obj = api->object_new(klass);
+    if (!obj) return nullptr;
+    bool ok = false;
+    SafeInvoke(api, api->class_get_method_from_name(klass, ".ctor", 0), obj, nullptr, &ok);
+    return ok ? obj : nullptr;
+}
+
+bool SetFieldValue(void* obj, const char* fieldName, void* value) {
+    const Api* api = GetApi();
+    return api && SafeSetField(api, obj, fieldName, value);
+}
+
+bool SetFieldReference(void* obj, const char* fieldName, void* object) {
+    // Like static fields, il2cpp_field_set_value stores reference-type values as given (the object pointer).
+    const Api* api = GetApi();
+    return api && SafeSetField(api, obj, fieldName, object);
 }
 
 void* GetParentClass(void* klass) {

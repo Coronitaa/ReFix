@@ -2,6 +2,7 @@
 #include "refix_il2cpp_scene.h"
 #include "refix_pa_offline.h"
 #include "refix_il2cpp_logfwd.h"
+#include "refix_pa_backend.h"
 #include "minhook/MinHook.h"
 #include <cstdio>
 #include <atomic>
@@ -1328,6 +1329,9 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     if (ReadIniBool("P2P", "ForwardGameLog", false)) {
         ReFixIL2CPPLogForward::Install("Recreate", "RecreateLogger");
     }
+
+    // 9. Loopback backend answering the game's AWS Lambda requests in login-free mode
+    ReFixPABackend::Initialize();
 
     g_initialized.store(true);
     ReFixLog("[IL2CPP] Initialization and hook installation completed successfully.");

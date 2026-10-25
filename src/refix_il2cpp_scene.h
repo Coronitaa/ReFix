@@ -37,6 +37,9 @@ namespace ReFixIL2CPPScene {
     // First UnityEngine.Object of the given type in loaded scenes (including inactive); main thread only.
     void* FindFirstObjectOfType(const char* ns, const char* className);
 
+    // Allocates a managed System.String (only safe to use immediately, e.g. as a call argument).
+    void* NewString(const char* utf8);
+
     // Allocates a managed System.String from UTF-8 and keeps it alive for the process lifetime (strong GC handle).
     void* NewPinnedString(const char* utf8);
 
@@ -49,6 +52,14 @@ namespace ReFixIL2CPPScene {
 
     // UTF-8 text of a System.String; other objects as "<Namespace.Class> " + ToString().
     std::string ObjectToDisplayString(void* obj);
+
+    // Allocates an instance of klass and runs its parameterless constructor (nullptr on failure).
+    void* NewObject(void* klass);
+
+    // Writes an instance field. SetFieldValue: value types, `value` points to the data (&int32, &bool...).
+    // SetFieldReference: reference-type fields, pass the object pointer itself (may be nullptr).
+    bool SetFieldValue(void* obj, const char* fieldName, void* value);
+    bool SetFieldReference(void* obj, const char* fieldName, void* object);
 
     // Parent class (e.g. the generic Singleton<T> instantiation a type derives from).
     void* GetParentClass(void* klass);

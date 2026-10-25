@@ -27,6 +27,8 @@ std::atomic<DWORD> g_engagedTick{ 0 };
 std::atomic<bool> g_lanFlagApplied{ false };
 std::atomic<bool> g_profileIdDone{ false };
 std::string g_profileId;
+std::string g_effectiveProfileId; // id actually seeded into AccountManager.s_FakeId
+bool g_credentialsInstalled = false;   // main thread only
 void* g_klassInjection = nullptr;
 void* g_klassGameInfo = nullptr;
 void* g_klassAccountManager = nullptr;
@@ -79,6 +81,7 @@ void SeedStableFakeId() {
     void* readback = nullptr;
     ReFixIL2CPPScene::GetStaticFieldValue(g_klassAccountManager, "s_FakeId", &readback);
     ok = ok && readback == str;
+    if (ok) g_effectiveProfileId = id;
     if (!ok && readback) {
         // Never leave a value we cannot verify: the game would dereference it as a string.
         ReFixIL2CPPScene::SetStaticReference(g_klassAccountManager, "s_FakeId", nullptr);
@@ -157,7 +160,7 @@ void LogLoadingGate(void* menuSceneLoader) {
 
 void Initialize() {
     char val[32] = { 0 };
-    GetPrivateProfileStringA("P2P", "OfflineModeType", "lan", val, sizeof(val), IniPath().c_str());
+    GetPrivateProfileStringA("P2P", "OfflineModeType", "p2p", val, sizeof(val), IniPath().c_str());
     int32_t mode = ParseMode(val);
     g_targetMode.store(mode);
     g_finished.store(mode == kModeDisabled);
@@ -200,10 +203,10 @@ void Tick() {
 }
 
 static void ApplyLanFlag() {
-    // Lan mode also needs StaticGameInfo.isLanMode (as the studio's own LAN test path sets it): with a fake
-    // account id, LocalPlayerData only creates the Player scope when isEditorOrLanMode is true. The setter
+    // Login-free modes also need StaticGameInfo.isLanMode (as the studio's own LAN test path sets it): with a
+    // fake account id, LocalPlayerData only creates the Player scope when isEditorOrLanMode is true. The setter
     // re-initializes ServerAgent, so it must run on the Unity main thread.
-    if (g_targetMode.load() != kModeLan || g_lanFlagApplied.exchange(true)) return;
+    if (g_targetMode.load() == kModeUnknown || g_lanFlagApplied.exchange(true)) return;
     void* klass = ReFixIL2CPPScene::FindClassByName("", "StaticGameInfo");
     bool applied = ReFixIL2CPPScene::InvokeStaticBoolSetter(klass, "set_isLanMode", true);
     bool readback = false;
@@ -239,10 +242,74 @@ static void SkipFirstLaunchProfileSteps() {
     }
 }
 
+static std::string Base64Url(const std::string& in) {
+    static const char* kAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    size_t i = 0;
+    for (; i + 2 < in.size(); i += 3) {
+        uint32_t v = ((uint8_t)in[i] << 16) | ((uint8_t)in[i + 1] << 8) | (uint8_t)in[i + 2];
+        out += kAlphabet[(v >> 18) & 63]; out += kAlphabet[(v >> 12) & 63];
+        out += kAlphabet[(v >> 6) & 63];  out += kAlphabet[v & 63];
+    }
+    if (i + 1 == in.size()) {
+        uint32_t v = (uint8_t)in[i] << 16;
+        out += kAlphabet[(v >> 18) & 63]; out += kAlphabet[(v >> 12) & 63];
+    } else if (i + 2 == in.size()) {
+        uint32_t v = ((uint8_t)in[i] << 16) | ((uint8_t)in[i + 1] << 8);
+        out += kAlphabet[(v >> 18) & 63]; out += kAlphabet[(v >> 12) & 63]; out += kAlphabet[(v >> 6) & 63];
+    }
+    return out;
+}
+
+// Unsigned (alg "none") but well-formed JWT, in case the client decodes claims such as exp.
+static std::string BuildLocalJwt(const std::string& accountId) {
+    constexpr long long kExpiry = 4102444800LL; // 2100-01-01
+    std::string header = "{\"alg\":\"none\",\"typ\":\"JWT\"}";
+    std::string payload = "{\"accountId\":\"" + accountId + "\",\"iss\":\"refix-local\",\"exp\":" + std::to_string(kExpiry) + "}";
+    return Base64Url(header) + "." + Base64Url(payload) + ".";
+}
+
+// Login-free modes never authenticate, so LoginManagerAsync.GetJwt() is empty and every backend request
+// stops at "No jwt". Install a local AccountLoginResult as the previous login so requests reach the
+// local backend (see refix_pa_backend), carrying the offline account id.
+static void InstallLocalCredentials() {
+    if (g_credentialsInstalled || g_effectiveProfileId.empty()) return;
+    void* login = AutoSingleton("Recreate.Scripts.Network.Account", "LoginManagerAsync");
+    void* klassResult = ReFixIL2CPPScene::FindClassByName("Recreate.Scripts.Network.Account", "AccountLoginResult");
+    if (!login || !klassResult) return;
+    g_credentialsInstalled = true;
+
+    void* result = ReFixIL2CPPScene::NewObject(klassResult);
+    if (!result) {
+        ReFixLog("[PA-Offline] Could not create AccountLoginResult; backend requests will lack a jwt");
+        return;
+    }
+    char steamId[32] = { 0 };
+    GetEnvironmentVariableA("REFIX_STEAM_ID", steamId, sizeof(steamId));
+    int32_t code = 1; // success
+    int64_t jwtVer = 1;
+    void* jwt = ReFixIL2CPPScene::NewString(BuildLocalJwt(g_effectiveProfileId).c_str());
+    void* accountId = ReFixIL2CPPScene::NewString(g_effectiveProfileId.c_str());
+    void* platformId = ReFixIL2CPPScene::NewString(steamId);
+    void* sessionId = ReFixIL2CPPScene::NewString("refix-local-session");
+    bool ok = ReFixIL2CPPScene::SetFieldValue(result, "code", &code) &&
+              ReFixIL2CPPScene::SetFieldValue(result, "jwtVer", &jwtVer) &&
+              ReFixIL2CPPScene::SetFieldReference(result, "jwt", jwt) &&
+              ReFixIL2CPPScene::SetFieldReference(result, "accountId", accountId) &&
+              ReFixIL2CPPScene::SetFieldReference(result, "platformId", platformId) &&
+              ReFixIL2CPPScene::SetFieldReference(result, "sessionId", sessionId) &&
+              ReFixIL2CPPScene::SetFieldReference(login, "m_prevLoginResult", result);
+    void* jwtReadback = nullptr;
+    ReFixIL2CPPScene::GetFieldValue(result, "jwt", &jwtReadback);
+    ok = ok && jwtReadback == jwt;
+    ReFixLog("[PA-Offline] Local login credentials %s (accountId=%s)", ok ? "installed" : "FAILED", g_effectiveProfileId.c_str());
+}
+
 void MainThreadTick() {
     if (!g_engaged.load()) return;
     ApplyLanFlag();
     SkipFirstLaunchProfileSteps();
+    InstallLocalCredentials();
 }
 
 bool IsEngaged() {
