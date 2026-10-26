@@ -70,7 +70,8 @@ struct ReflexiveInfo {
 
 // Tells the server which player a connecting client is: the server answers a connect request only once the
 // UniqueId in it is registered (Simulation.RegisterUniqueIdPlayerMapping), otherwise it leaves it waiting.
-// PlayerRef.FromIndex(playerIndex) is the client's PlayerRef, i.e. playerIndex = Join.playerRef - 1.
+// playerIndex is on the same scale as Join.playerRef (both log as [Player:n]); reusing the host's value makes the
+// host abort with "player can't exist".
 struct PlayerRefMapping {
     uint32_t actorId = 0;
     uint32_t playerIndex = 0;

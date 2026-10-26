@@ -437,7 +437,7 @@ void Emulator::ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFu
     // ...and only accepts the connect once that UniqueId is registered as the client's player.
     PnFusion::PlayerRefMapping mapping;
     mapping.actorId = (uint32_t)actor;
-    mapping.playerIndex = (uint32_t)(actor - 1); // Join.playerRef = actor
+    mapping.playerIndex = (uint32_t)actor; // same value as the client's Join.playerRef; the host is player 1
     mapping.uniqueId = { true, uniqueId };
     SendFusionMessage(room, room.fusionServer, PnFusion::BuildPlayerRefMapping(header, mapping));
 }

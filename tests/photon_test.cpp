@@ -437,11 +437,11 @@ static void TestFusionClientGetsServerReflexiveInfo() {
     PnFusion::ReflexiveInfo clientInfo;
     CHECK(host.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseReflexiveInfo(data, h, clientInfo));
     CHECK(clientInfo.actorId == 2 && clientInfo.uniqueId.bytes == clientId && clientInfo.publicAddr[0] == 0);
-    // ...and registers it as the client's player (PlayerRef.FromIndex(1) == playerRef 2); without this the host
-    // leaves the client's connect request waiting forever.
+    // ...and registers it as the client's player (index == its playerRef, never the host's 1); without this the
+    // host leaves the client's connect request waiting forever.
     PnFusion::PlayerRefMapping mapping;
     CHECK(host.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParsePlayerRefMapping(data, h, mapping));
-    CHECK(mapping.actorId == 2 && mapping.playerIndex == 1 && mapping.uniqueId.bytes == clientId);
+    CHECK(mapping.actorId == 2 && mapping.playerIndex == 2 && mapping.uniqueId.bytes == clientId);
     CHECK(h.protocolVersion == 10 && data.size() % 4 == 0);
     CHECK(!host.Take(4, 100, p));
     CHECK(client.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st));
