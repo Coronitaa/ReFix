@@ -429,10 +429,17 @@ void Emulator::ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFu
 
     // The server maps the UniqueId in a client's connect request to that client's actor from the client's own
     // ReflexiveInfo, which these clients never send, so the plugin sends it on their behalf (no addresses).
+    const std::string& uniqueId = room.fusionUniqueIds[actor];
     PnFusion::ReflexiveInfo client;
     client.actorId = (uint32_t)actor;
-    client.uniqueId = { true, room.fusionUniqueIds[actor] };
+    client.uniqueId = { true, uniqueId };
     SendFusionMessage(room, room.fusionServer, PnFusion::BuildReflexiveInfo(header, client));
+    // ...and only accepts the connect once that UniqueId is registered as the client's player.
+    PnFusion::PlayerRefMapping mapping;
+    mapping.actorId = (uint32_t)actor;
+    mapping.playerIndex = (uint32_t)(actor - 1); // Join.playerRef = actor
+    mapping.uniqueId = { true, uniqueId };
+    SendFusionMessage(room, room.fusionServer, PnFusion::BuildPlayerRefMapping(header, mapping));
 }
 
 void Emulator::Tick(uint32_t nowMs) {

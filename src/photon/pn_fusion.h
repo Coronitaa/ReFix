@@ -19,7 +19,8 @@ constexpr uint8_t P_FUSION_DATA = 245;
 // Message ids (ProtocolSerializer registration order): 1 Join, 2 NetworkConfigSync, 3 ReflexiveInfo,
 // 4 Disconnect, 5 Start, 6 Snapshot, 7 HostMigration, 8 PlayerRefMapping, 9 ChangeMasterClient,
 // 10 DummyTrafficSync.
-constexpr uint8_t MSG_JOIN = 1, MSG_NETWORK_CONFIG_SYNC = 2, MSG_REFLEXIVE_INFO = 3, MSG_START = 5;
+constexpr uint8_t MSG_JOIN = 1, MSG_NETWORK_CONFIG_SYNC = 2, MSG_REFLEXIVE_INFO = 3, MSG_START = 5,
+                  MSG_PLAYER_REF_MAPPING = 8;
 constexpr uint8_t SYNC_REQUEST = 1, SYNC_RESPONSE = 2, SYNC_OVERRIDE = 3; // NetworkConfigSync.SyncType
 constexpr int32_t JOIN_REQUEST_NETWORK_CONFIG = 1, JOIN_REQUEST_REFLEXIVE_INFO = 2; // Join.JoinRequests flags
 constexpr uint8_t JOIN_REQUEST = 1, JOIN_CONFIRMATION = 2;
@@ -67,6 +68,15 @@ struct ReflexiveInfo {
     OptionalBytes uniqueId;  // from protocol V1_2_3 (6)
 };
 
+// Tells the server which player a connecting client is: the server answers a connect request only once the
+// UniqueId in it is registered (Simulation.RegisterUniqueIdPlayerMapping), otherwise it leaves it waiting.
+// PlayerRef.FromIndex(playerIndex) is the client's PlayerRef, i.e. playerIndex = Join.playerRef - 1.
+struct PlayerRefMapping {
+    uint32_t actorId = 0;
+    uint32_t playerIndex = 0;
+    OptionalBytes uniqueId;
+};
+
 // Message id of the first message in the buffer, or -1 when the buffer is empty or truncated.
 int FirstMessageId(const std::string& buffer);
 
@@ -76,6 +86,8 @@ bool ParseStart(const std::string& buffer, Header& header, Start& start);
 std::string BuildStart(const Header& header, const Start& start);
 bool ParseReflexiveInfo(const std::string& buffer, Header& header, ReflexiveInfo& info);
 std::string BuildReflexiveInfo(const Header& header, const ReflexiveInfo& info);
+bool ParsePlayerRefMapping(const std::string& buffer, Header& header, PlayerRefMapping& mapping);
+std::string BuildPlayerRefMapping(const Header& header, const PlayerRefMapping& mapping);
 
 // NetworkConfigSync: [Type:8][NetworkConfig: string, same presence-bit/16-bit-length form as byte[]]. The plugin
 // asks the host for its config (Request) and forwards the host's Response to clients that asked in their Join.

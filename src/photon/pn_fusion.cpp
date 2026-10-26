@@ -192,4 +192,25 @@ std::string BuildReflexiveInfo(const Header& header, const ReflexiveInfo& info) 
     return w.Finish();
 }
 
+bool ParsePlayerRefMapping(const std::string& buffer, Header& header, PlayerRefMapping& mapping) {
+    BitReader r(buffer);
+    if (r.U8() != MSG_PLAYER_REF_MAPPING) return false;
+    ReadHeader(r, header);
+    mapping = PlayerRefMapping();
+    mapping.actorId = r.Bits(32);
+    mapping.playerIndex = r.Bits(32);
+    r.Optional(mapping.uniqueId);
+    return r.ok;
+}
+
+std::string BuildPlayerRefMapping(const Header& header, const PlayerRefMapping& mapping) {
+    BitWriter w;
+    w.U8(MSG_PLAYER_REF_MAPPING);
+    WriteHeader(w, header);
+    w.Bits(mapping.actorId, 32);
+    w.Bits(mapping.playerIndex, 32);
+    w.Optional(mapping.uniqueId);
+    return w.Finish();
+}
+
 } // namespace PnFusion
