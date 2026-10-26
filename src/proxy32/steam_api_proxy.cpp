@@ -396,6 +396,16 @@ __declspec(dllexport) void* __cdecl SteamInternal_CreateInterface(const char* ps
     EnsureOrigLoaded();
     if (!pszVersion) return nullptr;
 
+    // The exact version first: the shortcuts below return whatever version the genuine DLL's accessors use
+    // (its SteamClient() is SteamClient017), and a caller that asked for another version calls the wrong
+    // vtable slots and corrupts its stack (Overcooked! 2 asks for SteamClient018 and crashed).
+    typedef void* (__cdecl *fn_Create_t)(const char*);
+    auto pfnOrig = (fn_Create_t)GetProcAddress(g_hOrig, "SteamInternal_CreateInterface");
+    if (pfnOrig) {
+        void* res = pfnOrig(pszVersion);
+        if (IsValidInterfacePtr(res)) return res;
+    }
+
     if (strstr(pszVersion, "SteamClient") || strstr(pszVersion, "STEAMCLIENT")) {
         return SteamClient();
     }
@@ -430,13 +440,6 @@ __declspec(dllexport) void* __cdecl SteamInternal_CreateInterface(const char* ps
     }
     if (strstr(pszVersion, "SteamTimeline") || strstr(pszVersion, "STEAMTIMELINE")) {
         return &s_dummyTimeline;
-    }
-
-    typedef void* (__cdecl *fn_Create_t)(const char*);
-    auto pfnOrig = (fn_Create_t)GetProcAddress(g_hOrig, "SteamInternal_CreateInterface");
-    if (pfnOrig) {
-        void* res = pfnOrig(pszVersion);
-        if (IsValidInterfacePtr(res)) return res;
     }
 
     LogMsg("SteamInternal_CreateInterface('%s') not found -> returning nullptr", pszVersion);
