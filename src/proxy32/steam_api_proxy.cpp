@@ -163,6 +163,28 @@ static void ApplyEnvironmentOverrides() {
     }
 }
 
+// The genuine 32-bit steam_api loads the Steam client from HKCU\Software\Valve\Steam\ActiveProcess\SteamClientDll.
+// Third-party loaders (e.g. cracked game launchers) overwrite it with their own steamclient.dll, and every 32-bit
+// game's SteamAPI_Init then fails until Steam is restarted; log that so the crash that follows is explainable.
+static void LogSteamClientDllMismatch() {
+    char dll[MAX_PATH] = { 0 }, steamPath[MAX_PATH] = { 0 };
+    DWORD size = sizeof(dll);
+    if (RegGetValueA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\ActiveProcess", "SteamClientDll", RRF_RT_REG_SZ, nullptr,
+                     dll, &size) != ERROR_SUCCESS)
+        return;
+    size = sizeof(steamPath);
+    if (RegGetValueA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath", RRF_RT_REG_SZ, nullptr, steamPath, &size) !=
+        ERROR_SUCCESS)
+        return;
+    std::string a(dll), b(steamPath);
+    for (std::string* s : { &a, &b })
+        for (char& c : *s) c = (c == '/') ? '\\' : (char)tolower((unsigned char)c);
+    if (a.compare(0, b.size(), b) != 0)
+        LogMsg("WARNING: Steam client DLL registered outside the Steam folder ('%s', Steam at '%s'); another program "
+               "overwrote HKCU\\Software\\Valve\\Steam\\ActiveProcess\\SteamClientDll. Restart Steam to restore it.",
+               dll, steamPath);
+}
+
 static inline bool IsValidInterfacePtr(void* p) {
     return ((uintptr_t)p >= 0x10000);
 }
@@ -241,6 +263,7 @@ __declspec(dllexport) bool __cdecl SteamAPI_Init() {
         if (pfn) {
             bool ok = pfn();
             LogMsg("Underlying SteamAPI_Init returned %d", (int)ok);
+            if (!ok) LogSteamClientDllMismatch();
             return ok;
         }
         auto pfnSafe = (fn_Init_t)GetProcAddress(g_hOrig, "SteamAPI_InitSafe");
