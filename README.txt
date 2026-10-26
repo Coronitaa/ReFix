@@ -15,6 +15,15 @@ WHAT'S NEW IN v1.4.0:
 - Game-specific helpers are opt-in per game in ReFix.ini (HTTP proxy, local backend, fast cloud-fail,
   inventory); online games keep full access to EOS, PlayFab and other official services.
 - Photon emulator joins now work across PCs when the game swaps Photon's GameServer port (e.g. R.E.P.O.).
+- Photon Fusion host/client games (e.g. Roadside Research) can now be joined from another PC: the emulator
+  plays the parts of Photon's Fusion plugin that clients need (relay address, player UniqueId and player
+  mapping), and large relayed packets are reassembled correctly.
+- One clean backup: Online mode keeps a single steam_api64_original.dll next to the proxy (no duplicate
+  _valve copy), and Uninstall_ReFix.bat restores it first. Re:Goldberg deployments verify correctly again.
+- 32-bit games (e.g. Overcooked! 2): the x86 proxy now hands games the exact Steam interface version they
+  ask for (fixes a startup crash), and AutoDeploy no longer drops proxies into Unity's Linux plugin folders.
+- Clearer diagnostics: ReFix.log warns when another program has hijacked Steam's 32-bit client path
+  (restart Steam to fix it) and reports the real error when a local port cannot be opened.
 - Generic IL2CPP bridge: license hotpatch, loopback preservation and fast cloud-failure fallback.
 - AI Bridge and proxy performance work: optimized hot loops and SteamNetworkingSockets v012 support.
 - Stability: fixed a crash on Steamworks 1.60 games caused by an ISteamFriends interface-version mismatch;
