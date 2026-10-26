@@ -8,8 +8,13 @@ WHAT'S NEW IN v1.4.0:
   Steam P2P (Spacewar 480). Fusion's server-plugin handshake (Join / Start) is emulated too.
 - Smarter auto-decision: AutoDeploy detects Photon (including IL2CPP builds via global-metadata.dat) and
   writes Backend=ReFixCloud automatically; the emulator stays inert unless the game really contacts Photon.
-- Generic Steam P2P / SDR tunnelling for serverless P2P games, store emulation and offline inventory
-  persistence (ReFix_Inventory.json).
+- Generic Steam P2P / SDR tunnelling for serverless P2P games, and opt-in offline inventory persistence
+  (ReFix_Inventory.json, [Inventory] EnableLocalInventory). Purchases are never emulated.
+- Version-aware Steam interface hooks: every C++ vtable hook is matched to the interface version the game
+  uses (fixes crashes and broken auth/invites on Steamworks 1.57-1.61 games such as Unreal 5 titles).
+- Game-specific helpers are opt-in per game in ReFix.ini (HTTP proxy, local backend, fast cloud-fail,
+  inventory); online games keep full access to EOS, PlayFab and other official services.
+- Photon emulator joins now work across PCs when the game swaps Photon's GameServer port (e.g. R.E.P.O.).
 - Generic IL2CPP bridge: license hotpatch, loopback preservation and fast cloud-failure fallback.
 - AI Bridge and proxy performance work: optimized hot loops and SteamNetworkingSockets v012 support.
 - Stability: fixed a crash on Steamworks 1.60 games caused by an ISteamFriends interface-version mismatch;

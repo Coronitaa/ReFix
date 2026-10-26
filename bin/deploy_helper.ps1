@@ -253,6 +253,10 @@ function Generate-UNAE-ReFixIni {
     $photonDefault = if ($P.UsesPhoton -and ($P.OnlineMode -in @("valve","goldberg","offline","lan"))) { "ReFixCloud" } else { "OfficialPhoton" }
     $photonBackend = & $Pick "Photon" "Backend" $photonDefault
     $eosAuth       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
+    # Fast-failing cloud TCP (443/80) only helps when there is no internet backend to reach; online it would
+    # block EOS sign-in, PlayFab and other official services.
+    $fastCloudFailDefault = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "true" } else { "false" }
+    $fastCloudFail = & $Pick "P2P" "FastCloudFail" $fastCloudFailDefault
 
     $existingDiscoveryPort = if ($existing.ContainsKey("Network/DiscoveryPort") -and $existing["Network/DiscoveryPort"] -ne "") {
         $existing["Network/DiscoveryPort"]
@@ -319,6 +323,10 @@ AllowRelay = true
 
 ; Puerto UDP principal de la sesion de juego (Default: 7777 para Unreal/Mirror, 27015 para Fusion)
 P2PPort = $existingP2PPort
+
+; Falla al instante las conexiones TCP 443/80 a la nube (evita congelamientos de 16s sin internet).
+; Solo en modos offline/LAN: en modo online bloquearia EOS, PlayFab y otros backends oficiales.
+FastCloudFail = $fastCloudFail
 
 ; Tiempo de espera de negociacion de sesion P2P antes de activar fallback (milisegundos)
 PeerHandshakeTimeoutMs = 5000

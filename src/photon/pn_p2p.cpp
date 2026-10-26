@@ -52,10 +52,13 @@ struct Connection {
     std::unique_ptr<PnEnetConnection> enet;
 };
 
-// One loopback socket per remote host; local Photon clients talk to it as if it were that host's GameServer.
+// One loopback address per remote host; local Photon clients talk to it as if it were that host's GameServer.
+// It listens on every GameServer port: Photon clients may swap the port the Master returned for their
+// alternative one (5056 <-> 27002, e.g. R.E.P.O.), and nothing would answer on the other port.
 struct Forwarder {
-    SOCKET socket = INVALID_SOCKET;
-    std::string address; // "127.80.x.y:port"
+    std::vector<SOCKET> sockets;               // one per kGamePorts entry
+    std::map<uint16_t, SOCKET> clientSocket;   // local client port -> socket it talks to
+    std::string address; // "127.80.x.y:port" handed to the client
 };
 
 std::atomic<bool> g_started{ false };
@@ -154,13 +157,17 @@ Forwarder* ForwarderFor(uint64_t host) {
     uint32_t index = (uint32_t)g_forwarders.size() + 1;
     uint32_t ip = (uint32_t)kForwarderNet0 << 24 | (uint32_t)kForwarderNet1 << 16 | (index & 0xFFFF);
     Forwarder f;
-    f.socket = OpenUdp(ip, g_gamePort);
-    if (f.socket == INVALID_SOCKET) {
-        Log("[Photon] Could not open forwarder %s for host %llu (%d)", AddressString(ip, g_gamePort).c_str(),
-            (unsigned long long)host, WSAGetLastError());
-        return nullptr;
+    for (uint16_t port : kGamePorts) {
+        SOCKET s = OpenUdp(ip, port);
+        if (s == INVALID_SOCKET) {
+            Log("[Photon] Could not open forwarder %s for host %llu (%d)", AddressString(ip, port).c_str(),
+                (unsigned long long)host, WSAGetLastError());
+            continue;
+        }
+        f.sockets.push_back(s);
+        if (f.address.empty() || port == g_gamePort) f.address = AddressString(ip, port);
     }
-    f.address = AddressString(ip, g_gamePort);
+    if (f.sockets.empty()) return nullptr;
     Log("[Photon] Host %llu reachable at %s via Steam P2P", (unsigned long long)host, f.address.c_str());
     return &g_forwarders.emplace(host, f).first->second;
 }
@@ -251,9 +258,11 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
         c.enet->OnDatagram(data + 3, size - 3, GetTickCount());
     } else if (data[0] == kToClient) {
         auto it = g_forwarders.find(from);
-        if (it == g_forwarders.end()) return;
+        if (it == g_forwarders.end() || it->second.sockets.empty()) return;
+        auto cs = it->second.clientSocket.find(port);
+        SOCKET s = cs != it->second.clientSocket.end() ? cs->second : it->second.sockets[0];
         sockaddr_in client = Loopback(INADDR_LOOPBACK, port);
-        sendto(it->second.socket, (const char*)data + 3, (int)size - 3, 0, (const sockaddr*)&client, sizeof(client));
+        sendto(s, (const char*)data + 3, (int)size - 3, 0, (const sockaddr*)&client, sizeof(client));
     }
 }
 
@@ -262,7 +271,8 @@ void Pump() {
     fd_set readable;
     FD_ZERO(&readable);
     for (const auto& l : g_listeners) FD_SET(l.socket, &readable);
-    for (const auto& [host, f] : g_forwarders) FD_SET(f.socket, &readable);
+    for (const auto& [host, f] : g_forwarders)
+        for (SOCKET s : f.sockets) FD_SET(s, &readable);
     timeval timeout = { 0, kSelectTimeoutUs };
     if (select(0, &readable, nullptr, nullptr, &timeout) > 0) {
         for (size_t i = 0; i < g_listeners.size(); i++) {
@@ -275,14 +285,17 @@ void Pump() {
                 OnListenerDatagram(i, from, buf, n);
             }
         }
-        for (const auto& [host, f] : g_forwarders) {
-            if (!FD_ISSET(f.socket, &readable)) continue;
-            for (;;) {
-                sockaddr_in from = {};
-                int len = sizeof(from);
-                int n = recvfrom(f.socket, buf, sizeof(buf), 0, (sockaddr*)&from, &len);
-                if (n <= 0) break;
-                SendSteam(host, kToHost, ntohs(from.sin_port), buf, (size_t)n);
+        for (auto& [host, f] : g_forwarders) {
+            for (SOCKET s : f.sockets) {
+                if (!FD_ISSET(s, &readable)) continue;
+                for (;;) {
+                    sockaddr_in from = {};
+                    int len = sizeof(from);
+                    int n = recvfrom(s, buf, sizeof(buf), 0, (sockaddr*)&from, &len);
+                    if (n <= 0) break;
+                    f.clientSocket[ntohs(from.sin_port)] = s;
+                    SendSteam(host, kToHost, ntohs(from.sin_port), buf, (size_t)n);
+                }
             }
         }
     }
@@ -342,7 +355,9 @@ void Initialize() {
     if (g_started.exchange(true)) return;
     std::string ini = IniPath();
     char backend[64] = { 0 };
-    GetPrivateProfileStringA("Photon", "Backend", kP2PBackend, backend, sizeof(backend), ini.c_str());
+    // Off unless ReFix.ini selects it: deploy_helper writes Backend=ReFixCloud only for games where it detected
+    // a Photon stack, so other games never get the emulator's DNS hooks and loopback listeners.
+    GetPrivateProfileStringA("Photon", "Backend", "OfficialPhoton", backend, sizeof(backend), ini.c_str());
     if (_stricmp(backend, kP2PBackend) != 0 && _stricmp(backend, kP2PBackendLegacy) != 0) {
         Log("[Photon] Backend '%s' selected in ReFix.ini; local Photon emulator off (real/self-hosted Photon)", backend);
         return;

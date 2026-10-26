@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#include <atomic>
 #include <windows.h>
 #include <psapi.h>
 #include "refix_steam_flat.h"
@@ -169,6 +170,9 @@ std::map<std::string, std::vector<FriendPresence>> g_presenceCache;  // key -> m
 std::vector<uint64_t> g_friendIdsCache;                              // immediate friend SteamIDs (last refresh)
 std::map<std::string, std::string> g_pendingPresence;                // queued local SetRichPresence writes
 bool g_pendingPresenceDirty = false;
+// Set the first time a ReFix feature needs friend or presence data (Photon emulator, PA relay). Until then
+// ServiceMainThread() does nothing, so games that never use those features see no ReFix ISteamFriends calls.
+std::atomic<bool> g_friendsWanted{ false };
 }
 
 } // namespace
@@ -186,6 +190,7 @@ uint64_t LocalSteamID() {
 bool SetRichPresence(const char* key, const std::string& value) {
     // Queue the write; it is applied on the game's main thread in ServiceMainThread() to avoid touching
     // ISteamFriends from a worker thread.
+    g_friendsWanted.store(true, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     g_pendingPresence[key ? key : ""] = value;
     g_pendingPresenceDirty = true;
@@ -203,6 +208,7 @@ std::vector<FriendPresence> FriendsWithRichPresence(const char* key) {
     // Lock-free of Steam: returns the cache last refreshed on the main thread, and registers the key so the
     // next ServiceMainThread() refresh picks it up.
     std::string k = key ? key : "";
+    g_friendsWanted.store(true, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g_cacheMutex);
     if (std::find(g_watchedKeys.begin(), g_watchedKeys.end(), k) == g_watchedKeys.end()) g_watchedKeys.push_back(k);
     auto it = g_presenceCache.find(k);
@@ -254,6 +260,7 @@ void OnSessionRequestCallback(const void* param, int32_t size) {
 }
 
 void AcceptFriendSessions() {
+    g_friendsWanted.store(true, std::memory_order_relaxed);
     std::vector<uint64_t> ids;
     { std::lock_guard<std::mutex> lock(g_cacheMutex); ids = g_friendIdsCache; }
     for (uint64_t id : ids) {
@@ -262,6 +269,7 @@ void AcceptFriendSessions() {
 }
 
 void ServiceMainThread() {
+    if (!g_friendsWanted.load(std::memory_order_relaxed)) return;
     // MUST run on the game's main thread (called from the Steam callback pumps). Applies queued rich-presence
     // writes and refreshes the friend/presence caches that worker threads read.
     Api api = ResolveApi();

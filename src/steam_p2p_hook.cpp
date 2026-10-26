@@ -984,7 +984,9 @@ static inline bool GetFastCloudFailConfig() {
         size_t pos = p.find_last_of("\\/");
         std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
         char val[32] = { 0 };
-        GetPrivateProfileStringA("P2P", "FastCloudFail", "true", val, sizeof(val), ini.c_str());
+        // Off unless ReFix.ini asks for it (offline/LAN deploys): failing every 443/80 connect also blocks the
+        // official backends online games need (EOS sign-in, PlayFab, Cloudflare-fronted APIs).
+        GetPrivateProfileStringA("P2P", "FastCloudFail", "false", val, sizeof(val), ini.c_str());
         s_fastFail = (_stricmp(val, "true") == 0 || strcmp(val, "1") == 0 || _stricmp(val, "yes") == 0) ? 1 : 0;
     }
     return s_fastFail != 0;
@@ -1234,8 +1236,10 @@ void Install(void* hSteamOriginal) {
 
     Log("Installing Winsock P2P hooks via MinHook...");
 
-    if (MH_Initialize() != MH_OK) {
-        Log("ERROR: MH_Initialize failed");
+    // Other ReFix modules (Photon DNS, IL2CPP bridge, PA backend) may have initialized MinHook first.
+    MH_STATUS mh = MH_Initialize();
+    if (mh != MH_OK && mh != MH_ERROR_ALREADY_INITIALIZED) {
+        Log("ERROR: MH_Initialize failed (%d)", (int)mh);
         return;
     }
 

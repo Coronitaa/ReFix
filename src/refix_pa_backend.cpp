@@ -233,7 +233,8 @@ void Initialize() {
     if (g_started.exchange(true)) return;
     char enabled[16] = { 0 };
     char filter[128] = { 0 };
-    GetPrivateProfileStringA("P2P", "LocalBackend", "true", enabled, sizeof(enabled), IniPath().c_str());
+    // Opt-in per game (Party Animals' ReFix.ini sets it); other games must not get a loopback HTTP server.
+    GetPrivateProfileStringA("P2P", "LocalBackend", "false", enabled, sizeof(enabled), IniPath().c_str());
     GetPrivateProfileStringA("P2P", "LocalBackendHost", "partyanimalsgame.com", filter, sizeof(filter), IniPath().c_str());
     if (_stricmp(enabled, "true") != 0 && strcmp(enabled, "1") != 0) {
         ReFixLog("[PA-Backend] LocalBackend disabled in ReFix.ini");

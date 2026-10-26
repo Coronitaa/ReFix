@@ -22,10 +22,7 @@ extern bool HookVTableMethod(void* pInterface, int vtableIndex, void* pHookFn, v
 namespace ReFixInventory {
 
 // Configuration settings
-static bool g_enableLocalInventory = true;
-static bool g_enableStoreEmulation = true;
-static bool g_autoAuthorizeMicroTxn = true;
-static bool g_instantPurchaseSuccess = true;
+static bool g_enableLocalInventory = false; // opt-in via [Inventory] EnableLocalInventory
 static std::string g_inventoryFileName = "ReFix_Inventory.json";
 static uint32_t g_defaultQuantity = 1;
 static bool g_initialized = false;
@@ -36,7 +33,6 @@ static std::vector<LocalItem> g_localItems;
 static std::unordered_map<SteamInventoryResult_t, InventoryResultEntry> g_activeResults;
 static std::atomic<SteamInventoryResult_t> g_nextResultHandle{ 1 };
 static std::atomic<uint64_t> g_nextItemId{ 100000001ULL };
-static std::atomic<uint64_t> g_nextOrderId{ 88000000001ULL };
 
 // Helper to get executable / working directory
 static std::string GetBasePath() {
@@ -64,13 +60,6 @@ std::string GetInventoryFilePath() {
 }
 
 bool IsLocalInventoryEnabled() { return g_enableLocalInventory; }
-bool IsStoreEmulationEnabled() { return g_enableStoreEmulation; }
-bool IsAutoAuthorizeMicroTxnEnabled() { return g_autoAuthorizeMicroTxn; }
-bool IsInstantPurchaseSuccessEnabled() { return g_instantPurchaseSuccess; }
-
-uint64_t GenerateOrderId() {
-    return g_nextOrderId.fetch_add(1);
-}
 
 // -----------------------------------------------------------------------------
 // Lightweight JSON Parser and Serializer for ReFix_Inventory.json
@@ -216,18 +205,9 @@ void Initialize(const std::string& iniPath) {
     g_initialized = true;
 
     char buf[MAX_PATH];
-    // [Store]
-    GetPrivateProfileStringA("Store", "EnableStoreEmulation", "true", buf, sizeof(buf), iniPath.c_str());
-    g_enableStoreEmulation = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
-
-    GetPrivateProfileStringA("Store", "AutoAuthorizeMicroTxn", "true", buf, sizeof(buf), iniPath.c_str());
-    g_autoAuthorizeMicroTxn = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
-
-    GetPrivateProfileStringA("Store", "InstantPurchaseSuccess", "true", buf, sizeof(buf), iniPath.c_str());
-    g_instantPurchaseSuccess = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
-
-    // [Inventory]
-    GetPrivateProfileStringA("Inventory", "EnableLocalInventory", "true", buf, sizeof(buf), iniPath.c_str());
+    // [Inventory] -- off unless the game's ReFix.ini enables it: emulating ISteamInventory in every game hands
+    // fake results to games that use the real Steam inventory.
+    GetPrivateProfileStringA("Inventory", "EnableLocalInventory", "false", buf, sizeof(buf), iniPath.c_str());
     g_enableLocalInventory = (_stricmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
 
     GetPrivateProfileStringA("Inventory", "InventoryFile", "ReFix_Inventory.json", buf, sizeof(buf), iniPath.c_str());
@@ -235,33 +215,12 @@ void Initialize(const std::string& iniPath) {
 
     g_defaultQuantity = GetPrivateProfileIntA("Inventory", "DefaultQuantity", 1, iniPath.c_str());
 
-    ReFixLog("[Inventory] Initialized: LocalInventory=%d, StoreEmulation=%d, AutoAuth=%d, InstantSuccess=%d, File='%s'",
-             (int)g_enableLocalInventory, (int)g_enableStoreEmulation, (int)g_autoAuthorizeMicroTxn,
-             (int)g_instantPurchaseSuccess, g_inventoryFileName.c_str());
+    ReFixLog("[Inventory] Initialized: LocalInventory=%d, File='%s'", (int)g_enableLocalInventory,
+             g_inventoryFileName.c_str());
 
     if (g_enableLocalInventory) {
         LoadFromFile();
     }
-}
-
-// -----------------------------------------------------------------------------
-// Microtransaction Authorization (Callback 152)
-// -----------------------------------------------------------------------------
-void AuthorizeMicroTxn(uint64_t orderId, uint32_t appId) {
-    if (!g_enableStoreEmulation || !g_autoAuthorizeMicroTxn) return;
-
-    if (appId == 0) appId = ReFix_GetRealAppID();
-
-    MicroTxnAuthorizationResponse_t resp{};
-    resp.m_unAppID = appId;
-    resp.m_ulOrderID = orderId;
-    resp.m_bAuthorized = 1;
-
-    ReFixLog("[Store] Emitting MicroTxnAuthorizationResponse_t (Callback 152): AppID=%u, OrderID=%llu, Authorized=1",
-             appId, orderId);
-
-    // Post to unified callback dispatcher (covers ManualDispatch and CCallback)
-    ReFix_PostCallback(MicroTxnAuthorizationResponse_t::k_iCallback, &resp, sizeof(resp));
 }
 
 // -----------------------------------------------------------------------------
@@ -588,67 +547,6 @@ bool ExchangeItems(
     return true;
 }
 
-SteamAPICall_t ProcessStartPurchase(
-    const SteamItemDef_t* pArrayItemDefs,
-    const uint32_t* punArrayQuantity,
-    uint32_t unArrayLength,
-    uint64_t& outOrderId
-) {
-    std::lock_guard<std::recursive_mutex> lock(g_invMutex);
-
-    static std::atomic<SteamAPICall_t> s_nextCall{ 77000000001ULL };
-    SteamAPICall_t callHandle = s_nextCall.fetch_add(1);
-    outOrderId = (uint64_t)callHandle;
-
-    ReFixLog("[Store] ProcessStartPurchase: Initiating order %llu for %u items (callHandle=%llu)",
-             outOrderId, unArrayLength, callHandle);
-
-    if (g_instantPurchaseSuccess) {
-        // Automatically grant items into local inventory
-        uint32_t now = (uint32_t)time(nullptr);
-        std::vector<SteamItemDetails_t> granted;
-        if (pArrayItemDefs && unArrayLength > 0) {
-            for (uint32_t i = 0; i < unArrayLength; ++i) {
-                int32_t defId = pArrayItemDefs[i];
-                uint32_t qty = (punArrayQuantity ? punArrayQuantity[i] : 1);
-
-                LocalItem item;
-                item.itemId = g_nextItemId.fetch_add(1);
-                item.definitionId = defId;
-                item.quantity = (uint16_t)qty;
-                item.flags = 0;
-                item.acquiredTimestamp = now;
-                g_localItems.push_back(item);
-
-                SteamItemDetails_t d{};
-                d.m_itemId = item.itemId;
-                d.m_iDefinition = item.definitionId;
-                d.m_unQuantity = item.quantity;
-                d.m_unFlags = item.flags;
-                granted.push_back(d);
-            }
-            SaveToFile();
-        }
-
-        // Complete the StartPurchase APICall (Callback 1004)
-        ReFix_QueueSyntheticAPICall(callHandle, SteamInventoryStartPurchaseResult_t::k_iCallback, sizeof(SteamInventoryStartPurchaseResult_t));
-
-        // Immediately authorize the microtransaction (Callback 152)
-        AuthorizeMicroTxn(outOrderId, ReFix_GetRealAppID());
-
-        // Emit inventory result ready for granted items
-        if (!granted.empty()) {
-            SteamInventoryResult_t resH = CreateResult(granted);
-            SteamInventoryResultReady_t ready{};
-            ready.m_handle = resH;
-            ready.m_result = k_EResultOK;
-            ReFix_PostCallback(SteamInventoryResultReady_t::k_iCallback, &ready, sizeof(ready));
-        }
-    }
-
-    return callHandle;
-}
-
 bool LoadItemDefinitions() {
     ReFixLog("[Inventory] LoadItemDefinitions requested -> Returning OK");
     SteamInventoryDefinitionUpdate_t defUpdate{};
@@ -733,7 +631,6 @@ typedef bool (*fn_ISteamInventory_TriggerItemDrop_t)(void* self, SteamInventoryR
 typedef bool (*fn_ISteamInventory_LoadItemDefinitions_t)(void* self);
 typedef bool (*fn_ISteamInventory_GetItemDefinitionIDs_t)(void* self, SteamItemDef_t* pItemDefIDs, uint32_t* punItemDefIDsArraySize);
 typedef bool (*fn_ISteamInventory_GetItemDefinitionProperty_t)(void* self, SteamItemDef_t iDefinition, const char* pchPropertyName, char* pchValueBuffer, uint32_t* punValueBufferSizeOut);
-typedef SteamAPICall_t (*fn_ISteamInventory_StartPurchase_t)(void* self, const SteamItemDef_t* pArrayItemDefs, const uint32_t* punArrayQuantity, uint32_t unArrayLength);
 
 static fn_ISteamInventory_GetResultStatus_t g_orig_GetResultStatus = nullptr;
 static fn_ISteamInventory_GetResultItems_t g_orig_GetResultItems = nullptr;
@@ -749,7 +646,6 @@ static fn_ISteamInventory_TriggerItemDrop_t g_orig_TriggerItemDrop = nullptr;
 static fn_ISteamInventory_LoadItemDefinitions_t g_orig_LoadItemDefinitions = nullptr;
 static fn_ISteamInventory_GetItemDefinitionIDs_t g_orig_GetItemDefinitionIDs = nullptr;
 static fn_ISteamInventory_GetItemDefinitionProperty_t g_orig_GetItemDefinitionProperty = nullptr;
-static fn_ISteamInventory_StartPurchase_t g_orig_StartPurchase = nullptr;
 
 static EResult Hooked_VTable_GetResultStatus(void* self, SteamInventoryResult_t resultHandle) {
     if (g_enableLocalInventory) {
@@ -863,17 +759,13 @@ static bool Hooked_VTable_GetItemDefinitionProperty(void* self, SteamItemDef_t i
     return false;
 }
 
-static SteamAPICall_t Hooked_VTable_StartPurchase(void* self, const SteamItemDef_t* pArrayItemDefs, const uint32_t* punArrayQuantity, uint32_t unArrayLength) {
-    if (g_enableStoreEmulation) {
-        uint64_t orderId = 0;
-        return ProcessStartPurchase(pArrayItemDefs, punArrayQuantity, unArrayLength, orderId);
-    }
-    if (g_orig_StartPurchase) return g_orig_StartPurchase(self, pArrayItemDefs, punArrayQuantity, unArrayLength);
-    return 0;
-}
-
 void HookISteamInventory(void* pInterface, const char* pszVersion) {
-    if (!pInterface) return;
+    if (!pInterface || !g_enableLocalInventory) return; // opt-in: leave the real Steam inventory untouched
+    // Slots below are from STEAMINVENTORY_INTERFACE_V003; another layout would hook unrelated methods.
+    if (!pszVersion || !strstr(pszVersion, "V003")) {
+        ReFixLog("[Inventory] Unknown ISteamInventory version '%s', hooks skipped", pszVersion ? pszVersion : "");
+        return;
+    }
     ReFixLog("[Inventory] Installing VTable hooks on ISteamInventory interface %p (version='%s')",
              pInterface, pszVersion ? pszVersion : "unknown");
 
@@ -891,7 +783,6 @@ void HookISteamInventory(void* pInterface, const char* pszVersion) {
     HookVTableMethod(pInterface, 20, (void*)Hooked_VTable_LoadItemDefinitions, (void**)&g_orig_LoadItemDefinitions);
     HookVTableMethod(pInterface, 21, (void*)Hooked_VTable_GetItemDefinitionIDs, (void**)&g_orig_GetItemDefinitionIDs);
     HookVTableMethod(pInterface, 22, (void*)Hooked_VTable_GetItemDefinitionProperty, (void**)&g_orig_GetItemDefinitionProperty);
-    HookVTableMethod(pInterface, 25, (void*)Hooked_VTable_StartPurchase, (void**)&g_orig_StartPurchase);
 
     ReFixLog("[Inventory] VTable hooks for ISteamInventory installed successfully");
 }

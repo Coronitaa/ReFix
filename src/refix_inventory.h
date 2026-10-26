@@ -5,7 +5,8 @@
 // Persists unlocked items in ReFix_Inventory.json.
 // Emulates ISteamInventory (v003) queries: GetAllItems, GetResultItems,
 // GenerateItems, TriggerItemDrop, ExchangeItems, ConsumeItem.
-// Handles MicroTxnAuthorizationResponse_t and StartPurchase validation.
+// Opt-in ([Inventory] EnableLocalInventory). Purchases are never emulated: StartPurchase and
+// MicroTxnAuthorizationResponse_t always go to Steam.
 // =============================================================================
 
 #include <cstdint>
@@ -56,20 +57,7 @@ bool SaveToFile(const std::string& customPath = "");
 
 // Configuration accessors
 bool IsLocalInventoryEnabled();
-bool IsStoreEmulationEnabled();
-bool IsAutoAuthorizeMicroTxnEnabled();
-bool IsInstantPurchaseSuccessEnabled();
 std::string GetInventoryFilePath();
-
-// Microtransaction & Purchase Validation
-uint64_t GenerateOrderId();
-void AuthorizeMicroTxn(uint64_t orderId, uint32_t appId = 0);
-SteamAPICall_t ProcessStartPurchase(
-    const SteamItemDef_t* pArrayItemDefs,
-    const uint32_t* punArrayQuantity,
-    uint32_t unArrayLength,
-    uint64_t& outOrderId
-);
 
 // ISteamInventory emulation routines
 bool GetAllItems(SteamInventoryResult_t* pResultHandle);

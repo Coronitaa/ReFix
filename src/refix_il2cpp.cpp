@@ -352,7 +352,7 @@ static bool ActivateP2PModeInternal() {
     // The game's built-in fake room data is only needed when no local backend serves the room operations
     // (createRoom/describeRoom/listRoom). Set the field directly: SwitchP2PFakeData() toggles, so calling
     // it on every activation (startup + transition) would flip it back.
-    bool useFakeData = !ReadIniBool("P2P", "LocalBackend", true);
+    bool useFakeData = !ReadIniBool("P2P", "LocalBackend", false); // same default as refix_pa_backend.cpp
     if (ReFixIL2CPPScene::SetStaticFieldValue(klassUtils, "useFakeData", &useFakeData)) {
         ReFixLog("[IL2CPP] P2PRoomUtils.useFakeData set to %s", useFakeData ? "true" : "false");
     }
