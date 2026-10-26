@@ -2115,6 +2115,9 @@ typedef bool(*fn_VTable_InviteUserToGame_t)(void* self, uint64_t steamIDFriend, 
 static fn_VTable_InviteUserToGame_t g_orig_VTable_InviteUserToGame = nullptr;
 static fn_VTable_SetRichPresence_t g_orig_VTable_SetRichPresence = nullptr;
 
+typedef bool (*fn_VTable_GetFriendGamePlayed_t)(void* self, uint64_t steamIDFriend, void* pFriendGameInfo);
+static fn_VTable_GetFriendGamePlayed_t g_orig_VTable_GetFriendGamePlayed = nullptr;
+
 struct ReFix_FriendGameInfo_t {
     uint64_t m_gameID;
     uint32_t m_unGameIP;
@@ -2457,6 +2460,15 @@ static void NormalizeFriendGameInfo(void* pFriendGameInfo, uint64_t steamIDFrien
             ReFixLog("GetFriendGamePlayed: Normalized friend %llu AppID (%u -> %u, Lobby=%llu)", steamIDFriend, fid, myAppId, info->m_steamIDLobby);
         }
     }
+}
+
+static bool Hooked_ISteamFriends_GetFriendGamePlayed(void* self, uint64_t steamIDFriend, void* pFriendGameInfo) {
+    bool res = false;
+    if (g_orig_VTable_GetFriendGamePlayed) {
+        res = g_orig_VTable_GetFriendGamePlayed(self, steamIDFriend, pFriendGameInfo);
+    }
+    if (res) NormalizeFriendGameInfo(pFriendGameInfo, steamIDFriend);
+    return res;
 }
 
 static bool Intercepted_SteamAPI_ISteamFriends_GetFriendGamePlayed(void* self, uint64_t steamIDFriend, void* pFriendGameInfo) {
@@ -3401,10 +3413,15 @@ static bool Hooked_VTable_GetEncryptedAppTicket(void* self, void* pTicket, int c
 }
 
 // Number at the end of an interface version string ("SteamUser023" -> 23), 0 when there is none.
-// Vtable slots move between interface versions, so every C++ vtable hook is keyed on it: a hook on the wrong
-// slot replaces an unrelated method (crashes, broken auth, broken invites). Unknown versions stay unhooked.
-// Diagnostics: REFIX_SKIP_HOOKS="user,friends,apps,utils,sockets,http" leaves those vtable hook groups out, to
-// bisect a game that misbehaves with ReFix.
+static int InterfaceVersionNumber(const char* version) {
+    if (!version) return 0;
+    const char* digits = version + strlen(version);
+    while (digits > version && isdigit((unsigned char)digits[-1])) digits--;
+    return *digits ? atoi(digits) : 0;
+}
+
+// Diagnostics: REFIX_SKIP_HOOKS="user,friends,apps,utils,sockets,netutils,http,ugc" leaves those vtable hook
+// groups out, to bisect a game that misbehaves with ReFix.
 static bool HookGroupSkipped(const char* group) {
     char buf[256] = { 0 };
     if (!GetEnvironmentVariableA("REFIX_SKIP_HOOKS", buf, sizeof(buf))) return false;
@@ -3413,75 +3430,114 @@ static bool HookGroupSkipped(const char* group) {
     return true;
 }
 
-static int InterfaceVersionNumber(const char* version) {
-    if (!version) return 0;
-    const char* digits = version + strlen(version);
-    while (digits > version && isdigit((unsigned char)digits[-1])) digits--;
-    return *digits ? atoi(digits) : 0;
+// Vtable slot of a method, read from the loaded Steam DLL's own flat export. Since SDK 1.48 every
+// SteamAPI_ISteamX_Method export is a thunk: `mov rax,[rcx]` then `jmp [rax+disp]` or `mov r10,[rax+disp];
+// jmp r10`, so disp/8 is the exact slot for this DLL. Hand-written slot tables drifted between SDKs (and the
+// headers do not show the real order): hooks landed on unrelated methods, crashing Unreal games and turning
+// SetPlayedWith into an overlay invite. Returns -1 when the export is missing or not such a thunk.
+static int FlatThunkSlot(const char* exportName) {
+    const uint8_t* p = g_hOriginalDll ? (const uint8_t*)GetProcAddress((HMODULE)g_hOriginalDll, exportName) : nullptr;
+    if (!p || p[0] != 0x48 || p[1] != 0x8B || p[2] != 0x01) return -1;
+    p += 3;
+    int32_t disp = -1;
+    if (p[0] == 0x48) p++; // optional REX.W on the jmp
+    if (p[0] == 0xFF && p[1] == 0x20) disp = 0;
+    else if (p[0] == 0xFF && p[1] == 0x60) disp = (int8_t)p[2];
+    else if (p[0] == 0xFF && p[1] == 0xA0) memcpy(&disp, p + 2, sizeof(disp));
+    else if (p[0] == 0x4C && p[1] == 0x8B && p[2] == 0x10) disp = 0;
+    else if (p[0] == 0x4C && p[1] == 0x8B && p[2] == 0x50) disp = (int8_t)p[3];
+    else if (p[0] == 0x4C && p[1] == 0x8B && p[2] == 0x90) memcpy(&disp, p + 3, sizeof(disp));
+    return disp >= 0 && disp % 8 == 0 ? disp / 8 : -1;
 }
 
-static void HookISteamUser(void* iface, const char* pszVersion) {
-    if (!iface) return;
-    if (HookGroupSkipped("user")) return;
-    int v = InterfaceVersionNumber(pszVersion);
-    if (v >= 23) {
-        // SteamUser023 inserted GetAuthTicketForWebApi at 14, shifting the later methods by one.
-        HookVTableMethod(iface, 13, (void*)Hooked_VTable_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
-        HookVTableMethod(iface, 14, (void*)Hooked_VTable_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi);
-        HookVTableMethod(iface, 18, (void*)Hooked_ISteamUser_UserHasLicenseForApp, (void**)&g_orig_VTable_UserHasLicenseForApp);
-        HookVTableMethod(iface, 21, (void*)Hooked_VTable_RequestEncryptedAppTicket, (void**)&g_orig_VTable_RequestEncryptedAppTicket);
-        HookVTableMethod(iface, 22, (void*)Hooked_VTable_GetEncryptedAppTicket, (void**)&g_orig_VTable_GetEncryptedAppTicket);
-    } else if (v == 22) {
-        HookVTableMethod(iface, 13, (void*)Hooked_VTable_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket);
-        HookVTableMethod(iface, 17, (void*)Hooked_ISteamUser_UserHasLicenseForApp, (void**)&g_orig_VTable_UserHasLicenseForApp);
-        HookVTableMethod(iface, 20, (void*)Hooked_VTable_RequestEncryptedAppTicket, (void**)&g_orig_VTable_RequestEncryptedAppTicket);
-        HookVTableMethod(iface, 21, (void*)Hooked_VTable_GetEncryptedAppTicket, (void**)&g_orig_VTable_GetEncryptedAppTicket);
-    } else {
-        ReFixLog("HookISteamUser: unknown interface '%s', vtable hooks skipped", pszVersion ? pszVersion : "");
+struct ThunkHook {
+    const char* flatName; // SteamAPI_ISteamX_Method export whose thunk gives the slot
+    void* hook;
+    void** original;
+};
+
+// Hooks `hooks` on `iface` at the slots the loaded DLL uses. Only for the interface version the DLL's flat API
+// was built for (its versioned accessor `<accessorPrefix><NNN>` is exported); other versions have other layouts.
+static void HookByThunks(void* iface, const char* group, const char* version, const char* const* accessorPrefixes,
+                         const ThunkHook* hooks, size_t count) {
+    if (!iface || HookGroupSkipped(group)) return;
+    int v = InterfaceVersionNumber(version);
+    bool dllVersion = false;
+    for (const char* const* prefix = accessorPrefixes; *prefix && v > 0 && !dllVersion; prefix++) {
+        char name[128];
+        snprintf(name, sizeof(name), "%s%03d", *prefix, v);
+        dllVersion = GetProcAddress((HMODULE)g_hOriginalDll, name) != nullptr;
+    }
+    if (!dllVersion) {
+        ReFixLog("HookByThunks: '%s' is not the DLL's own %s interface, vtable hooks skipped", version ? version : "",
+                 group);
         return;
     }
-    ReFixLog("HookISteamUser: installed vtable hooks for %p (version='%s')", iface, pszVersion);
+    for (size_t i = 0; i < count; i++) {
+        int slot = FlatThunkSlot(hooks[i].flatName);
+        if (slot < 0) {
+            ReFixLog("HookByThunks: no thunk slot for %s, hook skipped", hooks[i].flatName);
+            continue;
+        }
+        HookVTableMethod(iface, slot, hooks[i].hook, hooks[i].original);
+    }
+    ReFixLog("HookByThunks: %s hooks installed for %p (version='%s')", group, iface, version);
 }
 
-// ISteamFriends017/018 share these slots.
+// Interface from the newest versioned flat accessor `<prefix><NNN>` the loaded DLL exports; its version goes
+// to `version`. nullptr when there is none.
+static void* DllInterface(const char* accessorPrefix, int& version) {
+    for (int v = 40; v > 0; v--) {
+        char name[128];
+        snprintf(name, sizeof(name), "%s%03d", accessorPrefix, v);
+        auto fn = (void* (*)())GetProcAddress((HMODULE)g_hOriginalDll, name);
+        if (!fn) continue;
+        version = v;
+        return fn();
+    }
+    return nullptr;
+}
+
+static void HookISteamUser(void* iface, const char* version) {
+    static const char* const kPrefixes[] = { "SteamAPI_SteamUser_v", nullptr };
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamUser_GetAuthSessionTicket", (void*)Hooked_VTable_GetAuthSessionTicket, (void**)&g_orig_VTable_GetAuthSessionTicket },
+        { "SteamAPI_ISteamUser_GetAuthTicketForWebApi", (void*)Hooked_VTable_GetAuthTicketForWebApi, (void**)&g_orig_VTable_GetAuthTicketForWebApi },
+        { "SteamAPI_ISteamUser_UserHasLicenseForApp", (void*)Hooked_ISteamUser_UserHasLicenseForApp, (void**)&g_orig_VTable_UserHasLicenseForApp },
+        { "SteamAPI_ISteamUser_RequestEncryptedAppTicket", (void*)Hooked_VTable_RequestEncryptedAppTicket, (void**)&g_orig_VTable_RequestEncryptedAppTicket },
+        { "SteamAPI_ISteamUser_GetEncryptedAppTicket", (void*)Hooked_VTable_GetEncryptedAppTicket, (void**)&g_orig_VTable_GetEncryptedAppTicket },
+    };
+    HookByThunks(iface, "user", version, kPrefixes, kHooks, _countof(kHooks));
+}
+
 static void HookISteamFriends(void* iface, const char* version) {
-    if (HookGroupSkipped("friends")) return;
-    int v = InterfaceVersionNumber(version);
-    if (v != 17 && v != 18) {
-        ReFixLog("HookISteamFriends: unknown interface '%s', vtable hooks skipped", version);
-        return;
-    }
-    // GetFriendGamePlayed (slot 7) is deliberately not hooked here: hooking it through the C++ vtable crashed
-    // Unreal 5.7 at startup (Grain Rot, SDK 1.61) even as a pure pass-through. Flat-API callers still get the
-    // lobby/AppID normalization through the intercepted SteamAPI_ISteamFriends_GetFriendGamePlayed export.
-    HookVTableMethod(iface, 32, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
-    HookVTableMethod(iface, 41, (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence);
-    HookVTableMethod(iface, 47, (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame);
+    static const char* const kPrefixes[] = { "SteamAPI_SteamFriends_v", nullptr };
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamFriends_GetFriendGamePlayed", (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed },
+        { "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog", (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog },
+        { "SteamAPI_ISteamFriends_SetRichPresence", (void*)Hooked_ISteamFriends_SetRichPresence, (void**)&g_orig_VTable_SetRichPresence },
+        { "SteamAPI_ISteamFriends_InviteUserToGame", (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame },
+    };
+    HookByThunks(iface, "friends", version, kPrefixes, kHooks, _countof(kHooks));
 }
 
-// ISteamApps008/009 share these slots (GetLaunchCommandLine does not exist before 008).
 static void HookISteamApps(void* iface, const char* version) {
-    if (HookGroupSkipped("apps")) return;
-    int v = InterfaceVersionNumber(version);
-    if (v != 8 && v != 9) {
-        ReFixLog("HookISteamApps: unknown interface '%s', vtable hooks skipped", version);
-        return;
-    }
-    HookVTableMethod(iface, 0, (void*)Hooked_ISteamApps_BIsSubscribed, (void**)&g_orig_VTable_BIsSubscribed);
-    HookVTableMethod(iface, 6, (void*)Hooked_ISteamApps_BIsSubscribedApp, (void**)&g_orig_VTable_BIsSubscribedApp);
-    HookVTableMethod(iface, 7, (void*)Hooked_ISteamApps_BIsDlcInstalled, (void**)&g_orig_VTable_BIsDlcInstalled);
-    HookVTableMethod(iface, 26, (void*)Hooked_ISteamApps_GetLaunchCommandLine, (void**)&g_orig_VTable_GetLaunchCommandLine);
+    static const char* const kPrefixes[] = { "SteamAPI_SteamApps_v", nullptr };
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamApps_BIsSubscribed", (void*)Hooked_ISteamApps_BIsSubscribed, (void**)&g_orig_VTable_BIsSubscribed },
+        { "SteamAPI_ISteamApps_BIsSubscribedApp", (void*)Hooked_ISteamApps_BIsSubscribedApp, (void**)&g_orig_VTable_BIsSubscribedApp },
+        { "SteamAPI_ISteamApps_BIsDlcInstalled", (void*)Hooked_ISteamApps_BIsDlcInstalled, (void**)&g_orig_VTable_BIsDlcInstalled },
+        { "SteamAPI_ISteamApps_GetLaunchCommandLine", (void*)Hooked_ISteamApps_GetLaunchCommandLine, (void**)&g_orig_VTable_GetLaunchCommandLine },
+    };
+    HookByThunks(iface, "apps", version, kPrefixes, kHooks, _countof(kHooks));
 }
 
-// GetAppID is slot 9 in ISteamUtils007 through 010.
 static void HookISteamUtils(void* iface, const char* version) {
-    if (HookGroupSkipped("utils")) return;
-    int v = InterfaceVersionNumber(version);
-    if (v < 7 || v > 10) {
-        ReFixLog("HookISteamUtils: unknown interface '%s', vtable hooks skipped", version);
-        return;
-    }
-    HookVTableMethod(iface, 9, (void*)Hooked_ISteamUtils_GetAppID, (void**)&g_orig_VTable_GetAppID);
+    static const char* const kPrefixes[] = { "SteamAPI_SteamUtils_v", nullptr };
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamUtils_GetAppID", (void*)Hooked_ISteamUtils_GetAppID, (void**)&g_orig_VTable_GetAppID },
+    };
+    HookByThunks(iface, "utils", version, kPrefixes, kHooks, _countof(kHooks));
 }
 
 typedef void* (*fn_ISteamClient_GetISteamUser_t)(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion);
@@ -3899,20 +3955,18 @@ static void* Hooked_Flat_GetISteamHTTP(void* self, uint32_t hSteamUser, uint32_t
 }
 
 static void HookISteamHTTP(void* iface, const char* pszVersion) {
-    if (!iface) return;
-    if (HookGroupSkipped("http")) return;
-    int v = InterfaceVersionNumber(pszVersion);
-    if (v != 2 && v != 3) { // slots verified for STEAMHTTP_INTERFACE_VERSION002/003
-        ReFixLog("HookISteamHTTP: unknown interface '%s', vtable hooks skipped", pszVersion ? pszVersion : "");
-        return;
-    }
-    HookVTableMethod(iface, 0, (void*)Hooked_VTable_CreateHTTPRequest, (void**)&g_orig_VTable_CreateHTTPRequest);
-    HookVTableMethod(iface, 1, (void*)Hooked_VTable_SetHTTPRequestContextValue, (void**)&g_orig_VTable_SetHTTPRequestContextValue);
-    HookVTableMethod(iface, 5, (void*)Hooked_VTable_SendHTTPRequest, (void**)&g_orig_VTable_SendHTTPRequest);
-    HookVTableMethod(iface, 11, (void*)Hooked_VTable_GetHTTPResponseBodySize, (void**)&g_orig_VTable_GetHTTPResponseBodySize);
-    HookVTableMethod(iface, 12, (void*)Hooked_VTable_GetHTTPResponseBodyData, (void**)&g_orig_VTable_GetHTTPResponseBodyData);
-    HookVTableMethod(iface, 14, (void*)Hooked_VTable_ReleaseHTTPRequest, (void**)&g_orig_VTable_ReleaseHTTPRequest);
-    ReFixLog("HookISteamHTTP: Installed VTable hooks for %p (version='%s')", iface, pszVersion ? pszVersion : "unknown");
+    if (!g_configLoaded) LoadConfig();
+    if (!g_config.httpProxyEnabled) return; // the hooks only matter for games that opted into the HTTP proxy
+    static const char* const kPrefixes[] = { "SteamAPI_SteamHTTP_v", nullptr };
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamHTTP_CreateHTTPRequest", (void*)Hooked_VTable_CreateHTTPRequest, (void**)&g_orig_VTable_CreateHTTPRequest },
+        { "SteamAPI_ISteamHTTP_SetHTTPRequestContextValue", (void*)Hooked_VTable_SetHTTPRequestContextValue, (void**)&g_orig_VTable_SetHTTPRequestContextValue },
+        { "SteamAPI_ISteamHTTP_SendHTTPRequest", (void*)Hooked_VTable_SendHTTPRequest, (void**)&g_orig_VTable_SendHTTPRequest },
+        { "SteamAPI_ISteamHTTP_GetHTTPResponseBodySize", (void*)Hooked_VTable_GetHTTPResponseBodySize, (void**)&g_orig_VTable_GetHTTPResponseBodySize },
+        { "SteamAPI_ISteamHTTP_GetHTTPResponseBodyData", (void*)Hooked_VTable_GetHTTPResponseBodyData, (void**)&g_orig_VTable_GetHTTPResponseBodyData },
+        { "SteamAPI_ISteamHTTP_ReleaseHTTPRequest", (void*)Hooked_VTable_ReleaseHTTPRequest, (void**)&g_orig_VTable_ReleaseHTTPRequest },
+    };
+    HookByThunks(iface, "http", pszVersion, kPrefixes, kHooks, _countof(kHooks));
 }
 
 typedef void* (*fn_ISteamClient_GetISteamInventory_t)(void* self, uint32_t hSteamUser, uint32_t hSteamPipe, const char* pchVersion);
@@ -4068,30 +4122,21 @@ static bool Hooked_Flat_ISteamInventory_GetItemDefinitionProperty(void* self, St
     return false;
 }
 
-// ISteamNetworkingSockets InitAuthentication / GetAuthenticationStatus vtable slots per interface version
-// (from the SDK headers). ConfigureConnectionLanes shifts them by one in v012, so a fixed slot hooks the wrong
-// method there: the game's InitAuthentication() ran our status hook with a garbage pointer and crashed.
-// Unknown versions are left unhooked; a wrong slot crashes, a missing hook only loses the override.
-static bool SocketsAuthenticationSlots(const char* version, int& slotInit, int& slotStatus) {
-    switch (InterfaceVersionNumber(version)) {
-        case 6: case 12: slotInit = 22; slotStatus = 23; return true;
-        case 8: case 9: case 10: slotInit = 21; slotStatus = 22; return true;
-        default: return false;
-    }
+static void HookSocketsAuthentication(void* iface, const char* version) {
+    static const char* const kPrefixes[] = { "SteamAPI_SteamNetworkingSockets_SteamAPI_v", "SteamAPI_SteamNetworkingSockets_v", nullptr };
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamNetworkingSockets_InitAuthentication", (void*)Hooked_ISteamNetworkingSockets_InitAuthentication, (void**)&g_orig_VTable_InitAuthentication },
+        { "SteamAPI_ISteamNetworkingSockets_GetAuthenticationStatus", (void*)Hooked_ISteamNetworkingSockets_GetAuthenticationStatus, (void**)&g_orig_VTable_GetAuthenticationStatus },
+    };
+    HookByThunks(iface, "sockets", version, kPrefixes, kHooks, _countof(kHooks));
 }
 
-static void HookSocketsAuthentication(void* iface, const char* version) {
-    if (HookGroupSkipped("sockets")) return;
-    int slotInit = 0, slotStatus = 0;
-    if (!SocketsAuthenticationSlots(version, slotInit, slotStatus)) {
-        ReFixLog("HookSocketsAuthentication: unknown interface %s, auth hooks skipped", version);
-        return;
-    }
-    HookVTableMethod(iface, slotInit, (void*)Hooked_ISteamNetworkingSockets_InitAuthentication,
-                     (void**)&g_orig_VTable_InitAuthentication);
-    HookVTableMethod(iface, slotStatus, (void*)Hooked_ISteamNetworkingSockets_GetAuthenticationStatus,
-                     (void**)&g_orig_VTable_GetAuthenticationStatus);
-    ReFixLog("HookSocketsAuthentication: %s auth hooks on vtable[%d], vtable[%d]", version, slotInit, slotStatus);
+static void HookNetworkingUtils(void* iface, const char* version) {
+    static const char* const kPrefixes[] = { "SteamAPI_SteamNetworkingUtils_SteamAPI_v", "SteamAPI_SteamNetworkingUtils_v", nullptr };
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus", (void*)Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus, (void**)&g_orig_VTable_GetRelayNetworkStatus },
+    };
+    HookByThunks(iface, "netutils", version, kPrefixes, kHooks, _countof(kHooks));
 }
 
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
@@ -4120,15 +4165,7 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     }
     else if (strstr(pszVersion, "SteamNetworkingUtils")) {
         SteamNetCompat::NotifySocketsPathDetected();
-        // GetRelayNetworkStatus: slot 0 in v002, slot 1 from v003 (AllocateMessage was inserted first).
-        int v = InterfaceVersionNumber(pszVersion);
-        int slot = v == 2 ? 0 : (v == 3 || v == 4) ? 1 : -1;
-        if (slot < 0) {
-            ReFixLog("HookInterfaceByVersion: unknown interface '%s', relay hook skipped", pszVersion);
-        } else {
-            HookVTableMethod(iface, slot, (void*)Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus,
-                             (void**)&g_orig_VTable_GetRelayNetworkStatus);
-        }
+        HookNetworkingUtils(iface, pszVersion);
     }
     else if (strstr(pszVersion, "SteamHTTP")) {
         HookISteamHTTP(iface, pszVersion);
@@ -4277,47 +4314,31 @@ static void InstallVTableHooks() {
         }
     }
 
-    // 6. ISteamUGC
-    fn_GetInterface_t pfnUGC = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_SteamUGC_v016");
-    if (!pfnUGC) pfnUGC = (fn_GetInterface_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamUGC");
-    if (pfnUGC) {
-        void* pUGC = pfnUGC();
-        if (pUGC) {
-            void** vtable = *(void***)pUGC;
-            if (vtable && vtable[30]) {
-                g_orig_VTable_GetItemInstallInfo = (fn_VTable_GetItemInstallInfo_t)vtable[30];
-            }
-            HookVTableMethod(pUGC, 27, (void*)Hooked_ISteamUGC_GetNumSubscribedItems, (void**)&g_orig_VTable_GetNumSubscribedItems);
-            HookVTableMethod(pUGC, 28, (void*)Hooked_ISteamUGC_GetSubscribedItems, (void**)&g_orig_VTable_GetSubscribedItems);
-        }
-    }
-
-    // 7. ISteamNetworkingUtils -- GetRelayNetworkStatus hook
-    // Fixes "Checking Steam Relay..." hang for all ISteamNetworkingSockets games.
-    // vtable[0]=AllocateMessage, vtable[1]=GetRelayNetworkStatus (hooked).
+    // 6. ISteamUGC and 7. ISteamNetworkingUtils (GetRelayNetworkStatus fixes the "Checking Steam Relay..." hang):
+    // the DLL's own accessor gives the interface, its thunks give the slots.
     {
-        fn_GetInterface_t pfnNetUtils = nullptr;
-        pfnNetUtils = (fn_GetInterface_t)GetProcAddress(
-            (HMODULE)g_hOriginalDll, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004");
-        if (!pfnNetUtils)
-            pfnNetUtils = (fn_GetInterface_t)GetProcAddress(
-                (HMODULE)g_hOriginalDll, "SteamNetworkingUtils004");
-        if (!pfnNetUtils)
-            pfnNetUtils = (fn_GetInterface_t)GetProcAddress(
-                (HMODULE)g_hOriginalDll, "SteamAPI_SteamNetworkingUtils_v003");
-        if (!pfnNetUtils)
-            pfnNetUtils = (fn_GetInterface_t)GetProcAddress(
-                (HMODULE)g_hOriginalDll, "SteamNetworkingUtils_v003");
-        if (pfnNetUtils) {
-            void* pNetUtils = pfnNetUtils();
-            if (pNetUtils) {
-                HookVTableMethod(pNetUtils, 1,
-                    (void*)Hooked_ISteamNetworkingUtils_GetRelayNetworkStatus,
-                    (void**)&g_orig_VTable_GetRelayNetworkStatus);
-                ReFixLog("InstallVTableHooks: ISteamNetworkingUtils relay hook OK (vtable[1])");
-            } else {
-                ReFixLog("InstallVTableHooks: ISteamNetworkingUtils->pfn returned null");
-            }
+        int ugcVersion = 0;
+        if (void* pUGC = DllInterface("SteamAPI_SteamUGC_v", ugcVersion)) {
+            char version[16];
+            snprintf(version, sizeof(version), "v%03d", ugcVersion);
+            int installInfoSlot = FlatThunkSlot("SteamAPI_ISteamUGC_GetItemInstallInfo");
+            void** vtable = *(void***)pUGC;
+            if (vtable && installInfoSlot >= 0 && vtable[installInfoSlot])
+                g_orig_VTable_GetItemInstallInfo = (fn_VTable_GetItemInstallInfo_t)vtable[installInfoSlot];
+            static const char* const kPrefixes[] = { "SteamAPI_SteamUGC_v", nullptr };
+            static const ThunkHook kHooks[] = {
+                { "SteamAPI_ISteamUGC_GetNumSubscribedItems", (void*)Hooked_ISteamUGC_GetNumSubscribedItems, (void**)&g_orig_VTable_GetNumSubscribedItems },
+                { "SteamAPI_ISteamUGC_GetSubscribedItems", (void*)Hooked_ISteamUGC_GetSubscribedItems, (void**)&g_orig_VTable_GetSubscribedItems },
+            };
+            HookByThunks(pUGC, "ugc", version, kPrefixes, kHooks, _countof(kHooks));
+        }
+        int utilsVersion = 0;
+        void* pNetUtils = DllInterface("SteamAPI_SteamNetworkingUtils_SteamAPI_v", utilsVersion);
+        if (!pNetUtils) pNetUtils = DllInterface("SteamAPI_SteamNetworkingUtils_v", utilsVersion);
+        if (pNetUtils) {
+            char version[16];
+            snprintf(version, sizeof(version), "v%03d", utilsVersion);
+            HookNetworkingUtils(pNetUtils, version);
         } else {
             ReFixLog("InstallVTableHooks: SteamNetworkingUtils accessor not in valve DLL");
         }

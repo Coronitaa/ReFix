@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -224,7 +225,13 @@ Connection& Connect(uint64_t key, PnServer::Role role, const std::string& userId
 void SendSteam(uint64_t steamId, uint8_t kind, uint16_t clientPort, const char* data, size_t size) {
     std::string envelope{ (char)kind, (char)(clientPort >> 8), (char)clientPort };
     envelope.append(data, size);
-    ReFixSteamFlat::SendMessage(steamId, envelope.data(), (uint32_t)envelope.size(), g_channel);
+    bool sent = ReFixSteamFlat::SendMessage(steamId, envelope.data(), (uint32_t)envelope.size(), g_channel);
+    // Tunnel diagnostics: the first packet to each peer and every failed send (rate-limited per peer).
+    static std::map<uint64_t, uint32_t> s_sent, s_failed;
+    uint32_t& count = sent ? s_sent[steamId] : s_failed[steamId];
+    if (count++ == 0 || (!sent && count % 100 == 0))
+        Log("[Photon] Steam P2P %s to %llu (%s, %zu bytes, %u so far)", sent ? "first send" : "SEND FAILED",
+            (unsigned long long)steamId, kind == kToHost ? "to host" : "to client", size, count);
 }
 
 // Region ping (Photon.Realtime.PhotonPing): 12 x 0x7D + ping id, answered by echoing it.
@@ -250,6 +257,9 @@ void OnListenerDatagram(size_t index, const sockaddr_in& from, const char* data,
 
 void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
     if (size < 4) return;
+    static std::set<uint64_t> s_seen;
+    if (s_seen.insert(from).second)
+        Log("[Photon] Steam P2P first message from %llu (%s)", (unsigned long long)from, data[0] == kToHost ? "to host" : "to client");
     uint16_t port = (uint16_t)(data[1] << 8 | data[2]);
     if (data[0] == kToHost) {
         Connection& c = Connect(RemoteKey(from, port), PnServer::Role::Game, std::to_string(from), [from, port](const std::string& d) {
