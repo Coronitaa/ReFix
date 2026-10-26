@@ -182,8 +182,10 @@ bool OpenSocket(uint16_t port) {
     WSAIoctl(g_socket, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &reportConnReset, sizeof(reportConnReset), nullptr, 0, &bytes,
              nullptr, nullptr);
     if (bind(g_socket, (sockaddr*)&addr, sizeof(addr)) != 0 || ioctlsocket(g_socket, FIONBIO, &nonBlocking) != 0) {
+        int error = WSAGetLastError(); // closesocket resets it; the caller logs it
         closesocket(g_socket);
         g_socket = INVALID_SOCKET;
+        WSASetLastError(error);
         return false;
     }
     g_port.store(port);

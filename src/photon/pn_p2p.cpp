@@ -117,7 +117,9 @@ SOCKET OpenUdp(uint32_t ipHostOrder, uint16_t port) {
     DWORD bytes = 0;
     WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &noConnReset, sizeof(noConnReset), nullptr, 0, &bytes, nullptr, nullptr);
     if (bind(s, (sockaddr*)&a, sizeof(a)) != 0 || ioctlsocket(s, FIONBIO, &nonBlocking) != 0) {
+        int error = WSAGetLastError(); // closesocket resets it; callers log it
         closesocket(s);
+        WSASetLastError(error);
         return INVALID_SOCKET;
     }
     return s;
