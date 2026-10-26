@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 namespace PnServer {
 
@@ -357,6 +358,8 @@ void Emulator::HandleFusionJoin(Peer& peer, Room& room, const std::string& buffe
     if (join.peerMode == PnFusion::PEER_SERVER) room.fusionServer = peer.actor;
     join.type = PnFusion::JOIN_CONFIRMATION;
     join.playerRef = peer.actor;
+    if (join.uniqueId.bytes.size() != PnFusion::UNIQUE_ID_SIZE) join.uniqueId = { true, FusionUniqueId(peer) };
+    room.fusionUniqueIds[peer.actor] = join.uniqueId.bytes;
     SendFusionMessage(room, peer.actor, PnFusion::BuildJoin(header, join));
 
     bool wantsConfig = (join.joinRequests & PnFusion::JOIN_REQUEST_NETWORK_CONFIG) && room.fusionServer &&
@@ -406,6 +409,16 @@ void Emulator::StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header
     if (room.fusionServer && actor != room.fusionServer) ScheduleServerReflexiveInfo(room, actor, header);
 }
 
+// Photon Cloud's plugin gives every peer an 8-byte UniqueId in its Join confirmation; a client cannot connect
+// without one ("UniqueId is required"). The SteamID is unique per player and never zero.
+std::string Emulator::FusionUniqueId(const Peer& peer) const {
+    uint64_t id = std::strtoull(peer.userId.c_str(), nullptr, 10);
+    if (!id) id = std::hash<std::string>()(peer.userId) | 1;
+    std::string bytes(PnFusion::UNIQUE_ID_SIZE, '\0');
+    for (size_t i = 0; i < bytes.size(); i++) bytes[i] = (char)(id >> (8 * i));
+    return bytes;
+}
+
 // The client handles Start asynchronously and waits only ~100 ms for it to finish when a ReflexiveInfo arrives
 // (it then fails with StartGameException), so the message is held back for a moment instead of following Start.
 void Emulator::ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFusion::Header& header) {
@@ -413,6 +426,13 @@ void Emulator::ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFu
     PnFusion::ReflexiveInfo info;
     info.actorId = (uint32_t)room.fusionServer;
     room.fusionRelayInfo[actor] = { m_nowMs + kReflexiveInfoDelayMs, PnFusion::BuildReflexiveInfo(header, info) };
+
+    // The server maps the UniqueId in a client's connect request to that client's actor from the client's own
+    // ReflexiveInfo, which these clients never send, so the plugin sends it on their behalf (no addresses).
+    PnFusion::ReflexiveInfo client;
+    client.actorId = (uint32_t)actor;
+    client.uniqueId = { true, room.fusionUniqueIds[actor] };
+    SendFusionMessage(room, room.fusionServer, PnFusion::BuildReflexiveInfo(header, client));
 }
 
 void Emulator::Tick(uint32_t nowMs) {
@@ -572,6 +592,7 @@ void Emulator::LeaveRoom(uint64_t key, bool sendResponse) {
     if (room.fusionServer == actor) room.fusionServer = 0;
     room.fusionConfigWaiters.erase(actor);
     room.fusionRelayInfo.erase(actor);
+    room.fusionUniqueIds.erase(actor);
     if (room.cleanupCacheOnLeave) {
         room.cache.erase(std::remove_if(room.cache.begin(), room.cache.end(),
                                         [&](const CachedEvent& e) { return !e.global && e.sender == actor; }),

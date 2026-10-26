@@ -388,6 +388,7 @@ static void TestFusionClientGetsHostConfigBeforeStart() {
     // ReflexiveInfo (id 3) is relayed verbatim client -> host and host -> client.
     std::string reflexive(8, '\0');
     reflexive[0] = (char)PnFusion::MSG_REFLEXIVE_INFO;
+    host.inbox.clear(); // drops the plugin's own ReflexiveInfo for the started client
     toServer(2, reflexive);
     CHECK(host.Take(4, 100, p) && AsBytes(p[245], data) && data == reflexive);
     toServer(1, reflexive);
@@ -426,10 +427,17 @@ static void TestFusionClientGetsServerReflexiveInfo() {
     toServer(1, kFusionHostJoin);
     PnFusion::Join cj = j;
     cj.peerMode = PnFusion::PEER_CLIENT;
-    toServer(2, PnFusion::BuildJoin(hostHeader, cj));
     host.inbox.clear();
+    toServer(2, PnFusion::BuildJoin(hostHeader, cj));
     PnFusion::Start st;
     CHECK(client.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseJoin(data, h, j));
+    const std::string clientId("\xC8\0\0\0\0\0\0\0", 8); // SteamID "200", little-endian
+    CHECK(j.uniqueId.present && j.uniqueId.bytes == clientId); // a client cannot connect without a UniqueId
+    // The host learns which actor owns that UniqueId right away.
+    PnFusion::ReflexiveInfo clientInfo;
+    CHECK(host.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseReflexiveInfo(data, h, clientInfo));
+    CHECK(clientInfo.actorId == 2 && clientInfo.uniqueId.bytes == clientId && clientInfo.publicAddr[0] == 0);
+    CHECK(!host.Take(4, 100, p));
     CHECK(client.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st));
 
     emu.Tick(1100);
@@ -497,6 +505,8 @@ static void TestFusionPluginConfirmsJoin() {
     CHECK(b.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseJoin(data, h, j));
     CHECK(j.type == PnFusion::JOIN_CONFIRMATION && j.peerMode == PnFusion::PEER_CLIENT && j.playerRef == 2);
     CHECK(b.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st) && st.remoteServerId == 1);
+    PnFusion::ReflexiveInfo info; // the host only hears which actor owns the client's UniqueId
+    CHECK(a.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseReflexiveInfo(data, h, info) && info.actorId == 2);
     CHECK(!a.Take(4, 100, p));
 }
 

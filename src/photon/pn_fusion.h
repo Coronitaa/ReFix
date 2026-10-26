@@ -25,6 +25,7 @@ constexpr int32_t JOIN_REQUEST_NETWORK_CONFIG = 1, JOIN_REQUEST_REFLEXIVE_INFO =
 constexpr uint8_t JOIN_REQUEST = 1, JOIN_CONFIRMATION = 2;
 constexpr uint8_t PEER_NONE = 0, PEER_SERVER = 1, PEER_CLIENT = 2;
 constexpr uint8_t GAME_MODE_CLIENT_SERVER = 1, GAME_MODE_SHARED = 2;
+constexpr size_t UNIQUE_ID_SIZE = 8; // Join/ReflexiveInfo UniqueId: a 64-bit id, little-endian
 
 struct Header {
     uint8_t protocolVersion = 0;

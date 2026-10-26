@@ -76,6 +76,7 @@ private:
         int32_t fusionServer = 0;   // actor that joined Fusion as Server (client/server mode), 0 if none
         std::map<int32_t, PnFusion::Header> fusionConfigWaiters; // clients started once the host sends its config
         std::map<int32_t, FusionPending> fusionRelayInfo; // per client: the server's ReflexiveInfo, sent when due
+        std::map<int32_t, std::string> fusionUniqueIds;    // 8-byte Fusion UniqueId given to each actor in its Join
         std::map<int32_t, Actor> actors;
         std::vector<CachedEvent> cache;
     };
@@ -103,6 +104,7 @@ private:
     void StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header& header);
     void SendFusionMessage(Room& room, int32_t actor, const std::string& buffer);
     void ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFusion::Header& header);
+    std::string FusionUniqueId(const Peer& peer) const;
     void LogEventSample(const Peer& peer, uint8_t code, int64_t receivers, const std::vector<int32_t>& targets,
                         const PnProto18::Params& params);
     void SetProperties(Peer& peer, const PnProto18::Params& params);
