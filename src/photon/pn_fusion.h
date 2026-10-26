@@ -19,7 +19,9 @@ constexpr uint8_t P_FUSION_DATA = 245;
 // Message ids (ProtocolSerializer registration order): 1 Join, 2 NetworkConfigSync, 3 ReflexiveInfo,
 // 4 Disconnect, 5 Start, 6 Snapshot, 7 HostMigration, 8 PlayerRefMapping, 9 ChangeMasterClient,
 // 10 DummyTrafficSync.
-constexpr uint8_t MSG_JOIN = 1, MSG_START = 5;
+constexpr uint8_t MSG_JOIN = 1, MSG_NETWORK_CONFIG_SYNC = 2, MSG_REFLEXIVE_INFO = 3, MSG_START = 5;
+constexpr uint8_t SYNC_REQUEST = 1, SYNC_RESPONSE = 2, SYNC_OVERRIDE = 3; // NetworkConfigSync.SyncType
+constexpr int32_t JOIN_REQUEST_NETWORK_CONFIG = 1, JOIN_REQUEST_REFLEXIVE_INFO = 2; // Join.JoinRequests flags
 constexpr uint8_t JOIN_REQUEST = 1, JOIN_CONFIRMATION = 2;
 constexpr uint8_t PEER_NONE = 0, PEER_SERVER = 1, PEER_CLIENT = 2;
 constexpr uint8_t GAME_MODE_CLIENT_SERVER = 1, GAME_MODE_SHARED = 2;
@@ -60,5 +62,10 @@ bool ParseJoin(const std::string& buffer, Header& header, Join& join);
 std::string BuildJoin(const Header& header, const Join& join);
 bool ParseStart(const std::string& buffer, Header& header, Start& start);
 std::string BuildStart(const Header& header, const Start& start);
+
+// NetworkConfigSync: [Type:8][NetworkConfig: string, same presence-bit/16-bit-length form as byte[]]. The plugin
+// asks the host for its config (Request) and forwards the host's Response to clients that asked in their Join.
+bool ParseNetworkConfigSync(const std::string& buffer, Header& header, uint8_t& type, OptionalBytes& config);
+std::string BuildNetworkConfigSync(const Header& header, uint8_t type, const OptionalBytes& config);
 
 } // namespace PnFusion

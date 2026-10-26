@@ -121,6 +121,14 @@ foreach ($tcName in $testCases) {
         Write-Host "  [FAIL] detect_game.ps1: Expected '$gameDir', got '$detectedExeDir'" -ForegroundColor Red
     }
 
+    # Online mode keeps exactly one backend next to the proxy: the game's genuine DLL as steam_api64_original.dll,
+    # or ReFix's stock Valve DLL as steam_api64_valve.dll when the game had none. Never both.
+    $hasSingleBackend = {
+        $orig = Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_original.dll")
+        $valve = Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll")
+        $orig -xor $valve
+    }
+
     # --- Phase 2: deploy_helper.ps1 direct execution ---
     $deployHelpOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $deployHelperPs1 `
         -TargetDir "$gameDir" `
@@ -139,7 +147,7 @@ foreach ($tcName in $testCases) {
     $deployHelpCode = $LASTEXITCODE
 
     $p2Deployed = (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64.dll")) -and `
-                  (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll")) -and `
+                  (& $hasSingleBackend) -and `
                   (Test-Path -LiteralPath (Join-Path $gameDir "steam_appid.txt")) -and `
                   (Test-Path -LiteralPath (Join-Path $gameDir "ReFix.ini")) -and `
                   (Test-Path -LiteralPath (Join-Path $gameDir "winmm.dll")) -and `
@@ -160,7 +168,7 @@ foreach ($tcName in $testCases) {
     $autoDeployCode = $LASTEXITCODE
 
     $p3BatDeployed = (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64.dll")) -and `
-                     (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll")) -and `
+                     (& $hasSingleBackend) -and `
                      (Test-Path -LiteralPath (Join-Path $gameDir "steam_appid.txt")) -and `
                      (Test-Path -LiteralPath (Join-Path $gameDir "ReFix.ini")) -and `
                      (Test-Path -LiteralPath (Join-Path $gameDir "winmm.dll")) -and `
@@ -189,6 +197,7 @@ foreach ($tcName in $testCases) {
 
     $p4Restored = (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64.dll")) -and `
                   (-not (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll"))) -and `
+                  (-not (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_original.dll"))) -and `
                   (-not (Test-Path -LiteralPath (Join-Path $gameDir "winmm.dll"))) -and `
                   (-not (Test-Path -LiteralPath (Join-Path $gameDir "ReFix.ini"))) -and `
                   (-not (Test-Path -LiteralPath (Join-Path $gameDir "steam_appid.txt"))) -and `

@@ -1591,7 +1591,8 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
         "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
     if (pfnGetOwner) {
         uint64_t ownerID = pfnGetOwner(matchmaking, lobbyID);
-        if (ownerID != 0) {
+        // Never register ourselves: tunnelled packets to our own SteamID loop back as session requests.
+        if (ownerID != 0 && ownerID != g_capturedSteamID) {
             uint32_t ownerIP = 0;
             if (serverIP && serverIP[0] != '\0') {
                 struct in_addr addr;
@@ -1614,7 +1615,7 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
 
     for (int i = 0; i < count; i++) {
         uint64_t memberID = g_pfn_GetLobbyMemberByIndex(matchmaking, lobbyID, i);
-        if (!memberID) continue;
+        if (!memberID || memberID == g_capturedSteamID) continue;
 
         // Resolve IP: use SERVER_IP from lobby data for the host; for other members
         // we derive a synthetic IP from their SteamID so sendto can find them.
@@ -2685,7 +2686,7 @@ static uint64_t Hooked_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType,
         int waitMs = (g_godotIsEngine || g_unrealIsEngine) ? 3000 : 1000;
         Sleep(waitMs);
         if (g_activeLobbyID == 0) {
-            uint64_t userSteamID = g_capturedSteamID != 0 ? g_capturedSteamID : 76561198362393833ULL;
+            uint64_t userSteamID = g_capturedSteamID != 0 ? g_capturedSteamID : g_config.steamIdNum;
             uint64_t syntheticLobbyID = 0x0110000100000000ULL | (userSteamID & 0xFFFFFFFFULL);
             ReFixLog("  -> CreateLobby Fallback: Active Lobby ID still 0 after %dms. Assigning Synthetic Lobby ID: %llu", waitMs, syntheticLobbyID);
             ReFix_NotifyLobbyID(syntheticLobbyID);

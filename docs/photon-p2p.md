@@ -45,8 +45,11 @@ Emulator sockets are registered with `SteamP2PHook::ExcludeSocket`. `PreserveLoo
 ## Status (2026-10-25)
 - Photon Fusion (Roadside Research, AppId 3643170, Fusion 2.0.8): hosting works on one PC (Host -> New game
   loads into the room). The emulator plays Photon Cloud's Fusion room plugin (`pn_fusion`): it confirms the
-  client's Join (event 100 to actor 0) and sends Start pointing at the actor that joined as Server. Shared mode
-  (plugin-simulated) is not supported, and joining as a second PC is not yet tested. Fusion detected
+  client's Join (event 100 to actor 0) and sends Start pointing at the actor that joined as Server. For a client
+  that asks for the NetworkConfig it requests it from the host (NetworkConfigSync), forwards the reply and only
+  then starts the client; ReflexiveInfo is relayed between peers. Shared mode (plugin-simulated) is not
+  supported; a two-PC Fusion join is implemented but not yet tested.
+- R.E.P.O. (PUN 2 + Voice): two-PC join over Steam P2P verified. Fusion detected
   automatically; config is Topology B (ReFixCloud emulator + Steam SDR, port 27015).
 - R.E.P.O. (Mono, PUN 2 + Voice): hosting works on one PC. The lobby loads, the room and voice room are created on
   the emulator, and START GAME loads a level. Not yet tested across two PCs.

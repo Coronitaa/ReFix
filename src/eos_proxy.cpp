@@ -1941,7 +1941,7 @@ static void CreateAndTagRealSteamLobbyAsync() {
         if (steamLobbyId == 0) {
             char envSteamId[32] = "";
             GetEnvironmentVariableA("REFIX_STEAM_ID", envSteamId, sizeof(envSteamId));
-            uint64_t userSteamID = envSteamId[0] != '\0' ? _strtoui64(envSteamId, nullptr, 10) : 76561198362393833ULL;
+            uint64_t userSteamID = envSteamId[0] != '\0' ? _strtoui64(envSteamId, nullptr, 10) : (uint64_t)GetTickCount64(); // per-session, never a fixed account
             steamLobbyId = 0x0110000100000000ULL | (userSteamID & 0xFFFFFFFFULL);
             Log("WARNING: CreateAndTagRealSteamLobbyAsync: Steam API returned 0, assigned Synthetic Lobby ID=%llu", steamLobbyId);
         } else {

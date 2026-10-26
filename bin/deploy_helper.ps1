@@ -593,6 +593,9 @@ if ($pluginDirs32.Count -gt 0) {
 
 if ($pluginDirs.Count -eq 0) { $pluginDirs += $ExeDir }
 
+# Set by the Valve branch; other modes must still pass a boolean to Verify-ReFixDeployment.
+$isX86Game = ($pluginDirs32.Count -gt 0)
+
 switch ($OnlineMode) {
     "valve" {
         # --- Mode 1: ReFix Online por Steam (Valve Mode) ---
@@ -621,12 +624,17 @@ switch ($OnlineMode) {
                 }
             }
 
-            # If $origPath exists, make sure $valvePath is restored from $origPath
+            # Online mode keeps ONE backup: steam_api64_original.dll (the game's genuine DLL). The proxy loads it when
+            # no steam_api64_valve.dll backend is present; _valve is only needed for Re:Goldberg (emulator backend).
             if (Test-Path -LiteralPath $origPath) {
-                if ((-not (Test-Path -LiteralPath $valvePath)) -or $isGoldbergAtValve) {
-                    Copy-Item -LiteralPath $origPath -Destination $valvePath -Force
-                    Write-Host "  [OK] Restored original Valve DLL from $origPath -> steam_api64_valve.dll in $dir" -ForegroundColor Green
+                if ($isGoldbergAtValve) {
+                    Remove-Item -LiteralPath $valvePath -Force
+                    Write-Host "  [OK] Removed Re:Goldberg backend steam_api64_valve.dll; proxy uses steam_api64_original.dll in $dir" -ForegroundColor Green
                     $isGoldbergAtValve = $false
+                } elseif ((Test-Path -LiteralPath $valvePath) -and
+                          (Get-FileHash -LiteralPath $valvePath).Hash -eq (Get-FileHash -LiteralPath $origPath).Hash) {
+                    Remove-Item -LiteralPath $valvePath -Force
+                    Write-Host "  [OK] Removed duplicate steam_api64_valve.dll (same as steam_api64_original.dll) in $dir" -ForegroundColor Green
                 }
             } elseif (Test-Path -LiteralPath $steamPath) {
                 $isAlreadyProxy = ((Get-Item -LiteralPath $steamPath).Length -eq (Get-Item -LiteralPath $proxyPath).Length)
@@ -634,14 +642,13 @@ switch ($OnlineMode) {
                 if ((-not $isAlreadyProxy) -and (-not $isGoldbergAtSteam)) {
                     # This is genuine original DLL
                     Copy-Item -LiteralPath $steamPath -Destination $origPath -Force
-                    Copy-Item -LiteralPath $steamPath -Destination $valvePath -Force
-                    Write-Host "  [OK] Preserved original steam_api64.dll -> steam_api64_original.dll & steam_api64_valve.dll in $dir" -ForegroundColor Green
+                    Write-Host "  [OK] Preserved original steam_api64.dll -> steam_api64_original.dll in $dir" -ForegroundColor Green
                     $isGoldbergAtValve = $false
                 }
             }
 
-            # If valvePath is still missing or still Goldberg, use stock genuine Valve DLL as fallback
-            if ((-not (Test-Path -LiteralPath $valvePath)) -or $isGoldbergAtValve) {
+            # No genuine DLL of the game's own to forward to: use ReFix's stock Valve DLL as the backend.
+            if ((-not (Test-Path -LiteralPath $origPath)) -and ((-not (Test-Path -LiteralPath $valvePath)) -or $isGoldbergAtValve)) {
                 if (Test-Path -LiteralPath $valveStockDll) {
                     Copy-Item -LiteralPath $valveStockDll -Destination $valvePath -Force
                     Write-Host "  [OK] Deployed stock genuine Valve steam_api64.dll -> steam_api64_valve.dll in $dir" -ForegroundColor Green
@@ -2305,7 +2312,7 @@ $verifySuccess = Verify-ReFixDeployment `
     -GameName $GameName `
     -PluginDirs $pluginDirs `
     -PluginDirs32 $pluginDirs32 `
-    -IsX86 $isX86Game
+    -IsX86 ([bool]$isX86Game)
 
 if (-not $verifySuccess) {
     Write-Host "[FATAL ERROR] Post-deploy verification failed! Mandatory files are missing or corrupted." -ForegroundColor Red

@@ -1,4 +1,5 @@
 #pragma once
+#include "pn_fusion.h"
 #include "pn_proto18.h"
 #include <cstdint>
 #include <functional>
@@ -67,6 +68,7 @@ private:
         int32_t nextActor = 1;
         int32_t master = 0;
         int32_t fusionServer = 0;   // actor that joined Fusion as Server (client/server mode), 0 if none
+        std::map<int32_t, PnFusion::Header> fusionConfigWaiters; // clients started once the host sends its config
         std::map<int32_t, Actor> actors;
         std::vector<CachedEvent> cache;
     };
@@ -89,6 +91,9 @@ private:
     void EnterRoom(Peer& peer, uint64_t key, uint8_t op, const PnProto18::Params& params);
     void RaiseEvent(Peer& peer, const PnProto18::Params& params, bool reliable, uint8_t channel);
     void HandleFusionProtocol(Peer& peer, const PnProto18::Raw& data);
+    void HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer);
+    void HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
+    void StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header& header);
     void SendFusionMessage(Room& room, int32_t actor, const std::string& buffer);
     void LogEventSample(const Peer& peer, uint8_t code, int64_t receivers, const std::vector<int32_t>& targets,
                         const PnProto18::Params& params);

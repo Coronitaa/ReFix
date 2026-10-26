@@ -122,6 +122,24 @@ std::string BuildJoin(const Header& header, const Join& join) {
     return w.Finish();
 }
 
+bool ParseNetworkConfigSync(const std::string& buffer, Header& header, uint8_t& type, OptionalBytes& config) {
+    BitReader r(buffer);
+    if (r.U8() != MSG_NETWORK_CONFIG_SYNC) return false;
+    ReadHeader(r, header);
+    type = r.U8();
+    r.Optional(config);
+    return r.ok;
+}
+
+std::string BuildNetworkConfigSync(const Header& header, uint8_t type, const OptionalBytes& config) {
+    BitWriter w;
+    w.U8(MSG_NETWORK_CONFIG_SYNC);
+    WriteHeader(w, header);
+    w.U8(type);
+    w.Optional(config);
+    return w.Finish();
+}
+
 bool ParseStart(const std::string& buffer, Header& header, Start& start) {
     BitReader r(buffer);
     if (r.U8() != MSG_START) return false;

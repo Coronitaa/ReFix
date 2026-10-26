@@ -318,30 +318,87 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
               room.actors.size(), room.master);
 }
 
-// Photon Cloud runs a "Fusion" plugin in Fusion rooms that answers the protocol messages clients send to the
-// server actor; the client times out without them. Join is confirmed to the sender with its PlayerRef, then
-// Start tells it which actor runs the Fusion server (in client/server mode, the peer that joined as Server).
+// Photon Cloud runs a "Fusion" plugin in Fusion rooms that answers the protocol messages peers send to the
+// server actor; peers time out without them. The emulator plays its client/server part:
+//  - Join is confirmed to the sender with its PlayerRef, then Start tells it which actor runs the Fusion
+//    server (the peer that joined as Server).
+//  - A client whose Join asks for the NetworkConfig is started only after the host's config was requested
+//    (NetworkConfigSync Request) and the host's Response forwarded to it.
+//  - ReflexiveInfo (NAT-punch addresses) is relayed between clients and the host unchanged.
 void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
     std::string buffer;
+    if (!AsBytes(data, buffer) || !peer.room) return;
+    Room& room = *peer.room;
+    switch (PnFusion::FirstMessageId(buffer)) {
+        case PnFusion::MSG_JOIN: HandleFusionJoin(peer, room, buffer); return;
+        case PnFusion::MSG_NETWORK_CONFIG_SYNC: HandleFusionConfigSync(peer, room, buffer); return;
+        case PnFusion::MSG_REFLEXIVE_INFO:
+            if (peer.actor == room.fusionServer) {
+                for (const auto& [nr, a] : room.actors)
+                    if (nr != room.fusionServer) SendFusionMessage(room, nr, buffer);
+            } else if (room.fusionServer) {
+                SendFusionMessage(room, room.fusionServer, buffer);
+            }
+            return;
+        default:
+            m_env.log("[Photon] Fusion: unhandled protocol message %d from actor %d (%zu bytes)",
+                      PnFusion::FirstMessageId(buffer), peer.actor, buffer.size());
+    }
+}
+
+void Emulator::HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer) {
     PnFusion::Header header;
     PnFusion::Join join;
-    if (!AsBytes(data, buffer) || !PnFusion::ParseJoin(buffer, header, join) || join.type != PnFusion::JOIN_REQUEST) {
-        m_env.log("[Photon] Fusion: unhandled protocol message %d from actor %d (%zu bytes)", PnFusion::FirstMessageId(buffer),
-                  peer.actor, buffer.size());
-        return;
-    }
-    Room& room = *peer.room;
+    if (!PnFusion::ParseJoin(buffer, header, join) || join.type != PnFusion::JOIN_REQUEST) return;
     if (join.peerMode == PnFusion::PEER_SERVER) room.fusionServer = peer.actor;
     join.type = PnFusion::JOIN_CONFIRMATION;
     join.playerRef = peer.actor;
     SendFusionMessage(room, peer.actor, PnFusion::BuildJoin(header, join));
 
+    bool wantsConfig = (join.joinRequests & PnFusion::JOIN_REQUEST_NETWORK_CONFIG) && room.fusionServer &&
+                       room.fusionServer != peer.actor;
+    if (wantsConfig) {
+        room.fusionConfigWaiters[peer.actor] = header;
+        SendFusionMessage(room, room.fusionServer,
+                          PnFusion::BuildNetworkConfigSync(header, PnFusion::SYNC_REQUEST, PnFusion::OptionalBytes()));
+        m_env.log("[Photon] Fusion: actor %d joined; NetworkConfig requested from server actor %d", peer.actor,
+                  room.fusionServer);
+        return;
+    }
+    StartFusionPeer(room, peer.actor, header);
+    m_env.log("[Photon] Fusion: actor %d joined and started (mode %u, peer %u, protocol %u, Fusion %d.%d.%d)", peer.actor,
+              join.gameMode, join.peerMode, header.protocolVersion, header.versionMajor, header.versionMinor,
+              header.versionBuild);
+}
+
+void Emulator::HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer) {
+    PnFusion::Header header;
+    uint8_t type = 0;
+    PnFusion::OptionalBytes config;
+    if (peer.actor != room.fusionServer || !PnFusion::ParseNetworkConfigSync(buffer, header, type, config)) {
+        m_env.log("[Photon] Fusion: ignored NetworkConfigSync from actor %d", peer.actor);
+        return;
+    }
+    if (type == PnFusion::SYNC_OVERRIDE) { // host pushes a new config to everyone
+        for (const auto& [nr, a] : room.actors)
+            if (nr != room.fusionServer) SendFusionMessage(room, nr, buffer);
+        return;
+    }
+    auto waiters = std::move(room.fusionConfigWaiters);
+    room.fusionConfigWaiters.clear();
+    for (const auto& [actor, clientHeader] : waiters) {
+        if (!room.actors.count(actor)) continue;
+        SendFusionMessage(room, actor, buffer);
+        StartFusionPeer(room, actor, clientHeader);
+        m_env.log("[Photon] Fusion: forwarded host NetworkConfig (%zu bytes) to actor %d and started it",
+                  config.bytes.size(), actor);
+    }
+}
+
+void Emulator::StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header& header) {
     PnFusion::Start start;
     start.remoteServerId = (uint32_t)(room.fusionServer ? room.fusionServer : room.master);
-    SendFusionMessage(room, peer.actor, PnFusion::BuildStart(header, start));
-    m_env.log("[Photon] Fusion: actor %d joined and started (mode %u, peer %u, server actor %u, protocol %u, Fusion %d.%d.%d)",
-              peer.actor, join.gameMode, join.peerMode, start.remoteServerId, header.protocolVersion,
-              header.versionMajor, header.versionMinor, header.versionBuild);
+    SendFusionMessage(room, actor, PnFusion::BuildStart(header, start));
 }
 
 void Emulator::SendFusionMessage(Room& room, int32_t actor, const std::string& buffer) {
@@ -481,6 +538,7 @@ void Emulator::LeaveRoom(uint64_t key, bool sendResponse) {
     peer.actor = 0;
     room.actors.erase(actor);
     if (room.fusionServer == actor) room.fusionServer = 0;
+    room.fusionConfigWaiters.erase(actor);
     if (room.cleanupCacheOnLeave) {
         room.cache.erase(std::remove_if(room.cache.begin(), room.cache.end(),
                                         [&](const CachedEvent& e) { return !e.global && e.sender == actor; }),
