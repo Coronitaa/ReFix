@@ -222,10 +222,39 @@ Connection& Connect(uint64_t key, PnServer::Role role, const std::string& userId
     return c;
 }
 
+// Tunnel diagnostics: per-peer message and byte counts, logged by the pump while they change.
+struct TunnelStats {
+    uint32_t sent = 0, sentBytes = 0, sentMax = 0, received = 0, receivedBytes = 0, receivedMax = 0;
+    uint32_t loggedSent = 0, loggedReceived = 0;
+};
+std::map<uint64_t, TunnelStats> g_tunnelStats;
+
+void CountTunnel(uint32_t& messages, uint32_t& bytes, uint32_t& largest, size_t size) {
+    messages++;
+    bytes += (uint32_t)size;
+    if (size > largest) largest = (uint32_t)size;
+}
+
+void LogTunnelStats(DWORD now) {
+    constexpr DWORD kIntervalMs = 5000;
+    static DWORD s_last = 0;
+    if (now - s_last < kIntervalMs) return;
+    s_last = now;
+    for (auto& [peer, st] : g_tunnelStats) {
+        if (st.sent == st.loggedSent && st.received == st.loggedReceived) continue;
+        st.loggedSent = st.sent;
+        st.loggedReceived = st.received;
+        Log("[Photon] Steam tunnel %llu: sent %u (%u bytes, largest %u), received %u (%u bytes, largest %u)",
+            (unsigned long long)peer, st.sent, st.sentBytes, st.sentMax, st.received, st.receivedBytes, st.receivedMax);
+    }
+}
+
 void SendSteam(uint64_t steamId, uint8_t kind, uint16_t clientPort, const char* data, size_t size) {
     std::string envelope{ (char)kind, (char)(clientPort >> 8), (char)clientPort };
     envelope.append(data, size);
     bool sent = ReFixSteamFlat::SendMessage(steamId, envelope.data(), (uint32_t)envelope.size(), g_channel);
+    TunnelStats& stats = g_tunnelStats[steamId];
+    if (sent) CountTunnel(stats.sent, stats.sentBytes, stats.sentMax, size);
     // Tunnel diagnostics: the first packet to each peer and every failed send (rate-limited per peer).
     static std::map<uint64_t, uint32_t> s_sent, s_failed;
     uint32_t& count = sent ? s_sent[steamId] : s_failed[steamId];
@@ -260,6 +289,8 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
     static std::set<uint64_t> s_seen;
     if (s_seen.insert(from).second)
         Log("[Photon] Steam P2P first message from %llu (%s)", (unsigned long long)from, data[0] == kToHost ? "to host" : "to client");
+    TunnelStats& stats = g_tunnelStats[from];
+    CountTunnel(stats.received, stats.receivedBytes, stats.receivedMax, size - 3);
     uint16_t port = (uint16_t)(data[1] << 8 | data[2]);
     if (data[0] == kToHost) {
         Connection& c = Connect(RemoteKey(from, port), PnServer::Role::Game, std::to_string(from), [from, port](const std::string& d) {
@@ -315,6 +346,7 @@ void Pump() {
 
     DWORD now = GetTickCount();
     g_emulator->Tick(now);
+    LogTunnelStats(now);
     for (auto it = g_connections.begin(); it != g_connections.end();) {
         it->second.enet->Tick(now);
         if (it->second.enet->IsClosed()) {

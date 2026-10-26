@@ -482,6 +482,19 @@ void Emulator::LogEventSample(const Peer& peer, uint8_t code, int64_t receivers,
               detail.c_str());
 }
 
+// Diagnostic: Fusion's peer-to-peer packets travel as DATA events between two actors; the first few of every
+// sender -> target pair are logged with their size, so a direction that never carries anything shows up.
+void Emulator::LogRelaySample(int32_t sender, const std::vector<int32_t>& targets, size_t size, bool reliable,
+                              uint8_t channel) {
+    constexpr int kMaxPerPair = 10;
+    int32_t target = targets.empty() ? -1 : targets[0];
+    int& count = m_relaySamples[{ sender, target }];
+    if (count >= kMaxPerPair) return;
+    count++;
+    m_env.log("[Photon] Relay data actor %d -> %d (%zu bytes, %s, channel %u, #%d)", sender, target, size,
+              reliable ? "reliable" : "unreliable", channel, count);
+}
+
 void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8_t channel) {
     if (!peer.room) return;
     Room& room = *peer.room;
@@ -493,7 +506,8 @@ void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8
     Raw data = dataIt != params.end() ? dataIt->second : Raw();
     std::vector<int32_t> targets;
     if (params.count(P_ACTOR_LIST)) AsIntArray(params.at(P_ACTOR_LIST), targets);
-    LogEventSample(peer, code, receivers, targets, params);
+    if (code == PnFusion::EV_DATA) LogRelaySample(peer.actor, targets, data.size(), reliable, channel);
+    else LogEventSample(peer, code, receivers, targets, params);
     if (code == PnFusion::EV_PROTOCOL && targets.size() == 1 && targets[0] == PnFusion::SERVER_ACTOR) {
         HandleFusionProtocol(peer, data);
         return;
