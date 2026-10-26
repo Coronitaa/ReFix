@@ -99,6 +99,32 @@ static void TestEnetHandshakeAndOrdering() {
     CHECK(delivered.size() == 2 && delivered[0] == "A" && delivered[1] == "B");
 }
 
+// Unreliable messages over the MTU arrive as unsequenced fragments (command 15), possibly out of order. They were
+// acknowledged but dropped, so Photon Fusion's relayed connect never reached the host.
+static void TestEnetReassemblesUnsequencedFragments() {
+    std::vector<std::string> delivered;
+    std::vector<bool> reliableFlags;
+    PnEnetConnection conn(7, [](const std::string&) {},
+                          [&](const std::string& m, bool reliable, uint8_t) { delivered.push_back(m); reliableFlags.push_back(reliable); });
+    std::string connect = ClientDatagram(ClientCommand(2, 255, 1, 1, std::string(32, '\0')), 1, 42);
+    conn.OnDatagram((const uint8_t*)connect.data(), connect.size(), 100);
+
+    const std::string message = "0123456789";
+    auto fragment = [&](int32_t number, int32_t offset, const std::string& chunk) {
+        // start sequence 5, 3 fragments, total length 10
+        std::string extra = BE32(5) + BE32(3) + BE32(number) + BE32((int32_t)message.size()) + BE32(offset);
+        return ClientDatagram(ClientCommand(15, 1, 2, 5 + number, extra + chunk), 1, 42);
+    };
+    std::string f2 = fragment(2, 8, "89"), f0 = fragment(0, 0, "0123"), f1 = fragment(1, 4, "4567");
+    conn.OnDatagram((const uint8_t*)f2.data(), f2.size(), 110);
+    conn.OnDatagram((const uint8_t*)f0.data(), f0.size(), 111);
+    CHECK(delivered.empty());
+    conn.OnDatagram((const uint8_t*)f1.data(), f1.size(), 112);
+    CHECK(delivered.size() == 1 && delivered[0] == message && !reliableFlags[0]);
+    conn.OnDatagram((const uint8_t*)f1.data(), f1.size(), 113); // late duplicate: no second delivery
+    CHECK(delivered.size() == 1);
+}
+
 static void TestEnetFragmentsLargeMessages() {
     std::vector<std::string> sent;
     PnEnetConnection conn(1, [&](const std::string& d) { sent.push_back(d); }, [](const std::string&, bool, uint8_t) {});
@@ -420,6 +446,7 @@ int main() {
     TestTableMerge();
     TestEnetHandshakeAndOrdering();
     TestEnetFragmentsLargeMessages();
+    TestEnetReassemblesUnsequencedFragments();
     TestCrypto();
     TestGameServerRoomFlow();
     TestMasterRoutesJoinsToHost();

@@ -104,7 +104,10 @@ void PnEnetConnection::HandleCommand(uint8_t type, uint8_t channel, uint8_t flag
         case CT_RELIABLE_UNSEQUENCED:
             m_onMessage(std::string((const char*)payload, payloadSize), type == CT_RELIABLE_UNSEQUENCED, channel);
             break;
-        default: // ping, server time, unsequenced fragments: acknowledged above, nothing to deliver
+        case CT_FRAGMENT_UNSEQUENCED:
+            DeliverUnsequencedFragment(channel, extra, payload, payloadSize);
+            break;
+        default: // ping, server time: acknowledged above, nothing to deliver
             break;
     }
 }
@@ -141,6 +144,40 @@ void PnEnetConnection::DeliverOrdered(IncomingChannel& ch, uint8_t channel, cons
     if (ch.fragmentsLeft <= 0 || offset < 0 || (size_t)offset + chunk > ch.fragmentBuffer.size()) return;
     ch.fragmentBuffer.replace((size_t)offset, chunk, item, 1 + kFragmentExtra, chunk);
     if (--ch.fragmentsLeft == 0) m_onMessage(ch.fragmentBuffer, true, channel);
+}
+
+// Unreliable messages larger than the MTU (Photon Fusion's relayed packets) arrive as unsequenced fragments,
+// interleaved and in any order. Each carries the same 20-byte header as a reliable fragment (start sequence,
+// count, number, total length, offset); the message is delivered once every fragment arrived.
+void PnEnetConnection::DeliverUnsequencedFragment(uint8_t channel, const uint8_t* extra, const uint8_t* payload, size_t size) {
+    constexpr uint32_t kFragmentTimeoutMs = 5000;
+    constexpr size_t kMaxCompletedKeys = 256;
+    int32_t start = BE32(extra), count = BE32(extra + 4), number = BE32(extra + 8), total = BE32(extra + 12),
+            offset = BE32(extra + 16);
+    uint64_t key = (uint64_t)channel << 32 | (uint32_t)start;
+    if (count <= 0 || total <= 0 || number < 0 || number >= count || offset < 0 || (size_t)offset + size > (size_t)total)
+        return;
+    if (m_completedUnsequenced.count(key)) return; // late duplicate of a delivered message
+
+    for (auto it = m_unsequencedFragments.begin(); it != m_unsequencedFragments.end();) { // drop abandoned ones
+        if (m_nowMs - it->second.startedMs > kFragmentTimeoutMs) it = m_unsequencedFragments.erase(it);
+        else ++it;
+    }
+    UnsequencedMessage& msg = m_unsequencedFragments[key];
+    if (msg.buffer.empty()) {
+        msg.buffer.assign((size_t)total, '\0');
+        msg.count = count;
+        msg.startedMs = m_nowMs;
+    }
+    if (msg.buffer.size() != (size_t)total || msg.count != count || !msg.received.insert(number).second) return;
+    msg.buffer.replace((size_t)offset, size, (const char*)payload, size);
+    if ((int32_t)msg.received.size() < msg.count) return;
+
+    std::string complete = std::move(msg.buffer);
+    m_unsequencedFragments.erase(key);
+    if (m_completedUnsequenced.size() >= kMaxCompletedKeys) m_completedUnsequenced.clear();
+    m_completedUnsequenced.insert(key);
+    m_onMessage(complete, false, channel);
 }
 
 void PnEnetConnection::QueueAck(uint8_t channel, int32_t seq, int32_t sentTime, bool unsequenced) {

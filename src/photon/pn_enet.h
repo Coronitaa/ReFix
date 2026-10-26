@@ -3,6 +3,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,17 @@ private:
         std::string fragmentBuffer;              // reassembly of the fragmented message in progress
         int32_t fragmentsLeft = 0;
     };
+
+    // Unsequenced fragments (unreliable messages over the MTU) of one message, keyed by channel and start sequence.
+    struct UnsequencedMessage {
+        std::string buffer;
+        std::set<int32_t> received;  // fragment numbers already copied
+        int32_t count = 0;
+        uint32_t startedMs = 0;
+    };
+    std::map<uint64_t, UnsequencedMessage> m_unsequencedFragments;
+    std::set<uint64_t> m_completedUnsequenced;  // recent keys, so late duplicates are not delivered twice
+    void DeliverUnsequencedFragment(uint8_t channel, const uint8_t* extra, const uint8_t* payload, size_t size);
 
     void HandleCommand(uint8_t type, uint8_t channel, uint8_t flags, int32_t reliableSeq, const uint8_t* extra,
                        const uint8_t* payload, size_t payloadSize, int32_t sentTime);
