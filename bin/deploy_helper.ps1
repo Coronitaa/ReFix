@@ -518,16 +518,21 @@ Write-Host ""
 # Discover all steam_api64.dll or backup steam_api64_valve.dll locations
 $pluginDirs = @()
 
-# For Unity games, discover dedicated Plugins folders (e.g. *_Data\Plugins\x86_64 or *_Data\Plugins)
-$unityPluginDirs = @()
+# A folder is a Steam plugin folder only if it holds a Steam API DLL (or ReFix's backup of one). Unity also
+# ships Linux plugins in *_Data\Plugins\x86 / x86_64 (.so files): a proxy there has no genuine DLL behind it
+# and fails post-deploy verification (e.g. Overcooked! 2, a 32-bit game using *_Data\Plugins\steam_api.dll).
+function Test-HasSteamApi([string]$Dir, [string]$Pattern) {
+    return [bool](Get-ChildItem -LiteralPath $Dir -Filter $Pattern -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
 # For Unity games, discover dedicated Plugins folders (e.g. *_Data\Plugins\x86_64 or *_Data\Plugins)
 $unityPluginDirs = @()
 $unityDataDirs = Get-ChildItem -LiteralPath $TargetDir -Directory -Filter "*_Data" -Recurse -ErrorAction SilentlyContinue
 foreach ($uData in $unityDataDirs) {
     $p64 = Join-Path $uData.FullName "Plugins\x86_64"
     $pRoot = Join-Path $uData.FullName "Plugins"
-    if (Test-Path -LiteralPath $p64) { $unityPluginDirs += $p64 }
-    elseif (Test-Path -LiteralPath $pRoot) { $unityPluginDirs += $pRoot }
+    if (Test-HasSteamApi $p64 "steam_api64*.dll") { $unityPluginDirs += $p64 }
+    elseif (Test-HasSteamApi $pRoot "steam_api64*.dll") { $unityPluginDirs += $pRoot }
 }
 
 $steamDlls = Get-ChildItem -LiteralPath $TargetDir -Filter "steam_api64.dll" -Recurse -ErrorAction SilentlyContinue
@@ -569,7 +574,7 @@ $pluginDirs32 = @()
 # Unity x86 plugin subfolder: *_Data\Plugins\x86
 foreach ($uData in $unityDataDirs) {
     $p32 = Join-Path $uData.FullName "Plugins\x86"
-    if (Test-Path -LiteralPath $p32) {
+    if ((Test-HasSteamApi $p32 "steam_api.dll") -or (Test-HasSteamApi $p32 "steam_api_*.dll")) {
         if ($pluginDirs32 -notcontains $p32) { $pluginDirs32 += $p32 }
     }
 }
@@ -591,7 +596,8 @@ if ($pluginDirs32.Count -gt 0) {
     Write-Host "  [x86] Detected 32-bit steam_api.dll location(s): $($pluginDirs32 -join ', ')" -ForegroundColor Yellow
 }
 
-if ($pluginDirs.Count -eq 0) { $pluginDirs += $ExeDir }
+# No steam_api64.dll anywhere: fall back to the exe folder, unless the game is 32-bit only (it never loads it).
+if ($pluginDirs.Count -eq 0 -and $pluginDirs32.Count -eq 0) { $pluginDirs += $ExeDir }
 
 # Set by the Valve branch; other modes must still pass a boolean to Verify-ReFixDeployment.
 $isX86Game = ($pluginDirs32.Count -gt 0)

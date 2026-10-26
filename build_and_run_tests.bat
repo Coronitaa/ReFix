@@ -34,6 +34,12 @@ echo ====================================================================
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tests\test_path_robustness.ps1"
 if %ERRORLEVEL% neq 0 ( echo [!] Path robustness tests failed & exit /b 1 )
 
+echo ====================================================================
+echo [*] Unity deploy with Linux plugin folders (32-bit game)
+echo ====================================================================
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tests\test_unity_linux_plugins.ps1"
+if %ERRORLEVEL% neq 0 ( echo [!] Unity Linux plugin folder test failed & exit /b 1 )
+
 echo:
 echo [OK] All ReFix test suites passed.
 exit /b 0
