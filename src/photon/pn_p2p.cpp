@@ -341,6 +341,9 @@ DWORD WINAPI Thread(LPVOID) {
     env.roomHosted = RoomHosted;
     env.log = Log;
     g_emulator = std::make_unique<PnServer::Emulator>(env);
+    // Start watching friends' room presence now, so the presence cache (refreshed on the game thread) is warm by
+    // the time a join needs it; a cold cache made the first join of a code-named room fail ("not found").
+    ReFixSteamFlat::FriendsWithRichPresence(kPresenceKey);
     Log("[Photon] P2P emulator ready (self %llu, master %s, game %s, Steam channel %d)", (unsigned long long)g_self,
         g_masterAddress.c_str(), g_gameAddress.c_str(), g_channel);
     for (;;) Pump();
