@@ -55,6 +55,17 @@ struct Start {
     uint32_t startRequests = 0;  // StartRequests flags: ConnectToShared 1, WaitForReflexiveInfo 2
 };
 
+// NAT-punch addresses of one peer. A client connects to its server only after receiving the server's
+// ReflexiveInfo: directly when the addresses are usable, otherwise through the relay (Photon events to the
+// server's actor). A NetAddress is three 64-bit blocks; all zero is "no address".
+struct ReflexiveInfo {
+    uint32_t actorId = 0;
+    uint64_t publicAddr[3] = {};
+    uint64_t privateAddr[3] = {};
+    uint8_t natType = 0;     // StunNatType, from protocol V1_2_0 (4); 0 = invalid
+    OptionalBytes uniqueId;  // from protocol V1_2_3 (6)
+};
+
 // Message id of the first message in the buffer, or -1 when the buffer is empty or truncated.
 int FirstMessageId(const std::string& buffer);
 
@@ -62,6 +73,8 @@ bool ParseJoin(const std::string& buffer, Header& header, Join& join);
 std::string BuildJoin(const Header& header, const Join& join);
 bool ParseStart(const std::string& buffer, Header& header, Start& start);
 std::string BuildStart(const Header& header, const Start& start);
+bool ParseReflexiveInfo(const std::string& buffer, Header& header, ReflexiveInfo& info);
+std::string BuildReflexiveInfo(const Header& header, const ReflexiveInfo& info);
 
 // NetworkConfigSync: [Type:8][NetworkConfig: string, same presence-bit/16-bit-length form as byte[]]. The plugin
 // asks the host for its config (Request) and forwards the host's Response to clients that asked in their Join.

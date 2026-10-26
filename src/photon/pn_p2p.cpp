@@ -314,6 +314,7 @@ void Pump() {
     }
 
     DWORD now = GetTickCount();
+    g_emulator->Tick(now);
     for (auto it = g_connections.begin(); it != g_connections.end();) {
         it->second.enet->Tick(now);
         if (it->second.enet->IsClosed()) {

@@ -40,6 +40,8 @@ public:
     void OnConnect(uint64_t peerKey, Role role, const std::string& userId, SendFn send);
     void OnMessage(uint64_t peerKey, const std::string& message, bool reliable, uint8_t channel);
     void OnDisconnect(uint64_t peerKey);
+    // Sends messages that were scheduled for later (called regularly by the transport thread).
+    void Tick(uint32_t nowMs);
 
     // True when this machine currently hosts the room (any app id).
     bool HostsRoom(const std::string& name) const;
@@ -57,6 +59,10 @@ private:
         bool global;
         PnProto18::Raw data;   // empty when the event had no data
     };
+    struct FusionPending {
+        uint32_t dueMs = 0;
+        std::string buffer;
+    };
     struct Room {
         std::string appId;
         std::string name;
@@ -69,6 +75,7 @@ private:
         int32_t master = 0;
         int32_t fusionServer = 0;   // actor that joined Fusion as Server (client/server mode), 0 if none
         std::map<int32_t, PnFusion::Header> fusionConfigWaiters; // clients started once the host sends its config
+        std::map<int32_t, FusionPending> fusionRelayInfo; // per client: the server's ReflexiveInfo, sent when due
         std::map<int32_t, Actor> actors;
         std::vector<CachedEvent> cache;
     };
@@ -95,6 +102,7 @@ private:
     void HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
     void StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header& header);
     void SendFusionMessage(Room& room, int32_t actor, const std::string& buffer);
+    void ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFusion::Header& header);
     void LogEventSample(const Peer& peer, uint8_t code, int64_t receivers, const std::vector<int32_t>& targets,
                         const PnProto18::Params& params);
     void SetProperties(Peer& peer, const PnProto18::Params& params);
@@ -112,6 +120,7 @@ private:
     std::map<uint64_t, Peer> m_peers;
     std::map<std::string, std::unique_ptr<Room>> m_rooms; // key: appId + '\n' + name
     int m_sampledEvents = 0;
+    uint32_t m_nowMs = 0;
 };
 
 } // namespace PnServer

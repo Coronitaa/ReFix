@@ -4,6 +4,7 @@ namespace PnFusion {
 namespace {
 
 constexpr uint8_t kVersionWithSerializationVersion = 2; // V1_1_0
+constexpr uint8_t kVersionWithNatType = 4;              // V1_2_0
 constexpr uint8_t kVersionWithUniqueId = 6;             // V1_2_3
 constexpr uint8_t kVersionWithPlayerRef = 7;            // V1_3_0
 constexpr uint8_t kVersionWithEncryption = 9;           // V1_5_0
@@ -155,6 +156,39 @@ std::string BuildStart(const Header& header, const Start& start) {
     WriteHeader(w, header);
     w.Bits(start.remoteServerId, 32);
     w.Bits(start.startRequests, 32);
+    return w.Finish();
+}
+
+bool ParseReflexiveInfo(const std::string& buffer, Header& header, ReflexiveInfo& info) {
+    BitReader r(buffer);
+    if (r.U8() != MSG_REFLEXIVE_INFO) return false;
+    ReadHeader(r, header);
+    info = ReflexiveInfo();
+    info.actorId = r.Bits(32);
+    for (uint64_t* addr : { info.publicAddr, info.privateAddr })
+        for (int i = 0; i < 3; i++) {
+            uint64_t low = r.Bits(32);
+            addr[i] = low | (uint64_t)r.Bits(32) << 32;
+        }
+    uint8_t v = header.protocolVersion;
+    if (v >= kVersionWithNatType) info.natType = r.U8();
+    if (v >= kVersionWithUniqueId) r.Optional(info.uniqueId);
+    return r.ok;
+}
+
+std::string BuildReflexiveInfo(const Header& header, const ReflexiveInfo& info) {
+    BitWriter w;
+    w.U8(MSG_REFLEXIVE_INFO);
+    WriteHeader(w, header);
+    w.Bits(info.actorId, 32);
+    for (const uint64_t* addr : { info.publicAddr, info.privateAddr })
+        for (int i = 0; i < 3; i++) {
+            w.Bits((uint32_t)addr[i], 32);
+            w.Bits((uint32_t)(addr[i] >> 32), 32);
+        }
+    uint8_t v = header.protocolVersion;
+    if (v >= kVersionWithNatType) w.U8(info.natType);
+    if (v >= kVersionWithUniqueId) w.Optional(info.uniqueId);
     return w.Finish();
 }
 

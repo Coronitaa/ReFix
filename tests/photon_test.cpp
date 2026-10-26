@@ -394,6 +394,66 @@ static void TestFusionClientGetsHostConfigBeforeStart() {
     CHECK(client.Take(4, 100, p) && AsBytes(p[245], data) && data == reflexive);
 }
 
+// A Fusion client connects only after it has the server's ReflexiveInfo. The emulator sends one without
+// addresses (so the client uses the relay) a moment after Start, never to the host, and the codec round-trips.
+static void TestFusionClientGetsServerReflexiveInfo() {
+    PnServer::Environment env;
+    env.localUserId = "100";
+    env.masterAddress = "127.0.0.1:27001";
+    env.localGameAddress = "127.0.0.1:27002";
+    env.gameAddress = [](const std::string&) { return std::string(); };
+    env.newRoomName = [] { return std::string("100-r"); };
+    env.joinableRooms = [] { return std::vector<std::string>(); };
+    env.roomHosted = [](const std::string&, bool) {};
+    env.log = NoLog;
+    PnServer::Emulator emu(env);
+    emu.Tick(1000);
+
+    FakeClient host, client;
+    emu.OnConnect(1, PnServer::Role::Game, "100", host.Sink());
+    emu.OnConnect(2, PnServer::Role::Game, "200", client.Sink());
+    for (uint64_t k : { 1, 2 }) emu.OnMessage(k, Init("app"), true, 0);
+    emu.OnMessage(1, Request(227, { { 255, Str("f") } }), true, 0);
+    emu.OnMessage(2, Request(226, { { 255, Str("f") } }), true, 0);
+    auto toServer = [&](uint64_t key, const std::string& buffer) {
+        emu.OnMessage(key, Request(253, { { 244, Byte(100) }, { 245, ByteArray(buffer) }, { 252, IntArray({ 0 }) } }), true, 0);
+    };
+    Params p;
+    std::string data;
+    PnFusion::Header h, hostHeader;
+    PnFusion::Join j;
+    PnFusion::ParseJoin(kFusionHostJoin, hostHeader, j);
+    toServer(1, kFusionHostJoin);
+    PnFusion::Join cj = j;
+    cj.peerMode = PnFusion::PEER_CLIENT;
+    toServer(2, PnFusion::BuildJoin(hostHeader, cj));
+    host.inbox.clear();
+    PnFusion::Start st;
+    CHECK(client.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseJoin(data, h, j));
+    CHECK(client.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st));
+
+    emu.Tick(1100);
+    CHECK(!client.Take(4, 100, p)); // held back while the client handles Start
+    emu.Tick(3000);
+    PnFusion::ReflexiveInfo info;
+    CHECK(client.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseReflexiveInfo(data, h, info));
+    CHECK(info.actorId == 1 && info.publicAddr[2] == 0 && info.privateAddr[0] == 0 && info.natType == 0);
+    CHECK(!info.uniqueId.present && h.protocolVersion == 10 && h.versionBuild == 8);
+    CHECK(data.size() % 4 == 0);
+    emu.Tick(6000);
+    CHECK(!client.Take(4, 100, p) && !host.Take(4, 100, p)); // sent once, never to the host
+
+    info.actorId = 7;
+    info.publicAddr[1] = 0x1122334455667788ull;
+    info.privateAddr[2] = 0x8000000100000000ull;
+    info.natType = 3;
+    info.uniqueId = { true, "12345678" };
+    PnFusion::ReflexiveInfo back;
+    CHECK(PnFusion::ParseReflexiveInfo(PnFusion::BuildReflexiveInfo(hostHeader, info), h, back));
+    CHECK(back.actorId == 7 && back.publicAddr[1] == info.publicAddr[1] && back.privateAddr[2] == info.privateAddr[2]);
+    CHECK(back.natType == 3 && back.uniqueId.bytes == "12345678");
+}
+
 static void TestFusionPluginConfirmsJoin() {
     PnServer::Environment env;
     env.localUserId = "100";
@@ -453,6 +513,7 @@ int main() {
     TestCreatorEntersClosedRoom();
     TestFusionJoinCodec();
     TestFusionPluginConfirmsJoin();
+    TestFusionClientGetsServerReflexiveInfo();
     TestFusionClientGetsHostConfigBeforeStart();
     std::printf(g_failures ? "%d FAILURE(S)\n" : "ALL PHOTON TESTS PASSED\n", g_failures);
     return g_failures ? 1 : 0;

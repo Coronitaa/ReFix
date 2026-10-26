@@ -324,7 +324,10 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
 //    server (the peer that joined as Server).
 //  - A client whose Join asks for the NetworkConfig is started only after the host's config was requested
 //    (NetworkConfigSync Request) and the host's Response forwarded to it.
-//  - ReflexiveInfo (NAT-punch addresses) is relayed between clients and the host unchanged.
+//  - ReflexiveInfo (NAT-punch addresses) is relayed between clients and the host unchanged. A client only
+//    connects once it has the server's ReflexiveInfo, and Fusion hosts here never send one, so the emulator
+//    sends each client one without addresses shortly after Start: the client then connects through the relay
+//    (Photon events to the server's actor), which is what the Steam tunnel carries.
 void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
     std::string buffer;
     if (!AsBytes(data, buffer) || !peer.room) return;
@@ -334,6 +337,7 @@ void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
         case PnFusion::MSG_NETWORK_CONFIG_SYNC: HandleFusionConfigSync(peer, room, buffer); return;
         case PnFusion::MSG_REFLEXIVE_INFO:
             if (peer.actor == room.fusionServer) {
+                room.fusionRelayInfo.clear(); // the host's own addresses replace the relay-only ones
                 for (const auto& [nr, a] : room.actors)
                     if (nr != room.fusionServer) SendFusionMessage(room, nr, buffer);
             } else if (room.fusionServer) {
@@ -399,6 +403,34 @@ void Emulator::StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header
     PnFusion::Start start;
     start.remoteServerId = (uint32_t)(room.fusionServer ? room.fusionServer : room.master);
     SendFusionMessage(room, actor, PnFusion::BuildStart(header, start));
+    if (room.fusionServer && actor != room.fusionServer) ScheduleServerReflexiveInfo(room, actor, header);
+}
+
+// The client handles Start asynchronously and waits only ~100 ms for it to finish when a ReflexiveInfo arrives
+// (it then fails with StartGameException), so the message is held back for a moment instead of following Start.
+void Emulator::ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFusion::Header& header) {
+    constexpr uint32_t kReflexiveInfoDelayMs = 1500;
+    PnFusion::ReflexiveInfo info;
+    info.actorId = (uint32_t)room.fusionServer;
+    room.fusionRelayInfo[actor] = { m_nowMs + kReflexiveInfoDelayMs, PnFusion::BuildReflexiveInfo(header, info) };
+}
+
+void Emulator::Tick(uint32_t nowMs) {
+    m_nowMs = nowMs;
+    for (auto& [key, room] : m_rooms) {
+        for (auto it = room->fusionRelayInfo.begin(); it != room->fusionRelayInfo.end();) {
+            if ((int32_t)(nowMs - it->second.dueMs) < 0) {
+                ++it;
+                continue;
+            }
+            if (room->actors.count(it->first)) {
+                SendFusionMessage(*room, it->first, it->second.buffer);
+                m_env.log("[Photon] Fusion: sent server actor %d's relay ReflexiveInfo to actor %d", room->fusionServer,
+                          it->first);
+            }
+            it = room->fusionRelayInfo.erase(it);
+        }
+    }
 }
 
 void Emulator::SendFusionMessage(Room& room, int32_t actor, const std::string& buffer) {
@@ -539,6 +571,7 @@ void Emulator::LeaveRoom(uint64_t key, bool sendResponse) {
     room.actors.erase(actor);
     if (room.fusionServer == actor) room.fusionServer = 0;
     room.fusionConfigWaiters.erase(actor);
+    room.fusionRelayInfo.erase(actor);
     if (room.cleanupCacheOnLeave) {
         room.cache.erase(std::remove_if(room.cache.begin(), room.cache.end(),
                                         [&](const CachedEvent& e) { return !e.global && e.sender == actor; }),
