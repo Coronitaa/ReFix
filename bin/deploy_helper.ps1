@@ -252,6 +252,10 @@ function Generate-UNAE-ReFixIni {
     # no-third-party mode uses the local emulator (ReFixCloud over Steam P2P); otherwise real Photon.
     $photonDefault = if ($P.UsesPhoton -and ($P.OnlineMode -in @("valve","goldberg","offline","lan"))) { "ReFixCloud" } else { "OfficialPhoton" }
     $photonBackend = & $Pick "Photon" "Backend" $photonDefault
+    # OfficialPhoton is what older ReFix versions wrote for every game, so an existing value is not a user
+    # choice: re-decide it. Without this a redeploy keeps the emulator off on one PC while the other uses it,
+    # and the joining player hits real Photon Cloud with a Spacewar ticket ("Custom Authentication Failed").
+    if ($photonBackend -eq "OfficialPhoton") { $photonBackend = $photonDefault }
     $eosAuth       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
     # Fast-failing cloud TCP (443/80) only helps when there is no internet backend to reach; online it would
     # block EOS sign-in, PlayFab and other official services.
