@@ -4,6 +4,7 @@ namespace PnFusion {
 namespace {
 
 constexpr uint8_t kVersionWithSerializationVersion = 2; // V1_1_0
+constexpr uint8_t kVersionWithCustomData = 3;           // V1_1_2
 constexpr uint8_t kVersionWithNatType = 4;              // V1_2_0
 constexpr uint8_t kVersionWithUniqueId = 6;             // V1_2_3
 constexpr uint8_t kVersionWithPlayerRef = 7;            // V1_3_0
@@ -26,6 +27,12 @@ public:
         if (!b.present) return;
         Bits((uint32_t)b.bytes.size() & 0xFFFF, 16);
         for (char c : b.bytes) U8((uint8_t)c);
+    }
+    void String(const OptionalBytes& s) {
+        Bits(!s.present ? 1 : 0, 1);
+        if (!s.present) return;
+        Bits((uint32_t)s.bytes.size() & 0xFFFF, 16);
+        for (char c : s.bytes) U8((uint8_t)c);
     }
     std::string Finish() {
         while (m_out.size() % kBufferAlignment) m_out.push_back('\0');
@@ -58,6 +65,14 @@ public:
         uint32_t n = Bits(16);
         for (uint32_t i = 0; i < n && ok; i++) b.bytes.push_back((char)U8());
     }
+    void String(OptionalBytes& s) {
+        bool isNull = Bits(1) != 0;
+        s.present = !isNull;
+        s.bytes.clear();
+        if (isNull) return;
+        uint32_t n = Bits(16);
+        for (uint32_t i = 0; i < n && ok; i++) s.bytes.push_back((char)U8());
+    }
 
 private:
     const std::string& m_in;
@@ -78,6 +93,12 @@ void WriteHeader(BitWriter& w, const Header& h) {
     w.I32(h.versionMajor);
     w.I32(h.versionMinor);
     w.I32(h.versionBuild);
+}
+
+void WriteFooter(BitWriter& w, const Header& h) {
+    if (h.protocolVersion >= kVersionWithCustomData) {
+        w.String({ true, "" });
+    }
 }
 
 } // namespace
@@ -120,6 +141,7 @@ std::string BuildJoin(const Header& header, const Join& join) {
         w.Optional(join.encryptionKey);
         w.Optional(join.encryptionKeySecret);
     }
+    WriteFooter(w, header);
     return w.Finish();
 }
 
@@ -128,7 +150,7 @@ bool ParseNetworkConfigSync(const std::string& buffer, Header& header, uint8_t& 
     if (r.U8() != MSG_NETWORK_CONFIG_SYNC) return false;
     ReadHeader(r, header);
     type = r.U8();
-    r.Optional(config);
+    r.String(config);
     return r.ok;
 }
 
@@ -137,7 +159,8 @@ std::string BuildNetworkConfigSync(const Header& header, uint8_t type, const Opt
     w.U8(MSG_NETWORK_CONFIG_SYNC);
     WriteHeader(w, header);
     w.U8(type);
-    w.Optional(config);
+    w.String(config);
+    WriteFooter(w, header);
     return w.Finish();
 }
 
@@ -156,6 +179,7 @@ std::string BuildStart(const Header& header, const Start& start) {
     WriteHeader(w, header);
     w.Bits(start.remoteServerId, 32);
     w.Bits(start.startRequests, 32);
+    WriteFooter(w, header);
     return w.Finish();
 }
 
@@ -189,6 +213,7 @@ std::string BuildReflexiveInfo(const Header& header, const ReflexiveInfo& info) 
     uint8_t v = header.protocolVersion;
     if (v >= kVersionWithNatType) w.U8(info.natType);
     if (v >= kVersionWithUniqueId) w.Optional(info.uniqueId);
+    WriteFooter(w, header);
     return w.Finish();
 }
 
@@ -210,6 +235,7 @@ std::string BuildPlayerRefMapping(const Header& header, const PlayerRefMapping& 
     w.Bits(mapping.actorId, 32);
     w.Bits(mapping.playerIndex, 32);
     w.Optional(mapping.uniqueId);
+    WriteFooter(w, header);
     return w.Finish();
 }
 

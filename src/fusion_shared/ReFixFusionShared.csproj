@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Photon Fusion Shared-mode room server: runs Fusion's own Simulation.Server (Topologies.Shared) outside Unity,
+       the part Photon Cloud's Fusion plugin plays. The ReFix Photon emulator starts it and bridges actor packets. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+    <RollForward>Major</RollForward>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <FusionLibDir Condition="'$(FusionLibDir)' == ''">$(MSBuildThisFileDirectory)lib\fusion-2.0.12\</FusionLibDir>
+    <NoWarn>$(NoWarn);CS0618;CS8500</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Krafs.Publicizer" Version="2.2.1" PrivateAssets="all" />
+    <PackageReference Include="Lib.Harmony" Version="2.3.3" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="$(FusionLibDir)Fusion.Runtime.dll" />
+    <Reference Include="$(FusionLibDir)Fusion.Sockets.dll" />
+    <Reference Include="$(FusionLibDir)Fusion.Common.dll" />
+    <Reference Include="$(FusionLibDir)Fusion.Log.dll" />
+    <Reference Include="$(FusionLibDir)Fusion.Realtime.dll" />
+    <Reference Include="$(FusionLibDir)Photon3Unity3D.dll" />
+    <Reference Include="$(FusionLibDir)NanoSockets.dll" />
+    <Reference Include="$(FusionLibDir)UnityEngine.dll" />
+    <Reference Include="$(FusionLibDir)UnityEngine.CoreModule.dll" Private="false" />
+    <None Include="$(FusionLibDir)UnityEngine.CoreModule.dll" Link="unity/UnityEngine.CoreModule.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Reference Include="$(FusionLibDir)UnityEngine.PhysicsModule.dll" />
+    <Reference Include="$(FusionLibDir)UnityEngine.Physics2DModule.dll" />
+    <Reference Include="$(FusionLibDir)UnityEngine.AnimationModule.dll" />
+    <Reference Include="$(FusionLibDir)UnityEngine.JSONSerializeModule.dll" />
+    <Publicize Include="Fusion.Runtime;Fusion.Sockets;Fusion.Common" />
+  </ItemGroup>
+</Project>

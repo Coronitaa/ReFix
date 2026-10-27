@@ -88,8 +88,14 @@ void* Interface(HMODULE module, const InterfaceVersion* versions) {
     for (const InterfaceVersion* v = versions; v->accessor; v++) {
         auto fn = Export<fn_GetInterface_t>(module, v->accessor);
         if (!fn) continue; // this DLL's flat thunks do not match this version
-        if (void* ptr = fn()) return ptr;
-        if (void* ptr = find && user ? find(user, v->version) : nullptr) return ptr;
+        if (find && user) {
+            __try {
+                if (void* ptr = find(user, v->version)) return ptr;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+        __try {
+            if (void* ptr = fn()) return ptr;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     return nullptr;
 }

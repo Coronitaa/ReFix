@@ -355,6 +355,10 @@ void Emulator::HandleFusionJoin(Peer& peer, Room& room, const std::string& buffe
     PnFusion::Header header;
     PnFusion::Join join;
     if (!PnFusion::ParseJoin(buffer, header, join) || join.type != PnFusion::JOIN_REQUEST) return;
+    if (join.gameMode == PnFusion::GAME_MODE_SHARED) {
+        HandleFusionSharedJoin(peer, room, header, join);
+        return;
+    }
     if (join.peerMode == PnFusion::PEER_SERVER) room.fusionServer = peer.actor;
     join.type = PnFusion::JOIN_CONFIRMATION;
     join.playerRef = peer.actor;
@@ -382,6 +386,17 @@ void Emulator::HandleFusionConfigSync(Peer& peer, Room& room, const std::string&
     PnFusion::Header header;
     uint8_t type = 0;
     PnFusion::OptionalBytes config;
+    if (room.fusionShared) {
+        if (!PnFusion::ParseNetworkConfigSync(buffer, header, type, config) || type != PnFusion::SYNC_RESPONSE ||
+            !config.present || room.fusionSharedConfigSent) {
+            return;
+        }
+        room.fusionSharedConfigSent = true;
+        room.fusionShared->Config(room.maxPlayers, config.bytes);
+        m_env.log("[Photon] Fusion Shared: actor %d sent the NetworkProjectConfig (%zu bytes)", peer.actor,
+                  config.bytes.size());
+        return;
+    }
     if (peer.actor != room.fusionServer || !PnFusion::ParseNetworkConfigSync(buffer, header, type, config)) {
         m_env.log("[Photon] Fusion: ignored NetworkConfigSync from actor %d", peer.actor);
         return;
@@ -400,6 +415,58 @@ void Emulator::HandleFusionConfigSync(Peer& peer, Room& room, const std::string&
         m_env.log("[Photon] Fusion: forwarded host NetworkConfig (%zu bytes) to actor %d and started it",
                   config.bytes.size(), actor);
     }
+}
+
+// Shared mode: every client connects to the plugin's server simulation (actor 0), which the emulator runs in the
+// companion process. The first client is asked for its NetworkProjectConfig, the server is configured from it,
+// and each client is started (ConnectToShared) once that server is running.
+void Emulator::HandleFusionSharedJoin(Peer& peer, Room& room, const PnFusion::Header& header, PnFusion::Join join) {
+    if (!room.fusionShared && m_env.startFusionShared) room.fusionShared = m_env.startFusionShared();
+    if (!room.fusionShared) {
+        m_env.log("[Photon] Fusion Shared: no server simulation available, actor %d cannot start", peer.actor);
+        return;
+    }
+    join.type = PnFusion::JOIN_CONFIRMATION;
+    join.playerRef = peer.actor;
+    if (join.uniqueId.bytes.size() != PnFusion::UNIQUE_ID_SIZE) join.uniqueId = { true, FusionUniqueId(peer) };
+    room.fusionUniqueIds[peer.actor] = join.uniqueId.bytes;
+    room.fusionShared->Join(peer.actor, join.uniqueId.bytes);
+    room.fusionShared->Master(room.master);
+
+    join.joinRequests &= ~(PnFusion::JOIN_REQUEST_NETWORK_CONFIG | PnFusion::JOIN_REQUEST_REFLEXIVE_INFO);
+    if (!room.fusionSharedConfigSent && !room.fusionSharedConfigActor) {
+        room.fusionSharedConfigActor = peer.actor;
+        join.joinRequests |= PnFusion::JOIN_REQUEST_NETWORK_CONFIG;
+    }
+    SendFusionMessage(room, peer.actor, PnFusion::BuildJoin(header, join));
+    m_env.log("[Photon] Fusion Shared: actor %d joined (protocol %u, Fusion %d.%d.%d)%s", peer.actor,
+              header.protocolVersion, header.versionMajor, header.versionMinor, header.versionBuild,
+              room.fusionSharedConfigActor == peer.actor ? ", NetworkProjectConfig requested" : "");
+    if (room.fusionSharedRunning) StartFusionSharedPeer(room, peer.actor, header);
+    else room.fusionConfigWaiters[peer.actor] = header;
+}
+
+void Emulator::StartFusionSharedPeer(Room& room, int32_t actor, const PnFusion::Header& header) {
+
+    PnFusion::Start start;
+    start.remoteServerId = PnFusion::SERVER_ACTOR;
+    start.startRequests = PnFusion::START_REQUEST_CONNECT_TO_SHARED;
+    SendFusionMessage(room, actor, PnFusion::BuildStart(header, start));
+    m_env.log("[Photon] Fusion Shared: actor %d started", actor);
+}
+
+void Emulator::PumpFusionShared(Room& room) {
+    bool started = room.fusionShared->Poll(m_nowMs, [&](int32_t target, const std::string& packet, bool reliable) {
+        if (!room.actors.count(target)) return;
+        Params ev = { { P_ACTOR_NR, Int(PnFusion::SERVER_ACTOR) }, { P_DATA, ByteArray(packet) } };
+        SendEvent(room, target, PnFusion::EV_DATA, ev, reliable, 0);
+    });
+    if (!started || room.fusionSharedRunning) return;
+    room.fusionSharedRunning = true;
+    auto waiters = std::move(room.fusionConfigWaiters);
+    room.fusionConfigWaiters.clear();
+    for (const auto& [actor, header] : waiters)
+        if (room.actors.count(actor)) StartFusionSharedPeer(room, actor, header);
 }
 
 void Emulator::StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header& header) {
@@ -445,6 +512,7 @@ void Emulator::ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFu
 void Emulator::Tick(uint32_t nowMs) {
     m_nowMs = nowMs;
     for (auto& [key, room] : m_rooms) {
+        if (room->fusionShared) PumpFusionShared(*room);
         for (auto it = room->fusionRelayInfo.begin(); it != room->fusionRelayInfo.end();) {
             if ((int32_t)(nowMs - it->second.dueMs) < 0) {
                 ++it;
@@ -519,6 +587,11 @@ void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8
         HandleFusionProtocol(peer, data);
         return;
     }
+    if (code == PnFusion::EV_DATA && room.fusionShared && targets.size() == 1 && targets[0] == PnFusion::SERVER_ACTOR) {
+        std::string packet;
+        if (AsBytes(data, packet)) room.fusionShared->Data(peer.actor, packet, reliable);
+        return;
+    }
 
     if (cache == CACHE_REMOVE) { RemoveFromCache(room, code, targets, data); return; }
     if (cache == CACHE_REMOVE_LEFT) {
@@ -575,6 +648,7 @@ void Emulator::SetProperties(Peer& peer, const Params& params) {
         int64_t master;
         if (const Raw* v = changes.Find(Byte(GP_MASTER_CLIENT)); v && AsInt(*v, master) && room.actors.count((int32_t)master)) {
             room.master = (int32_t)master;
+            if (room.fusionShared) room.fusionShared->Master(room.master);
         }
     }
     Respond(peer, OP_SET_PROPERTIES, 0);
@@ -614,6 +688,10 @@ void Emulator::LeaveRoom(uint64_t key, bool sendResponse) {
     room.fusionConfigWaiters.erase(actor);
     room.fusionRelayInfo.erase(actor);
     room.fusionUniqueIds.erase(actor);
+    if (room.fusionShared) {
+        room.fusionShared->Leave(actor);
+        if (room.fusionSharedConfigActor == actor && !room.fusionSharedConfigSent) room.fusionSharedConfigActor = 0;
+    }
     if (room.cleanupCacheOnLeave) {
         room.cache.erase(std::remove_if(room.cache.begin(), room.cache.end(),
                                         [&](const CachedEvent& e) { return !e.global && e.sender == actor; }),
@@ -634,6 +712,7 @@ void Emulator::LeaveRoom(uint64_t key, bool sendResponse) {
 
 void Emulator::SetMaster(Room& room, int32_t actor) {
     room.master = actor;
+    if (room.fusionShared) room.fusionShared->Master(actor);
     room.props.Set(Byte(GP_MASTER_CLIENT), Int(actor));
 }
 

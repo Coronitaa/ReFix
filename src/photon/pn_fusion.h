@@ -22,7 +22,8 @@ constexpr uint8_t P_FUSION_DATA = 245;
 constexpr uint8_t MSG_JOIN = 1, MSG_NETWORK_CONFIG_SYNC = 2, MSG_REFLEXIVE_INFO = 3, MSG_START = 5,
                   MSG_PLAYER_REF_MAPPING = 8;
 constexpr uint8_t SYNC_REQUEST = 1, SYNC_RESPONSE = 2, SYNC_OVERRIDE = 3; // NetworkConfigSync.SyncType
-constexpr int32_t JOIN_REQUEST_NETWORK_CONFIG = 1, JOIN_REQUEST_REFLEXIVE_INFO = 2; // Join.JoinRequests flags
+constexpr int32_t JOIN_REQUEST_NETWORK_CONFIG = 2, JOIN_REQUEST_REFLEXIVE_INFO = 4,
+                  JOIN_REQUEST_DISABLE_NAT_PUNCH = 8; // Join.JoinRequests flags
 constexpr uint8_t JOIN_REQUEST = 1, JOIN_CONFIRMATION = 2;
 constexpr uint8_t PEER_NONE = 0, PEER_SERVER = 1, PEER_CLIENT = 2;
 constexpr uint8_t GAME_MODE_CLIENT_SERVER = 1, GAME_MODE_SHARED = 2;
@@ -33,11 +34,13 @@ struct Header {
     int32_t versionMajor = 0, versionMinor = 0, versionBuild = 0;
 };
 
-// byte[] fields: a presence bit, then a 16-bit length and the bytes.
+// byte[] fields: a presence bit (1=present, 0=null), then a 16-bit length and the bytes.
+// string fields: an inverted null bit (0=present, 1=null), then a 16-bit length and the bytes.
 struct OptionalBytes {
     bool present = false;
     std::string bytes;
 };
+using OptionalString = OptionalBytes;
 
 struct Join {
     uint8_t type = 0;
@@ -52,9 +55,10 @@ struct Join {
 
 // Sent by the plugin after Join: the client then initializes its NetworkRunner and, as a client, connects to
 // the peer RemoteServerID (the host's actor number).
+constexpr uint32_t START_REQUEST_CONNECT_TO_SHARED = 2, START_REQUEST_WAIT_FOR_REFLEXIVE_INFO = 4;
 struct Start {
     uint32_t remoteServerId = 0;
-    uint32_t startRequests = 0;  // StartRequests flags: ConnectToShared 1, WaitForReflexiveInfo 2
+    uint32_t startRequests = 0;  // StartRequests flags: ConnectToShared 2, WaitForReflexiveInfo 4
 };
 
 // NAT-punch addresses of one peer. A client connects to its server only after receiving the server's

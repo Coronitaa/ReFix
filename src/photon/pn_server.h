@@ -1,6 +1,7 @@
 #pragma once
 #include "pn_fusion.h"
 #include "pn_proto18.h"
+#include "pn_shared.h"
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -27,6 +28,7 @@ struct Environment {
     std::function<std::string()> newRoomName;                         // name for CreateGame without a name
     std::function<std::vector<std::string>()> joinableRooms;          // candidates for JoinRandomGame
     std::function<void(const std::string& room, bool open)> roomHosted; // host-side room created / closed
+    std::function<std::unique_ptr<PnShared::Link>()> startFusionShared; // Fusion Shared-mode server; optional
     void (*log)(const char* fmt, ...) = nullptr; // printf-style; required
 };
 
@@ -77,6 +79,10 @@ private:
         std::map<int32_t, PnFusion::Header> fusionConfigWaiters; // clients started once the host sends its config
         std::map<int32_t, FusionPending> fusionRelayInfo; // per client: the server's ReflexiveInfo, sent when due
         std::map<int32_t, std::string> fusionUniqueIds;    // 8-byte Fusion UniqueId given to each actor in its Join
+        std::unique_ptr<PnShared::Link> fusionShared;      // Shared mode: the plugin's server simulation
+        int32_t fusionSharedConfigActor = 0;                // actor asked for the NetworkProjectConfig
+        bool fusionSharedConfigSent = false;
+        bool fusionSharedRunning = false;
         std::map<int32_t, Actor> actors;
         std::vector<CachedEvent> cache;
     };
@@ -101,6 +107,9 @@ private:
     void HandleFusionProtocol(Peer& peer, const PnProto18::Raw& data);
     void HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer);
     void HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
+    void HandleFusionSharedJoin(Peer& peer, Room& room, const PnFusion::Header& header, PnFusion::Join join);
+    void StartFusionSharedPeer(Room& room, int32_t actor, const PnFusion::Header& header);
+    void PumpFusionShared(Room& room);
     void StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header& header);
     void SendFusionMessage(Room& room, int32_t actor, const std::string& buffer);
     void ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFusion::Header& header);
