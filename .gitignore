@@ -43,3 +43,6 @@ graphify-out/
 src/fusion_shared/lib/
 src/fusion_shared/bin/
 src/fusion_shared/obj/
+
+# Release distribution builds
+release/
