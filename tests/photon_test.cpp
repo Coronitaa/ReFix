@@ -706,6 +706,147 @@ static void TestFusionSharedCompanionIpc() {
     WSACleanup();
 }
 
+static void TestLobbyPopulatesPublicGameList() {
+    PnServer::Environment env;
+    env.localUserId = "100";
+    env.masterAddress = "127.0.0.1:27001";
+    env.localGameAddress = "127.0.0.1:27002";
+    env.gameAddress = [](const std::string&) { return std::string(); };
+    env.newRoomName = [] { return std::string("test-room"); };
+    env.joinableRooms = [] { return std::vector<std::string>(); };
+    env.roomHosted = [](const std::string&, bool) {};
+    env.publicLobbies = []() {
+        std::map<std::string, Table> lobbies;
+        Table r;
+        r.Set(Byte(255), Int(4));
+        r.Set(Byte(253), Bool(true));
+        lobbies["remote-room-123"] = r;
+        return lobbies;
+    };
+    env.log = NoLog;
+    PnServer::Emulator emu(env);
+
+    FakeClient host, client;
+    emu.OnConnect(1, PnServer::Role::Game, "100", host.Sink());
+    emu.OnMessage(1, Init("app"), true, 0);
+
+    Table hostProps;
+    hostProps.Set(Byte(255), Int(4));
+    hostProps.Set(Byte(253), Bool(true));
+    hostProps.Set(Byte(254), Bool(true)); // visible
+    emu.OnMessage(1, Request(227, { { 255, Str("phasmo-public-849201") }, { 248, hostProps.Encode() } }), true, 0);
+
+    emu.OnConnect(2, PnServer::Role::Master, "200", client.Sink());
+    emu.OnMessage(2, Init("app"), true, 0);
+    emu.OnMessage(2, Request(229, {}), true, 0);
+
+    Params respParams;
+    int16_t rc = -1;
+    CHECK(client.Take(3, 229, respParams, &rc) && rc == 0);
+
+    Params evParams;
+    CHECK(client.Take(4, 230, evParams));
+    CHECK(evParams.count(222));
+
+    Table gameList;
+    CHECK(AsTable(evParams[222], gameList));
+    CHECK(gameList.Find(Str("phasmo-public-849201")) != nullptr);
+    CHECK(gameList.Find(Str("remote-room-123")) != nullptr);
+}
+
+static void TestP2PRoomDiscoveryCodec() {
+    // 1. Room Query / Reply round trip
+    constexpr uint8_t kRoomQuery = 3, kRoomReply = 4, kLobbyAnnounce = 5;
+    uint16_t sentQueryId = 0x4A12;
+    std::string roomCode = "582914";
+
+    // Encode kRoomQuery
+    std::string query;
+    query.push_back((char)kRoomQuery);
+    query.push_back(0); // flags
+    query.push_back((char)(sentQueryId >> 8));
+    query.push_back((char)(sentQueryId & 0xFF));
+    query.append(roomCode);
+
+    CHECK(query.size() == 4 + roomCode.size());
+    CHECK((uint8_t)query[0] == kRoomQuery);
+    uint16_t parsedQueryId = (uint16_t)(((uint8_t)query[2] << 8) | (uint8_t)query[3]);
+    CHECK(parsedQueryId == sentQueryId);
+    std::string parsedRoomCode = query.substr(4);
+    CHECK(parsedRoomCode == roomCode);
+
+    // Encode kRoomReply from host
+    uint16_t hostGamePort = 27002;
+    std::string reply;
+    reply.push_back((char)kRoomReply);
+    reply.push_back(0); // flags
+    reply.push_back((char)(parsedQueryId >> 8));
+    reply.push_back((char)(parsedQueryId & 0xFF));
+    reply.push_back((char)(hostGamePort >> 8));
+    reply.push_back((char)(hostGamePort & 0xFF));
+    reply.append(parsedRoomCode);
+
+    CHECK(reply.size() == 6 + roomCode.size());
+    CHECK((uint8_t)reply[0] == kRoomReply);
+    uint16_t replyQueryId = (uint16_t)(((uint8_t)reply[2] << 8) | (uint8_t)reply[3]);
+    uint16_t replyGamePort = (uint16_t)(((uint8_t)reply[4] << 8) | (uint8_t)reply[5]);
+    std::string replyRoomCode = reply.substr(6);
+    CHECK(replyQueryId == sentQueryId);
+    CHECK(replyGamePort == hostGamePort);
+    CHECK(replyRoomCode == roomCode);
+
+    // 2. Lobby Announce add/update with Table payload
+    Table originalProps;
+    originalProps.Set(Byte(255), Int(4)); // max players = 4
+    originalProps.Set(Byte(253), Bool(true)); // is open
+    originalProps.Set(Byte(254), Bool(true)); // is visible
+    originalProps.Set(Str("map"), Str("Tanglewood"));
+    std::string rawProps = originalProps.Encode();
+
+    std::string ann;
+    ann.push_back((char)kLobbyAnnounce);
+    ann.push_back(1); // action 1: add/update
+    ann.push_back((char)(roomCode.size() >> 8));
+    ann.push_back((char)(roomCode.size() & 0xFF));
+    ann.append(roomCode);
+    ann.append(rawProps);
+
+    CHECK((uint8_t)ann[0] == kLobbyAnnounce);
+    uint8_t action = (uint8_t)ann[1];
+    uint16_t nameLen = (uint16_t)(((uint8_t)ann[2] << 8) | (uint8_t)ann[3]);
+    CHECK(action == 1);
+    CHECK(nameLen == roomCode.size());
+    std::string annRoomName = ann.substr(4, nameLen);
+    CHECK(annRoomName == roomCode);
+
+    std::string extractedRawProps = ann.substr(4 + nameLen);
+    Table decodedProps;
+    CHECK(AsTable(extractedRawProps, decodedProps));
+    const Raw* maxP = decodedProps.Find(Byte(255));
+    CHECK(maxP != nullptr);
+    int64_t maxPlayers = 0;
+    CHECK(AsInt(*maxP, maxPlayers) && maxPlayers == 4);
+
+    const Raw* mapProp = decodedProps.Find(Str("map"));
+    CHECK(mapProp != nullptr);
+    std::string mapName;
+    CHECK(AsString(*mapProp, mapName) && mapName == "Tanglewood");
+
+    // 3. Lobby Announce remove
+    std::string remAnn;
+    remAnn.push_back((char)kLobbyAnnounce);
+    remAnn.push_back(2); // action 2: remove
+    remAnn.push_back((char)(roomCode.size() >> 8));
+    remAnn.push_back((char)(roomCode.size() & 0xFF));
+    remAnn.append(roomCode);
+
+    CHECK((uint8_t)remAnn[0] == kLobbyAnnounce);
+    CHECK((uint8_t)remAnn[1] == 2);
+    uint16_t remNameLen = (uint16_t)(((uint8_t)remAnn[2] << 8) | (uint8_t)remAnn[3]);
+    CHECK(remNameLen == roomCode.size());
+    CHECK(remAnn.substr(4, remNameLen) == roomCode);
+}
+
 int main() {
     TestScalarsRoundTrip();
     TestSkipComplexValues();
@@ -723,7 +864,10 @@ int main() {
         TestFusionClientGetsHostConfigBeforeStart();
     TestFusionNetworkConfigCodec();
     TestFusionSharedModeProtocol();
+
     TestFusionSharedCompanionIpc();
+    TestLobbyPopulatesPublicGameList();
+    TestP2PRoomDiscoveryCodec();
     std::printf(g_failures ? "%d FAILURE(S)\n" : "ALL PHOTON TESTS PASSED\n", g_failures);
     return g_failures ? 1 : 0;
 }

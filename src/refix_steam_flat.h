@@ -22,6 +22,9 @@ namespace ReFixSteamFlat {
     // (ServiceMainThread). Safe to call from any thread; registers `key` for the next refresh.
     std::vector<FriendPresence> FriendsWithRichPresence(const char* key);
 
+    // Immediate friend SteamIDs from the cache refreshed on the main thread. Safe to call from any thread.
+    std::vector<uint64_t> FriendSteamIDs();
+
     // Services Steam friend/presence state on the game's MAIN thread (call from the Steam callback pumps):
     // applies queued SetRichPresence writes and refreshes the friend caches. ISteamFriends enumeration is
     // unsafe off the main thread, so worker threads must rely on the caches instead of calling Steam.

@@ -236,6 +236,12 @@ std::vector<FriendPresence> FriendsWithRichPresence(const char* key) {
     return it != g_presenceCache.end() ? it->second : std::vector<FriendPresence>{};
 }
 
+std::vector<uint64_t> FriendSteamIDs() {
+    g_friendsWanted.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_cacheMutex);
+    return g_friendIdsCache;
+}
+
 uint64_t LobbyOwner(uint64_t lobbyId) {
     Api api = ResolveApi();
     return api.matchmaking && api.getLobbyOwner && lobbyId ? api.getLobbyOwner(api.matchmaking, lobbyId) : 0;

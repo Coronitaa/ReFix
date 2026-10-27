@@ -28,6 +28,7 @@ struct Environment {
     std::function<std::string()> newRoomName;                         // name for CreateGame without a name
     std::function<std::vector<std::string>()> joinableRooms;          // candidates for JoinRandomGame
     std::function<void(const std::string& room, bool open)> roomHosted; // host-side room created / closed
+    std::function<std::map<std::string, PnProto18::Table>()> publicLobbies; // remote public rooms announced by peers; optional
     std::function<std::unique_ptr<PnShared::Link>()> startFusionShared; // Fusion Shared-mode server; optional
     void (*log)(const char* fmt, ...) = nullptr; // printf-style; required
 };
@@ -47,6 +48,9 @@ public:
 
     // True when this machine currently hosts the room (any app id).
     bool HostsRoom(const std::string& name) const;
+
+    // Returns table of local public rooms hosted on this machine (suitable for P_GAME_LIST).
+    PnProto18::Table LocalPublicRooms() const;
 
 private:
     struct Actor {
