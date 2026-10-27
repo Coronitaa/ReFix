@@ -1,5 +1,8 @@
 // Unit tests for the Photon P2P emulator core (codec, transport, server roles). No network, no Steam.
 // Build & run: tests\run_photon_tests.bat
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <windows.h>
 #include "../src/photon/pn_crypto.h"
 #include "../src/photon/pn_enet.h"
 #include "../src/photon/pn_fusion.h"
@@ -518,6 +521,191 @@ static void TestFusionPluginConfirmsJoin() {
     CHECK(!a.Take(4, 100, p));
 }
 
+class MockSharedLink : public PnShared::Link {
+public:
+    int32_t maxPlayers = 0;
+    std::string configJson;
+    std::vector<std::pair<int32_t, std::string>> joins;
+    std::vector<int32_t> leaves;
+    std::vector<int32_t> masters;
+    std::vector<std::tuple<int32_t, std::string, bool>> incomingData;
+    std::vector<std::tuple<int32_t, std::string, bool>> queuedOutputs;
+    bool reportRunning = false;
+
+    void Config(int32_t mp, const std::string& json) override {
+        maxPlayers = mp;
+        configJson = json;
+        reportRunning = true;
+    }
+    void Join(int32_t actor, const std::string& uniqueId) override {
+        joins.push_back({ actor, uniqueId });
+    }
+    void Leave(int32_t actor) override {
+        leaves.push_back(actor);
+    }
+    void Master(int32_t actor) override {
+        masters.push_back(actor);
+    }
+    void Data(int32_t fromActor, const std::string& packet, bool reliable) override {
+        incomingData.push_back({ fromActor, packet, reliable });
+    }
+    bool Poll(uint32_t nowMs, const DataFn& onData) override {
+        (void)nowMs;
+        for (const auto& item : queuedOutputs) {
+            onData(std::get<0>(item), std::get<1>(item), std::get<2>(item));
+        }
+        queuedOutputs.clear();
+        bool r = reportRunning;
+        reportRunning = false;
+        return r;
+    }
+};
+
+static void TestFusionSharedModeProtocol() {
+    MockSharedLink* rawLink = nullptr;
+    PnServer::Environment env;
+    env.localUserId = "100";
+    env.masterAddress = "127.0.0.1:27001";
+    env.localGameAddress = "127.0.0.1:27002";
+    env.gameAddress = [](const std::string&) { return std::string(); };
+    env.newRoomName = [] { return std::string("shared-room"); };
+    env.joinableRooms = [] { return std::vector<std::string>(); };
+    env.roomHosted = [](const std::string&, bool) {};
+    env.startFusionShared = [&] {
+        auto link = std::make_unique<MockSharedLink>();
+        rawLink = link.get();
+        return link;
+    };
+    env.log = NoLog;
+    PnServer::Emulator emu(env);
+
+    FakeClient client1, client2;
+    emu.OnConnect(1, PnServer::Role::Game, "100", client1.Sink());
+    emu.OnConnect(2, PnServer::Role::Game, "200", client2.Sink());
+    for (uint64_t k : { 1, 2 }) emu.OnMessage(k, Init("app"), true, 0);
+    emu.OnMessage(1, Request(227, { { 255, Str("shared-room") } }), true, 0);
+    emu.OnMessage(2, Request(226, { { 255, Str("shared-room") } }), true, 0);
+
+    auto toServer = [&](uint64_t key, const std::string& buffer) {
+        emu.OnMessage(key, Request(253, { { 244, Byte(100) }, { 245, ByteArray(buffer) }, { 252, IntArray({ 0 }) } }), true, 0);
+    };
+
+    Params p;
+    std::string data;
+    PnFusion::Header h, joinHeader;
+    PnFusion::Join j;
+    PnFusion::ParseJoin(kFusionHostJoin, joinHeader, j);
+    j.gameMode = PnFusion::GAME_MODE_SHARED;
+    j.peerMode = PnFusion::PEER_CLIENT;
+
+    // Client 1 joins in Shared Mode
+    toServer(1, PnFusion::BuildJoin(joinHeader, j));
+
+    // Link must be created and client 1 registered
+    CHECK(rawLink != nullptr);
+    CHECK(rawLink->joins.size() == 1 && rawLink->joins[0].first == 1);
+    CHECK(rawLink->masters.size() >= 1 && rawLink->masters.back() == 1);
+
+    // Client 1 receives JOIN_CONFIRMATION with NetworkConfig requested (bit 2)
+    CHECK(client1.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseJoin(data, h, j));
+    CHECK(j.type == PnFusion::JOIN_CONFIRMATION && j.playerRef == 1);
+    CHECK((j.joinRequests & PnFusion::JOIN_REQUEST_NETWORK_CONFIG) != 0);
+    CHECK(!client1.Take(4, 100, p)); // No Start yet!
+
+    // Client 1 answers with NetworkProjectConfig
+    std::string configJson = "{\"Simulation\":{\"PlayerCount\":8}}";
+    toServer(1, PnFusion::BuildNetworkConfigSync(joinHeader, PnFusion::SYNC_RESPONSE, { true, configJson }));
+    CHECK(rawLink->configJson == configJson);
+
+    // Pump emulator: poll detects simulation is running, sends Start to Client 1
+    emu.Tick(100);
+    PnFusion::Start st;
+    CHECK(client1.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st));
+    CHECK(st.remoteServerId == PnFusion::SERVER_ACTOR && st.startRequests == PnFusion::START_REQUEST_CONNECT_TO_SHARED);
+
+    // Client 2 joins in Shared Mode: config already sent, simulation already running
+    j.type = PnFusion::JOIN_REQUEST;
+    toServer(2, PnFusion::BuildJoin(joinHeader, j));
+    CHECK(rawLink->joins.size() == 2 && rawLink->joins[1].first == 2);
+    CHECK(client2.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseJoin(data, h, j));
+    CHECK(j.type == PnFusion::JOIN_CONFIRMATION && j.playerRef == 2);
+    CHECK((j.joinRequests & PnFusion::JOIN_REQUEST_NETWORK_CONFIG) == 0); // NOT requested again
+
+    // Client 2 receives Start immediately
+    CHECK(client2.Take(4, 100, p) && AsBytes(p[245], data) && PnFusion::ParseStart(data, h, st));
+    CHECK(st.remoteServerId == PnFusion::SERVER_ACTOR && st.startRequests == PnFusion::START_REQUEST_CONNECT_TO_SHARED);
+
+    // Bidirectional data transfer:
+    // Client 1 raises EV_DATA (101) targeting server actor 0
+    emu.OnMessage(1, Request(253, { { 244, Byte(101) }, { 245, ByteArray("c1-payload") }, { 252, IntArray({ 0 }) } }), true, 0);
+    CHECK(rawLink->incomingData.size() == 1);
+    CHECK(std::get<0>(rawLink->incomingData[0]) == 1 && std::get<1>(rawLink->incomingData[0]) == "c1-payload");
+
+    // Server companion sends data to Client 1
+    rawLink->queuedOutputs.push_back({ 1, "srv-payload", true });
+    emu.Tick(200);
+    CHECK(client1.Take(4, 101, p));
+    int64_t fromActor = 0;
+    CHECK(AsInt(p[254], fromActor) && fromActor == PnFusion::SERVER_ACTOR);
+    CHECK(AsBytes(p[245], data) && data == "srv-payload");
+
+    // Client 1 leaves:
+    emu.OnMessage(1, Request(254, {}), true, 0);
+    CHECK(rawLink->leaves.size() == 1 && rawLink->leaves[0] == 1);
+    // Master transitions to Client 2
+    CHECK(rawLink->masters.back() == 2);
+}
+
+static void TestFusionNetworkConfigCodec() {
+    PnFusion::Header h;
+    h.protocolVersion = 10;
+    h.versionMajor = 2;
+    h.versionMinor = 0;
+    h.versionBuild = 12;
+
+    PnFusion::OptionalBytes emptyCfg;
+    std::string reqBuf = PnFusion::BuildNetworkConfigSync(h, PnFusion::SYNC_REQUEST, emptyCfg);
+    PnFusion::Header parsedH;
+    uint8_t type = 0;
+    PnFusion::OptionalBytes parsedCfg;
+    CHECK(PnFusion::ParseNetworkConfigSync(reqBuf, parsedH, type, parsedCfg));
+    CHECK(type == PnFusion::SYNC_REQUEST && !parsedCfg.present);
+    CHECK(((uint8_t)reqBuf[15] & 1) == 1); // isNull bit is 1
+
+    PnFusion::OptionalBytes fullCfg = { true, "{\"Test\":123}" };
+    std::string respBuf = PnFusion::BuildNetworkConfigSync(h, PnFusion::SYNC_RESPONSE, fullCfg);
+    CHECK(PnFusion::ParseNetworkConfigSync(respBuf, parsedH, type, parsedCfg));
+    CHECK(type == PnFusion::SYNC_RESPONSE && parsedCfg.present && parsedCfg.bytes == "{\"Test\":123}");
+    CHECK(((uint8_t)respBuf[15] & 1) == 0); // isNull bit is 0
+}
+
+static void TestFusionSharedCompanionIpc() {
+    WSADATA wd;
+    WSAStartup(MAKEWORD(2, 2), &wd);
+    std::string exePath = "bin\\ReFix\\FusionShared\\ReFixFusionShared.exe";
+    DWORD attr = GetFileAttributesA(exePath.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) return; // skip if companion exe not published yet
+
+    auto link = PnShared::StartProcess(exePath, "build\\tests\\ipc_test.log", NoLog);
+    CHECK(link != nullptr);
+    if (!link) return;
+
+    link->Config(4, "{}");
+    link->Join(1, "12345678");
+
+    bool running = false;
+    for (int i = 0; i < 50; i++) {
+        Sleep(50);
+        if (link->Poll(i * 50, [](int32_t, const std::string&, bool) {})) {
+            running = true;
+            break;
+        }
+    }
+    CHECK(running);
+    link->Leave(1);
+    WSACleanup();
+}
+
 int main() {
     TestScalarsRoundTrip();
     TestSkipComplexValues();
@@ -532,7 +720,10 @@ int main() {
     TestFusionJoinCodec();
     TestFusionPluginConfirmsJoin();
     TestFusionClientGetsServerReflexiveInfo();
-    TestFusionClientGetsHostConfigBeforeStart();
+        TestFusionClientGetsHostConfigBeforeStart();
+    TestFusionNetworkConfigCodec();
+    TestFusionSharedModeProtocol();
+    TestFusionSharedCompanionIpc();
     std::printf(g_failures ? "%d FAILURE(S)\n" : "ALL PHOTON TESTS PASSED\n", g_failures);
     return g_failures ? 1 : 0;
 }

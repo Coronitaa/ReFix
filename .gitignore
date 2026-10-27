@@ -38,3 +38,8 @@ Desktop.ini
 sign_dlls.ps1
 
 graphify-out/
+
+# Photon Fusion / Unity reference assemblies used to build the Fusion Shared-mode server (not redistributed)
+src/fusion_shared/lib/
+src/fusion_shared/bin/
+src/fusion_shared/obj/

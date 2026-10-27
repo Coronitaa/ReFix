@@ -82,13 +82,15 @@ std::unique_ptr<PnServer::Emulator> g_emulator;
 std::string g_masterAddress, g_gameAddress;
 uint16_t g_gamePort = 0;
 
-std::string IniPath() {
+std::string GameDir() {
     char buf[MAX_PATH] = { 0 };
     GetModuleFileNameA(NULL, buf, MAX_PATH);
     std::string p(buf);
     size_t pos = p.find_last_of("\\/");
-    return (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
+    return pos != std::string::npos ? p.substr(0, pos + 1) : ".\\";
 }
+
+std::string IniPath() { return GameDir() + "ReFix.ini"; }
 
 void Log(const char* fmt, ...) {
     char buf[1024];
@@ -431,6 +433,10 @@ DWORD WINAPI Thread(LPVOID) {
     env.newRoomName = NewRoomName;
     env.joinableRooms = JoinableRooms;
     env.roomHosted = RoomHosted;
+    env.startFusionShared = [] {
+        return PnShared::StartProcess(GameDir() + "ReFix\\FusionShared\\ReFixFusionShared.exe",
+                                      GameDir() + "ReFixFusionShared.log", Log);
+    };
     env.log = Log;
     g_emulator = std::make_unique<PnServer::Emulator>(env);
     ConfigureSteamNetworking();
