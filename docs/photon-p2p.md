@@ -30,6 +30,20 @@ offline / lan) it writes `Backend = ReFixCloud`; otherwise `OfficialPhoton` (rea
    3. A Steam lobby ID used as the name, which resolves to the lobby owner. R.E.P.O. uses `<lobbyId>` and `<lobbyId>_voice_`.
    4. A friend whose rich presence `refix_photon_room` equals the room name.
 
+## Latency and session robustness
+- The pump waits on one WSA event shared by all emulator sockets plus a periodic 1 ms high-resolution waitable
+  timer (Steam messages have no wait handle). A plain `select` timeout is rounded up to the ~15.6 ms timer tick,
+  which used to delay each Steam hop by up to a tick.
+- At start the emulator calls `InitRelayNetworkAccess` and sets process-wide SteamNetworkingSockets config,
+  tunable under `[Photon]`: `DirectConnections` (1: ICE Private|Public, so LAN/nearby players skip the Valve
+  relay), `SendRateMinKB`/`SendRateMaxKB` (256/4096; the host forwards everyone's traffic, voice included),
+  `SessionConnectTimeoutMs`/`SessionTimeoutMs` (20000/30000).
+- A client sends a hello envelope (`[0][0][0][0]`, reply `[0][1][0][0]`) as soon as it resolves a room's host,
+  so session setup overlaps the Photon connect instead of starting with it.
+- Every 5 s, while traffic flows, the log shows `Steam session <id>: state, RELAYED|direct, ping, quality, send
+  queue` from `GetSessionConnectionInfo`. A growing send queue means the rate cap is too low; `RELAYED` between
+  nearby PCs means ICE was not possible (firewall, or Steam's "allow direct connections" setting).
+
 ## Session acceptance
 Incoming ISteamNetworkingMessages sessions are accepted **reactively** on the game's own thread:
 `steam_proxy` intercepts `SteamNetworkingMessagesSessionRequest_t` (callback 1251) inside

@@ -39,6 +39,28 @@ namespace ReFixSteamFlat {
     // Drains up to `maxMessages` messages received on `channel`, invoking `onMessage` for each.
     int ReceiveMessages(int channel, int maxMessages, const std::function<void(uint64_t, const uint8_t*, uint32_t)>& onMessage);
 
+    // Process-wide SteamNetworkingSockets settings; 0 leaves a value at Steam's default.
+    struct NetworkingConfig {
+        int32_t iceEnable = 0;          // k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_* bits (direct routes)
+        int32_t sendRateMin = 0;        // bytes/s
+        int32_t sendRateMax = 0;        // bytes/s
+        int32_t timeoutInitialMs = 0;   // connect phase
+        int32_t timeoutConnectedMs = 0; // established session
+    };
+    // Starts relay network access and applies `config`. False until ISteamNetworkingUtils is available.
+    bool ConfigureNetworking(const NetworkingConfig& config);
+
+    struct SessionStatus {
+        int state = 0;                  // ESteamNetworkingConnectionState
+        bool relayed = false;           // SDR/TURN instead of a direct route
+        int pingMs = -1;
+        float qualityLocal = -1.0f;     // fraction of packets delivered, -1 unknown
+        int64_t queueTimeUs = 0;        // how long a new message would wait in the send queue
+        int pendingUnreliable = 0, pendingReliable = 0, sendRate = 0;
+    };
+    // Route and quality of the SteamNetworkingMessages session with steamID (false when there is none).
+    bool SessionInfo(uint64_t steamID, SessionStatus& out);
+
     // Accepts a pending SteamNetworkingMessages session from steamID (false when none is pending).
     bool AcceptSession(uint64_t steamID);
 

@@ -33,12 +33,17 @@ typedef int (*fn_SendMessageToUser_t)(void* self, const SteamNetworkingIdentity&
 typedef int (*fn_ReceiveMessagesOnChannel_t)(void* self, int channel, SteamNetworkingMessage_t** out, int max);
 typedef bool (*fn_AcceptSessionWithUser_t)(void* self, const SteamNetworkingIdentity& id);
 typedef uint64_t (*fn_GetLobbyOwner_t)(void* self, uint64_t lobbyId);
+typedef int (*fn_GetSessionConnectionInfo_t)(void* self, const SteamNetworkingIdentity& id, SteamNetConnectionInfo_t* info,
+                                             SteamNetConnectionRealTimeStatus_t* status);
+typedef void (*fn_InitRelayNetworkAccess_t)(void* self);
+typedef bool (*fn_SetGlobalConfigValueInt32_t)(void* self, int value, int32_t v);
 
 struct Api {
     void* user = nullptr;
     void* friends = nullptr;
     void* messages = nullptr;
     void* matchmaking = nullptr;
+    void* utils = nullptr;
     fn_GetSteamID_t getSteamID = nullptr;
     fn_SetRichPresence_t setRichPresence = nullptr;
     fn_GetFriendCount_t getFriendCount = nullptr;
@@ -49,6 +54,9 @@ struct Api {
     fn_ReceiveMessagesOnChannel_t receiveMessagesOnChannel = nullptr;
     fn_AcceptSessionWithUser_t acceptSessionWithUser = nullptr;
     fn_GetLobbyOwner_t getLobbyOwner = nullptr;
+    fn_GetSessionConnectionInfo_t getSessionConnectionInfo = nullptr;
+    fn_InitRelayNetworkAccess_t initRelayNetworkAccess = nullptr;
+    fn_SetGlobalConfigValueInt32_t setGlobalConfigValueInt32 = nullptr;
 };
 
 std::mutex g_apiMutex;
@@ -123,7 +131,11 @@ Api ResolveApi() {
         { "SteamAPI_SteamNetworkingMessages_SteamAPI_v002", "SteamNetworkingMessages002" },
         { "SteamAPI_SteamNetworkingMessages_v002", "SteamNetworkingMessages002" }, { nullptr, nullptr } };
     static const InterfaceVersion kMatchmaking[] = { { "SteamAPI_SteamMatchmaking_v009", "SteamMatchMaking009" }, { nullptr, nullptr } };
+    static const InterfaceVersion kUtils[] = { { "SteamAPI_SteamNetworkingUtils_SteamAPI_v004", "SteamNetworkingUtils004" },
+                                               { "SteamAPI_SteamNetworkingUtils_SteamAPI_v003", "SteamNetworkingUtils003" },
+                                               { "SteamAPI_SteamNetworkingUtils_v003", "SteamNetworkingUtils003" }, { nullptr, nullptr } };
     if (!g_api.user) g_api.user = Interface(steam, kUser);
+    if (!g_api.utils) g_api.utils = Interface(steam, kUtils);
     if (!g_api.friends) g_api.friends = Interface(steam, kFriends);
     if (!g_api.messages) g_api.messages = Interface(steam, kMessages);
     if (!g_api.matchmaking) g_api.matchmaking = Interface(steam, kMatchmaking);
@@ -137,6 +149,9 @@ Api ResolveApi() {
     g_api.sendMessageToUser = Export<fn_SendMessageToUser_t>(steam, "SteamAPI_ISteamNetworkingMessages_SendMessageToUser");
     g_api.receiveMessagesOnChannel = Export<fn_ReceiveMessagesOnChannel_t>(steam, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel");
     g_api.acceptSessionWithUser = Export<fn_AcceptSessionWithUser_t>(steam, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser");
+    g_api.getSessionConnectionInfo = Export<fn_GetSessionConnectionInfo_t>(steam, "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo");
+    g_api.initRelayNetworkAccess = Export<fn_InitRelayNetworkAccess_t>(steam, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
+    g_api.setGlobalConfigValueInt32 = Export<fn_SetGlobalConfigValueInt32_t>(steam, "SteamAPI_ISteamNetworkingUtils_SetGlobalConfigValueInt32");
     static bool s_logged = false;
     static DWORD s_lastMissingLog = 0;
     if (!s_logged && !(g_api.user && g_api.friends && g_api.messages) && GetTickCount() - s_lastMissingLog > 10000) {
@@ -241,6 +256,40 @@ int ReceiveMessages(int channel, int maxMessages, const std::function<void(uint6
         msg->Release();
     }
     return count;
+}
+
+bool ConfigureNetworking(const NetworkingConfig& config) {
+    Api api = ResolveApi();
+    if (!api.utils || !api.initRelayNetworkAccess || !api.setGlobalConfigValueInt32) return false;
+    api.initRelayNetworkAccess(api.utils); // warm SDR (relay config + POP pings) before the first send needs it
+    auto set = [&](ESteamNetworkingConfigValue key, int32_t value, const char* name) {
+        if (!value) return;
+        bool ok = api.setGlobalConfigValueInt32(api.utils, key, value);
+        ReFixLog("[SteamFlat] Networking config %s = %d%s", name, value, ok ? "" : " (rejected)");
+    };
+    set(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, config.iceEnable, "P2P_Transport_ICE_Enable");
+    set(k_ESteamNetworkingConfig_SendRateMin, config.sendRateMin, "SendRateMin");
+    set(k_ESteamNetworkingConfig_SendRateMax, config.sendRateMax, "SendRateMax");
+    set(k_ESteamNetworkingConfig_TimeoutInitial, config.timeoutInitialMs, "TimeoutInitial");
+    set(k_ESteamNetworkingConfig_TimeoutConnected, config.timeoutConnectedMs, "TimeoutConnected");
+    return true;
+}
+
+bool SessionInfo(uint64_t steamID, SessionStatus& out) {
+    Api api = ResolveApi();
+    if (!api.messages || !api.getSessionConnectionInfo || !steamID) return false;
+    SteamNetConnectionInfo_t info = {};
+    SteamNetConnectionRealTimeStatus_t status = {};
+    out.state = api.getSessionConnectionInfo(api.messages, Identity(steamID), &info, &status);
+    if (out.state == k_ESteamNetworkingConnectionState_None) return false;
+    out.relayed = (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_Relayed) != 0;
+    out.pingMs = status.m_nPing;
+    out.qualityLocal = status.m_flConnectionQualityLocal;
+    out.queueTimeUs = (int64_t)status.m_usecQueueTime;
+    out.pendingUnreliable = status.m_cbPendingUnreliable;
+    out.pendingReliable = status.m_cbPendingReliable;
+    out.sendRate = status.m_nSendRateBytesPerSecond;
+    return true;
 }
 
 bool AcceptSession(uint64_t steamID) {

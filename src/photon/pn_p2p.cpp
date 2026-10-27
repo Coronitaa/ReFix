@@ -7,6 +7,7 @@
 #include "pn_enet.h"
 #include "pn_server.h"
 #include "../refix_steam_flat.h"
+#include <steamnetworkingtypes.h>
 #include "../steam_p2p_hook.h"
 #include <atomic>
 #include <cstdarg>
@@ -33,11 +34,15 @@ constexpr const char* kDefaultHostSuffixes = "photonengine.io;photonengine.com;e
 constexpr const char* kPresenceKey = "refix_photon_room";
 constexpr const char* kP2PBackend = "ReFixCloud";     // canonical ecosystem token: local Photon emulator over Steam P2P
 constexpr const char* kP2PBackendLegacy = "ReFixP2P"; // back-compat alias for configs written before the rename
-constexpr uint8_t kToHost = 1, kToClient = 2;  // Steam envelope: [kind][clientPort:2][Photon datagram]
+constexpr uint8_t kHello = 0, kToHost = 1, kToClient = 2;  // Steam envelope: [kind][clientPort:2][Photon datagram]
+constexpr uint8_t kHelloRequest = 0, kHelloReply = 1;      // hello: [kHello][request|reply][0][0], opens the session early
 constexpr uint64_t kSteamIdMin = 76561197960265728ull, kSteamIdMax = 76561202255233023ull;
 constexpr uint64_t kRemoteKeyFlag = 1ull << 63;
 constexpr int kMaxDatagram = 65536;
-constexpr int kSelectTimeoutUs = 1000;
+constexpr LONGLONG kPumpIntervalMs = 1;  // high-resolution wake-up to poll Steam between socket events
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 constexpr int kSteamBatch = 64;
 constexpr uint8_t kForwarderNet0 = 127, kForwarderNet1 = 80;
 constexpr int kRegionPingSize = 13;
@@ -69,6 +74,8 @@ std::atomic<bool> g_photonActive{ false };  // true once the game actually uses 
 int g_channel = 9;
 uint64_t g_self = 0;
 std::vector<Listener> g_listeners;
+WSAEVENT g_socketEvent = WSA_INVALID_EVENT; // signalled when any emulator socket is readable
+HANDLE g_pumpTimer = nullptr;               // periodic 1 ms timer (high resolution when the OS offers it)
 std::map<uint64_t, Connection> g_connections;   // peer key -> transport
 std::map<uint64_t, Forwarder> g_forwarders;     // host SteamID -> forwarder
 std::unique_ptr<PnServer::Emulator> g_emulator;
@@ -116,7 +123,8 @@ SOCKET OpenUdp(uint32_t ipHostOrder, uint16_t port) {
     BOOL noConnReset = FALSE;
     DWORD bytes = 0;
     WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &noConnReset, sizeof(noConnReset), nullptr, 0, &bytes, nullptr, nullptr);
-    if (bind(s, (sockaddr*)&a, sizeof(a)) != 0 || ioctlsocket(s, FIONBIO, &nonBlocking) != 0) {
+    if (bind(s, (sockaddr*)&a, sizeof(a)) != 0 || ioctlsocket(s, FIONBIO, &nonBlocking) != 0 ||
+        WSAEventSelect(s, g_socketEvent, FD_READ) != 0) {
         int error = WSAGetLastError(); // closesocket resets it; callers log it
         closesocket(s);
         WSASetLastError(error);
@@ -133,6 +141,11 @@ std::string AddressString(uint32_t ipHostOrder, uint16_t port) {
 }
 
 // --- Room directory ----------------------------------------------------------------------------------------
+
+void SendHello(uint64_t steamId, uint8_t which) {
+    const char hello[4] = { (char)kHello, (char)which, 0, 0 };
+    ReFixSteamFlat::SendMessage(steamId, hello, sizeof(hello), g_channel);
+}
 
 uint64_t SteamIdPrefix(const std::string& name) {
     size_t digits = 0;
@@ -172,6 +185,7 @@ Forwarder* ForwarderFor(uint64_t host) {
     }
     if (f.sockets.empty()) return nullptr;
     Log("[Photon] Host %llu reachable at %s via Steam P2P", (unsigned long long)host, f.address.c_str());
+    SendHello(host, kHelloRequest); // start session setup now, in parallel with the client's own connect
     return &g_forwarders.emplace(host, f).first->second;
 }
 
@@ -248,6 +262,12 @@ void LogTunnelStats(DWORD now) {
         st.loggedReceived = st.received;
         Log("[Photon] Steam tunnel %llu: sent %u (%u bytes, largest %u), received %u (%u bytes, largest %u)",
             (unsigned long long)peer, st.sent, st.sentBytes, st.sentMax, st.received, st.receivedBytes, st.receivedMax);
+        ReFixSteamFlat::SessionStatus ss;
+        if (ReFixSteamFlat::SessionInfo(peer, ss))
+            Log("[Photon] Steam session %llu: state %d, %s, ping %d ms, quality %.2f, send queue %lld us "
+                "(pending %d unreliable / %d reliable bytes, rate %d B/s)", (unsigned long long)peer, ss.state,
+                ss.relayed ? "RELAYED" : "direct", ss.pingMs, ss.qualityLocal, (long long)ss.queueTimeUs,
+                ss.pendingUnreliable, ss.pendingReliable, ss.sendRate);
     }
 }
 
@@ -288,6 +308,11 @@ void OnListenerDatagram(size_t index, const sockaddr_in& from, const char* data,
 
 void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
     if (size < 4) return;
+    if (data[0] == kHello) {
+        if (data[1] == kHelloRequest) SendHello(from, kHelloReply); // open the reverse direction as well
+        Log("[Photon] Steam P2P hello %s from %llu", data[1] == kHelloRequest ? "request" : "reply", (unsigned long long)from);
+        return;
+    }
     static std::set<uint64_t> s_seen;
     if (s_seen.insert(from).second)
         Log("[Photon] Steam P2P first message from %llu (%s)", (unsigned long long)from, data[0] == kToHost ? "to host" : "to client");
@@ -309,37 +334,38 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
     }
 }
 
+// Reads every pending datagram of a non-blocking socket.
+template <typename Handler>
+void Drain(SOCKET s, char* buf, Handler&& onDatagram) {
+    for (;;) {
+        sockaddr_in from = {};
+        int len = sizeof(from);
+        int n = recvfrom(s, buf, kMaxDatagram, 0, (sockaddr*)&from, &len);
+        if (n <= 0) break;
+        onDatagram(from, n);
+    }
+}
+
+// Sleeps until a socket is readable or the pump timer fires. A select/Sleep timeout is rounded up to the system
+// timer tick (~15.6 ms), which delayed every Steam message by up to a tick on each hop.
+void WaitForWork() {
+    HANDLE handles[2] = { g_socketEvent, g_pumpTimer };
+    DWORD count = g_pumpTimer ? 2 : 1;
+    WaitForMultipleObjects(count, handles, FALSE, g_pumpTimer ? INFINITE : (DWORD)kPumpIntervalMs);
+}
+
 void Pump() {
     static char buf[kMaxDatagram];
-    fd_set readable;
-    FD_ZERO(&readable);
-    for (const auto& l : g_listeners) FD_SET(l.socket, &readable);
-    for (const auto& [host, f] : g_forwarders)
-        for (SOCKET s : f.sockets) FD_SET(s, &readable);
-    timeval timeout = { 0, kSelectTimeoutUs };
-    if (select(0, &readable, nullptr, nullptr, &timeout) > 0) {
-        for (size_t i = 0; i < g_listeners.size(); i++) {
-            if (!FD_ISSET(g_listeners[i].socket, &readable)) continue;
-            for (;;) {
-                sockaddr_in from = {};
-                int len = sizeof(from);
-                int n = recvfrom(g_listeners[i].socket, buf, sizeof(buf), 0, (sockaddr*)&from, &len);
-                if (n <= 0) break;
-                OnListenerDatagram(i, from, buf, n);
-            }
-        }
-        for (auto& [host, f] : g_forwarders) {
-            for (SOCKET s : f.sockets) {
-                if (!FD_ISSET(s, &readable)) continue;
-                for (;;) {
-                    sockaddr_in from = {};
-                    int len = sizeof(from);
-                    int n = recvfrom(s, buf, sizeof(buf), 0, (sockaddr*)&from, &len);
-                    if (n <= 0) break;
-                    f.clientSocket[ntohs(from.sin_port)] = s;
-                    SendSteam(host, kToHost, ntohs(from.sin_port), buf, (size_t)n);
-                }
-            }
+    WSAResetEvent(g_socketEvent); // before draining: anything arriving later signals it again
+    for (size_t i = 0; i < g_listeners.size(); i++)
+        Drain(g_listeners[i].socket, buf, [&](const sockaddr_in& from, int n) { OnListenerDatagram(i, from, buf, n); });
+    for (auto& [host, f] : g_forwarders) {
+        for (SOCKET s : f.sockets) {
+            uint64_t peer = host;
+            Drain(s, buf, [&, peer, s](const sockaddr_in& from, int n) {
+                f.clientSocket[ntohs(from.sin_port)] = s;
+                SendSteam(peer, kToHost, ntohs(from.sin_port), buf, (size_t)n);
+            });
         }
     }
     if (g_photonActive.load(std::memory_order_relaxed)) { // only poll Steam once Photon is actually in use
@@ -362,6 +388,37 @@ void Pump() {
     // (callback 1251), handled on the game's own thread in steam_proxy via ReFixSteamFlat::OnSessionRequestCallback.
     // We must NOT enumerate the Steam friends list from this background pump thread: doing so races the game's
     // own Steam calls (e.g. the Steam auth burst during Photon room creation) and crashes inside the Valve DLL.
+    WaitForWork();
+}
+
+void ConfigureSteamNetworking() {
+    std::string ini = IniPath();
+    ReFixSteamFlat::NetworkingConfig config;
+    // Direct routes (LAN and STUN/public addresses) besides SDR: SNS picks the faster one, so nearby players stop
+    // bouncing through a Valve relay. DirectConnections = 0 keeps Steam's default.
+    if (GetPrivateProfileIntA("Photon", "DirectConnections", 1, ini.c_str()))
+        config.iceEnable = k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Private |
+                           k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Public;
+    // The host forwards every player's traffic (voice included); Steam's default rate cap queues it up.
+    config.sendRateMin = GetPrivateProfileIntA("Photon", "SendRateMinKB", 256, ini.c_str()) * 1024;
+    config.sendRateMax = GetPrivateProfileIntA("Photon", "SendRateMaxKB", 4096, ini.c_str()) * 1024;
+    // Photon clients give up after ~10 s; let the Steam session itself ride out a host's unstable link longer.
+    config.timeoutInitialMs = GetPrivateProfileIntA("Photon", "SessionConnectTimeoutMs", 20000, ini.c_str());
+    config.timeoutConnectedMs = GetPrivateProfileIntA("Photon", "SessionTimeoutMs", 30000, ini.c_str());
+    while (!ReFixSteamFlat::ConfigureNetworking(config)) Sleep(200);
+}
+
+void StartPumpTimer() {
+    g_pumpTimer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    bool highResolution = g_pumpTimer != nullptr;
+    if (!g_pumpTimer) g_pumpTimer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS); // pre-1803 Windows
+    LARGE_INTEGER due;
+    due.QuadPart = -kPumpIntervalMs * 10000; // relative, 100 ns units
+    if (g_pumpTimer && !SetWaitableTimer(g_pumpTimer, &due, (LONG)kPumpIntervalMs, nullptr, nullptr, FALSE)) {
+        CloseHandle(g_pumpTimer);
+        g_pumpTimer = nullptr;
+    }
+    Log("[Photon] Pump timer: %s", !g_pumpTimer ? "none (timer tick)" : highResolution ? "high resolution 1 ms" : "1 ms (timer tick)");
 }
 
 DWORD WINAPI Thread(LPVOID) {
@@ -376,6 +433,8 @@ DWORD WINAPI Thread(LPVOID) {
     env.roomHosted = RoomHosted;
     env.log = Log;
     g_emulator = std::make_unique<PnServer::Emulator>(env);
+    ConfigureSteamNetworking();
+    StartPumpTimer();
     // Start watching friends' room presence now, so the presence cache (refreshed on the game thread) is warm by
     // the time a join needs it; a cold cache made the first join of a code-named room fail ("not found").
     ReFixSteamFlat::FriendsWithRichPresence(kPresenceKey);
@@ -416,6 +475,7 @@ void Initialize() {
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
+    g_socketEvent = WSACreateEvent();
     OpenListeners(kNameServerPorts, _countof(kNameServerPorts), PnServer::Role::NameServer, nullptr);
     OpenListeners(kMasterPorts, _countof(kMasterPorts), PnServer::Role::Master, &g_masterAddress);
     OpenListeners(kGamePorts, _countof(kGamePorts), PnServer::Role::Game, &g_gameAddress);
