@@ -1,6 +1,14 @@
 ====================================================================
-               ReFix Deployment Suite v1.4.0 (Standalone)
+               ReFix Deployment Suite v1.4.1 (Standalone)
 ====================================================================
+
+WHAT'S NEW IN v1.4.1 (test build):
+- Photon P2P: lower voice/game latency. The emulator no longer waits up to ~15 ms per Steam hop, enables
+  direct Steam P2P routes (LAN / nearby players skip the Valve relay) and raises Steam's send-rate cap.
+- Photon P2P: joins survive an unstable host better (longer Steam session timeouts, session opened early).
+- ReFix.log now shows per player: RELAYED/direct route, ping, quality and send queue ('Steam session' lines).
+- New optional [Photon] keys: DirectConnections, SendRateMinKB, SendRateMaxKB, SessionConnectTimeoutMs,
+  SessionTimeoutMs.
 
 WHAT'S NEW IN v1.4.0:
 - Local Photon Cloud emulator (ReFixCloud): Photon games (PUN 2, Realtime, Voice and Fusion) run with no
