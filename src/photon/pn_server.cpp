@@ -99,6 +99,23 @@ bool Emulator::HostsRoom(const std::string& name) const {
     return false;
 }
 
+Table Emulator::LocalPublicRooms() const {
+    Table gameList;
+    for (const auto& [key, room] : m_rooms) {
+        bool open = true;
+        if (const Raw* v = room->props.Find(Byte(GP_IS_OPEN))) AsBool(*v, open);
+        bool visible = true;
+        if (const Raw* v = room->props.Find(Byte(254))) AsBool(*v, visible);
+        if (!visible) continue;
+        Table props = room->props;
+        props.Set(Byte(GP_MAX_PLAYERS), Int(room->maxPlayers));
+        props.Set(Byte(GP_IS_OPEN), Bool(open));
+        props.Set(Byte(252), Int((int32_t)room->actors.size()));
+        gameList.Set(Str(room->name), props.Encode());
+    }
+    return gameList;
+}
+
 void Emulator::OnConnect(uint64_t peerKey, Role role, const std::string& userId, SendFn send) {
     Peer peer;
     peer.role = role;
@@ -195,10 +212,19 @@ void Emulator::HandleMaster(Peer& peer, uint8_t op, const Params& params) {
         case OP_AUTHENTICATE_ONCE:
             Respond(peer, op, 0, { { P_USER_ID, Str(peer.userId) }, { P_TOKEN, Str("refix") } });
             return;
-        case OP_JOIN_LOBBY:
+        case OP_JOIN_LOBBY: {
             Respond(peer, op, 0);
-            peer.send(Message(MT_EVENT, EventData(EV_GAME_LIST, { { P_GAME_LIST, Table().Encode() } })), true, 0);
+            Table gameList = LocalPublicRooms();
+            if (m_env.publicLobbies) {
+                for (const auto& [name, props] : m_env.publicLobbies()) {
+                    if (!gameList.Find(Str(name))) {
+                        gameList.Set(Str(name), props.Encode());
+                    }
+                }
+            }
+            peer.send(Message(MT_EVENT, EventData(EV_GAME_LIST, { { P_GAME_LIST, gameList.Encode() } })), true, 0);
             return;
+        }
         case OP_CREATE_GAME: {
             std::string name = StrParam(params, P_ROOM_NAME);
             if (name.empty()) name = m_env.newRoomName();
@@ -288,7 +314,7 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
     // IsOpen only gates later joins: like Photon Cloud, the creator always enters (Fusion creates rooms closed).
     bool open = true;
     if (const Raw* v = room.props.Find(Byte(GP_IS_OPEN))) AsBool(*v, open);
-    if (!open && exists) { Respond(peer, op, ERR_GAME_CLOSED, {}, "Game closed"); return; }
+    if (!open && exists && !room.fusionShared && !m_env.startFusionShared) { Respond(peer, op, ERR_GAME_CLOSED, {}, "Game closed"); return; }
     if (room.maxPlayers > 0 && (int32_t)room.actors.size() >= room.maxPlayers) { Respond(peer, op, ERR_GAME_FULL, {}, "Game full"); return; }
 
     Actor actor;

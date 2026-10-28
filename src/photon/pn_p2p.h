@@ -1,4 +1,6 @@
 #pragma once
+#include <string>
+#include <cstdint>
 
 // ReFix Photon P2P: replaces Photon Cloud for PUN/Realtime games with a local emulator plus Steam P2P.
 //
@@ -11,4 +13,7 @@
 namespace ReFixPhotonP2P {
     // Call once Steam is initialized. Idempotent; does nothing when disabled in ReFix.ini.
     void Initialize();
+
+    // Directly registers the SteamID hosting a room name (and its voice room counterpart).
+    void RegisterRoomHost(const std::string& roomName, uint64_t hostSteamID);
 }

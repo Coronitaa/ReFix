@@ -22,6 +22,9 @@ namespace ReFixSteamFlat {
     // (ServiceMainThread). Safe to call from any thread; registers `key` for the next refresh.
     std::vector<FriendPresence> FriendsWithRichPresence(const char* key);
 
+    // Immediate friend SteamIDs from the cache refreshed on the main thread. Safe to call from any thread.
+    std::vector<uint64_t> FriendSteamIDs();
+
     // Services Steam friend/presence state on the game's MAIN thread (call from the Steam callback pumps):
     // applies queued SetRichPresence writes and refreshes the friend caches. ISteamFriends enumeration is
     // unsafe off the main thread, so worker threads must rely on the caches instead of calling Steam.
@@ -33,8 +36,12 @@ namespace ReFixSteamFlat {
     // Owner of a Steam lobby the local user can see (0 when unknown).
     uint64_t LobbyOwner(uint64_t lobbyId);
 
-    // Unreliable, no-Nagle send over Steam Datagram Relay on `channel`.
-    bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel);
+    // Sends a message over Steam Datagram Relay on `channel`. When `reliable` is true,
+    // uses k_nSteamNetworkingSend_ReliableNoNagle | k_nSteamNetworkingSend_AutoRestartBrokenSession.
+    bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel, bool reliable = false);
+
+    // Currently active Steam lobby ID if known (0 when not in a lobby).
+    uint64_t ActiveLobbyID();
 
     // Drains up to `maxMessages` messages received on `channel`, invoking `onMessage` for each.
     int ReceiveMessages(int channel, int maxMessages, const std::function<void(uint64_t, const uint8_t*, uint32_t)>& onMessage);

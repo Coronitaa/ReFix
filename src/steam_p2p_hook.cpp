@@ -1404,6 +1404,16 @@ void UnregisterPeer(uint64_t steamID) {
     }
 }
 
+std::vector<uint64_t> GetRegisteredPeers() {
+    std::lock_guard<std::mutex> lg(g_peerMutex);
+    std::vector<uint64_t> result;
+    result.reserve(g_steamIDToIP.size());
+    for (const auto& kv : g_steamIDToIP) {
+        if (kv.first) result.push_back(kv.first);
+    }
+    return result;
+}
+
 } // namespace SteamP2PHook
 
 // =============================================================================

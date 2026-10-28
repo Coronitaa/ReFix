@@ -1612,6 +1612,21 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
     if (!g_pfn_GetNumLobbyMembers || !g_pfn_GetLobbyMemberByIndex) return;
     int count = g_pfn_GetNumLobbyMembers(matchmaking, lobbyID);
     ReFixLog("UpdateP2PPeers: lobby=%llu members=%d (serverIP='%s')", lobbyID, count, serverIP ? serverIP : "");
+    if (pfnGetOwner) {
+        uint64_t ownerID = pfnGetOwner(matchmaking, lobbyID);
+        if (ownerID) {
+            typedef const char* (*fn_GetLobbyData_t)(void*, uint64_t, const char*);
+            auto pfnGD = (fn_GetLobbyData_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyData");
+            if (pfnGD) {
+                for (const char* k : { "Fusion_Room_Name", "Room_Name", "room", "connect" }) {
+                    const char* rName = pfnGD(matchmaking, lobbyID, k);
+                    if (rName && rName[0] != '\0') {
+                        ReFixPhotonP2P::RegisterRoomHost(rName, ownerID);
+                    }
+                }
+            }
+        }
+    }
 
     for (int i = 0; i < count; i++) {
         uint64_t memberID = g_pfn_GetLobbyMemberByIndex(matchmaking, lobbyID, i);
@@ -2591,6 +2606,16 @@ static const char* Hooked_ISteamMatchmaking_GetLobbyData(void* self, uint64_t st
     }
     ReFixLog("ISteamMatchmaking::GetLobbyData Hook: lobbyID=%llu, key='%s' -> '%s' (self=%p)",
              steamIDLobby, pchKey ? pchKey : "(null)", val ? val : "(null)", self);
+    if (val && val[0] != '\0' && steamIDLobby && self) {
+        if (pchKey && (strstr(pchKey, "Room") || strstr(pchKey, "room") || strstr(pchKey, "Fusion") || strstr(pchKey, "connect"))) {
+            typedef uint64_t (*fn_GetLobbyOwner_t)(void*, uint64_t);
+            auto pfnGetOwner = (fn_GetLobbyOwner_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+            uint64_t ownerID = pfnGetOwner ? pfnGetOwner(self, steamIDLobby) : 0;
+            if (ownerID) {
+                ReFixPhotonP2P::RegisterRoomHost(val, ownerID);
+            }
+        }
+    }
     return val ? val : "";
 }
 extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
@@ -2749,6 +2774,14 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
 static bool Hooked_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
     ReFixLog("ISteamMatchmaking::SetLobbyData Hook: Lobby=%llu, Key='%s', Value='%s'",
              steamIDLobby, pchKey ? pchKey : "", pchValue ? pchValue : "");
+    if (pchValue && pchValue[0] != '\0' && steamIDLobby) {
+        if (pchKey && (strstr(pchKey, "Room") || strstr(pchKey, "room") || strstr(pchKey, "Fusion") || strstr(pchKey, "connect"))) {
+            uint64_t mySteamID = g_capturedSteamID ? g_capturedSteamID : g_config.steamIdNum;
+            if (mySteamID) {
+                ReFixPhotonP2P::RegisterRoomHost(pchValue, mySteamID);
+            }
+        }
+    }
 
     // Setting lobby metadata implies this process is hosting/managing this lobby
     if (steamIDLobby != 0) {
@@ -4880,6 +4913,10 @@ static uint64_t Intercepted_JoinLobby(void* self, uint64_t steamIDLobby) {
     return Hooked_ISteamMatchmaking_JoinLobby(self, steamIDLobby);
 }
 
+extern "C" __declspec(dllexport) uint64_t ReFix_GetActiveLobbyID() {
+    return g_activeLobbyID;
+}
+
 extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {
     if (lobbyID && lobbyID != g_activeLobbyID) {
         // PROTECTION: If g_activeLobbyID is already a real Steam lobby (0x0186...),
@@ -5689,6 +5726,19 @@ static void CapturePersonaName() {
 }
 
 // Intercepted Exports implemented directly
+extern "C" void SteamP2PHook_ForceResolve();
+
+static void InitPhotonAndP2PHooks() {
+    if (!g_godotIsEngine && !g_isGoldbergMode) {
+        SteamP2PHook::Install(g_hOriginalDll);
+        ReFixLog("Steam P2P Winsock hooks installed");
+        SteamP2PHook_ForceResolve();
+    } else {
+        ReFixLog("Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
+    }
+    ReFixPhotonP2P::Initialize();
+}
+
 extern "C" __declspec(dllexport) bool SteamAPI_Init() {
     ApplySteamEnv();
     ReFixLog("SteamAPI_Init called");
@@ -5719,17 +5769,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (for non-Godot engines in Valve Online mode)
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
-            SteamP2PHook::Install(g_hOriginalDll);
-            ReFixPhotonP2P::Initialize();
-            ReFixLog("SteamAPI_Init: Steam P2P Winsock hooks installed");
-            // Force immediate re-resolve of ISteamNetworking now that Steam is initialized
-            extern void SteamP2PHook_ForceResolve();
-            SteamP2PHook_ForceResolve();
-        } else {
-            ReFixLog("SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
-        }
+        InitPhotonAndP2PHooks();
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
         ReFixIL2CPP::Initialize();
@@ -5756,6 +5796,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
     ReFixLog("SteamAPI_InitSafe: result=%d", result);
     if (result) {
         CapturePersonaName();
+        InitPhotonAndP2PHooks();
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
         ReFixIL2CPP::Initialize();
@@ -5788,12 +5829,7 @@ extern "C" __declspec(dllexport) int SteamAPI_InitFlat(char* pOutErrMsg) {
     ReFixLog("SteamAPI_InitFlat: result=%d, msg='%s'", result, targetErr);
     if (result == 0) {
         CapturePersonaName();
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
-            SteamP2PHook::Install(g_hOriginalDll);
-            ReFixPhotonP2P::Initialize();
-            extern void SteamP2PHook_ForceResolve();
-            SteamP2PHook_ForceResolve();
-        }
+        InitPhotonAndP2PHooks();
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
         ReFixIL2CPP::Initialize();
@@ -5864,16 +5900,7 @@ extern "C" __declspec(dllexport) int SteamInternal_SteamAPI_Init(
         g_steamInitTick = GetTickCount();
         CapturePersonaName();
         TriggerSyntheticRelayCallback();
-        // Install Winsock -> Steam P2P redirect hooks (for non-Godot engines in Valve Online mode)
-        if (!g_godotIsEngine && !g_isGoldbergMode) {
-            SteamP2PHook::Install(g_hOriginalDll);
-            ReFixPhotonP2P::Initialize();
-            ReFixLog("SteamInternal_SteamAPI_Init: Steam P2P Winsock hooks installed");
-            extern void SteamP2PHook_ForceResolve();
-            SteamP2PHook_ForceResolve();
-        } else {
-            ReFixLog("SteamInternal_SteamAPI_Init: Winsock P2P hook skipped (godot=%d, unreal=%d, goldberg=%d)", g_godotIsEngine, g_unrealIsEngine, g_isGoldbergMode);
-        }
+        InitPhotonAndP2PHooks();
         InstallVTableHooks();
         SteamNetCompat::OnSteamInitialized(g_isGoldbergMode, g_config.maskAppIdNum, g_config.realAppIdNum);
         ReFixIL2CPP::Initialize();
