@@ -247,12 +247,27 @@ uint64_t LobbyOwner(uint64_t lobbyId) {
     return api.matchmaking && api.getLobbyOwner && lobbyId ? api.getLobbyOwner(api.matchmaking, lobbyId) : 0;
 }
 
-bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel) {
+bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel, bool reliable) {
     Api api = ResolveApi();
     if (!api.messages || !api.sendMessageToUser || !steamID) return false;
     SteamNetworkingIdentity id = Identity(steamID);
-    int result = api.sendMessageToUser(api.messages, id, data, size, kSendUnreliableNoNagle | kSendAutoRestartBrokenSession, channel);
+    int sendFlags = reliable
+        ? (9 | kSendAutoRestartBrokenSession) // k_nSteamNetworkingSend_ReliableNoNagle | AutoRestart
+        : (kSendUnreliableNoNagle | kSendAutoRestartBrokenSession);
+    int result = api.sendMessageToUser(api.messages, id, data, size, sendFlags, channel);
     return result == 1; // k_EResultOK
+}
+
+uint64_t ActiveLobbyID() {
+    typedef uint64_t (*fn_GetActiveLobbyID_t)();
+    static fn_GetActiveLobbyID_t pfn = nullptr;
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        HMODULE hSelf = GetModuleHandleA("steam_api64.dll");
+        if (hSelf) pfn = (fn_GetActiveLobbyID_t)GetProcAddress(hSelf, "ReFix_GetActiveLobbyID");
+    }
+    return pfn ? pfn() : 0;
 }
 
 int ReceiveMessages(int channel, int maxMessages, const std::function<void(uint64_t, const uint8_t*, uint32_t)>& onMessage) {

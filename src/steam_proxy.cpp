@@ -1612,6 +1612,21 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
     if (!g_pfn_GetNumLobbyMembers || !g_pfn_GetLobbyMemberByIndex) return;
     int count = g_pfn_GetNumLobbyMembers(matchmaking, lobbyID);
     ReFixLog("UpdateP2PPeers: lobby=%llu members=%d (serverIP='%s')", lobbyID, count, serverIP ? serverIP : "");
+    if (pfnGetOwner) {
+        uint64_t ownerID = pfnGetOwner(matchmaking, lobbyID);
+        if (ownerID) {
+            typedef const char* (*fn_GetLobbyData_t)(void*, uint64_t, const char*);
+            auto pfnGD = (fn_GetLobbyData_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyData");
+            if (pfnGD) {
+                for (const char* k : { "Fusion_Room_Name", "Room_Name", "room", "connect" }) {
+                    const char* rName = pfnGD(matchmaking, lobbyID, k);
+                    if (rName && rName[0] != '\0') {
+                        ReFixPhotonP2P::RegisterRoomHost(rName, ownerID);
+                    }
+                }
+            }
+        }
+    }
 
     for (int i = 0; i < count; i++) {
         uint64_t memberID = g_pfn_GetLobbyMemberByIndex(matchmaking, lobbyID, i);
@@ -2591,6 +2606,16 @@ static const char* Hooked_ISteamMatchmaking_GetLobbyData(void* self, uint64_t st
     }
     ReFixLog("ISteamMatchmaking::GetLobbyData Hook: lobbyID=%llu, key='%s' -> '%s' (self=%p)",
              steamIDLobby, pchKey ? pchKey : "(null)", val ? val : "(null)", self);
+    if (val && val[0] != '\0' && steamIDLobby && self) {
+        if (pchKey && (strstr(pchKey, "Room") || strstr(pchKey, "room") || strstr(pchKey, "Fusion") || strstr(pchKey, "connect"))) {
+            typedef uint64_t (*fn_GetLobbyOwner_t)(void*, uint64_t);
+            auto pfnGetOwner = (fn_GetLobbyOwner_t)GetProcAddress((HMODULE)g_hOriginalDll, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+            uint64_t ownerID = pfnGetOwner ? pfnGetOwner(self, steamIDLobby) : 0;
+            if (ownerID) {
+                ReFixPhotonP2P::RegisterRoomHost(val, ownerID);
+            }
+        }
+    }
     return val ? val : "";
 }
 extern "C" __declspec(dllexport) const char* SteamAPI_ISteamMatchmaking_GetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey) {
@@ -2749,6 +2774,14 @@ static uint64_t Hooked_ISteamMatchmaking_JoinLobby(void* self, uint64_t steamIDL
 static bool Hooked_ISteamMatchmaking_SetLobbyData(void* self, uint64_t steamIDLobby, const char* pchKey, const char* pchValue) {
     ReFixLog("ISteamMatchmaking::SetLobbyData Hook: Lobby=%llu, Key='%s', Value='%s'",
              steamIDLobby, pchKey ? pchKey : "", pchValue ? pchValue : "");
+    if (pchValue && pchValue[0] != '\0' && steamIDLobby) {
+        if (pchKey && (strstr(pchKey, "Room") || strstr(pchKey, "room") || strstr(pchKey, "Fusion") || strstr(pchKey, "connect"))) {
+            uint64_t mySteamID = g_capturedSteamID ? g_capturedSteamID : g_config.steamIdNum;
+            if (mySteamID) {
+                ReFixPhotonP2P::RegisterRoomHost(pchValue, mySteamID);
+            }
+        }
+    }
 
     // Setting lobby metadata implies this process is hosting/managing this lobby
     if (steamIDLobby != 0) {
@@ -4878,6 +4911,10 @@ static uint64_t Intercepted_CreateLobby(void* self, int eLobbyType, int cMaxMemb
 
 static uint64_t Intercepted_JoinLobby(void* self, uint64_t steamIDLobby) {
     return Hooked_ISteamMatchmaking_JoinLobby(self, steamIDLobby);
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_GetActiveLobbyID() {
+    return g_activeLobbyID;
 }
 
 extern "C" void ReFix_NotifyLobbyID(uint64_t lobbyID) {

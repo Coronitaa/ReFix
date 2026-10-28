@@ -177,6 +177,15 @@ std::vector<uint64_t> KnownPeers() {
     for (uint64_t id : ReFixSteamFlat::FriendSteamIDs()) {
         if (id && id != g_self) peers.insert(id);
     }
+    for (uint64_t id : SteamP2PHook::GetRegisteredPeers()) {
+        if (id && id != g_self) peers.insert(id);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_discoveryMutex);
+        for (const auto& [_, host] : g_resolvedRooms) {
+            if (host && host != g_self) peers.insert(host);
+        }
+    }
     for (const auto& [host, _] : g_forwarders) {
         if (host && host != g_self) peers.insert(host);
     }
@@ -235,7 +244,9 @@ uint64_t ResolveHost(const std::string& name) {
     }
     {
         std::lock_guard<std::mutex> lock(g_discoveryMutex);
-        if (g_emulator && g_emulator->HostsRoom(name)) {
+        if (g_emulator && (g_emulator->HostsRoom(name) ||
+            (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0 && g_emulator->HostsRoom(name.substr(0, name.size() - 6))) ||
+            g_emulator->HostsRoom(name + "_voice"))) {
             Log("[Photon] Room '%s' is hosted locally", name.c_str());
             return g_self;
         }
@@ -244,14 +255,56 @@ uint64_t ResolveHost(const std::string& name) {
             Log("[Photon] Room '%s' resolved to %llu from cache", name.c_str(), (unsigned long long)it->second);
             return it->second;
         }
+        if (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0) {
+            it = g_resolvedRooms.find(name.substr(0, name.size() - 6));
+            if (it != g_resolvedRooms.end()) {
+                Log("[Photon] Room '%s' (base '%s') resolved to %llu from cache",
+                    name.c_str(), name.substr(0, name.size() - 6).c_str(), (unsigned long long)it->second);
+                return it->second;
+            }
+        } else {
+            it = g_resolvedRooms.find(name + "_voice");
+            if (it != g_resolvedRooms.end()) {
+                Log("[Photon] Room '%s' (voice variant) resolved to %llu from cache", name.c_str(), (unsigned long long)it->second);
+                return it->second;
+            }
+        }
     }
-    for (const char* key : { kPresenceKey, "connect", "status" }) {
+    uint64_t activeLobby = ReFixSteamFlat::ActiveLobbyID();
+    if (activeLobby) {
+        uint64_t owner = ReFixSteamFlat::LobbyOwner(activeLobby);
+        if (owner && owner != g_self) {
+            Log("[Photon] Active lobby %llu owner %llu assumed host for room '%s'",
+                (unsigned long long)activeLobby, (unsigned long long)owner, name.c_str());
+            std::lock_guard<std::mutex> lock(g_discoveryMutex);
+            g_resolvedRooms[name] = owner;
+            if (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0) {
+                g_resolvedRooms[name.substr(0, name.size() - 6)] = owner;
+            } else {
+                g_resolvedRooms[name + "_voice"] = owner;
+            }
+            return owner;
+        }
+    }
+    for (const char* key : { kPresenceKey, "refix_photon_voice", "connect", "status" }) {
         for (const auto& entry : ReFixSteamFlat::FriendsWithRichPresence(key)) {
-            if (entry.value == name || entry.value.find(name) != std::string::npos) {
+            bool match = (entry.value == name);
+            if (!match && !entry.value.empty()) {
+                if (name == entry.value + "_voice" || entry.value == name + "_voice" ||
+                    entry.value.find(name) != std::string::npos) {
+                    match = true;
+                }
+            }
+            if (match) {
                 Log("[Photon] Room '%s' found in friend %llu presence ('%s' = '%s')",
                     name.c_str(), (unsigned long long)entry.steamID, key, entry.value.c_str());
                 std::lock_guard<std::mutex> lock(g_discoveryMutex);
                 g_resolvedRooms[name] = entry.steamID;
+                if (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0) {
+                    g_resolvedRooms[name.substr(0, name.size() - 6)] = entry.steamID;
+                } else {
+                    g_resolvedRooms[name + "_voice"] = entry.steamID;
+                }
                 return entry.steamID;
             }
         }
@@ -268,16 +321,31 @@ uint64_t ResolveHost(const std::string& name) {
         query.push_back((char)(qid & 0xFF));
         query.append(name);
         for (uint64_t peer : targets) {
-            ReFixSteamFlat::SendMessage(peer, query.data(), (uint32_t)query.size(), g_channel);
+            ReFixSteamFlat::SendMessage(peer, query.data(), (uint32_t)query.size(), g_channel, /*reliable=*/true);
         }
-        for (int i = 0; i < 14; i++) {
-            Sleep(15);
+        for (int i = 0; i < 80; i++) {
+            Sleep(25);
             ReFixSteamFlat::ReceiveMessages(g_channel, kSteamBatch, OnSteamMessage);
             std::lock_guard<std::mutex> lock(g_discoveryMutex);
             auto it = g_resolvedRooms.find(name);
             if (it != g_resolvedRooms.end()) {
                 Log("[Photon] P2P room query succeeded: '%s' is hosted by %llu", name.c_str(), (unsigned long long)it->second);
                 return it->second;
+            }
+            if (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0) {
+                it = g_resolvedRooms.find(name.substr(0, name.size() - 6));
+                if (it != g_resolvedRooms.end()) {
+                    Log("[Photon] P2P room query succeeded: '%s' (base '%s') is hosted by %llu",
+                        name.c_str(), name.substr(0, name.size() - 6).c_str(), (unsigned long long)it->second);
+                    return it->second;
+                }
+            } else {
+                it = g_resolvedRooms.find(name + "_voice");
+                if (it != g_resolvedRooms.end()) {
+                    Log("[Photon] P2P room query succeeded: '%s' (voice variant) is hosted by %llu",
+                        name.c_str(), (unsigned long long)it->second);
+                    return it->second;
+                }
             }
         }
     }
@@ -338,13 +406,28 @@ std::vector<std::string> JoinableRooms() {
 
 void RoomHosted(const std::string& name, bool open) {
     if (open) g_photonActive.store(true, std::memory_order_relaxed);
-    ReFixSteamFlat::SetRichPresence(kPresenceKey, open ? name : std::string());
+    bool isVoice = (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0);
+    if (!isVoice) {
+        ReFixSteamFlat::SetRichPresence(kPresenceKey, open ? name : std::string());
+    } else {
+        ReFixSteamFlat::SetRichPresence("refix_photon_voice", open ? name : std::string());
+    }
     {
         std::lock_guard<std::mutex> lock(g_discoveryMutex);
         if (open) {
             g_resolvedRooms[name] = g_self;
+            if (isVoice) {
+                g_resolvedRooms[name.substr(0, name.size() - 6)] = g_self;
+            } else {
+                g_resolvedRooms[name + "_voice"] = g_self;
+            }
         } else {
             g_resolvedRooms.erase(name);
+            if (isVoice) {
+                g_resolvedRooms.erase(name.substr(0, name.size() - 6));
+            } else {
+                g_resolvedRooms.erase(name + "_voice");
+            }
         }
     }
     BroadcastRoomAnnounce(name, open);
@@ -448,7 +531,12 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
         uint16_t queryId = (uint16_t)((data[2] << 8) | data[3]);
         std::string roomName((const char*)data + 4, size - 4);
         bool hosted = false;
-        if (g_emulator && g_emulator->HostsRoom(roomName)) hosted = true;
+        if (g_emulator) {
+            if (g_emulator->HostsRoom(roomName)) hosted = true;
+            else if (roomName.size() > 6 && roomName.compare(roomName.size() - 6, 6, "_voice") == 0 &&
+                     g_emulator->HostsRoom(roomName.substr(0, roomName.size() - 6))) hosted = true;
+            else if (g_emulator->HostsRoom(roomName + "_voice")) hosted = true;
+        }
         if (hosted) {
             Log("[Photon] Responding to room query for '%s' from %llu", roomName.c_str(), (unsigned long long)from);
             std::string reply;
@@ -460,7 +548,7 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
             reply.push_back((char)(port >> 8));
             reply.push_back((char)(port & 0xFF));
             reply.append(roomName);
-            ReFixSteamFlat::SendMessage(from, reply.data(), (uint32_t)reply.size(), g_channel);
+            ReFixSteamFlat::SendMessage(from, reply.data(), (uint32_t)reply.size(), g_channel, /*reliable=*/true);
         }
         return;
     }
@@ -474,6 +562,11 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
         {
             std::lock_guard<std::mutex> lock(g_discoveryMutex);
             g_resolvedRooms[roomName] = from;
+            if (roomName.size() > 6 && roomName.compare(roomName.size() - 6, 6, "_voice") == 0) {
+                g_resolvedRooms[roomName.substr(0, roomName.size() - 6)] = from;
+            } else {
+                g_resolvedRooms[roomName + "_voice"] = from;
+            }
         }
         ForwarderFor(from);
         return;
@@ -653,6 +746,7 @@ DWORD WINAPI Thread(LPVOID) {
     // Start watching friends' room presence now, so the presence cache (refreshed on the game thread) is warm by
     // the time a join needs it; a cold cache made the first join of a code-named room fail ("not found").
     ReFixSteamFlat::FriendsWithRichPresence(kPresenceKey);
+    ReFixSteamFlat::FriendsWithRichPresence("refix_photon_voice");
     Log("[Photon] P2P emulator ready (self %llu, master %s, game %s, Steam channel %d)", (unsigned long long)g_self,
         g_masterAddress.c_str(), g_gameAddress.c_str(), g_channel);
     for (;;) Pump();
@@ -701,6 +795,18 @@ void Initialize() {
     PnDns::Install(Split(suffixes, ';'));
     HANDLE h = CreateThread(nullptr, 0, Thread, nullptr, 0, nullptr);
     if (h) CloseHandle(h);
+}
+
+void RegisterRoomHost(const std::string& roomName, uint64_t hostSteamID) {
+    if (roomName.empty() || !hostSteamID) return;
+    std::lock_guard<std::mutex> lock(g_discoveryMutex);
+    g_resolvedRooms[roomName] = hostSteamID;
+    if (roomName.size() > 6 && roomName.compare(roomName.size() - 6, 6, "_voice") == 0) {
+        g_resolvedRooms[roomName.substr(0, roomName.size() - 6)] = hostSteamID;
+    } else {
+        g_resolvedRooms[roomName + "_voice"] = hostSteamID;
+    }
+    Log("[Photon] RegisterRoomHost: '%s' mapped to host %llu", roomName.c_str(), (unsigned long long)hostSteamID);
 }
 
 } // namespace ReFixPhotonP2P

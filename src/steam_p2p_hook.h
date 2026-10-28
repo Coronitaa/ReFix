@@ -14,6 +14,7 @@
 // =============================================================================
 #pragma once
 #include <cstdint>
+#include <vector>
 
 namespace SteamP2PHook {
 
@@ -31,6 +32,9 @@ namespace SteamP2PHook {
 
     // Remove a peer mapping (e.g. when they leave the lobby).
     void UnregisterPeer(uint64_t steamID);
+
+    // Returns all known SteamIDs currently mapped as P2P peers.
+    std::vector<uint64_t> GetRegisteredPeers();
 
     // Log wrapper — forwards to ReFix.log via steam_proxy's logger.
     void Log(const char* fmt, ...);
