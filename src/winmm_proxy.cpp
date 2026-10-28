@@ -228,8 +228,6 @@ static bool InjectSteamOverlayWinmm(const char* appIdStr) {
     const char* overlayDllName = "GameOverlayRenderer.dll";
 #endif
 
-    if (GetModuleHandleA(overlayDllName) != NULL) return true;
-
     char steamPath[MAX_PATH] = { 0 };
     DWORD pathSize = sizeof(steamPath);
     HKEY hKey = NULL;
@@ -268,6 +266,8 @@ static bool InjectSteamOverlayWinmm(const char* appIdStr) {
     sprintf_s(eventName, sizeof(eventName), "SteamOverlayRunning_%s", appIdStr);
     HANDLE hEvt = CreateEventA(NULL, TRUE, TRUE, eventName);
     (void)hEvt;
+
+    if (GetModuleHandleA(overlayDllName) != NULL) return true;
 
     std::string fullOverlayPath = sPath + "\\" + overlayDllName;
     HMODULE hOverlay = LoadLibraryA(fullOverlayPath.c_str());

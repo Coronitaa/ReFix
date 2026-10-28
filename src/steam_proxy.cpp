@@ -1940,11 +1940,6 @@ static bool InjectSteamOverlay() {
     const char* overlayDllName = "GameOverlayRenderer.dll";
 #endif
 
-    if (GetModuleHandleA(overlayDllName) != NULL) {
-        ReFixLog("InjectSteamOverlay: '%s' is already loaded in process.", overlayDllName);
-        return true;
-    }
-
     char steamPath[MAX_PATH] = { 0 };
     DWORD pathSize = sizeof(steamPath);
     HKEY hKey = NULL;
@@ -1996,6 +1991,11 @@ static bool InjectSteamOverlay() {
     sprintf_s(eventName, sizeof(eventName), "SteamOverlayRunning_%s", targetAppId);
     HANDLE hEvt = CreateEventA(NULL, TRUE, TRUE, eventName);
     (void)hEvt;
+
+    if (GetModuleHandleA(overlayDllName) != NULL) {
+        ReFixLog("InjectSteamOverlay: '%s' is already loaded in process (environment & event signaled).", overlayDllName);
+        return true;
+    }
 
     std::string fullOverlayPath = sPath + "\\" + overlayDllName;
     ReFixLog("InjectSteamOverlay: Attempting to load '%s' (AppID=%s, PID=%s)...", fullOverlayPath.c_str(), targetAppId, pidStr);
