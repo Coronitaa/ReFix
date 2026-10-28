@@ -25,6 +25,14 @@ static unsafe class PluginPatches {
             Console.WriteLine("[plugin] WARNING: Could not find StateReplicator.ReadObjectUpdates to patch");
         }
 
+        var writeStructs = AccessTools.Method(typeof(Simulation.StateReplicator), "WriteStructs");
+        if (writeStructs != null) {
+            harmony.Patch(writeStructs, prefix: new HarmonyMethod(typeof(PluginPatches), nameof(WriteStructsPrefix)));
+            Console.WriteLine("[plugin] Patched StateReplicator.WriteStructs");
+        } else {
+            Console.WriteLine("[plugin] WARNING: Could not find StateReplicator.WriteStructs to patch");
+        }
+
         var createInternal = AccessTools.Method(typeof(Simulation.Server), "CreateInternalStateObjects");
         if (createInternal != null) {
             harmony.Patch(createInternal, prefix: new HarmonyMethod(typeof(PluginPatches), nameof(CreateInternalStateObjectsPrefix)));
@@ -36,6 +44,36 @@ static unsafe class PluginPatches {
 
     static void CreateInternalStateObjectsPrefix(ref PlayerRef sceneInfoStateAuth) {
         sceneInfoStateAuth = PlayerRef.MasterClient;
+    }
+
+    // Ensures internal state structs (RuntimeConfig, SceneInfo, PhysicsInfo, PlayerData) are continuously
+    // written to newly connected clients until acknowledged, avoiding SD-020 (OperationTimeout) when the
+    // initial snapshot packet is dropped or received before client simulation starts.
+    static void WriteStructsPrefix(Simulation.StateReplicator __instance) {
+        var sim = __instance._simulation;
+        if (sim == null) return;
+        var connection = sim._sendContext?.Connection;
+        if (connection == null) return;
+
+        ResetUnconfirmedStruct(connection, NetworkId.RuntimeConfig);
+        ResetUnconfirmedStruct(connection, NetworkId.SceneInfo);
+        ResetUnconfirmedStruct(connection, NetworkId.PhysicsInfo);
+
+        if (sim._structs != null) {
+            foreach (var structId in sim._structs) {
+                if (sim.TryGetMeta(structId, out var meta) && meta.Type == NetworkObjectTypeId.PlayerData) {
+                    ResetUnconfirmedStruct(connection, structId);
+                }
+            }
+        }
+    }
+
+    static void ResetUnconfirmedStruct(SimulationConnection connection, NetworkId id) {
+        if (!id.IsValid) return;
+        var data = connection.GetObjectData(id, create: false);
+        if (data != null && (data.Status == NetworkObjectConnectionDataStatus.CreatedUnconfirmed || data.TickAcknowledged == 0)) {
+            data.TickSent = 0;
+        }
     }
 
     // In the Unity build of Fusion.Runtime, StateReplicator.ReadObjectUpdates assumes a Shared-topology simulation
@@ -52,10 +90,16 @@ static unsafe class PluginPatches {
             var inst = list[i];
             if (inst.opcode == OpCodes.Callvirt && inst.operand is MethodInfo mi && mi.Name == "GetSimulationConnectionForPlayer") {
                 getConnIdx = i;
-            }
-            if (getConnIdx != -1 && targetLabel == null && inst.opcode == OpCodes.Br) {
-                targetLabel = inst.operand;
                 break;
+            }
+        }
+
+        // Find the final branch before the common merge label (instruction 585 jumping to 657)
+        if (getConnIdx != -1) {
+            for (int i = getConnIdx; i < Math.Min(list.Count, getConnIdx + 150); i++) {
+                if (list[i].opcode == OpCodes.Br) {
+                    targetLabel = list[i].operand;
+                }
             }
         }
 

@@ -44,6 +44,7 @@ static class Program {
         using var bridge = new Bridge(port);
         var socket = new BridgeSocket(bridge);
         var server = new SharedServer(socket);
+        socket.AttachServer(server);
         bridge.SendSignal(Bridge.Hello);
         Console.WriteLine($"[server] ReFix Fusion Shared server up, emulator port {port}");
 

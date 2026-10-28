@@ -485,7 +485,7 @@ void Emulator::PumpFusionShared(Room& room) {
     bool started = room.fusionShared->Poll(m_nowMs, [&](int32_t target, const std::string& packet, bool reliable) {
         if (!room.actors.count(target)) return;
         Params ev = { { P_ACTOR_NR, Int(PnFusion::SERVER_ACTOR) }, { P_DATA, ByteArray(packet) } };
-        SendEvent(room, target, PnFusion::EV_DATA, ev, reliable, 0);
+        SendEvent(room, target, PnFusion::EV_DATA, ev, reliable, reliable ? 1 : 0);
     });
     if (!started || room.fusionSharedRunning) return;
     room.fusionSharedRunning = true;

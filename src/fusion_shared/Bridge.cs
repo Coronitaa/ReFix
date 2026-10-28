@@ -75,8 +75,11 @@ sealed class Bridge : IDisposable {
 sealed class BridgeSocket : INetSocket {
     readonly Bridge _bridge;
     readonly Queue<(int actor, byte[] packet)> _incoming = new Queue<(int, byte[])>();
+    SharedServer _server;
 
     public BridgeSocket(Bridge bridge) => _bridge = bridge;
+
+    public void AttachServer(SharedServer server) => _server = server;
 
     public void Push(int actor, ArraySegment<byte> packet) => _incoming.Enqueue((actor, packet.ToArray()));
 
@@ -97,7 +100,8 @@ sealed class BridgeSocket : INetSocket {
 
     public unsafe int Send(NetSocket socket, NetAddress* address, byte* buffer, int bufferLength, bool reliable = false) {
         if (!address->IsRelayAddr) return -1;
-        _bridge.SendData(address->ActorId, buffer, bufferLength, reliable);
+        bool shouldBeReliable = reliable || (_server != null && _server.IsConnectionUnacknowledged(address->ActorId));
+        _bridge.SendData(address->ActorId, buffer, bufferLength, shouldBeReliable);
         return bufferLength;
     }
 

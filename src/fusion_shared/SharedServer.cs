@@ -62,6 +62,13 @@ sealed unsafe class SharedServer : Simulation.ICallbacks {
 
     public void SetMaster(int actor) => _masterActor = actor;
 
+    public bool IsConnectionUnacknowledged(int actorId) {
+        if (_sim == null) return false;
+        var conn = _sim.GetSimulationConnectionForPlayer(PlayerRef.FromIndex(actorId));
+        if (conn == null) return true;
+        return conn._latestTickAcknowledged == 0;
+    }
+
     public void Update() {
         if (_sim == null) return;
         double now = _clock.Elapsed.TotalSeconds;
@@ -111,8 +118,21 @@ sealed unsafe class SharedServer : Simulation.ICallbacks {
         return SimulationMessageResult.Handled;
     }
 
-    public void PlayerJoined(PlayerRef player) => Console.WriteLine($"[server] {player} joined");
+    public void PlayerJoined(PlayerRef player) {
+        Console.WriteLine($"[server] {player} joined");
+        if (_sim == null) return;
+        var newConn = _sim.GetSimulationConnectionForPlayer(player);
+        if (newConn != null) {
+            foreach (var meta in _sim._metaLookup.Values) {
+                if (!meta.IsStruct) {
+                    newConn.GetObjectData(meta.Id, create: true);
+                }
+            }
+        }
+    }
+
     public void PlayerLeft(PlayerRef player) => Console.WriteLine($"[server] {player} left");
+
     public void OnServerStart() {
         Console.WriteLine("[server] first tick");
         if (_sim.TryGetMeta(NetworkId.SceneInfo, out var sceneInfoMeta)) {
@@ -152,7 +172,17 @@ sealed unsafe class SharedServer : Simulation.ICallbacks {
     public void ObjectIsSimulatedChanged(NetworkId id, bool simulated) { }
     public void ObjectEnterAOI(PlayerRef player, NetworkId id) { }
     public void ObjectExitAOI(PlayerRef player, NetworkId id) { }
-    public void ObjectChanged(PlayerRef player, NetworkObjectMeta obj, Simulation.ObjectChangeType changeType) { }
+    public void ObjectChanged(PlayerRef player, NetworkObjectMeta obj, Simulation.ObjectChangeType changeType) {
+        if (_sim == null || obj.IsStruct) return;
+        if (changeType == Simulation.ObjectChangeType.Created) {
+            foreach (SimulationConnection conn in _sim.Connections) {
+                PlayerRef connPlayer = _sim.Connection2Player(conn);
+                if (connPlayer != player) {
+                    conn.GetObjectData(obj.Id, create: true);
+                }
+            }
+        }
+    }
     public void RemoteObjectCreated(NetworkObjectMeta obj) { }
     public void UpdateRemotePrefabs() { }
     public void OnInput(SimulationInput input) { }
