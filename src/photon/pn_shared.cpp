@@ -3,6 +3,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include "pn_shared.h"
+#include "../steam_p2p_hook.h"
 #include <cstring>
 #include <vector>
 
@@ -32,6 +33,7 @@ public:
 
     ~ProcessLink() override {
         Send(std::string(1, MSG_QUIT));
+        SteamP2PHook::IncludeSocket(m_sock);
         closesocket(m_sock);
         // Closing the job (KILL_ON_JOB_CLOSE) ends the server even if it ignored the quit request.
         CloseHandle(m_process);
@@ -133,6 +135,7 @@ std::unique_ptr<Link> StartProcess(const std::string& exePath, const std::string
     }
     SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) return nullptr;
+    SteamP2PHook::ExcludeSocket(sock);
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -141,6 +144,7 @@ std::unique_ptr<Link> StartProcess(const std::string& exePath, const std::string
     int bufSize = 4 << 20;
     if (bind(sock, (sockaddr*)&addr, sizeof(addr)) != 0 || getsockname(sock, (sockaddr*)&addr, &addrLen) != 0 ||
         ioctlsocket(sock, FIONBIO, &nonBlocking) != 0) {
+        SteamP2PHook::IncludeSocket(sock);
         closesocket(sock);
         return nullptr;
     }
@@ -163,6 +167,7 @@ std::unique_ptr<Link> StartProcess(const std::string& exePath, const std::string
     if (!CreateProcessA(exePath.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
                         nullptr, workDir.c_str(), &si, &pi)) {
         log("[Photon] Could not start the Fusion Shared server (error %lu)", GetLastError());
+        SteamP2PHook::IncludeSocket(sock);
         closesocket(sock);
         if (job) CloseHandle(job);
         return nullptr;

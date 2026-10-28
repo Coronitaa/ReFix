@@ -1651,7 +1651,9 @@ static void UpdateP2PPeers(uint64_t lobbyID) {
         if (!g_godotIsEngine) {
             SteamP2PHook::RegisterPeer(memberID, ip4);
         }
+        ReFixSteamFlat::AcceptSession(memberID);
     }
+    ReFixSteamFlat::AcceptFriendSessions();
 }
 
 static std::string GetExeDir() {
@@ -2375,6 +2377,11 @@ static bool Hooked_ISteamFriends_InviteUserToGame(void* self, uint64_t steamIDFr
 static bool Hooked_ISteamFriends_SetRichPresence(void* self, const char* pchKey, const char* pchValue) {
     ReFixLog("ISteamFriends::SetRichPresence Hook: Key='%s', Value='%s'",
              pchKey ? pchKey : "", pchValue ? pchValue : "");
+    if (pchKey && (strstr(pchKey, "group") || strstr(pchKey, "connect") || strstr(pchKey, "room") || strstr(pchKey, "Fusion"))) {
+        if (g_activeLobbyID != 0) {
+            UpdateP2PPeers(g_activeLobbyID);
+        }
+    }
     if (g_orig_VTable_SetRichPresence) {
         return g_orig_VTable_SetRichPresence(self, pchKey, pchValue);
     }
@@ -4898,6 +4905,11 @@ static void Intercepted_SteamAPI_RegisterCallback(void* pCallback, int iCallback
 static bool Intercepted_SetRichPresence(void* self, const char* pchKey, const char* pchValue) {
     ReFixLog("SteamAPI_ISteamFriends_SetRichPresence: Key='%s', Value='%s'",
              pchKey ? pchKey : "", pchValue ? pchValue : "");
+    if (pchKey && (strstr(pchKey, "group") || strstr(pchKey, "connect") || strstr(pchKey, "room") || strstr(pchKey, "Fusion"))) {
+        if (g_activeLobbyID != 0) {
+            UpdateP2PPeers(g_activeLobbyID);
+        }
+    }
 
     if (g_pfn_SetRichPresence) {
         return g_pfn_SetRichPresence(self, pchKey, pchValue);
@@ -5947,6 +5959,12 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     DispatchRelayCallbacks();
     DispatchPendingAuthCallbacks();
     ReFixSteamFlat::ServiceMainThread(); // refresh friend/presence caches on the main thread
+    static DWORD s_lastLobbyPeerRefresh = 0;
+    DWORD nowTick = GetTickCount();
+    if (g_activeLobbyID != 0 && (nowTick - s_lastLobbyPeerRefresh >= 1000 || s_lastLobbyPeerRefresh == 0)) {
+        s_lastLobbyPeerRefresh = nowTick;
+        UpdateP2PPeers(g_activeLobbyID);
+    }
 
     // If manual dispatch is not driving the game loop, drain g_queuedCallbacks into registered listeners
     if (s_manualRunFrameLogged == 0) {
@@ -6036,6 +6054,11 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 504 (LobbyEnter_t)");
                 } else if (msg->m_iCallback == 1251) { // SteamNetworkingMessagesSessionRequest_t
                     ReFixSteamFlat::OnSessionRequestCallback(msg->m_pubParam, msg->m_cubParam);
+                } else if (msg->m_iCallback == 506) { // LobbyChatUpdate_t
+                    ReFixLog("ManualDispatch_GetNextCallback: Callback 506 (LobbyChatUpdate_t)");
+                    if (g_activeLobbyID != 0) {
+                        UpdateP2PPeers(g_activeLobbyID);
+                    }
                 } else if (msg->m_iCallback == 1221) {
                     SteamNetCompat::ProcessConnectionStatusChanged(msg->m_pubParam, msg->m_cubParam);
                 }

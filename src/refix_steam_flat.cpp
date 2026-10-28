@@ -377,7 +377,6 @@ void ServiceMainThread() {
     for (const auto& k : keys) {
         if (k.empty()) continue;
         for (uint64_t id : ids) {
-            if (api.requestFriendRichPresence) api.requestFriendRichPresence(api.friends, id);
             const char* val = api.getFriendRichPresence ? api.getFriendRichPresence(api.friends, id, k.c_str()) : nullptr;
             if (val && *val) fresh[k].push_back({ id, std::string(val) });
         }
@@ -386,6 +385,10 @@ void ServiceMainThread() {
         std::lock_guard<std::mutex> lock(g_cacheMutex);
         g_friendIdsCache.swap(ids);
         g_presenceCache.swap(fresh);
+    }
+    // Automatically accept incoming P2P sessions from all active friends
+    for (uint64_t id : g_friendIdsCache) {
+        AcceptSession(id);
     }
 }
 

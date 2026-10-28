@@ -185,12 +185,12 @@ std::vector<uint64_t> KnownPeers() {
         for (const auto& [_, host] : g_resolvedRooms) {
             if (host && host != g_self) peers.insert(host);
         }
-    }
-    for (const auto& [host, _] : g_forwarders) {
-        if (host && host != g_self) peers.insert(host);
-    }
-    for (const auto& [peer, _] : g_tunnelStats) {
-        if (peer && peer != g_self) peers.insert(peer);
+        for (const auto& [host, _] : g_forwarders) {
+            if (host && host != g_self) peers.insert(host);
+        }
+        for (const auto& [peer, _] : g_tunnelStats) {
+            if (peer && peer != g_self) peers.insert(peer);
+        }
     }
     return std::vector<uint64_t>(peers.begin(), peers.end());
 }
@@ -354,6 +354,7 @@ uint64_t ResolveHost(const std::string& name) {
 }
 
 Forwarder* ForwarderFor(uint64_t host) {
+    std::lock_guard<std::mutex> lock(g_discoveryMutex);
     auto it = g_forwarders.find(host);
     if (it != g_forwarders.end()) return &it->second;
     uint32_t index = (uint32_t)g_forwarders.size() + 1;
@@ -487,8 +488,11 @@ void SendSteam(uint64_t steamId, uint8_t kind, uint16_t clientPort, const char* 
     std::string envelope{ (char)kind, (char)(clientPort >> 8), (char)clientPort };
     envelope.append(data, size);
     bool sent = ReFixSteamFlat::SendMessage(steamId, envelope.data(), (uint32_t)envelope.size(), g_channel);
-    TunnelStats& stats = g_tunnelStats[steamId];
-    if (sent) CountTunnel(stats.sent, stats.sentBytes, stats.sentMax, size);
+    {
+        std::lock_guard<std::mutex> lock(g_discoveryMutex);
+        TunnelStats& stats = g_tunnelStats[steamId];
+        if (sent) CountTunnel(stats.sent, stats.sentBytes, stats.sentMax, size);
+    }
     // Tunnel diagnostics: the first packet to each peer and every failed send (rate-limited per peer).
     static std::map<uint64_t, uint32_t> s_sent, s_failed;
     uint32_t& count = sent ? s_sent[steamId] : s_failed[steamId];
@@ -615,8 +619,11 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
     static std::set<uint64_t> s_seen;
     if (s_seen.insert(from).second)
         Log("[Photon] Steam P2P first message from %llu (%s)", (unsigned long long)from, data[0] == kToHost ? "to host" : "to client");
-    TunnelStats& stats = g_tunnelStats[from];
-    CountTunnel(stats.received, stats.receivedBytes, stats.receivedMax, size - 3);
+    {
+        std::lock_guard<std::mutex> lock(g_discoveryMutex);
+        TunnelStats& stats = g_tunnelStats[from];
+        CountTunnel(stats.received, stats.receivedBytes, stats.receivedMax, size - 3);
+    }
     uint16_t port = (uint16_t)(data[1] << 8 | data[2]);
     if (data[0] == kToHost) {
         Connection& c = Connect(RemoteKey(from, port), PnServer::Role::Game, std::to_string(from), [from, port](const std::string& d) {
@@ -624,12 +631,18 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
         });
         c.enet->OnDatagram(data + 3, size - 3, GetTickCount());
     } else if (data[0] == kToClient) {
-        auto it = g_forwarders.find(from);
-        if (it == g_forwarders.end() || it->second.sockets.empty()) return;
-        auto cs = it->second.clientSocket.find(port);
-        SOCKET s = cs != it->second.clientSocket.end() ? cs->second : it->second.sockets[0];
-        sockaddr_in client = Loopback(INADDR_LOOPBACK, port);
-        sendto(s, (const char*)data + 3, (int)size - 3, 0, (const sockaddr*)&client, sizeof(client));
+        SOCKET s = INVALID_SOCKET;
+        {
+            std::lock_guard<std::mutex> lock(g_discoveryMutex);
+            auto it = g_forwarders.find(from);
+            if (it == g_forwarders.end() || it->second.sockets.empty()) return;
+            auto cs = it->second.clientSocket.find(port);
+            s = cs != it->second.clientSocket.end() ? cs->second : it->second.sockets[0];
+        }
+        if (s != INVALID_SOCKET) {
+            sockaddr_in client = Loopback(INADDR_LOOPBACK, port);
+            sendto(s, (const char*)data + 3, (int)size - 3, 0, (const sockaddr*)&client, sizeof(client));
+        }
     }
 }
 

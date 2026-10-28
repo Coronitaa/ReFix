@@ -14,6 +14,11 @@
 
 using namespace PnProto18;
 
+namespace SteamP2PHook {
+    void ExcludeSocket(uintptr_t) {}
+    void IncludeSocket(uintptr_t) {}
+}
+
 static int g_failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); g_failures++; } } while (0)
 
