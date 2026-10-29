@@ -242,18 +242,27 @@ uint64_t ResolveHost(const std::string& name) {
         Log("[Photon] Room '%s' hosted by %llu (name/lobby)", name.c_str(), (unsigned long long)id);
         return id;
     }
+    std::string canon = PnServer::CanonicalRoomCode(name);
     {
         std::lock_guard<std::mutex> lock(g_discoveryMutex);
         if (g_emulator && (g_emulator->HostsRoom(name) ||
+            (!canon.empty() && g_emulator->HostsRoom(canon)) ||
             (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0 && g_emulator->HostsRoom(name.substr(0, name.size() - 6))) ||
             g_emulator->HostsRoom(name + "_voice"))) {
-            Log("[Photon] Room '%s' is hosted locally", name.c_str());
+            Log("[Photon] Room '%s' (canon '%s') is hosted locally", name.c_str(), canon.c_str());
             return g_self;
         }
         auto it = g_resolvedRooms.find(name);
         if (it != g_resolvedRooms.end()) {
             Log("[Photon] Room '%s' resolved to %llu from cache", name.c_str(), (unsigned long long)it->second);
             return it->second;
+        }
+        if (!canon.empty()) {
+            it = g_resolvedRooms.find(canon);
+            if (it != g_resolvedRooms.end()) {
+                Log("[Photon] Room '%s' (canon '%s') resolved to %llu from cache", name.c_str(), canon.c_str(), (unsigned long long)it->second);
+                return it->second;
+            }
         }
         if (name.size() > 6 && name.compare(name.size() - 6, 6, "_voice") == 0) {
             it = g_resolvedRooms.find(name.substr(0, name.size() - 6));
@@ -290,8 +299,12 @@ uint64_t ResolveHost(const std::string& name) {
         for (const auto& entry : ReFixSteamFlat::FriendsWithRichPresence(key)) {
             bool match = (entry.value == name);
             if (!match && !entry.value.empty()) {
-                if (name == entry.value + "_voice" || entry.value == name + "_voice" ||
-                    entry.value.find(name) != std::string::npos) {
+                std::string entryCanon = PnServer::CanonicalRoomCode(entry.value);
+                if (!canon.empty() && !entryCanon.empty() && entryCanon == canon) {
+                    match = true;
+                } else if (name == entry.value + "_voice" || entry.value == name + "_voice" ||
+                    entry.value.find(name) != std::string::npos ||
+                    (!canon.empty() && entry.value.find(canon) != std::string::npos)) {
                     match = true;
                 }
             }
@@ -534,9 +547,10 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
         uint8_t flags = data[1];
         uint16_t queryId = (uint16_t)((data[2] << 8) | data[3]);
         std::string roomName((const char*)data + 4, size - 4);
+        std::string canonQuery = PnServer::CanonicalRoomCode(roomName);
         bool hosted = false;
         if (g_emulator) {
-            if (g_emulator->HostsRoom(roomName)) hosted = true;
+            if (g_emulator->HostsRoom(roomName) || (!canonQuery.empty() && g_emulator->HostsRoom(canonQuery))) hosted = true;
             else if (roomName.size() > 6 && roomName.compare(roomName.size() - 6, 6, "_voice") == 0 &&
                      g_emulator->HostsRoom(roomName.substr(0, roomName.size() - 6))) hosted = true;
             else if (g_emulator->HostsRoom(roomName + "_voice")) hosted = true;
@@ -564,8 +578,10 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
         std::string roomName((const char*)data + 6, size - 6);
         Log("[Photon] Discovered host %llu for room '%s' (port %u) via P2P query", (unsigned long long)from, roomName.c_str(), gamePort);
         {
+            std::string canonReply = PnServer::CanonicalRoomCode(roomName);
             std::lock_guard<std::mutex> lock(g_discoveryMutex);
             g_resolvedRooms[roomName] = from;
+            if (!canonReply.empty()) g_resolvedRooms[canonReply] = from;
             if (roomName.size() > 6 && roomName.compare(roomName.size() - 6, 6, "_voice") == 0) {
                 g_resolvedRooms[roomName.substr(0, roomName.size() - 6)] = from;
             } else {

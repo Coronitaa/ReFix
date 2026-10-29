@@ -852,6 +852,54 @@ static void TestP2PRoomDiscoveryCodec() {
     CHECK(remAnn.substr(4, remNameLen) == roomCode);
 }
 
+static void TestCanonicalRoomCodeAndRegionResolution() {
+    // 1. Basic canonical code extraction
+    CHECK(PnServer::CanonicalRoomCode("eu#123456") == "123456");
+    CHECK(PnServer::CanonicalRoomCode("usw#ABC_12") == "ABC_12");
+    CHECK(PnServer::CanonicalRoomCode("ABC_12_voice") == "ABC_12");
+    CHECK(PnServer::CanonicalRoomCode("eu#ABC_12_voice") == "ABC_12");
+    CHECK(PnServer::CanonicalRoomCode("PlainRoom") == "PlainRoom");
+    CHECK(PnServer::CanonicalRoomCode("") == "");
+
+    // 2. Emulator HostsRoom and EnterRoom with canonical region match
+    PnServer::Environment env;
+    env.localUserId = "100";
+    env.masterAddress = "127.0.0.1:27001";
+    env.localGameAddress = "127.0.0.1:27002";
+    env.gameAddress = [](const std::string&) { return std::string(); };
+    env.newRoomName = [] { return std::string("100-r"); };
+    env.joinableRooms = [] { return std::vector<std::string>(); };
+    env.roomHosted = [](const std::string&, bool) {};
+    env.log = NoLog;
+    PnServer::Emulator emu(env);
+
+    FakeClient a, b;
+    emu.OnConnect(1, PnServer::Role::Game, "100", a.Sink());
+    emu.OnConnect(2, PnServer::Role::Game, "200", b.Sink());
+    emu.OnMessage(1, Init("app"), true, 0);
+    emu.OnMessage(2, Init("app"), true, 0);
+
+    // Host creates room "123456"
+    Table roomProps;
+    roomProps.Set(Byte(255), Byte(4));
+    emu.OnMessage(1, Request(227, { { 255, Str("123456") }, { 248, roomProps.Encode() } }), true, 0);
+    Params p;
+    int16_t rc = -1;
+    int64_t actor = 0;
+    CHECK(a.Take(3, 227, p, &rc) && rc == 0 && AsInt(p[254], actor) && actor == 1);
+
+    // Verify exact and canonical matching in HostsRoom
+    CHECK(emu.HostsRoom("123456") == true);
+    CHECK(emu.HostsRoom("eu#123456") == true);
+    CHECK(emu.HostsRoom("us#123456") == true);
+    CHECK(emu.HostsRoom("asia#123456_voice") == true);
+    CHECK(emu.HostsRoom("999999") == false);
+
+    // Client B joins using region-prefixed name "eu#123456"
+    emu.OnMessage(2, Request(226, { { 255, Str("eu#123456") } }), true, 0);
+    CHECK(b.Take(3, 226, p, &rc) && rc == 0 && AsInt(p[254], actor) && actor == 2);
+}
+
 int main() {
     TestScalarsRoundTrip();
     TestSkipComplexValues();
@@ -873,6 +921,7 @@ int main() {
     TestFusionSharedCompanionIpc();
     TestLobbyPopulatesPublicGameList();
     TestP2PRoomDiscoveryCodec();
+    TestCanonicalRoomCodeAndRegionResolution();
     std::printf(g_failures ? "%d FAILURE(S)\n" : "ALL PHOTON TESTS PASSED\n", g_failures);
     return g_failures ? 1 : 0;
 }

@@ -95,7 +95,12 @@ std::string Message(uint8_t type, const Bytes& body) {
 Emulator::Emulator(Environment env) : m_env(std::move(env)) {}
 
 bool Emulator::HostsRoom(const std::string& name) const {
-    for (const auto& [key, room] : m_rooms) if (room->name == name) return true;
+    if (name.empty()) return false;
+    std::string canon = CanonicalRoomCode(name);
+    for (const auto& [key, room] : m_rooms) {
+        if (room->name == name) return true;
+        if (!canon.empty() && CanonicalRoomCode(room->name) == canon) return true;
+    }
     return false;
 }
 
@@ -288,6 +293,19 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
     if (name.empty()) name = m_env.newRoomName();
     std::string roomKey = peer.appId + '\n' + name;
     auto it = m_rooms.find(roomKey);
+    if (it == m_rooms.end() && op != OP_CREATE_GAME) {
+        std::string canon = CanonicalRoomCode(name);
+        if (!canon.empty()) {
+            for (auto roomIt = m_rooms.begin(); roomIt != m_rooms.end(); ++roomIt) {
+                if (roomIt->second->appId == peer.appId && CanonicalRoomCode(roomIt->second->name) == canon) {
+                    it = roomIt;
+                    name = it->second->name;
+                    roomKey = it->first;
+                    break;
+                }
+            }
+        }
+    }
     bool exists = it != m_rooms.end();
     bool create = op == OP_CREATE_GAME || (!exists && IntParam(params, P_JOIN_MODE, 0) == JOIN_MODE_CREATE_IF_MISSING);
     if (op == OP_CREATE_GAME && exists) { Respond(peer, op, ERR_GAME_EXISTS, {}, "Game already exists"); return; }

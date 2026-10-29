@@ -20,6 +20,21 @@ namespace PnServer {
 
 enum class Role { NameServer, Master, Game };
 
+// Normalizes a room name to its canonical code by stripping region prefix (e.g. "eu#123456" -> "123456")
+// and voice suffix (e.g. "123456_voice" -> "123456").
+inline std::string CanonicalRoomCode(const std::string& name) {
+    if (name.empty()) return "";
+    std::string s = name;
+    size_t hashPos = s.find('#');
+    if (hashPos != std::string::npos && hashPos + 1 < s.size()) {
+        s = s.substr(hashPos + 1);
+    }
+    if (s.size() > 6 && s.compare(s.size() - 6, 6, "_voice") == 0) {
+        s = s.substr(0, s.size() - 6);
+    }
+    return s;
+}
+
 struct Environment {
     std::string localUserId;                                          // e.g. own SteamID64
     std::string masterAddress;                                        // "127.0.0.1:27001"
@@ -48,6 +63,21 @@ public:
 
     // True when this machine currently hosts the room (any app id).
     bool HostsRoom(const std::string& name) const;
+
+    // Normalizes a room name to its canonical code by stripping region prefix (e.g. "eu#123456" -> "123456")
+    // and voice suffix (e.g. "123456_voice" -> "123456").
+    static inline std::string CanonicalRoomCode(const std::string& name) {
+        if (name.empty()) return "";
+        std::string s = name;
+        size_t hashPos = s.find('#');
+        if (hashPos != std::string::npos && hashPos + 1 < s.size()) {
+            s = s.substr(hashPos + 1);
+        }
+        if (s.size() > 6 && s.compare(s.size() - 6, 6, "_voice") == 0) {
+            s = s.substr(0, s.size() - 6);
+        }
+        return s;
+    }
 
     // Returns table of local public rooms hosted on this machine (suitable for P_GAME_LIST).
     PnProto18::Table LocalPublicRooms() const;
