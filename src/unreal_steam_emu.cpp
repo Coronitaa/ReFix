@@ -948,6 +948,74 @@ namespace UnrealSteamEmu {
         return refix::steam::SteamLobbyRegistry::Get().GetCoreLobbyId(steamLobbyId);
     }
 
+    // --- Lobby chat ----------------------------------------------------------------------------------
+    // Source matchmaking (Left 4 Dead, Garry's Mod) negotiates a join over lobby chat messages; with
+    // SendLobbyChatMsg a no-op the joiner waited ~5 s, gave up and opened a lobby of its own.
+    // Messages travel on a reserved LanCore channel to every member, and back to the sender as Steam does.
+    static constexpr uint8_t kLobbyChatChannel = 249;
+    static constexpr uint32_t kLobbyChatMagic = 0x4D434C52; // "RLCM"
+
+    struct LobbyChatEntry {
+        uint64_t sender;
+        uint8_t type;
+        std::vector<uint8_t> data;
+    };
+    static std::map<uint64_t, std::vector<LobbyChatEntry>> g_lobbyChat;
+
+    static void DeliverLobbyChat(uint64_t lobbyId, uint64_t sender, uint8_t type, const uint8_t* data, size_t len) {
+        LobbyChatMsg_t msg = {};
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            auto& log = g_lobbyChat[lobbyId];
+            log.push_back({ sender, type, std::vector<uint8_t>(data, data + len) });
+            msg.m_iChatID = (uint32)(log.size() - 1);
+        }
+        msg.m_ulSteamIDLobby = lobbyId;
+        msg.m_ulSteamIDUser = sender;
+        msg.m_eChatEntryType = type;
+        PostCallback(LobbyChatMsg_t::k_iCallback, &msg, sizeof(msg));
+    }
+
+    static bool SendLobbyChat(uint64_t lobbyId, const void* data, int len) {
+        if (!data || len <= 0) return false;
+        std::vector<uint8_t> wire(sizeof(uint32_t) + sizeof(uint64_t) + 1 + (size_t)len);
+        memcpy(wire.data(), &kLobbyChatMagic, sizeof(uint32_t));
+        memcpy(wire.data() + 4, &lobbyId, sizeof(uint64_t));
+        wire[12] = (uint8_t)k_EChatEntryTypeChatMsg;
+        memcpy(wire.data() + 13, data, (size_t)len);
+
+        auto& core = refix::lan::ILanCore::Get();
+        const std::string coreLobbyId = GetCoreLobbyId(lobbyId);
+        std::optional<refix::lan::LobbyRecord> rec;
+        if (!coreLobbyId.empty()) rec = core.Lobby().GetLobby(coreLobbyId);
+        int sent = 0;
+        if (rec) {
+            const auto self = core.Identity().GetLocalPeerId();
+            for (const auto& m : rec->members) {
+                if (m.peerId == self) continue;
+                auto peer = core.Peers().FindByPeerId(m.peerId);
+                if (peer && peer->endpoint.IsValid() &&
+                    core.Transport().SendReliable(m.peerId, peer->endpoint, kLobbyChatChannel, wire.data(), wire.size()))
+                    ++sent;
+            }
+        }
+        DeliverLobbyChat(lobbyId, g_localSteamID, (uint8_t)k_EChatEntryTypeChatMsg, (const uint8_t*)data, (size_t)len);
+        ReFixLog("[UnrealSteam] SendLobbyChatMsg: lobby %llu, %d bytes -> %d member(s)", lobbyId, len, sent);
+        return true;
+    }
+
+    // Returns true when the packet was a lobby chat message (consumed).
+    static bool ReceiveLobbyChat(uint64_t sender, uint8_t channel, const std::vector<uint8_t>& payload) {
+        if (channel != kLobbyChatChannel || payload.size() < 13) return false;
+        uint32_t magic = 0;
+        memcpy(&magic, payload.data(), sizeof(magic));
+        if (magic != kLobbyChatMagic) return false;
+        uint64_t lobbyId = 0;
+        memcpy(&lobbyId, payload.data() + 4, sizeof(lobbyId));
+        DeliverLobbyChat(lobbyId, sender, payload[12], payload.data() + 13, payload.size() - 13);
+        return true;
+    }
+
     static void CompleteCallResult(uint64_t hAPICall, int iCallback, const void* pData, size_t dataSize, bool bFailed) {
         CCallbackBase* pListener = nullptr;
         std::vector<uint8_t> listenerData;
@@ -4024,6 +4092,26 @@ namespace UnrealSteamEmu {
 
         virtual const char *GetLobbyData(CSteamID steamIDLobby, const char *pchKey) override {
             if (!pchKey) return "";
+            const char* value = GetLobbyDataExact(steamIDLobby, pchKey);
+            if (!*value) {
+                // Steam lobby keys are case-insensitive: Left 4 Dead stores "Game:mode" and its browser
+                // reads "game:mode". A case-sensitive miss made every LAN lobby look empty and hidden.
+                const auto view = LobbyDataView(steamIDLobby.ConvertToUint64());
+                for (const auto& [k, v] : view) {
+                    if (_stricmp(k.c_str(), pchKey) == 0) {
+                        thread_local char buf[16384];
+                        strncpy_s(buf, sizeof(buf), v.c_str(), _TRUNCATE);
+                        value = buf;
+                        break;
+                    }
+                }
+            }
+            if (TraceLobbyReads())
+                ReFixLog("[LobbyRead] GetLobbyData(%llu, '%s') -> '%s'", steamIDLobby.ConvertToUint64(), pchKey, value);
+            return value;
+        }
+
+        const char *GetLobbyDataExact(CSteamID steamIDLobby, const char *pchKey) {
             uint64_t lID = steamIDLobby.ConvertToUint64();
             std::string coreLobbyId = GetCoreLobbyId(lID);
             if (!coreLobbyId.empty()) {
@@ -4095,24 +4183,50 @@ namespace UnrealSteamEmu {
             return true;
         }
 
-        virtual int GetLobbyDataCount(CSteamID steamIDLobby) override {
+        // REFIX_LOG_VERBOSE=1 traces what a lobby browser reads, to see why it hides a lobby it was given.
+        static bool TraceLobbyReads() {
+            static const bool on = []() {
+                char v[8] = {};
+                return GetEnvironmentVariableA("REFIX_LOG_VERBOSE", v, sizeof(v)) > 0 && v[0] == '1';
+            }();
+            return on;
+        }
+
+        // All data of a lobby, local or found on the LAN. Source's lobby browser (Left 4 Dead) reads
+        // search results by index; with only the local table a remote lobby had no data and was hidden.
+        static std::map<std::string, std::string> LobbyDataView(uint64_t lID) {
+            std::map<std::string, std::string> view;
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
+                if (rec) {
+                    for (const auto& [k, v] : rec->attributes) {
+                        if (k.rfind("__", 0) != 0) view[k] = v.asString; // "__" keys are ReFix bookkeeping
+                    }
+                }
+            }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
-            if (it != g_lobbies.end()) return (int)it->second.data.size();
-            return 0;
+            auto it = g_lobbies.find(lID);
+            if (it != g_lobbies.end()) {
+                for (const auto& [k, v] : it->second.data) view[k] = v;
+            }
+            return view;
+        }
+
+        virtual int GetLobbyDataCount(CSteamID steamIDLobby) override {
+            const int count = (int)LobbyDataView(steamIDLobby.ConvertToUint64()).size();
+            if (TraceLobbyReads()) ReFixLog("[LobbyRead] GetLobbyDataCount(%llu) -> %d", steamIDLobby.ConvertToUint64(), count);
+            return count;
         }
 
         virtual bool GetLobbyDataByIndex(CSteamID steamIDLobby, int iLobbyData, char *pchKey, int cchKeyBufferSize, char *pchValue, int cchValueBufferSize) override {
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
-            if (it != g_lobbies.end() && iLobbyData >= 0 && iLobbyData < (int)it->second.data.size()) {
-                auto dIt = it->second.data.begin();
-                std::advance(dIt, iLobbyData);
-                if (pchKey && cchKeyBufferSize > 0) strncpy_s(pchKey, cchKeyBufferSize, dIt->first.c_str(), _TRUNCATE);
-                if (pchValue && cchValueBufferSize > 0) strncpy_s(pchValue, cchValueBufferSize, dIt->second.c_str(), _TRUNCATE);
-                return true;
-            }
-            return false;
+            const auto view = LobbyDataView(steamIDLobby.ConvertToUint64());
+            if (iLobbyData < 0 || iLobbyData >= (int)view.size()) return false;
+            auto dIt = view.begin();
+            std::advance(dIt, iLobbyData);
+            if (pchKey && cchKeyBufferSize > 0) strncpy_s(pchKey, cchKeyBufferSize, dIt->first.c_str(), _TRUNCATE);
+            if (pchValue && cchValueBufferSize > 0) strncpy_s(pchValue, cchValueBufferSize, dIt->second.c_str(), _TRUNCATE);
+            return true;
         }
 
         virtual bool DeleteLobbyData(CSteamID steamIDLobby, const char *pchKey) override {
@@ -4154,13 +4268,19 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool SendLobbyChatMsg(CSteamID steamIDLobby, const void *pvMsgBody, int cubMsgBody) override {
-            return true;
+            return SendLobbyChat(steamIDLobby.ConvertToUint64(), pvMsgBody, cubMsgBody);
         }
 
         virtual int GetLobbyChatEntry(CSteamID steamIDLobby, int iChatID, CSteamID *pSteamIDUser, void *pvData, int cubData, EChatEntryType *peChatEntryType) override {
-            if (pSteamIDUser) *pSteamIDUser = CSteamID(g_localSteamID);
-            if (peChatEntryType) *peChatEntryType = k_EChatEntryTypeChatMsg;
-            return 0;
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            auto it = g_lobbyChat.find(steamIDLobby.ConvertToUint64());
+            if (it == g_lobbyChat.end() || iChatID < 0 || iChatID >= (int)it->second.size()) return 0;
+            const auto& e = it->second[iChatID];
+            if (pSteamIDUser) *pSteamIDUser = CSteamID(e.sender);
+            if (peChatEntryType) *peChatEntryType = (EChatEntryType)e.type;
+            const int n = (std::min)(cubData, (int)e.data.size());
+            if (pvData && n > 0) memcpy(pvData, e.data.data(), (size_t)n);
+            return n;
         }
 
         virtual bool RequestLobbyData(CSteamID steamIDLobby) override {
@@ -4296,6 +4416,7 @@ namespace UnrealSteamEmu {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             if (!g_lastMatchmakingResults.empty()) {
                 if (iLobby >= 0 && iLobby < (int)g_lastMatchmakingResults.size()) {
+                    if (TraceLobbyReads()) ReFixLog("[LobbyRead] GetLobbyByIndex(%d) -> %llu", iLobby, g_lastMatchmakingResults[iLobby]);
                     return CSteamID(g_lastMatchmakingResults[iLobby]);
                 }
                 return CSteamID((uint64)0);
@@ -7547,6 +7668,7 @@ namespace UnrealSteamEmu {
                 ProcessRfxsPacket(senderSteamId, ev.payload.data(), ev.payload.size());
                 return;
             }
+            if (ReceiveLobbyChat(senderSteamId, ev.channel, ev.payload)) return;
 
             P2PPacket pkt;
             pkt.senderID = senderSteamId;
