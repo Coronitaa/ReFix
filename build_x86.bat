@@ -21,7 +21,7 @@ cl /nologo /O2 /MD /W3 /EHsc /std:c++17 ^
    "%SRC_DIR%\steam_api_proxy.cpp" ^
    /link /DLL ^
    /OUT:"%OUT_DIR%\steam_api.dll" ^
-   kernel32.lib user32.lib
+   kernel32.lib user32.lib advapi32.lib
 
 if errorlevel 1 (
     echo [ERROR] Failed to compile steam_api.dll x86!

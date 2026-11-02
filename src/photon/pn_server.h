@@ -1,0 +1,173 @@
+#pragma once
+#include "pn_fusion.h"
+#include "pn_proto18.h"
+#include "pn_shared.h"
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+
+// Photon LoadBalancing server emulator (NameServer, MasterServer and GameServer roles) for P2P play.
+//
+// NameServer and MasterServer are answered locally on every machine. The GameServer role runs on the host:
+// its rooms hold the actors of local and remote players and relay events, properties and the event cache the
+// same way Photon Cloud does. Transport and room discovery are injected through Environment, so this file
+// knows nothing about sockets or Steam.
+namespace PnServer {
+
+enum class Role { NameServer, Master, Game };
+
+// Normalizes a room name to its canonical code by stripping region prefix (e.g. "eu#123456" -> "123456")
+// and voice suffix (e.g. "123456_voice" -> "123456").
+inline std::string CanonicalRoomCode(const std::string& name) {
+    if (name.empty()) return "";
+    std::string s = name;
+    size_t hashPos = s.find('#');
+    if (hashPos != std::string::npos && hashPos + 1 < s.size()) {
+        s = s.substr(hashPos + 1);
+    }
+    if (s.size() > 6 && s.compare(s.size() - 6, 6, "_voice") == 0) {
+        s = s.substr(0, s.size() - 6);
+    }
+    return s;
+}
+
+struct Environment {
+    std::string localUserId;                                          // e.g. own SteamID64
+    std::string masterAddress;                                        // "127.0.0.1:27001"
+    std::string localGameAddress;                                     // game server role of this machine
+    std::function<std::string(const std::string& room)> gameAddress;  // where a room is served ("" unknown)
+    std::function<std::string()> newRoomName;                         // name for CreateGame without a name
+    std::function<std::vector<std::string>()> joinableRooms;          // candidates for JoinRandomGame
+    std::function<void(const std::string& room, bool open)> roomHosted; // host-side room created / closed
+    std::function<std::map<std::string, PnProto18::Table>()> publicLobbies; // remote public rooms announced by peers; optional
+    std::function<std::unique_ptr<PnShared::Link>()> startFusionShared; // Fusion Shared-mode server; optional
+    void (*log)(const char* fmt, ...) = nullptr; // printf-style; required
+};
+
+class Emulator {
+public:
+    // reliable/channel: transport options for this message.
+    using SendFn = std::function<void(const std::string& message, bool reliable, uint8_t channel)>;
+
+    explicit Emulator(Environment env);
+
+    void OnConnect(uint64_t peerKey, Role role, const std::string& userId, SendFn send);
+    void OnMessage(uint64_t peerKey, const std::string& message, bool reliable, uint8_t channel);
+    void OnDisconnect(uint64_t peerKey);
+    // Sends messages that were scheduled for later (called regularly by the transport thread).
+    void Tick(uint32_t nowMs);
+
+    // True when this machine currently hosts the room (any app id).
+    bool HostsRoom(const std::string& name) const;
+
+    // Normalizes a room name to its canonical code by stripping region prefix (e.g. "eu#123456" -> "123456")
+    // and voice suffix (e.g. "123456_voice" -> "123456").
+    static inline std::string CanonicalRoomCode(const std::string& name) {
+        if (name.empty()) return "";
+        std::string s = name;
+        size_t hashPos = s.find('#');
+        if (hashPos != std::string::npos && hashPos + 1 < s.size()) {
+            s = s.substr(hashPos + 1);
+        }
+        if (s.size() > 6 && s.compare(s.size() - 6, 6, "_voice") == 0) {
+            s = s.substr(0, s.size() - 6);
+        }
+        return s;
+    }
+
+    // Returns table of local public rooms hosted on this machine (suitable for P_GAME_LIST).
+    PnProto18::Table LocalPublicRooms() const;
+
+private:
+    struct Actor {
+        uint64_t peerKey = 0;
+        int32_t number = 0;
+        PnProto18::Table props;
+        std::set<uint8_t> groups;
+    };
+    struct CachedEvent {
+        uint8_t code;
+        int32_t sender;
+        bool global;
+        PnProto18::Raw data;   // empty when the event had no data
+    };
+    struct FusionPending {
+        uint32_t dueMs = 0;
+        std::string buffer;
+    };
+    struct Room {
+        std::string appId;
+        std::string name;
+        PnProto18::Table props;
+        int32_t flags = 0;
+        int32_t maxPlayers = 0;
+        bool cleanupCacheOnLeave = true;
+        bool publishUserId = false;
+        int32_t nextActor = 1;
+        int32_t master = 0;
+        int32_t fusionServer = 0;   // actor that joined Fusion as Server (client/server mode), 0 if none
+        std::map<int32_t, PnFusion::Header> fusionConfigWaiters; // clients started once the host sends its config
+        std::map<int32_t, FusionPending> fusionRelayInfo; // per client: the server's ReflexiveInfo, sent when due
+        std::map<int32_t, std::string> fusionUniqueIds;    // 8-byte Fusion UniqueId given to each actor in its Join
+        std::unique_ptr<PnShared::Link> fusionShared;      // Shared mode: the plugin's server simulation
+        int32_t fusionSharedConfigActor = 0;                // actor asked for the NetworkProjectConfig
+        bool fusionSharedConfigSent = false;
+        bool fusionSharedRunning = false;
+        std::map<int32_t, Actor> actors;
+        std::vector<CachedEvent> cache;
+    };
+    struct Peer {
+        Role role;
+        std::string userId;
+        std::string appId;
+        SendFn send;
+        std::string aesKey;   // payload encryption key once InitEncryption completed
+        Room* room = nullptr;
+        int32_t actor = 0;
+    };
+
+    void HandleOperation(Peer& peer, uint64_t key, uint8_t op, const PnProto18::Params& params, bool reliable, uint8_t channel);
+    void HandleNameServer(Peer& peer, uint8_t op, const PnProto18::Params& params);
+    void HandleMaster(Peer& peer, uint8_t op, const PnProto18::Params& params);
+    void HandleGame(Peer& peer, uint64_t key, uint8_t op, const PnProto18::Params& params, bool reliable, uint8_t channel);
+    void HandleInternal(Peer& peer, uint8_t op, const PnProto18::Params& params);
+
+    void EnterRoom(Peer& peer, uint64_t key, uint8_t op, const PnProto18::Params& params);
+    void RaiseEvent(Peer& peer, const PnProto18::Params& params, bool reliable, uint8_t channel);
+    void HandleFusionProtocol(Peer& peer, const PnProto18::Raw& data);
+    void HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer);
+    void HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
+    void HandleFusionSharedJoin(Peer& peer, Room& room, const PnFusion::Header& header, PnFusion::Join join);
+    void StartFusionSharedPeer(Room& room, int32_t actor, const PnFusion::Header& header);
+    void PumpFusionShared(Room& room);
+    void StartFusionPeer(Room& room, int32_t actor, const PnFusion::Header& header);
+    void SendFusionMessage(Room& room, int32_t actor, const std::string& buffer);
+    void ScheduleServerReflexiveInfo(Room& room, int32_t actor, const PnFusion::Header& header);
+    std::string FusionUniqueId(const Peer& peer) const;
+    void LogEventSample(const Peer& peer, uint8_t code, int64_t receivers, const std::vector<int32_t>& targets,
+                        const PnProto18::Params& params);
+    void LogRelaySample(int32_t sender, const std::vector<int32_t>& targets, size_t size, bool reliable, uint8_t channel);
+    void SetProperties(Peer& peer, const PnProto18::Params& params);
+    void ChangeGroups(Peer& peer, const PnProto18::Params& params);
+    void LeaveRoom(uint64_t key, bool sendResponse);
+    void RemoveFromCache(Room& room, uint8_t code, const std::vector<int32_t>& senders, const PnProto18::Raw& filter);
+    void SetMaster(Room& room, int32_t actor);
+
+    void Respond(Peer& peer, uint8_t op, int16_t code, const PnProto18::Params& params = {}, const std::string& message = "");
+    void SendEvent(Room& room, int32_t actor, uint8_t code, const PnProto18::Params& params, bool reliable, uint8_t channel);
+    PnProto18::Raw ActorTable(const Room& room) const;
+    std::vector<int32_t> ActorNumbers(const Room& room) const;
+
+    Environment m_env;
+    std::map<uint64_t, Peer> m_peers;
+    std::map<std::string, std::unique_ptr<Room>> m_rooms; // key: appId + '\n' + name
+    int m_sampledEvents = 0;
+    std::map<std::pair<int32_t, int32_t>, int> m_relaySamples;
+    uint32_t m_nowMs = 0;
+};
+
+} // namespace PnServer

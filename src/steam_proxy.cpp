@@ -1913,7 +1913,9 @@ void ReFixLog(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     char buf[16384];
-    vsprintf_s(buf, sizeof(buf), fmt, args);
+    // Truncate instead of vsprintf_s: an over-long message would trigger the CRT invalid-parameter
+    // handler and fail-fast the whole game process (0xC0000409).
+    _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, args);
     va_end(args);
 
     HWND hCons = GetConsoleWindow();
@@ -3244,8 +3246,12 @@ extern "C" __declspec(dllexport) void* SteamAPI_ISteamMatchmakingServers_Request
 
 extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUtils_GetAppID(void* self) {
     uint32_t targetApp = GetResolvedAppID();
-    ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
-             targetApp, g_config.engineType.c_str(), ReFix::NetworkModeManager::IsGoldbergBackendActive() ? "Goldberg" : "Valve");
+    static bool s_logged = false;
+    if (!s_logged) {
+        s_logged = true;
+        ReFixLog("SteamAPI_ISteamUtils_GetAppID returning AppId=%u (Engine=%s, Mode=%s)",
+                 targetApp, g_config.engineType.c_str(), ReFix::NetworkModeManager::IsGoldbergBackendActive() ? "Goldberg" : "Valve");
+    }
     return targetApp;
 }
 
