@@ -3,6 +3,8 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <mutex>
+#include <set>
 #include <iostream>
 
 namespace refix::lan {
@@ -991,7 +993,14 @@ public:
             }
             m_peers.RegisterOrUpdatePeer(info);
 
-            if (isNewPeer || gainedSteamId) {
+            // A peer another path (lobby/handshake) registered with its real SteamID before the first beacon
+            // is neither new nor "gained"; still announce it once so adapters bind it (one-way discovery).
+            bool firstAnnounceWithId = false;
+            if (extSteamId != 0) {
+                std::lock_guard<std::mutex> lock(m_announcedMutex);
+                firstAnnounceWithId = m_announced.insert(pid).second;
+            }
+            if (isNewPeer || gainedSteamId || firstAnnounceWithId) {
                 LanEvent ev;
                 ev.type = LanEvent::Type::PeerDiscovered;
                 ev.peerId = pid;
@@ -1328,6 +1337,8 @@ private:
     LobbyServiceImpl& m_lobby;
     ICallbackDispatcher& m_callbacks;
     std::string m_appScope;
+    std::mutex m_announcedMutex;
+    std::set<PeerId> m_announced;   // peers announced (PeerDiscovered posted) with a known external ID
 };
 
 // =============================================================================

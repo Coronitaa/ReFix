@@ -10,6 +10,7 @@ param(
     [Parameter(Mandatory = $true)][string]$GameDir,
     [Parameter(Mandatory = $true)][string]$Exe,          # relative to GameDir
     [int]$Seconds = 75,
+    [int]$StartGapSeconds = 6,   # delay between the two launches (heavy engines need the first to reach its menu)
     [string]$GameArgs = "",
     [string]$ReportDir = "",
     [ValidateSet("lan", "online")][string]$Product = "lan",
@@ -127,7 +128,7 @@ try {
         $sp = @{ FilePath = $exePath; WorkingDirectory = (Split-Path -Parent $exePath); PassThru = $true }
         if ($GameArgs) { $sp.ArgumentList = $GameArgs }
         $procs += Start-Process @sp
-        Start-Sleep -Seconds 6
+        Start-Sleep -Seconds $StartGapSeconds
     }
     $instState = @("running", "running")
     $instExit = @($null, $null)
@@ -136,7 +137,7 @@ try {
         for ($k = 0; $k -lt $procs.Count; $k++) {
             if ($null -eq $instExit[$k] -and $procs[$k].HasExited) {
                 $instExit[$k] = [int]$procs[$k].ExitCode
-                $instState[$k] = "exited($($instExit[$k])) after $([int]((Get-Date) - $start).TotalSeconds - $k * 6)s"
+                $instState[$k] = "exited($($instExit[$k])) after $([int]((Get-Date) - $start).TotalSeconds - $k * $StartGapSeconds)s"
             }
         }
         Start-Sleep -Seconds 1

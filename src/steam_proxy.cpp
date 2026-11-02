@@ -1933,16 +1933,38 @@ void ReFixLog(const char* fmt, ...) {
     size_t pos = logPath.find_last_of("\\/");
     if (pos != std::string::npos) logPath = logPath.substr(0, pos + 1) + "ReFix.log";
 
-    FILE* f = nullptr;
-    fopen_s(&f, logPath.c_str(), "a");
-    if (!f) return;
-
     SYSTEMTIME st;
     GetLocalTime(&st);
-    fprintf(f, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [steam_api64] %s\n",
-            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+    // REFIX_LOG_VERBOSE=1: tag each line with pid/tid and the module that logged (multi-module diagnosis)
+    static const bool verbose = []() {
+        char v[8] = {};
+        return GetEnvironmentVariableA("REFIX_LOG_VERBOSE", v, sizeof(v)) > 0 && v[0] == '1';
+    }();
+    char tag[MAX_PATH + 64] = {};
+    if (verbose) {
+        HMODULE self = nullptr;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&ReFixLog), &self);
+        char modPath[MAX_PATH] = {};
+        GetModuleFileNameA(self, modPath, MAX_PATH);
+        sprintf_s(tag, "[pid=%lu tid=%lu mod=%p %s] ", GetCurrentProcessId(), GetCurrentThreadId(), (void*)self, modPath);
+    }
+    char head[96];
+    int hn = sprintf_s(head, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [steam_api64] ",
+                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    std::string line(head, hn > 0 ? static_cast<size_t>(hn) : 0);
+    line += tag;
+    line += buf;
+    line += "\n";
 
-    fclose(f);
+    // One atomic append per line: the CRT "a" mode seeks then writes, so two processes sharing ReFix.log
+    // (multi-instance on one PC) overwrote each other's lines.
+    HANDLE hf = CreateFileA(logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(hf, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    CloseHandle(hf);
 }
 
 #pragma comment(lib, "advapi32.lib")
