@@ -48,3 +48,5 @@ src/fusion_shared/obj/
 # Release distribution builds
 release/
 build_x86_lan/
+
+bin/*_test_tmp/

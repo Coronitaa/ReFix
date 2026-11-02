@@ -72,14 +72,15 @@ void LobbyDirectory::SetLocalName(const std::string& name) {
     SteamBackend::Get().SetLocalIdentity(m_localPuid, name);
 }
 
-// Sends to whichever path the peer is reachable on, preferring Steam because it
-// works across networks and is relayed when a direct route is unavailable.
+// Sends to whichever path the peer is reachable on. In ReFix LAN the "Steam" backend is
+// the local emulator, which only re-wraps the packet for the same LAN, so the peer's direct
+// UDP address goes first; Steam stays as the fallback for peers known only by SteamID.
 bool LobbyDirectory::SendToPeer(const PeerRef& to, const void* data, size_t len) {
-    if (to.SteamId && SteamBackend::Get().Available() &&
-        SteamBackend::Get().SendTo(to.SteamId, data, len)) {
+    if (to.Udp.Valid() && Transport::Get().SendTo(to.Udp, data, len)) {
         return true;
     }
-    return to.Udp.Valid() && Transport::Get().SendTo(to.Udp, data, len);
+    return to.SteamId && SteamBackend::Get().Available() &&
+           SteamBackend::Get().SendTo(to.SteamId, data, len);
 }
 
 // Wires the Steam backend's events into the same authoritative model the LAN
@@ -109,7 +110,10 @@ void LobbyDirectory::InstallSteamEvents() {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_hosted.count(record.LobbyId)) return;
         LobbyRecord copy = record;
-        copy.LastSeenMs = NowMs();
+        // Must use the same clock as the TTL sweep in MaintenanceLoop (NowMillis): NowMs() counts
+        // from process start, so the sweep saw an age of "uptime" ms and dropped every
+        // Steam-mirrored lobby within 250 ms of discovery.
+        copy.LastSeenMs = NowMillis();
         for (const auto& m : copy.Members)
             if (m.SteamId || m.Address.Valid()) {
                 PeerRef p; p.Udp = m.Address; p.SteamId = m.SteamId;

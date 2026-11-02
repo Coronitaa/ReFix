@@ -195,6 +195,14 @@ bool Transport::Start() {
     unsigned char ttl = (unsigned char)cfg.GetInt("Network", "DiscoveryTtl", 1);
     setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, (const char*)&ttl, sizeof(ttl));
 
+    // Pin multicast egress to the adapter we advertise, so the looped-back copy reaches the other
+    // instances' group sockets on this PC instead of leaving through whatever the route picks.
+    const uint32_t localIp = DiscoverLocalIpv4();
+    if (localIp != 0 && localIp != htonl(INADDR_LOOPBACK)) {
+        in_addr ifAddr{}; ifAddr.s_addr = localIp;
+        setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF, (const char*)&ifAddr, sizeof(ifAddr));
+    }
+
     sockaddr_in bound{};
     int boundLen = sizeof(bound);
     getsockname(s, (sockaddr*)&bound, &boundLen);
@@ -230,6 +238,11 @@ bool Transport::Start() {
             if (setsockopt(g, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char*)&mreq, sizeof(mreq)) != 0)
                 RFLOG(Net, "Transport: joining %s failed (%d) - LAN discovery may be limited",
                       group.c_str(), WSAGetLastError());
+            // Also join on the advertised adapter; ANY may resolve to a different one.
+            if (localIp != 0 && localIp != htonl(INADDR_LOOPBACK)) {
+                mreq.imr_interface.s_addr = localIp;
+                setsockopt(g, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char*)&mreq, sizeof(mreq));
+            }
         }
     }
 
@@ -249,7 +262,7 @@ bool Transport::Start() {
 
     m_socket      = (uintptr_t)s;
     m_groupSocket = (uintptr_t)g;
-    m_local.Ipv4  = DiscoverLocalIpv4();
+    m_local.Ipv4  = localIp;
     m_local.Port  = ntohs(bound.sin_port);
     m_running     = true;
     m_thread      = std::thread(&Transport::ReceiveLoop, this);

@@ -39,6 +39,16 @@
 // Helper to determine if an IP is local/LAN
 #include "lan_core/refix_lan_firewall.h"
 
+// ReFix LAN reaches every peer directly over the local network, so raw UDP must never be
+// redirected into the emulated relay. Redirecting by IP also breaks several instances on one
+// PC: they all share one IP, and an EOS join request sent to the host's socket ended up in the
+// relay instead (MECCHA CHAMELEON could find rooms but never enter them).
+#ifdef REFIX_LAN_EDITION
+static constexpr bool kRedirectRawUdpToRelay = false;
+#else
+static constexpr bool kRedirectRawUdpToRelay = true;
+#endif
+
 // Helper to determine if an IP is local/LAN
 static bool IsAllowedLanEndpoint(const sockaddr* addr) {
     if (!addr) return false;
@@ -737,7 +747,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         }
     }
 
-    if (to && to->sa_family == AF_INET && len > 0) {
+    if (kRedirectRawUdpToRelay && to && to->sa_family == AF_INET && len > 0) {
         const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(to);
         uint32_t destIP = ntohl(sin->sin_addr.s_addr);
         uint16_t destPort = ntohs(sin->sin_port);
