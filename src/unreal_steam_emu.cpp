@@ -6793,6 +6793,7 @@ namespace UnrealSteamEmu {
     // Latest-version interface accessors for generated versioned adapters
     ISteamClient* LatestClient() { return static_cast<ISteamClient*>(&g_steamClientInstance); }
     ISteamUser* LatestUser() { return static_cast<ISteamUser*>(&g_steamUserInstance); }
+    ISteamGameServer* LatestGameServer() { return static_cast<ISteamGameServer*>(&g_steamGameServerInstance); }
     ISteamFriends* LatestFriends() { return static_cast<ISteamFriends*>(&g_steamFriends018Instance); }
     ISteamUtils* LatestUtils() { return static_cast<ISteamUtils*>(&g_steamUtilsInstance); }
     ISteamMatchmaking* LatestMatchmaking() { return static_cast<ISteamMatchmaking*>(&g_steamMatchmakingInstance); }

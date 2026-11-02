@@ -6,7 +6,7 @@
 class ISteamClient; class ISteamUser; class ISteamFriends; class ISteamUtils;
 class ISteamMatchmaking; class ISteamNetworking; class ISteamUserStats;
 class ISteamApps; class ISteamRemoteStorage; class ISteamUGC; class ISteamHTTP;
-class ISteamScreenshots;
+class ISteamScreenshots; class ISteamGameServer;
 
 struct ReFixIfaceEntry {
     const char* version;
@@ -33,4 +33,5 @@ namespace UnrealSteamEmu {
     ISteamUGC* LatestUGC();
     ISteamHTTP* LatestHTTP();
     ISteamScreenshots* LatestScreenshots();
+    ISteamGameServer* LatestGameServer();
 }

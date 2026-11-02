@@ -5252,6 +5252,42 @@ extern "C" __declspec(dllexport) bool SteamAPI_RestartAppIfNecessary(unsigned in
     return false;
 }
 
+#ifndef _WIN64
+extern "C" __declspec(dllexport) void* g_pSteamClientGameServer;
+
+// ISteamClient version behind g_pSteamClientGameServer: the one the game's own steam_api was built
+// with (preserved as steam_api_original.dll / steam_api_o.dll next to ours), else SteamClient017.
+static const char* ReFixLegacyGameServerClientVersion() {
+    static char s_version[32] = "SteamClient017";
+    static bool s_resolved = false;
+    if (s_resolved) return s_version;
+    s_resolved = true;
+    char self[MAX_PATH] = { 0 };
+    GetModuleFileNameA(g_hSelfModule, self, MAX_PATH);
+    char* slash = strrchr(self, '\\');
+    if (!slash) return s_version;
+    const char* backups[] = { "steam_api_original.dll", "steam_api_o.dll" };
+    for (const char* name : backups) {
+        std::string path = std::string(self, slash + 1) + name;
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) continue;
+        std::string data;
+        char chunk[65536];
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) data.append(chunk, n);
+        fclose(f);
+        size_t pos = data.find("SteamClient0");
+        if (pos != std::string::npos && pos + 14 <= data.size()) {
+            memcpy(s_version, data.data() + pos, 14);
+            s_version[14] = '\0';
+            break;
+        }
+    }
+    ReFixLog("g_pSteamClientGameServer will use %s", s_version);
+    return s_version;
+}
+#endif
+
 extern "C" __declspec(dllexport) bool SteamInternal_GameServer_Init(
     uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort,
     int eServerMode, const char* pchVersionString)
@@ -5262,12 +5298,28 @@ extern "C" __declspec(dllexport) bool SteamInternal_GameServer_Init(
     if (!ReFix::NetworkModeManager::IsOnline()) {
         bool result = UnrealSteamEmu::GameServer_Init(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
         ReFixLog("SteamInternal_GameServer_Init: autonomous LAN mode -> returning %d", result);
+#ifndef _WIN64
+        if (result) g_pSteamClientGameServer = UnrealSteamEmu::GetGenericInterface(ReFixLegacyGameServerClientVersion());
+#endif
         ReFixInitializePost(result);
         return result;
     }
     if (!EnsureOriginal() || !g_pfn_GSInit) return false;
     return g_pfn_GSInit(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
 }
+
+#ifndef _WIN64
+// SDK 1.58+ game server init (x64 gets it through the forward table). Returns ESteamAPIInitResult (0 = OK).
+extern "C" __declspec(dllexport) int SteamInternal_GameServer_Init_V2(
+    uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort, int eServerMode,
+    const char* pchVersionString, const char* pszInternalCheckInterfaceVersions, char* pOutErrMsg)
+{
+    (void)pszInternalCheckInterfaceVersions;
+    bool ok = SteamInternal_GameServer_Init(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
+    if (!ok && pOutErrMsg) strcpy_s(pOutErrMsg, 1024, "ReFix LAN game server init failed");
+    return ok ? 0 : 1;
+}
+#endif
 
 // SteamInternal_SteamAPI_Init: new Steam SDK primary init path (SDK v08.63+)
 // Returns ESteamAPIInitResult: 0 = k_ESteamAPIInitResult_OK
@@ -5588,6 +5640,9 @@ __declspec(dllexport) void SteamAPI_WriteMiniDump(uint32_t, void*, uint32_t) {}
 __declspec(dllexport) int32_t Steam_GetHSteamUserCurrent() { return SteamAPI_GetHSteamUser(); }
 __declspec(dllexport) void Steam_RegisterInterfaceFuncs(void*) {}
 __declspec(dllexport) void Steam_RunCallbacks(int32_t, bool) { SteamAPI_RunCallbacks(); }
+__declspec(dllexport) uint32_t SteamGameServer_GetIPCCallCount() { return 0; }
+// Old SDKs (Left 4 Dead era) read this data export through inline accessors after SteamGameServer_Init
+__declspec(dllexport) void* g_pSteamClientGameServer = nullptr;
 }
 #endif
 

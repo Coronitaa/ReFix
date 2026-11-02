@@ -1,11 +1,14 @@
-Tech,GameDir,Exe
-Unity Mono + Steamworks.NET,D:\Games\Valheim (2),valheim.exe
-Unity Mono + Facepunch.Steamworks + NGO,D:\Games\Lethal Company,Lethal Company.exe
-Unity Mono + Mirror,D:\Games\Scam With Your Friends (2),Scam With Your Friends.exe
-Unity Mono + FishNet,D:\Games\How to Fish\How to Fish,How to Fish.exe
-Unity Mono + Photon PUN,D:\Games\R.E.P.O,REPO.exe
-Unity IL2CPP,D:\Games\Shift At Midnight (2),ShiftAtMidnight.exe
-Unreal (OnlineSubsystemSteam),D:\Games\GRAIN ROT,Helden\Binaries\Win64\Helden-Win64-Shipping.exe
-Unreal + EOS,D:\Games\MECCHA CHAMELEON - copia,Chameleon\Binaries\Win64\PenguinHotel-Win64-Shipping.exe
-Godot + GodotSteam,D:\Games\Machine Party\Machine Party_Windows,Machine Party.exe
-Unity Mono x86 (32-bit),D:\Games\Overcooked! 2,Overcooked2.exe
+Tech,GameDir,Exe,Args
+Unity Mono + Steamworks.NET,D:\Games\Valheim (2),valheim.exe,
+Unity Mono + Facepunch.Steamworks + NGO,D:\Games\Lethal Company,Lethal Company.exe,
+Unity Mono + Mirror,D:\Games\Scam With Your Friends (2),Scam With Your Friends.exe,
+Unity Mono + FishNet,D:\Games\How to Fish\How to Fish,How to Fish.exe,
+Unity Mono + Photon PUN,D:\Games\R.E.P.O,REPO.exe,
+Unity IL2CPP,D:\Games\Shift At Midnight (2),ShiftAtMidnight.exe,
+Unreal (OnlineSubsystemSteam),D:\Games\GRAIN ROT,Helden\Binaries\Win64\Helden-Win64-Shipping.exe,
+Unreal + EOS,D:\Games\MECCHA CHAMELEON - copia,Chameleon\Binaries\Win64\PenguinHotel-Win64-Shipping.exe,
+Godot + GodotSteam,D:\Games\Machine Party\Machine Party_Windows,Machine Party.exe,
+Unity Mono x86 (32-bit),D:\Games\Overcooked! 2,Overcooked2.exe,
+GoldSrc x86 (CS 1.6),D:\Games\Counter-Strike,hl.exe,-game cstrike -windowed -w 800 -h 600 -nointro
+Source x86 (Left 4 Dead),D:\Games\Left 4 Dead,left4dead.exe,-windowed -w 800 -h 600 -novid
+Source x86/x64 (Garry's Mod),D:\Games\Garry's Mod,gmod.exe,-windowed -w 800 -h 600 -novid -multirun

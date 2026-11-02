@@ -33,6 +33,7 @@ FAMILIES = [
     ("ugc",           "isteamugc",           "STEAMUGC_INTERFACE_VERSION{v}",         "ISteamUGC",           "isteamugc.h",           "UGC",           set()),
     ("http",          "isteamhttp",          "STEAMHTTP_INTERFACE_VERSION{v}",        "ISteamHTTP",          "isteamhttp.h",          "HTTP",          set()),
     ("screenshots",   "isteamscreenshots",   "STEAMSCREENSHOTS_INTERFACE_VERSION{v}", "ISteamScreenshots",   "isteamscreenshots.h",   "Screenshots",   set()),
+    ("gameserver",    "isteamgameserver",    "SteamGameServer{v}",                    "ISteamGameServer",    "isteamgameserver.h",    "GameServer",    {"012"}),
 ]
 
 # (family, version) -> reason; filled from compile probing of the SDK headers.
