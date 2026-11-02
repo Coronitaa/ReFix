@@ -58,6 +58,7 @@ namespace UnrealSteamEmu {
     int32_t GameServer_GetHSteamUser();
 
     uint64_t GetLocalSteamID();
+    void AdoptAppId(uint32_t appId);
     const char* GetPersonaName();
     const char* GetFriendPersonaName(uint64_t steamIDFriend);
     uint32_t GetAppID();

@@ -117,7 +117,7 @@ namespace UnrealSteamEmu {
     static std::string g_personaName = "Player";
     static std::string g_basePersonaName = "Player";
     static bool g_autoIdentity = true;
-    static uint32_t g_appID = 480;
+    static uint32_t g_appID = 0; // resolved by LoadConfig (falls back to 480)
     static std::string g_language = "english";
     static uint16_t g_listenPort = 47584;
     static std::string g_customBroadcasts = "";
@@ -156,13 +156,29 @@ namespace UnrealSteamEmu {
     static HANDLE g_hSteamIdMutex = NULL;
     static int g_instanceSlot = 0;
 
+    // Slots are per game executable: the AppID can still change after the slot is taken (Source games
+    // write steam_appid.txt on first launch), and two instances keyed by different AppIDs both got slot 0.
+    static std::string InstanceSlotKey() {
+        char exePath[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        const char* base = strrchr(exePath, '\\');
+        std::string key = base ? base + 1 : exePath;
+        for (char& c : key) {
+            c = (char)tolower((unsigned char)c);
+            if (!isalnum((unsigned char)c)) c = '_';
+        }
+        return key;
+    }
+
     static int AcquireInstanceSlot(uint32_t appId) {
+        (void)appId;
         if (g_hSlotMutex != NULL) {
             return g_instanceSlot;
         }
 
+        const std::string slotKey = InstanceSlotKey();
         for (int slot = 0; slot < 16; ++slot) {
-            std::string mutexName = "Local\\ReFix_InstanceSlot_" + std::to_string(appId) + "_" + std::to_string(slot);
+            std::string mutexName = "Local\\ReFix_InstanceSlot_" + slotKey + "_" + std::to_string(slot);
             HANDLE hMutex = CreateMutexA(NULL, TRUE, mutexName.c_str());
             if (hMutex != NULL) {
                 if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -6784,6 +6800,23 @@ namespace UnrealSteamEmu {
     int32_t GameServer_GetHSteamUser() { return g_hGameServerUser; }
 
     uint64_t GetLocalSteamID() { return g_localSteamID; }
+
+    // The real AppID can arrive after init (steam_appid.txt written by the game, RestartAppIfNecessary).
+    // Every instance must end up in the same discovery scope, so move LanCore to the new scope.
+    void AdoptAppId(uint32_t appId) {
+        if (appId == 0 || appId == 480 || appId == g_appID) return;
+        uint32_t previous = g_appID;
+        g_appID = appId;
+        char appIdStr[16];
+        sprintf_s(appIdStr, "%u", appId);
+        SetEnvironmentVariableA("SteamAppId", appIdStr);
+        SetEnvironmentVariableA("SteamGameId", appIdStr);
+        if (g_transportMode.load() == TransportMode::Canonical) {
+            refix::lan::ILanCore::Get().SetAppScope("Steam_" + std::to_string(appId));
+            refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
+        }
+        ReFixLog("[UnrealSteam] Adopted AppID %u (was %u): LAN discovery scope updated", appId, previous);
+    }
     const char* GetPersonaName() { return g_personaName.c_str(); }
     const char* GetFriendPersonaName(uint64_t steamIDFriend) {
         return g_steamFriendsInstance.GetFriendPersonaName(CSteamID(steamIDFriend));
@@ -7120,6 +7153,17 @@ namespace UnrealSteamEmu {
                 }
             }
         });
+
+        // The transport is already receiving: peers discovered between Initialize() and the Subscribe()
+        // above were dispatched to nobody (typical for the 2nd instance, whose peers are already
+        // beaconing). Replay them so the adapter learns about every peer that exists right now.
+        for (const auto& known : core.Peers().GetAllPeers()) {
+            if (known.peerId == localPeer) continue;
+            refix::lan::LanEvent replay;
+            replay.type = refix::lan::LanEvent::Type::PeerDiscovered;
+            replay.peerId = known.peerId;
+            core.Callbacks().PostEvent(replay);
+        }
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyCreated, [](const refix::lan::LanEvent& ev) {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);

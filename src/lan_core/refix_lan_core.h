@@ -254,6 +254,8 @@ public:
     static ILanCore& Get();
 
     virtual bool Initialize(std::string_view appScope, uint16_t discoveryPort = 47584) = 0;
+    // Changes the game scope used to filter discovery/lobby traffic (e.g. AppID learned after init)
+    virtual void SetAppScope(std::string_view appScope) = 0;
     virtual void Shutdown() = 0;
     virtual void Tick() = 0; // Pumps socket IO, TTL checks, and CallbackDispatcher
 

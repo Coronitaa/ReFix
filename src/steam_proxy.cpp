@@ -2076,6 +2076,7 @@ static void EnsureSteamAppIdFile(const char* appIdStr) {
                             strcpy_s(g_realAppId, sizeof(g_realAppId), s.c_str());
                             SetEnvironmentVariableA("SteamAppId", s.c_str());
                             ReFixLog("EnsureSteamAppIdFile: Adopted existing AppID %s from %s", s.c_str(), appIdPath.c_str());
+                            if (!ReFix::NetworkModeManager::IsOnline()) UnrealSteamEmu::AdoptAppId(g_config.realAppIdNum);
                         }
                         return; // Preserve existing valid steam_appid.txt
                     }
@@ -5273,7 +5274,8 @@ extern "C" __declspec(dllexport) bool SteamAPI_InitAnonymousUser() {
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_RestartAppIfNecessary(unsigned int unOwnAppID) {
-    (void)unOwnAppID;
+    // The game states its own AppID here: use it for the LAN scope so every instance agrees
+    if (!ReFix::NetworkModeManager::IsOnline()) UnrealSteamEmu::AdoptAppId(unOwnAppID);
     return false;
 }
 

@@ -370,18 +370,20 @@ private:
 // LobbyServiceImpl
 // =============================================================================
 class LobbyServiceImpl : public ILobbyService {
+    // App scope can change at runtime (late AppID adoption) while the reactor thread reads it
+    std::string Scope() const { std::lock_guard<std::mutex> lk(m_scopeMutex); return m_appScope; }
 public:
     explicit LobbyServiceImpl(ILocalIdentityService& identity, ICallbackDispatcher& callbacks, LanTransport* transport = nullptr, IPeerRegistry* peers = nullptr)
         : m_identity(identity), m_callbacks(callbacks), m_transport(transport), m_peers(peers) {}
 
     void SetTransport(LanTransport* transport) { m_transport = transport; }
     void SetPeers(IPeerRegistry* peers) { m_peers = peers; }
-    void SetAppScope(std::string_view scope) { m_appScope = std::string(scope); }
+    void SetAppScope(std::string_view scope) { std::lock_guard<std::mutex> lk(m_scopeMutex); m_appScope = std::string(scope); }
 
     void BroadcastLobbyState(const LobbyRecord& lob) {
-        if (!m_transport || m_appScope.empty()) return;
+        if (!m_transport || Scope().empty()) return;
         ByteWriter w;
-        w.WriteString(m_appScope);
+        w.WriteString(Scope());
         w.WritePeerId(m_identity.GetLocalPeerId());
         w.WriteString(lob.lobbyId);
         w.WritePeerId(lob.ownerPeerId);
@@ -579,7 +581,7 @@ public:
             }
 
             ByteWriter w;
-            w.WriteString(m_appScope);
+            w.WriteString(Scope());
             w.WritePeerId(m_identity.GetLocalPeerId());
             w.WriteString(std::string(lobbyId));
             w.WritePeerId(m_identity.GetLocalPeerId());
@@ -601,9 +603,9 @@ public:
         if (it != m_lobbies.end()) {
             if (it->second.ownerPeerId != m_identity.GetLocalPeerId()) {
                 // Client leaving remote lobby
-                if (m_transport && !m_appScope.empty() && it->second.hostEndpoint.IsValid()) {
+                if (m_transport && !Scope().empty() && it->second.hostEndpoint.IsValid()) {
                     ByteWriter w;
-                    w.WriteString(m_appScope);
+                    w.WriteString(Scope());
                     w.WritePeerId(m_identity.GetLocalPeerId());
                     w.WriteString(std::string(lobbyId));
                     w.WritePeerId(m_identity.GetLocalPeerId());
@@ -728,6 +730,7 @@ private:
     LanTransport* m_transport = nullptr;
     IPeerRegistry* m_peers = nullptr;
     std::string m_appScope;
+    mutable std::mutex m_scopeMutex;
 };
 
 // =============================================================================
@@ -756,18 +759,20 @@ bool SearchFilter::Matches(const LobbyRecord& lobby) const {
 }
 
 class MatchmakingServiceImpl : public IMatchmakingService {
+    // App scope can change at runtime (late AppID adoption) while the reactor thread reads it
+    std::string Scope() const { std::lock_guard<std::mutex> lk(m_scopeMutex); return m_appScope; }
 public:
     explicit MatchmakingServiceImpl(ILobbyService& lobby, LanTransport* transport = nullptr, ILocalIdentityService* identity = nullptr)
         : m_lobby(lobby), m_transport(transport), m_identity(identity) {}
 
     void SetTransport(LanTransport* transport) { m_transport = transport; }
     void SetIdentity(ILocalIdentityService* identity) { m_identity = identity; }
-    void SetAppScope(std::string_view scope) { m_appScope = std::string(scope); }
+    void SetAppScope(std::string_view scope) { std::lock_guard<std::mutex> lk(m_scopeMutex); m_appScope = std::string(scope); }
 
     void RefreshLobbyList() override {
-        if (m_transport && !m_appScope.empty()) {
+        if (m_transport && !Scope().empty()) {
             ByteWriter w;
-            w.WriteString(m_appScope);
+            w.WriteString(Scope());
             w.WritePeerId(m_identity ? m_identity->GetLocalPeerId() : PeerId{});
             m_transport->BroadcastLobbyQuery(w.Data(), w.Size());
         }
@@ -801,6 +806,7 @@ private:
     LanTransport* m_transport = nullptr;
     ILocalIdentityService* m_identity = nullptr;
     std::string m_appScope;
+    mutable std::mutex m_scopeMutex;
 };
 
 // =============================================================================
@@ -899,13 +905,17 @@ private:
 // DiscoveryServiceImpl
 // =============================================================================
 class DiscoveryServiceImpl : public IDiscoveryService, public ILanTransportListener {
+    // App scope can change at runtime (late AppID adoption) while the reactor thread reads it
+    std::string Scope() const { std::lock_guard<std::mutex> lk(m_scopeMutex); return m_appScope; }
 public:
     DiscoveryServiceImpl(LanTransport& transport, ILocalIdentityService& identity,
                          IPeerRegistry& peers, LobbyServiceImpl& lobby, ICallbackDispatcher& callbacks)
         : m_transport(transport), m_identity(identity), m_peers(peers), m_lobby(lobby), m_callbacks(callbacks) {}
 
+    void SetAppScope(std::string_view scope) { std::lock_guard<std::mutex> lk(m_scopeMutex); m_appScope = std::string(scope); }
+
     bool Start(std::string_view appScope, uint16_t discoveryPort) override {
-        m_appScope = std::string(appScope);
+        { std::lock_guard<std::mutex> lk(m_scopeMutex); m_appScope = std::string(appScope); }
         m_transport.SetLocalPeerId(m_identity.GetLocalPeerId());
         return m_transport.Start(discoveryPort, this);
     }
@@ -916,7 +926,7 @@ public:
 
     void BroadcastQuery() override {
         ByteWriter w;
-        w.WriteString(m_appScope);
+        w.WriteString(Scope());
         w.WritePeerId(m_identity.GetLocalPeerId());
         w.WriteString(m_identity.GetDisplayName());
         w.WriteEndpoint(m_transport.GetLocalDataEndpoint());
@@ -931,7 +941,7 @@ public:
 
     void AnnouncePresence() override {
         ByteWriter w;
-        w.WriteString(m_appScope);
+        w.WriteString(Scope());
         w.WritePeerId(m_identity.GetLocalPeerId());
         w.WriteString(m_identity.GetDisplayName());
         w.WriteEndpoint(m_transport.GetLocalDataEndpoint());
@@ -952,7 +962,7 @@ public:
     void OnDiscoveryPacket(const LanEndpoint& sender, MsgType type, const uint8_t* data, size_t len) override {
         ByteReader r(data, len);
         std::string scope = r.ReadString();
-        if (scope != m_appScope) return; // Discard packets from other games on LAN!
+        if (scope != Scope()) return; // Discard packets from other games on LAN!
 
         PeerId pid = r.ReadPeerId();
         if (pid == m_identity.GetLocalPeerId()) return;
@@ -1010,7 +1020,7 @@ public:
             // If we received a query, or a beacon from a new peer, send a unicast response back to sender
             if (type == MsgType::DiscoveryQuery || (type == MsgType::DiscoveryBeacon && isNewPeer)) {
                 ByteWriter resp;
-                resp.WriteString(m_appScope);
+                resp.WriteString(Scope());
                 resp.WritePeerId(m_identity.GetLocalPeerId());
                 resp.WriteString(m_identity.GetDisplayName());
                 resp.WriteEndpoint(m_transport.GetLocalDataEndpoint());
@@ -1128,7 +1138,7 @@ public:
             for (const auto& lob : all) {
                 if (lob.ownerPeerId == m_identity.GetLocalPeerId()) {
                     ByteWriter w;
-                    w.WriteString(m_appScope);
+                    w.WriteString(Scope());
                     w.WritePeerId(m_identity.GetLocalPeerId());
                     w.WriteString(lob.lobbyId);
                     w.WritePeerId(lob.ownerPeerId);
@@ -1170,7 +1180,7 @@ public:
             auto lobOpt = m_lobby.GetLobby(lobbyId);
             if (!lobOpt || !m_lobby.IsHosting(lobbyId)) {
                 ByteWriter resp;
-                resp.WriteString(m_appScope);
+                resp.WriteString(Scope());
                 resp.WritePeerId(m_identity.GetLocalPeerId());
                 resp.WriteString(lobbyId);
                 resp.WriteU8(3); // DoesNotExist
@@ -1180,7 +1190,7 @@ public:
 
             if (!lobOpt->joinable) {
                 ByteWriter resp;
-                resp.WriteString(m_appScope);
+                resp.WriteString(Scope());
                 resp.WritePeerId(m_identity.GetLocalPeerId());
                 resp.WriteString(lobbyId);
                 resp.WriteU8(2); // NotJoinable
@@ -1190,7 +1200,7 @@ public:
 
             if (lobOpt->AvailableSlots() == 0) {
                 ByteWriter resp;
-                resp.WriteString(m_appScope);
+                resp.WriteString(Scope());
                 resp.WritePeerId(m_identity.GetLocalPeerId());
                 resp.WriteString(lobbyId);
                 resp.WriteU8(1); // Full
@@ -1223,7 +1233,7 @@ public:
             if (!updatedLob) return;
 
             ByteWriter resp;
-            resp.WriteString(m_appScope);
+            resp.WriteString(Scope());
             resp.WritePeerId(m_identity.GetLocalPeerId());
             resp.WriteString(lobbyId);
             resp.WriteU8(0); // Success
@@ -1337,6 +1347,7 @@ private:
     LobbyServiceImpl& m_lobby;
     ICallbackDispatcher& m_callbacks;
     std::string m_appScope;
+    mutable std::mutex m_scopeMutex;
     std::mutex m_announcedMutex;
     std::set<PeerId> m_announced;   // peers announced (PeerDiscovered posted) with a known external ID
 };
@@ -1356,6 +1367,12 @@ public:
           m_matchmaking(m_lobby, &m_transport, &m_identity),
           m_relay(m_transport, m_peers),
           m_discovery(m_transport, m_identity, m_peers, m_lobby, m_callbacks) {}
+
+    void SetAppScope(std::string_view appScope) override {
+        m_lobby.SetAppScope(appScope);
+        m_matchmaking.SetAppScope(appScope);
+        m_discovery.SetAppScope(appScope);
+    }
 
     bool Initialize(std::string_view appScope, uint16_t discoveryPort) override {
         std::lock_guard<std::mutex> lock(m_mutex);
