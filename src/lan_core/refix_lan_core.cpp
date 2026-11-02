@@ -969,9 +969,10 @@ public:
 
             auto existing = m_peers.FindByPeerId(pid);
             bool isNewPeer = !existing.has_value();
-            // A peer's first beacons can go out before its Steam adapter binds the SteamID. Announce it
-            // again when the SteamID shows up, or adapters that need the ID never see the peer.
-            bool gainedSteamId = existing && existing->externalId.numericId == 0 && extSteamId != 0;
+            // Announce again when the peer's SteamID shows up or changes: its first beacons can go out
+            // before its Steam adapter binds the ID, and lobby/handshake paths may have registered it
+            // earlier with a placeholder ID without posting PeerDiscovered.
+            bool gainedSteamId = existing && extSteamId != 0 && existing->externalId.numericId != extSteamId;
 
             PeerInfo info;
             if (existing) {

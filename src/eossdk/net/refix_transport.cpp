@@ -9,6 +9,10 @@
 #include <vector>
 #include <algorithm>
 
+// EOS LAN discovery ports, kept apart from the Steam LanCore range (47584..47599)
+static constexpr uint16_t kEosDiscoveryPortBase = 47610;
+static constexpr uint16_t kEosDiscoveryPortLast = 47615;
+
 namespace refix {
 
 std::string Endpoint::ToString() const {
@@ -163,7 +167,9 @@ bool Transport::Start() {
 
     auto& cfg = Config::Get();
     std::string group = cfg.GetString("Network", "DiscoveryGroup", "239.255.71.84");
-    m_groupPort = (uint16_t)cfg.GetInt("Network", "ListenPort", 47584);
+    // Not [Network] ListenPort: that one belongs to the Steam LanCore discovery (47584..47599), and
+    // sharing it with SO_REUSEADDR lets this socket swallow LanCore's unicast beacons.
+    m_groupPort = (uint16_t)cfg.GetInt("Network", "EOSDiscoveryPort", kEosDiscoveryPortBase);
     m_groupAddr = inet_addr(group.c_str());
     if (m_groupAddr == INADDR_NONE) m_groupAddr = inet_addr("239.255.71.84");
 
@@ -203,7 +209,7 @@ bool Transport::Start() {
         ga.sin_port = htons(m_groupPort);
         bool boundGroup = (bind(g, (sockaddr*)&ga, sizeof(ga)) == 0);
         if (!boundGroup) {
-            for (uint16_t altPort = 47585; altPort <= 47589; ++altPort) {
+            for (uint16_t altPort = kEosDiscoveryPortBase + 1; altPort <= kEosDiscoveryPortLast; ++altPort) {
                 ga.sin_port = htons(altPort);
                 if (bind(g, (sockaddr*)&ga, sizeof(ga)) == 0) {
                     m_groupPort = altPort;
@@ -304,7 +310,7 @@ bool Transport::SendToGroup(const void* data, size_t len) {
 
     auto blast = [&](uint32_t addr) {
         bool res = blastPort(addr, m_groupPort);
-        for (uint16_t alt = 47584; alt <= 47589; ++alt) {
+        for (uint16_t alt = kEosDiscoveryPortBase; alt <= kEosDiscoveryPortLast; ++alt) {
             if (alt != m_groupPort) {
                 blastPort(addr, alt);
             }

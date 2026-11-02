@@ -85,18 +85,12 @@ try {
     $env:REFIX_NON_INTERACTIVE = "1"
     $env:REFIX_DEPLOY_MODE = if ($Product -eq "online") { "1" } else { "2" }
     $deployLog = Join-Path $runDir "deploy.log"
-    # Use the real AutoDeploy.bat; only if the working copy is LF-only (cmd.exe cannot resolve goto labels then) run a temporary CRLF copy
-    $realBat = Join-Path $repo "AutoDeploy.bat"
-    $batBytes = [System.IO.File]::ReadAllBytes($realBat)
-    $hasCr = $batBytes -contains 13
-    $bat = $realBat
-    if (-not $hasCr) {
-        $bat = Join-Path $repo "AutoDeploy_phys_crlf.bat"
-        $batText = [System.IO.File]::ReadAllText($realBat) -replace "`r?`n", "`r`n"
-        [System.IO.File]::WriteAllText($bat, $batText, [System.Text.Encoding]::ASCII)
-        $result.Notes += "AutoDeploy.bat is LF-only on disk (CRLF copy used); "
-    }
-    try { & cmd.exe /c "`"$bat`" `"$GameDir`"" *> $deployLog } finally { if ($bat -ne $realBat) { Remove-Item -LiteralPath $bat -Force -ErrorAction SilentlyContinue } }
+    # AutoDeploy.bat must be CRLF (cmd.exe cannot resolve goto labels in LF-only files): fail loudly otherwise
+    $bat = Join-Path $repo "AutoDeploy.bat"
+    $batBytes = [System.IO.File]::ReadAllBytes($bat)
+    $lfOnly = 0; for ($k = 0; $k -lt $batBytes.Length; $k++) { if ($batBytes[$k] -eq 10 -and ($k -eq 0 -or $batBytes[$k - 1] -ne 13)) { $lfOnly++ } }
+    if ($lfOnly -gt 0) { $result.Notes = "AutoDeploy.bat has $lfOnly LF-only line endings (must be CRLF)"; throw "AutoDeploy.bat is not CRLF" }
+    & cmd.exe /c "`"$bat`" `"$GameDir`"" *> $deployLog
     $deployOk = ($LASTEXITCODE -eq 0)
     $result.Deploy = if ($deployOk) { "OK" } else { "FAIL($LASTEXITCODE)" }
     if (-not $deployOk) { $result.Notes = "deploy failed, see $deployLog"; throw "deploy failed" }
@@ -159,6 +153,32 @@ try {
     # --- Analyse logs ---------------------------------------------------------------------------------------------
     Get-ChildItem -LiteralPath $GameDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $start } |
         ForEach-Object { "$($_.LastWriteTime.ToString('HH:mm:ss')) $($_.Length) $($_.FullName.Substring($GameDir.Length + 1))" } | Set-Content -LiteralPath (Join-Path $runDir "modified_files.txt")
+    # Window/dialog text + running images, run in a job with a timeout (UIAutomation / Modules can hang on frozen games)
+    $diagJob = Start-Job -ArgumentList $GameDir, $runDir -ScriptBlock {
+        param($gd, $rd)
+    # Window titles / dialog text of every process running from the game folder (modal error dialogs)
+    try {
+        Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction Stop
+        $dlg = @()
+        Get-Process -ErrorAction SilentlyContinue | Where-Object { $p2 = $null; try { $p2 = $_.Path } catch {}; $p2 -and $p2.StartsWith($gd, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object {
+            $pr = $_
+            $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $pr.Id)
+            foreach ($w in [System.Windows.Automation.AutomationElement]::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) {
+                $texts = @()
+                try { foreach ($t in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) { if ($t.Current.Name) { $texts += $t.Current.Name } } } catch {}
+                $dlg += "pid=$($pr.Id) $($pr.ProcessName) window='$($w.Current.Name)' texts=[$((($texts | Select-Object -Unique) -join ' | '))]"
+            }
+        }
+        $dlg | Set-Content -LiteralPath (Join-Path $rd "windows.txt")
+    } catch { "dialog capture failed: $_" | Set-Content -LiteralPath (Join-Path $rd "windows.txt") }
+    # exe images actually running + steam_api modules
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $p2 = $null; try { $p2 = $_.Path } catch {}; $p2 -and $p2.StartsWith($gd, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object {
+        $mods = @(); try { $mods = $_.Modules | Where-Object { $_.ModuleName -match 'steam_api|winmm|EOSSDK|Redbone' } | ForEach-Object { $_.FileName } } catch { $mods = @("<modules unreadable>") }
+        "pid=$($_.Id) $($_.Path) mods=[$($mods -join '; ')]"
+    } | Set-Content -LiteralPath (Join-Path $rd "processes.txt")
+    }
+    if (-not (Wait-Job $diagJob -Timeout 30)) { "diagnostics timed out (game window/process unresponsive)" | Set-Content -LiteralPath (Join-Path $runDir "windows_timeout.txt") }
+    Stop-Job $diagJob -ErrorAction SilentlyContinue; Remove-Job $diagJob -Force -ErrorAction SilentlyContinue
     # Unity player logs (most recently written Player.log under LocalLow)
     $pl = Get-ChildItem -Path (Join-Path $env:USERPROFILE "AppData\LocalLow") -Recurse -Filter "Player.log" -ErrorAction SilentlyContinue |
           Where-Object { $_.LastWriteTime -ge $start } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
