@@ -14,6 +14,8 @@ param(
     [string]$GameArgs = "",
     [string]$ReportDir = "",
     [ValidateSet("lan", "online")][string]$Product = "lan",
+    [switch]$LaunchKeys,         # send {ENTER} to each instance window ~20 s after its launch (menus such as Lethal Company ONLINE/LAN)
+    [int]$LaunchKeysAfter = 20,
     [switch]$KeepDeployed
 )
 $ErrorActionPreference = "Stop"
@@ -81,6 +83,7 @@ function Restore-Game {
 
 $result = [ordered]@{ Game = (Split-Path -Leaf $GameDir); Exe = $Exe; Deploy = "?"; ProductFiles = "?"; Alive = "?"; Inits = 0; SteamIds = ""; Slots = ""; Discovery = "?"; Verdict = "FAIL"; Notes = ""; Inst1 = "?"; Inst2 = "?" }
 $procs = @()
+$launchedAt = @()
 try {
     # --- 2. Deploy ReFix LAN ----------------------------------------------------------------------------------
     $env:REFIX_NON_INTERACTIVE = "1"
@@ -128,16 +131,33 @@ try {
         $sp = @{ FilePath = $exePath; WorkingDirectory = (Split-Path -Parent $exePath); PassThru = $true }
         if ($GameArgs) { $sp.ArgumentList = $GameArgs }
         $procs += Start-Process @sp
+        $launchedAt += Get-Date
         Start-Sleep -Seconds $StartGapSeconds
     }
     $instState = @("running", "running")
     $instExit = @($null, $null)
+    $keysSent = @($false, $false)
+    if ($LaunchKeys) { $wsh = New-Object -ComObject WScript.Shell }
     $waitEnd = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $waitEnd) {
         for ($k = 0; $k -lt $procs.Count; $k++) {
             if ($null -eq $instExit[$k] -and $procs[$k].HasExited) {
                 $instExit[$k] = [int]$procs[$k].ExitCode
                 $instState[$k] = "exited($($instExit[$k])) after $([int]((Get-Date) - $start).TotalSeconds - $k * $StartGapSeconds)s"
+            }
+        }
+        if ($LaunchKeys) {
+            for ($k = 0; $k -lt $procs.Count; $k++) {
+                if (-not $keysSent[$k] -and -not $procs[$k].HasExited -and ((Get-Date) - $launchedAt[$k]).TotalSeconds -ge $LaunchKeysAfter) {
+                    $keysSent[$k] = $true
+                    $act = $false
+                    try { $wsh.SendKeys("%") } catch {}   # a synthetic Alt press lifts the foreground-lock restriction
+                    try { $act = $wsh.AppActivate([int]$procs[$k].Id) } catch {}
+                    if (-not $act) { try { $act = $wsh.AppActivate((Get-Process -Id $procs[$k].Id).MainWindowTitle) } catch {} }
+                    Start-Sleep -Milliseconds 800
+                    try { $wsh.SendKeys("{ENTER}") } catch {}
+                    $result.Notes += "keys->inst$($k + 1)(activate=$act); "
+                }
             }
         }
         Start-Sleep -Seconds 1
