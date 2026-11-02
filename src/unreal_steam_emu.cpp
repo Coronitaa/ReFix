@@ -1605,6 +1605,8 @@ namespace UnrealSteamEmu {
     }
 
     static void EnqueueSocketCallbackFromSnapshot(const ConnectionSnapshot& snap) {
+        ReFixLog("[Sockets] conn %u with %llu: state %d -> %d (listen=%u)", snap.handle,
+                 snap.remoteSteamID.ConvertToUint64(), (int)snap.oldState, (int)snap.newState, snap.hListenSocket);
         SteamNetConnectionStatusChangedCallback_t cb;
         memset(&cb, 0, sizeof(cb));
         cb.m_hConn = snap.handle;
@@ -4328,6 +4330,15 @@ namespace UnrealSteamEmu {
                 lob.gameServerPort = unGameServerPort;
                 lob.gameServerSteamID = steamIDGameServer.ConvertToUint64();
             }
+            // Members on other machines read it through GetLobbyGameServer: Valheim lists a lobby only
+            // when it names its game server, so a local-only copy hid every LAN world.
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                auto& lobbies = refix::lan::ILanCore::Get().Lobby();
+                lobbies.SetLobbyData(coreLobbyId, "__gs_ip", refix::lan::AttributeValue(std::to_string(unGameServerIP)));
+                lobbies.SetLobbyData(coreLobbyId, "__gs_port", refix::lan::AttributeValue(std::to_string(unGameServerPort)));
+                lobbies.SetLobbyData(coreLobbyId, "__gs_id", refix::lan::AttributeValue(std::to_string(steamIDGameServer.ConvertToUint64())));
+            }
 
             LobbyGameCreated_t lgc = {};
             lgc.m_ulSteamIDLobby = lID;
@@ -4339,13 +4350,29 @@ namespace UnrealSteamEmu {
 
         virtual bool GetLobbyGameServer(CSteamID steamIDLobby, uint32 *punGameServerIP, uint16 *punGameServerPort, CSteamID *psteamIDGameServer) override {
             auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
-            if (it != g_lobbies.end() && it->second.gameServerPort != 0) {
+            // A P2P host registers only its SteamID (IP and port 0), which is still a game server.
+            if (it != g_lobbies.end() && (it->second.gameServerPort != 0 || it->second.gameServerSteamID != 0)) {
                 if (punGameServerIP) *punGameServerIP = it->second.gameServerIP;
                 if (punGameServerPort) *punGameServerPort = it->second.gameServerPort;
                 if (psteamIDGameServer) *psteamIDGameServer = CSteamID(it->second.gameServerSteamID);
                 return true;
             }
-            return false;
+            std::string coreLobbyId = GetCoreLobbyId(steamIDLobby.ConvertToUint64());
+            if (coreLobbyId.empty()) return false;
+            auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
+            if (!rec) return false;
+            auto attr = [&](const char* key) -> uint64_t {
+                auto a = rec->attributes.find(key);
+                return a == rec->attributes.end() ? 0 : _strtoui64(a->second.asString.c_str(), nullptr, 10);
+            };
+            const uint64_t gsId = attr("__gs_id");
+            const uint64_t gsPort = attr("__gs_port");
+            if (gsId == 0 && gsPort == 0) return false;
+            if (punGameServerIP) *punGameServerIP = (uint32)attr("__gs_ip");
+            if (punGameServerPort) *punGameServerPort = (uint16)gsPort;
+            if (psteamIDGameServer) *psteamIDGameServer = CSteamID(gsId);
+            if (TraceLobbyReads()) ReFixLog("[LobbyRead] GetLobbyGameServer(%llu) -> id=%llu port=%llu", steamIDLobby.ConvertToUint64(), gsId, gsPort);
+            return true;
         }
 
         virtual bool SetLobbyMemberLimit(CSteamID steamIDLobby, int cMaxMembers) override {
@@ -4855,6 +4882,7 @@ namespace UnrealSteamEmu {
         // 4. ConnectP2P
         virtual HSteamNetConnection ConnectP2P(const SteamNetworkingIdentity &identityRemote, int nRemoteVirtualPort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) override {
             if (identityRemote.m_eType != k_ESteamNetworkingIdentityType_SteamID) {
+                ReFixLog("[UnrealSteam] ConnectP2P rejected: identity type %d is not a SteamID", (int)identityRemote.m_eType);
                 return k_HSteamNetConnection_Invalid;
             }
             CSteamID remoteID(identityRemote.GetSteamID64());
@@ -4863,8 +4891,10 @@ namespace UnrealSteamEmu {
                 remoteID.GetEAccountType() != k_EAccountTypeIndividual ||
                 remoteID.GetAccountID() == 0 ||
                 remoteID.GetUnAccountInstance() != k_unSteamUserDefaultInstance) {
+                ReFixLog("[UnrealSteam] ConnectP2P rejected: %llu is not an individual SteamID", remoteID.ConvertToUint64());
                 return k_HSteamNetConnection_Invalid;
             }
+            ReFixLog("[UnrealSteam] ConnectP2P -> %llu (virtual port %d)", remoteID.ConvertToUint64(), nRemoteVirtualPort);
 
             uint32_t sessionId = GenerateUniqueSessionId();
             uint32_t clientNonce = GenerateConnectionNonce();
@@ -4949,7 +4979,8 @@ namespace UnrealSteamEmu {
         }
 
         // 6. CloseConnection
-        virtual bool CloseConnection(HSteamNetConnection hPeer, int nReason, const char *pszDebug, bool bEnableLinger) override { 
+        virtual bool CloseConnection(HSteamNetConnection hPeer, int nReason, const char *pszDebug, bool bEnableLinger) override {
+            ReFixLog("[Sockets] CloseConnection(conn %u, reason %d, '%s')", hPeer, nReason, pszDebug ? pszDebug : "");
             bool doEnqueue = false;
             ConnectionSnapshot snap = {};
             CSteamID remoteID;

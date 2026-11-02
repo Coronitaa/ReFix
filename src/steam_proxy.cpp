@@ -6565,10 +6565,47 @@ extern "C" {
     bool SteamAPI_ISteamNetworkingUtils_SetConfigValue(void* self, int eValue, int eScopeType, intptr_t scopeObj, int eDataType, const void* pArg);
     int SteamAPI_ISteamNetworkingUtils_GetConfigValue(void* self, int eValue, int eScopeType, intptr_t scopeObj, int* pOutDataType, void* pResult, size_t* cbResult);
     void* SteamAPI_ISteamNetworkingUtils_AllocateMessage(void* self, int cbAllocateBuffer);
+
+    // SteamNetworkingIdentity / IPAddr helpers (steam_sockets_flat.cpp); only their addresses are taken here.
+    void ReFix_Identity_Clear(); void ReFix_Identity_IsInvalid(); void ReFix_Identity_SetSteamID64();
+    void ReFix_Identity_GetSteamID64(); void ReFix_Identity_SetIPAddr(); void ReFix_Identity_GetIPAddr();
+    void ReFix_Identity_SetIPv4Addr(); void ReFix_Identity_GetIPv4(); void ReFix_Identity_SetLocalHost();
+    void ReFix_Identity_IsLocalHost(); void ReFix_Identity_IsEqualTo(); void ReFix_Identity_ToString();
+    void ReFix_Identity_ParseString();
+    void ReFix_IPAddr_Clear(); void ReFix_IPAddr_IsIPv6AllZeros(); void ReFix_IPAddr_SetIPv6();
+    void ReFix_IPAddr_SetIPv4(); void ReFix_IPAddr_IsIPv4(); void ReFix_IPAddr_GetIPv4();
+    void ReFix_IPAddr_SetIPv6LocalHost(); void ReFix_IPAddr_IsLocalHost(); void ReFix_IPAddr_IsEqualTo();
+    void ReFix_IPAddr_ToString(); void ReFix_IPAddr_ParseString();
 }
 
 static FARPROC LookupLanExport(const char* name) {
     static const std::unordered_map<std::string, FARPROC> s_lanExports = {
+        { "SteamAPI_SteamNetworkingIdentity_Clear", (FARPROC)ReFix_Identity_Clear },
+        { "SteamAPI_SteamNetworkingIdentity_IsInvalid", (FARPROC)ReFix_Identity_IsInvalid },
+        { "SteamAPI_SteamNetworkingIdentity_SetSteamID", (FARPROC)ReFix_Identity_SetSteamID64 },
+        { "SteamAPI_SteamNetworkingIdentity_GetSteamID", (FARPROC)ReFix_Identity_GetSteamID64 },
+        { "SteamAPI_SteamNetworkingIdentity_SetSteamID64", (FARPROC)ReFix_Identity_SetSteamID64 },
+        { "SteamAPI_SteamNetworkingIdentity_GetSteamID64", (FARPROC)ReFix_Identity_GetSteamID64 },
+        { "SteamAPI_SteamNetworkingIdentity_SetIPAddr", (FARPROC)ReFix_Identity_SetIPAddr },
+        { "SteamAPI_SteamNetworkingIdentity_GetIPAddr", (FARPROC)ReFix_Identity_GetIPAddr },
+        { "SteamAPI_SteamNetworkingIdentity_SetIPv4Addr", (FARPROC)ReFix_Identity_SetIPv4Addr },
+        { "SteamAPI_SteamNetworkingIdentity_GetIPv4", (FARPROC)ReFix_Identity_GetIPv4 },
+        { "SteamAPI_SteamNetworkingIdentity_SetLocalHost", (FARPROC)ReFix_Identity_SetLocalHost },
+        { "SteamAPI_SteamNetworkingIdentity_IsLocalHost", (FARPROC)ReFix_Identity_IsLocalHost },
+        { "SteamAPI_SteamNetworkingIdentity_IsEqualTo", (FARPROC)ReFix_Identity_IsEqualTo },
+        { "SteamAPI_SteamNetworkingIdentity_ToString", (FARPROC)ReFix_Identity_ToString },
+        { "SteamAPI_SteamNetworkingIdentity_ParseString", (FARPROC)ReFix_Identity_ParseString },
+        { "SteamAPI_SteamNetworkingIPAddr_Clear", (FARPROC)ReFix_IPAddr_Clear },
+        { "SteamAPI_SteamNetworkingIPAddr_IsIPv6AllZeros", (FARPROC)ReFix_IPAddr_IsIPv6AllZeros },
+        { "SteamAPI_SteamNetworkingIPAddr_SetIPv6", (FARPROC)ReFix_IPAddr_SetIPv6 },
+        { "SteamAPI_SteamNetworkingIPAddr_SetIPv4", (FARPROC)ReFix_IPAddr_SetIPv4 },
+        { "SteamAPI_SteamNetworkingIPAddr_IsIPv4", (FARPROC)ReFix_IPAddr_IsIPv4 },
+        { "SteamAPI_SteamNetworkingIPAddr_GetIPv4", (FARPROC)ReFix_IPAddr_GetIPv4 },
+        { "SteamAPI_SteamNetworkingIPAddr_SetIPv6LocalHost", (FARPROC)ReFix_IPAddr_SetIPv6LocalHost },
+        { "SteamAPI_SteamNetworkingIPAddr_IsLocalHost", (FARPROC)ReFix_IPAddr_IsLocalHost },
+        { "SteamAPI_SteamNetworkingIPAddr_IsEqualTo", (FARPROC)ReFix_IPAddr_IsEqualTo },
+        { "SteamAPI_SteamNetworkingIPAddr_ToString", (FARPROC)ReFix_IPAddr_ToString },
+        { "SteamAPI_SteamNetworkingIPAddr_ParseString", (FARPROC)ReFix_IPAddr_ParseString },
         { "SteamClient", (FARPROC)SteamClient },
         { "SteamAPI_GetHSteamUser", (FARPROC)SteamAPI_GetHSteamUser },
         { "GetHSteamUser", (FARPROC)SteamAPI_GetHSteamUser },

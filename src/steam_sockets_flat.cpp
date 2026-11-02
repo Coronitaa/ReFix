@@ -311,4 +311,80 @@ __declspec(dllexport) void SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess
     if (u) u->InitRelayNetworkAccess();
 }
 
+// ---------------------------------------------------------------------------------------------------
+// SteamNetworkingIdentity / SteamNetworkingIPAddr helpers. C# and Godot wrappers build identities
+// through these flat calls; in ReFix LAN there is no Valve DLL behind them, so they were no-ops and
+// Valheim called ConnectP2P with an empty identity ("Failed to connect"). Not exported here: the LAN
+// override table in steam_proxy.cpp routes the SteamAPI_* names to them.
+// ---------------------------------------------------------------------------------------------------
+void ReFix_Identity_Clear(SteamNetworkingIdentity* self) { if (self) self->Clear(); }
+bool ReFix_Identity_IsInvalid(SteamNetworkingIdentity* self) { return !self || self->IsInvalid(); }
+void ReFix_Identity_SetSteamID64(SteamNetworkingIdentity* self, uint64 id) { if (self) self->SetSteamID64(id); }
+uint64 ReFix_Identity_GetSteamID64(SteamNetworkingIdentity* self) { return self ? self->GetSteamID64() : 0; }
+void ReFix_Identity_SetIPAddr(SteamNetworkingIdentity* self, const SteamNetworkingIPAddr* addr) { if (self && addr) self->SetIPAddr(*addr); }
+const SteamNetworkingIPAddr* ReFix_Identity_GetIPAddr(SteamNetworkingIdentity* self) { return self ? self->GetIPAddr() : nullptr; }
+void ReFix_Identity_SetIPv4Addr(SteamNetworkingIdentity* self, uint32 ip, uint16 port) { if (self) self->SetIPv4Addr(ip, port); }
+uint32 ReFix_Identity_GetIPv4(SteamNetworkingIdentity* self) {
+    const SteamNetworkingIPAddr* a = self ? self->GetIPAddr() : nullptr;
+    return a ? a->GetIPv4() : 0;
+}
+void ReFix_Identity_SetLocalHost(SteamNetworkingIdentity* self) { if (self) self->SetLocalHost(); }
+bool ReFix_Identity_IsLocalHost(SteamNetworkingIdentity* self) { return self && self->IsLocalHost(); }
+bool ReFix_Identity_IsEqualTo(SteamNetworkingIdentity* self, const SteamNetworkingIdentity* other) {
+    if (!self || !other || self->m_eType != other->m_eType || self->m_cbSize != other->m_cbSize) return false;
+    return self->m_cbSize <= 0 || memcmp(self->m_szUnknownRawString, other->m_szUnknownRawString, (size_t)self->m_cbSize) == 0;
+}
+void ReFix_Identity_ToString(SteamNetworkingIdentity* self, char* buf, uint32 cbBuf) {
+    if (!buf || cbBuf == 0) return;
+    if (!self || self->IsInvalid()) { strncpy_s(buf, cbBuf, "invalid", _TRUNCATE); return; }
+    if (self->m_eType == k_ESteamNetworkingIdentityType_SteamID) {
+        _snprintf_s(buf, cbBuf, _TRUNCATE, "steamid:%llu", (unsigned long long)self->m_steamID64);
+    } else if (const SteamNetworkingIPAddr* a = self->GetIPAddr()) {
+        const uint32 ip = a->GetIPv4();
+        _snprintf_s(buf, cbBuf, _TRUNCATE, "ip:%u.%u.%u.%u:%u", ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, a->m_port);
+    } else {
+        _snprintf_s(buf, cbBuf, _TRUNCATE, "type%d", (int)self->m_eType);
+    }
+}
+bool ReFix_Identity_ParseString(SteamNetworkingIdentity* self, const char* str) {
+    if (!self || !str) return false;
+    unsigned long long id = 0;
+    unsigned a = 0, b = 0, c = 0, d = 0, port = 0;
+    if (sscanf_s(str, "steamid:%llu", &id) == 1) { self->SetSteamID64(id); return true; }
+    if (sscanf_s(str, "ip:%u.%u.%u.%u:%u", &a, &b, &c, &d, &port) >= 4) {
+        self->SetIPv4Addr((a << 24) | (b << 16) | (c << 8) | d, (uint16)port);
+        return true;
+    }
+    self->Clear();
+    return false;
+}
+
+void ReFix_IPAddr_Clear(SteamNetworkingIPAddr* self) { if (self) self->Clear(); }
+bool ReFix_IPAddr_IsIPv6AllZeros(SteamNetworkingIPAddr* self) { return self && self->IsIPv6AllZeros(); }
+void ReFix_IPAddr_SetIPv6(SteamNetworkingIPAddr* self, const uint8* ipv6, uint16 port) { if (self && ipv6) self->SetIPv6(ipv6, port); }
+void ReFix_IPAddr_SetIPv4(SteamNetworkingIPAddr* self, uint32 ip, uint16 port) { if (self) self->SetIPv4(ip, port); }
+bool ReFix_IPAddr_IsIPv4(SteamNetworkingIPAddr* self) { return self && self->IsIPv4(); }
+uint32 ReFix_IPAddr_GetIPv4(SteamNetworkingIPAddr* self) { return self ? self->GetIPv4() : 0; }
+void ReFix_IPAddr_SetIPv6LocalHost(SteamNetworkingIPAddr* self, uint16 port) { if (self) self->SetIPv6LocalHost(port); }
+bool ReFix_IPAddr_IsLocalHost(SteamNetworkingIPAddr* self) { return self && self->IsLocalHost(); }
+bool ReFix_IPAddr_IsEqualTo(SteamNetworkingIPAddr* self, const SteamNetworkingIPAddr* other) {
+    return self && other && memcmp(self->m_ipv6, other->m_ipv6, 16) == 0 && self->m_port == other->m_port;
+}
+void ReFix_IPAddr_ToString(SteamNetworkingIPAddr* self, char* buf, uint32 cbBuf, bool bWithPort) {
+    if (!buf || cbBuf == 0) return;
+    const uint32 ip = self ? self->GetIPv4() : 0;
+    if (bWithPort && self)
+        _snprintf_s(buf, cbBuf, _TRUNCATE, "%u.%u.%u.%u:%u", ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, self->m_port);
+    else
+        _snprintf_s(buf, cbBuf, _TRUNCATE, "%u.%u.%u.%u", ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+}
+bool ReFix_IPAddr_ParseString(SteamNetworkingIPAddr* self, const char* str) {
+    if (!self || !str) return false;
+    unsigned a = 0, b = 0, c = 0, d = 0, port = 0;
+    const int n = sscanf_s(str, "%u.%u.%u.%u:%u", &a, &b, &c, &d, &port);
+    if (n < 4) { self->Clear(); return false; }
+    self->SetIPv4((a << 24) | (b << 16) | (c << 8) | d, (uint16)(n == 5 ? port : 0));
+    return true;
+}
+
 } // extern "C"
