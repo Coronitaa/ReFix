@@ -18,6 +18,11 @@ bool EnsureOnline();
 // first datagram can arrive.
 bool StartOnlineSubsystem();
 
+// Routes P2P datagrams into the EOS_P2P receive queue. Installed when the online layer starts:
+// a listen server may not touch the P2P API before its first client connects, and packets that
+// arrived before then were dropped, so the host never saw the connection request.
+void InstallP2PPacketHook();
+
 // Scope string isolating this title's traffic on a shared network. Derived from
 // the EOS product id the game passed to EOS_Platform_Create, so two different
 // games never see each other's lobbies.

@@ -8,6 +8,7 @@
 // to round-trip exactly.
 #include "../core/refix_common.h"
 #include "../sdk/eos_auth.h"
+#include "../sdk/eos_sanctions.h"
 #include "../core/refix_log.h"
 #include "../core/eos_handles.h"
 #include "../core/eos_platform.h"
@@ -475,6 +476,30 @@ EOS_DECLARE_FUNC(void) EOS_Friends_RemoveNotifyBlockedUsersUpdate(EOS_HFriends H
     Dispatcher::Get().Unregister(NotificationId);
 }
 
+// ===========================================================================
+// Sanctions
+// ===========================================================================
+// Nobody is banned on a LAN. Hosts check every joining player and drop them when the query
+// fails, so an unanswered query kicked each client right after it connected.
+EOS_DECLARE_FUNC(void) EOS_Sanctions_QueryActivePlayerSanctions(EOS_HSanctions Handle, const EOS_Sanctions_QueryActivePlayerSanctionsOptions* Options, void* ClientData, const EOS_Sanctions_OnQueryActivePlayerSanctionsCallback CompletionDelegate) {
+    if (!CompletionDelegate) return;
+    EOS_ProductUserId target = Options ? Options->TargetUserId : nullptr;
+    EOS_ProductUserId local  = Options ? Options->LocalUserId : nullptr;
+    Dispatcher::Get().Post([CompletionDelegate, ClientData, target, local]() {
+        EOS_Sanctions_QueryActivePlayerSanctionsCallbackInfo info{};
+        info.ResultCode   = ER::EOS_Success;
+        info.ClientData   = ClientData;
+        info.TargetUserId = target;
+        info.LocalUserId  = local;
+        CompletionDelegate(&info);
+    });
+}
+EOS_DECLARE_FUNC(uint32_t) EOS_Sanctions_GetPlayerSanctionCount(EOS_HSanctions Handle, const EOS_Sanctions_GetPlayerSanctionCountOptions* Options) { return 0; }
+EOS_DECLARE_FUNC(EOS_EResult) EOS_Sanctions_CopyPlayerSanctionByIndex(EOS_HSanctions Handle, const EOS_Sanctions_CopyPlayerSanctionByIndexOptions* Options, EOS_Sanctions_PlayerSanction** OutSanction) {
+    if (OutSanction) *OutSanction = nullptr;
+    return ER::EOS_NotFound;
+}
+
 namespace refix {
 
 void RegisterAuthApi(Registrar& reg) {
@@ -511,6 +536,10 @@ void RegisterUserApi(Registrar& reg) {
     REFIX_BIND(reg, EOS_Friends_RemoveNotifyFriendsUpdate);
     REFIX_BIND(reg, EOS_Friends_AddNotifyBlockedUsersUpdate);
     REFIX_BIND(reg, EOS_Friends_RemoveNotifyBlockedUsersUpdate);
+
+    REFIX_BIND(reg, EOS_Sanctions_QueryActivePlayerSanctions);
+    REFIX_BIND(reg, EOS_Sanctions_GetPlayerSanctionCount);
+    REFIX_BIND(reg, EOS_Sanctions_CopyPlayerSanctionByIndex);
 }
 
 } // namespace refix

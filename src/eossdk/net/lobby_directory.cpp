@@ -5,6 +5,8 @@
 #include "../core/refix_hash.h"
 #include "../core/eos_identity.h"
 #include <chrono>
+#include <mutex>
+#include <unordered_set>
 
 namespace refix {
 namespace {
@@ -72,6 +74,22 @@ void LobbyDirectory::SetLocalName(const std::string& name) {
     SteamBackend::Get().SetLocalIdentity(m_localPuid, name);
 }
 
+// The Steam mirror re-reports lobbies every few seconds, often with only a SteamID. Overwriting
+// would drop the direct UDP address learned from a join, so known fields are only ever filled in.
+static void MergePeer(PeerRef& slot, const PeerRef& peer) {
+    if (peer.SteamId) slot.SteamId = peer.SteamId;
+    if (peer.Udp.Valid()) slot.Udp = peer.Udp;
+}
+
+// The first packet of each game connection is the one worth seeing in the log: which route it
+// took, or that the peer had no known address at all.
+static bool FirstP2PFor(const std::string& key) {
+    static std::mutex s_mutex;
+    static std::unordered_set<std::string> s_seen;
+    std::lock_guard<std::mutex> lock(s_mutex);
+    return s_seen.insert(key).second;
+}
+
 // Sends to whichever path the peer is reachable on. In ReFix LAN the "Steam" backend is
 // the local emulator, which only re-wraps the packet for the same LAN, so the peer's direct
 // UDP address goes first; Steam stays as the fallback for peers known only by SteamID.
@@ -117,11 +135,11 @@ void LobbyDirectory::InstallSteamEvents() {
         for (const auto& m : copy.Members)
             if (m.SteamId || m.Address.Valid()) {
                 PeerRef p; p.Udp = m.Address; p.SteamId = m.SteamId;
-                m_addresses[m.Puid] = p;
+                MergePeer(m_addresses[m.Puid], p);
             }
         if (copy.OwnerSteamId) {
             PeerRef p; p.Udp = copy.HostAddress; p.SteamId = copy.OwnerSteamId;
-            m_addresses[copy.OwnerPuid] = p;
+            MergePeer(m_addresses[copy.OwnerPuid], p);
         }
         m_known[copy.LobbyId] = copy;
     };
@@ -148,7 +166,7 @@ void LobbyDirectory::InstallSteamEvents() {
                 m.SteamId     = steamId;
                 members.push_back(m);
                 PeerRef p; p.SteamId = steamId;
-                m_addresses[puid] = p;
+                MergePeer(m_addresses[puid], p);
                 changed = true;
             } else {
                 for (size_t i = 0; i < members.size(); i++) {
@@ -346,9 +364,11 @@ std::vector<LobbyRecord> LobbyDirectory::Snapshot() const {
 }
 
 bool LobbyDirectory::Join(const LobbyRecord& target, const LobbyMember& self) {
-    // A lobby that came from Steam is joined through Steam: entering the Steam
-    // lobby is what tells the host we are here, and it works across networks.
-    if (target.SteamLobbyId && SteamBackend::Get().Available()) {
+    // In ReFix LAN the host is on the local network, so a known host address is joined
+    // directly. Joining through the emulated Steam lobby never reached the host's EOS
+    // directory: the client waited for an answer that never came. Steam is the fallback
+    // for lobbies whose host address is unknown.
+    if (!target.HostAddress.Valid() && target.SteamLobbyId && SteamBackend::Get().Available()) {
         RFLOG(Lobby, "joining %s through Steam lobby %llu",
               target.LobbyId.c_str(), (unsigned long long)target.SteamLobbyId);
         return SteamBackend::Get().JoinSteamLobby(target.SteamLobbyId);
@@ -470,6 +490,9 @@ void LobbyDirectory::RememberAddress(const std::string& puid, const PeerRef& pee
 bool LobbyDirectory::SendP2P(const std::string& toPuid, const std::string& socketName,
                              uint8_t channel, const void* data, size_t len) {
     PeerRef to = AddressOf(toPuid);
+    if (FirstP2PFor("out:" + toPuid + "/" + socketName))
+        RFLOG(P2P, "first packet to %s socket '%s' via %s", toPuid.c_str(), socketName.c_str(),
+              to.Udp.Valid() ? to.Udp.ToString().c_str() : (to.SteamId ? "Steam" : "<no known address>"));
     if (!to.Valid()) return false;
     Writer w;
     BeginMessage(w, MSG_P2P);
@@ -796,8 +819,13 @@ void LobbyDirectory::OnDatagram(const PeerRef& from, const uint8_t* data, size_t
                     (from.Udp.Valid() && kv.second.Udp == from.Udp)) { fromPuid = kv.first; break; }
             }
         }
+        if (FirstP2PFor("in:" + fromPuid + "/" + socketName))
+            RFLOG(P2P, "first packet from %s socket '%s' (%s)", fromPuid.empty() ? "<unknown>" : fromPuid.c_str(),
+                  socketName.c_str(), from.Udp.Valid() ? from.Udp.ToString().c_str() : "Steam");
         if (m_events.OnP2PPacket)
             m_events.OnP2PPacket(fromPuid, socketName, channel, payload.data(), payload.size());
+        else if (FirstP2PFor("dropped:" + fromPuid))
+            RFLOG(P2P, "packet from %s dropped: no P2P receiver installed", fromPuid.c_str());
         break;
     }
 

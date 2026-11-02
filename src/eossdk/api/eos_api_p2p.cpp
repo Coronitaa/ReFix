@@ -59,6 +59,8 @@ std::string PuidString(EOS_ProductUserId id) {
 void RaiseConnectionRequest(const std::string& fromPuid, const std::string& socketName) {
     EOS_ProductUserId local  = Identity::Get().LocalPuid();
     EOS_ProductUserId remote = IdRegistry::Get().Puid(fromPuid);
+    RFLOG(P2P, "connection request from %s on socket '%s' -> %zu listener(s)", fromPuid.c_str(),
+          socketName.c_str(), Dispatcher::Get().Handlers(NotifyKind::P2PIncomingConnectionRequest).size());
     Dispatcher::Get().Broadcast<EOS_P2P_OnIncomingConnectionRequestInfo>(
         NotifyKind::P2PIncomingConnectionRequest,
         [local, remote, socketName](void* clientData) {
@@ -111,7 +113,7 @@ void InstallPacketHook() {
             bool needRequest = false;
             {
                 std::lock_guard<std::mutex> lock(st.Mutex);
-                if (st.QueuedBytes + len > st.MaxQueueBytes) return;
+                if (len > st.MaxQueueBytes || st.QueuedBytes > st.MaxQueueBytes - len) return;
                 if (!Contains(st.Accepted, fromPuid, socketName)) {
                     if (!Contains(st.Requested, fromPuid, socketName)) {
                         st.Requested.emplace_back(fromPuid, socketName);
@@ -139,6 +141,10 @@ std::string SocketNameOf(const EOS_P2P_SocketId* id) {
 
 } // namespace
 
+namespace refix {
+void InstallP2PPacketHook() { InstallPacketHook(); }
+} // namespace refix
+
 EOS_DECLARE_FUNC(EOS_EResult) EOS_P2P_SendPacket(EOS_HP2P Handle, const EOS_P2P_SendPacketOptions* Options) {
     if (!Options || !Options->Data) return ER::EOS_InvalidParameters;
     if (!EnsureOnline()) return ER::EOS_NoConnection;
@@ -148,6 +154,21 @@ EOS_DECLARE_FUNC(EOS_EResult) EOS_P2P_SendPacket(EOS_HP2P Handle, const EOS_P2P_
     if (to.empty()) return ER::EOS_InvalidUser;
 
     std::string socketName = SocketNameOf(Options->SocketId);
+    // Like the real SDK, sending to a peer accepts the connection with it: the peer's answers
+    // must not come back as a fresh connection request the title never expects to see.
+    bool newlyAccepted = false;
+    {
+        auto& st = State();
+        std::lock_guard<std::mutex> lock(st.Mutex);
+        if (!Contains(st.Accepted, to, socketName)) {
+            st.Accepted.emplace_back(to, socketName);
+            newlyAccepted = true;
+        }
+    }
+    if (newlyAccepted) {
+        RFLOG(P2P, "opened connection to %s on socket '%s'", to.c_str(), socketName.c_str());
+        Dispatcher::Get().Post([to, socketName]() { RaiseConnectionEstablished(to, socketName); });
+    }
     if (!LobbyDirectory::Get().SendP2P(to, socketName, (uint8_t)Options->Channel,
                                        Options->Data, Options->DataLengthBytes)) {
         return ER::EOS_NoConnection;
@@ -270,7 +291,10 @@ EOS_DECLARE_FUNC(EOS_EResult) EOS_P2P_SetPacketQueueSize(EOS_HP2P Handle, const 
     if (!Options) return ER::EOS_InvalidParameters;
     auto& st = State();
     std::lock_guard<std::mutex> lock(st.Mutex);
-    st.MaxQueueBytes = Options->IncomingPacketQueueMaxSizeBytes;
+    // 0 is EOS_P2P_MAX_QUEUE_SIZE_UNLIMITED, not "no room": read literally it dropped every
+    // incoming packet, so a host that set it never saw a client connect (MECCHA CHAMELEON).
+    st.MaxQueueBytes = Options->IncomingPacketQueueMaxSizeBytes == EOS_P2P_MAX_QUEUE_SIZE_UNLIMITED
+                           ? UINT64_MAX : Options->IncomingPacketQueueMaxSizeBytes;
     return ER::EOS_Success;
 }
 

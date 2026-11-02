@@ -267,6 +267,7 @@ namespace refix {
 
 bool StartOnlineSubsystem() {
     InstallDirectoryEvents();
+    InstallP2PPacketHook();
     return EnsureOnline();
 }
 
