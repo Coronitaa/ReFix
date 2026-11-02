@@ -751,6 +751,7 @@ namespace UnrealSteamEmu {
         std::vector<uint8_t> data;
         std::chrono::steady_clock::time_point triggerTime;
         bool isGameServer;
+        bool manualQueued = false; // already handed to the SteamAPI_ManualDispatch queue
     };
 
     struct QueuedCallResultItem {
@@ -2848,13 +2849,27 @@ namespace UnrealSteamEmu {
             }
 
             // 2. Process generic Callbacks (strictly after CallResults to preserve lifecycle ordering)
+            // A callback nobody listens to yet waits briefly: games register for it in the call result
+            // handler of the request that produced it (Left 4 Dead registers LobbyEnter_t inside its
+            // LobbyCreated_t handler), so dropping it in the same pass left lobby creation hanging.
+            constexpr auto kUnheardCallbackGrace = std::chrono::milliseconds(1500);
             for (auto it = g_callbackQueue.begin(); it != g_callbackQueue.end(); ) {
+                // Manual-dispatch games poll their own queue and never register, so they get it at once.
+                if (!it->isGameServer && now >= it->triggerTime &&
+                    g_clientCallbacks.count(it->iCallback) == 0 && now < it->triggerTime + kUnheardCallbackGrace) {
+                    if (!it->manualQueued) {
+                        it->manualQueued = true;
+                        g_manualCallbackQueue.push_back(*it);
+                    }
+                    ++it;
+                    continue;
+                }
                 if (!it->isGameServer && now >= it->triggerTime) {
                     auto range = g_clientCallbacks.equal_range(it->iCallback);
                     for (auto cbIt = range.first; cbIt != range.second; ++cbIt) {
                         if (cbIt->second) cbToDispatch.push_back({ cbIt->second, it->data });
                     }
-                    g_manualCallbackQueue.push_back(*it);
+                    if (!it->manualQueued) g_manualCallbackQueue.push_back(*it);
                     it = g_callbackQueue.erase(it);
                 } else {
                     ++it;
@@ -2864,6 +2879,8 @@ namespace UnrealSteamEmu {
 
         // Execute all dispatches with g_emuMutex RELEASED to eliminate lock inversion
         for (auto& item : crToDispatch) {
+            ReFixLog("[UnrealSteam] Delivering call result hAPICall=%llu (%zu bytes, failed=%d) to %p",
+                     item.hAPICall, item.data.size(), (int)item.failed, item.pListener);
             item.pListener->Run(item.data.data(), item.failed, item.hAPICall);
         }
         for (auto& item : ccToDispatch) {
