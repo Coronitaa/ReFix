@@ -34,6 +34,7 @@
 #include "network/message_tracker.h"
 #include "lan_core/refix_lan_core.h"
 #include "refix_module_dedupe.h"
+#include "refix_multi_instance.h"
 
 static bool EnsureOriginal();
 
@@ -1821,6 +1822,7 @@ static void LoadConfig() {
     }
 
     g_config.language = bufLang;
+    ReFix_MultiInstanceConfigure(ReadBool("User", "AllowMultipleInstances", true));
     g_config.bypassLicenseCheck = ReadBool("Steam", "BypassLicenseCheck", true);
 
     char bufAppIdMode[32] = "";
@@ -5120,6 +5122,7 @@ static void ReFixInitializePost(bool success) {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
     }
 
+    if (!ReFix::NetworkModeManager::IsOnline()) ReFix_MultiInstanceOnSteamInit();
     InstallVTableHooks();
 }
 

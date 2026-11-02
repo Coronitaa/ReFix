@@ -37,7 +37,7 @@ cl /nologo /c /O2 /Fobuild_x86_lan\refix_x86_stubs.obj src\refix_x86_stubs.c
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling refix_x86_stubs.c & exit /b 1 )
 
 echo [*] Building x86 steam_api.dll (LAN edition, no asm forwarding)...
-cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_LAN_EDITION=1 /LD /Fobuild_x86_lan\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde32.c build_x86_lan\refix_x86_stubs.obj /Febuild_x86_lan\steam_api.dll /Fdbuild_x86_lan\steam_api.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /MACHINE:X86 /DEBUG /MAP:build_x86_lan\steam_api.map
+cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_LAN_EDITION=1 /LD /Fobuild_x86_lan\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\refix_multi_instance.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde32.c build_x86_lan\refix_x86_stubs.obj /Febuild_x86_lan\steam_api.dll /Fdbuild_x86_lan\steam_api.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /MACHINE:X86 /DEBUG /MAP:build_x86_lan\steam_api.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling x86 steam_api.dll & exit /b 1 )
 
 if not exist bin\lan\x86 mkdir bin\lan\x86

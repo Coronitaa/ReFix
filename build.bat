@@ -59,12 +59,12 @@ set "LAN_CORE_SRC=src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_tra
 set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp src\network\fault_injector.cpp src\network\message_tracker.cpp !LAN_CORE_SRC! src\generated\iface_registry.cpp src\generated\iface_gameserver.cpp src\generated\iface_client.cpp src\generated\iface_user.cpp src\generated\iface_friends.cpp src\generated\iface_utils.cpp src\generated\iface_matchmaking.cpp src\generated\iface_networking.cpp src\generated\iface_userstats.cpp src\generated\iface_apps.cpp src\generated\iface_remotestorage.cpp src\generated\iface_ugc.cpp src\generated\iface_http.cpp src\generated\iface_screenshots.cpp"
 
 echo [*] Building steam_api64.dll proxy (production)...
-cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_LAN_EDITION=1 /LD /Fobuild\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
+cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_LAN_EDITION=1 /LD /Fobuild\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\refix_multi_instance.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64.dll & exit /b 1 )
 
 if not exist build\test_obj mkdir build\test_obj
 echo [*] Building steam_api64_test.dll proxy (test variant with test hooks)...
-cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_BUILD_TESTS=1 /DREFIX_LAN_EDITION=1 /LD /Fobuild\test_obj\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64_test.dll /Fdbuild\steam_api64_test.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64_test.map
+cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_BUILD_TESTS=1 /DREFIX_LAN_EDITION=1 /LD /Fobuild\test_obj\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\refix_multi_instance.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64_test.dll /Fdbuild\steam_api64_test.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64_test.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64_test.dll & exit /b 1 )
 
 echo.
@@ -121,6 +121,11 @@ echo [*] Building test_lan_concurrency_contract.exe (Dedicated Concurrency Contr
 cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Isrc\eossdk /Fobuild\ tests\test_lan_concurrency_contract.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp src\eossdk\core\lobby_model.cpp /Febin\test_lan_concurrency_contract.exe ws2_32.lib advapi32.lib iphlpapi.lib user32.lib
 if %ERRORLEVEL% neq 0 ( echo [!] Error building test_lan_concurrency_contract.exe & exit /b 1 )
 echo [OK] test_lan_concurrency_contract.exe built and placed in bin\
+
+echo [*] Building test_multi_instance.exe (singleton mutex release tester)...
+cl /nologo /O2 /EHsc /std:c++17 /Isrc /Fobuild\ tests\test_multi_instance.cpp /Febin\test_multi_instance.exe user32.lib
+if %ERRORLEVEL% neq 0 ( echo [!] Error building test_multi_instance.exe & exit /b 1 )
+echo [OK] test_multi_instance.exe built and placed in bin\
 
 echo [*] Building test_module_dedupe.exe (one-emulator-per-process regression tester)...
 cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ tests\test_module_dedupe.cpp /Febin\test_module_dedupe.exe
