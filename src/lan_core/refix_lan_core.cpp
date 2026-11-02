@@ -1,4 +1,5 @@
 #include "refix_lan_core.h"
+#include "refix_lan_trace.h"
 #include "refix_lan_wire.h"
 
 #include <windows.h>
@@ -962,7 +963,7 @@ public:
     void OnDiscoveryPacket(const LanEndpoint& sender, MsgType type, const uint8_t* data, size_t len) override {
         ByteReader r(data, len);
         std::string scope = r.ReadString();
-        if (scope != Scope()) return; // Discard packets from other games on LAN!
+        if (scope != Scope()) { LanTrace("disc scope mismatch rx='%s' local='%s' type=%u", scope.c_str(), Scope().c_str(), (unsigned)type); return; }
 
         PeerId pid = r.ReadPeerId();
         if (pid == m_identity.GetLocalPeerId()) return;
@@ -1010,6 +1011,7 @@ public:
                 std::lock_guard<std::mutex> lock(m_announcedMutex);
                 firstAnnounceWithId = m_announced.insert(pid).second;
             }
+            LanTrace("disc type=%u pid=%llx new=%d gained=%d firstAnn=%d ext=%llu", (unsigned)type, (unsigned long long)pid.low, isNewPeer, gainedSteamId, firstAnnounceWithId, (unsigned long long)extSteamId);
             if (isNewPeer || gainedSteamId || firstAnnounceWithId) {
                 LanEvent ev;
                 ev.type = LanEvent::Type::PeerDiscovered;
@@ -1405,12 +1407,21 @@ public:
     }
 
     void Tick() override {
+        // Hosts may drive Tick from several threads (game RunCallbacks + an idle pump): never run it twice at once.
+        std::unique_lock<std::mutex> tickLock(m_tickMutex, std::try_to_lock);
+        if (!tickLock.owns_lock()) return;
         auto now = std::chrono::steady_clock::now();
         // Periodic heartbeat beacon every 2.0s
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastAnnounce).count() > 2000) {
             m_lastAnnounce = now;
             m_discovery.AnnouncePresence();
             m_lobby.BroadcastHostedLobbies();
+        }
+
+        // The local peer is never "heard from" on the wire (own beacons are dropped), so without a refresh it
+        // aged out after 12s and beacons went out with no SteamID: peers that start later never learn it.
+        if (auto self = m_peers.FindByPeerId(m_identity.GetLocalPeerId())) {
+            m_peers.BindExternalId(self->peerId, self->externalId);
         }
 
         // Prune stale peers inactive > 12s and reset transport state
@@ -1434,6 +1445,7 @@ public:
     LanTransport& Transport() override { return m_transport; }
 
 private:
+    std::mutex m_tickMutex;
     std::mutex m_mutex;
     bool m_initialized = false;
     std::chrono::steady_clock::time_point m_lastAnnounce;

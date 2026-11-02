@@ -2699,11 +2699,39 @@ namespace UnrealSteamEmu {
         }
     }
 
+    // LanCore only dispatches events and heartbeats from Tick(). Some engines (Source: Garry's Mod's second
+    // instance, CS 1.6) call SteamAPI_RunCallbacks rarely or never, which left PeerDiscovered events queued
+    // forever. TickLanCore() stamps the game's own ticks; the idle pump below ticks only when the game does not.
+    static std::atomic<int64_t> g_lastLanTickMs{ 0 };
+    static std::atomic<bool> g_lanPumpStarted{ false };
+    static std::atomic<bool> g_lanPumpStop{ false };
+    static int64_t NowMs() {
+        return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    static void TickLanCore() {
+        g_lastLanTickMs.store(NowMs());
+        refix::lan::ILanCore::Get().Tick();
+    }
+    static void StartLanPump() {
+        if (g_lanPumpStarted.exchange(true)) return;
+        g_lanPumpStop.store(false);
+        std::thread([]() {
+            constexpr int64_t kGameIdleMs = 200;
+            while (!g_lanPumpStop.load()) {
+                Sleep(50);
+                if (g_lanPumpStop.load() || g_transportMode.load() != TransportMode::Canonical) continue;
+                if (NowMs() - g_lastLanTickMs.load() < kGameIdleMs) continue;
+                refix::lan::ILanCore::Get().Tick();
+            }
+        }).detach();
+    }
+
     void RunCallbacks() {
         RecordCall();
         if (!g_bInitialized) return;
 
-        refix::lan::ILanCore::Get().Tick();
+        TickLanCore();
         PollNetwork();
 
         auto now = std::chrono::steady_clock::now();
@@ -2849,7 +2877,7 @@ namespace UnrealSteamEmu {
     void GameServer_RunCallbacks() {
         if (!g_bInitialized) return;
 
-        refix::lan::ILanCore::Get().Tick();
+        TickLanCore();
         PollNetwork();
         auto now = std::chrono::steady_clock::now();
 
@@ -7537,6 +7565,7 @@ namespace UnrealSteamEmu {
             }
         }
 
+        if (g_transportMode.load() == TransportMode::Canonical) StartLanPump();
         g_contextCounter.fetch_add(1);
 
         // Queue SteamServersConnected_t on startup (outside state lock)
@@ -7559,6 +7588,8 @@ namespace UnrealSteamEmu {
     }
 
     void Shutdown() {
+        g_lanPumpStop.store(true);
+        g_lanPumpStarted.store(false);
         if (g_transportMode.load() == TransportMode::Canonical) {
             refix::lan::ILanCore::Get().Shutdown();
         }

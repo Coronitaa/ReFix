@@ -1,4 +1,5 @@
 #include "refix_lan_transport.h"
+#include "refix_lan_trace.h"
 #include <iostream>
 #include <algorithm>
 #include <vector>
@@ -496,6 +497,10 @@ void LanTransport::ReactorThreadLoop() {
 }
 
 void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, const LanEndpoint& fromEp) {
+    if (LanTraceEnabled() && len >= sizeof(WireHeader)) {
+        const auto* th = reinterpret_cast<const WireHeader*>(buf);
+        LanTrace("rx %u.%u.%u.%u:%u type=%u len=%zu magicOk=%d verOk=%d self=%d port=%u", (fromEp.ipv4>>24)&255,(fromEp.ipv4>>16)&255,(fromEp.ipv4>>8)&255,fromEp.ipv4&255, fromEp.port, (unsigned)th->msgType, len, th->magic==REFIX_WIRE_MAGIC, th->version==REFIX_WIRE_VERSION, GetLocalPeerId().IsValid() && th->GetSenderPeerId()==GetLocalPeerId(), m_discoveryPort);
+    }
     if (len < sizeof(WireHeader)) return;
 
     const auto* hdr = reinterpret_cast<const WireHeader*>(buf);

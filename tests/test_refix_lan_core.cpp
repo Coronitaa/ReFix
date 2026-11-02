@@ -4049,12 +4049,37 @@ static bool TestP1_OutboundArqQueueLimitAndNoPartialSends() {
     return true;
 }
 
+static bool TestLocalPeerSurvivesStalePrune() {
+    std::cout << "[*] Running TestLocalPeerSurvivesStalePrune (self peer must outlive the 12s prune)..." << std::endl;
+    auto& core = ILanCore::Get();
+    TEST_ASSERT(core.Initialize("Steam_selfprune", 0), "core init");
+    PeerId self = core.Identity().GetLocalPeerId();
+    PeerInfo info;
+    info.peerId = self;
+    info.endpoint = core.Transport().GetLocalDataEndpoint();
+    info.externalId.platform = ExternalPlatform::Steam;
+    info.externalId.numericId = 76561198000000042ULL;
+    info.externalId.stringId = "76561198000000042";
+    core.Peers().RegisterOrUpdatePeer(info);
+    auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(13500);
+    while (std::chrono::steady_clock::now() < until) {
+        core.Tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    auto after = core.Peers().FindByPeerId(self);
+    TEST_ASSERT(after.has_value(), "local peer must not be pruned by the stale-peer sweep");
+    TEST_ASSERT(after->externalId.numericId == 76561198000000042ULL, "local SteamID must stay bound for beacons");
+    std::cout << "  [PASS] local peer kept its SteamID past the stale-peer timeout" << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
     std::cout << "============================================================" << std::endl;
 
     if (!TestIdentity()) return 1;
+    if (!TestLocalPeerSurvivesStalePrune()) return 1;
     if (!TestFirewall()) return 1;
     if (!TestWireSerialization()) return 1;
     if (!TestLobbyAndMatchmaking()) return 1;
