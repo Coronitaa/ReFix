@@ -250,7 +250,7 @@ goto AFTER_MODE_PROMPTS
 
 :GOLDBERG_PROMPTS
 echo:
-echo [INFO] Selected Mode: Re:Goldberg LAN without Steam
+echo [INFO] Selected Mode: ReFix LAN without Steam
 echo:
 set "CUSTOM_USERNAME=%EXISTING_USERNAME%"
 if "%CUSTOM_USERNAME%"=="" set "CUSTOM_USERNAME=%USERNAME%"
@@ -465,7 +465,7 @@ echo  DLCs: Mode=%DLC_MODE% [%DLCS%]
 goto AFTER_SUMMARY
 
 :SUMMARY_GOLDBERG
-echo  Mode: Re:Goldberg LAN without Steam [Offline / gbe_fork]
+echo  Mode: ReFix LAN without Steam [standalone, no Steam client]
 echo  Location: "%EXE_DIR%"
 echo  AppID: RealAppId=%REAL_APPID%
 echo  DLCs: Mode=%DLC_MODE% [%DLCS%]

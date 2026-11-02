@@ -1103,9 +1103,9 @@ switch ($OnlineMode) {
 # ============================================================
 if ($OnlineMode -in @("goldberg", "offline", "lan")) {
     # ------------------------------------------------------------
-    # Mode 2: Re:Goldberg LAN sin Steam - Full Configuration Sync
+    # Mode 2: ReFix LAN sin Steam - Full Configuration Sync
     # ------------------------------------------------------------
-    Write-Host "[3/6] Synchronizing Re:Goldberg LAN Configuration & Persistent Identity..." -ForegroundColor Cyan
+    Write-Host "[3/6] Synchronizing ReFix LAN Configuration & Identity..." -ForegroundColor Cyan
 
     $reFixIniPath = Join-Path $ExeDir "ReFix.ini"
     $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir -InputSteamId $SteamId
@@ -1380,7 +1380,7 @@ unlock_all_dlc=$unlockAllDlcStr
 
     # Audit log
     $auditLogPath = Join-Path $ExeDir "ReFix.log"
-    $logEntry = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ReFix AutoDeploy] Deployed Mode: Re:Goldberg LAN without Steam | Game: $GameName | AppID: $finalRealAppId | SteamID: $($identity.SteamId) | User: $($identity.Name) | Port: $finalListenPort | LocalSave: saves`r`n"
+    $logEntry = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ReFix AutoDeploy] Deployed Mode: ReFix LAN without Steam | Game: $GameName | AppID: $finalRealAppId | SteamID: $($identity.SteamId) | User: $($identity.Name) | Port: $finalListenPort | LocalSave: saves`r`n"
     [System.IO.File]::AppendAllText($auditLogPath, $logEntry)
 
 }
