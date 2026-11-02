@@ -67,6 +67,7 @@
 #include "lan_core/refix_lan_core.h"
 #include "steam_lobby_mapping.h"
 #include "steam_p2p_hook.h"
+#include "generated/steam_emu_latest.h"
 
 class CCallbackMgr {
 public:
@@ -6446,7 +6447,7 @@ namespace UnrealSteamEmu {
         }
         virtual void ReleaseUser(HSteamPipe hSteamPipe, HSteamUser hUser) override {}
 
-        virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUser *>(rfv_);
             if (pchVersion && (strstr(pchVersion, "SteamUser023") || strstr(pchVersion, "SteamUser022") ||
                 strstr(pchVersion, "STEAMUSER023") || strstr(pchVersion, "STEAMUSER022"))) {
                 return (ISteamUser*)&g_steamUserInstance;
@@ -6462,7 +6463,7 @@ namespace UnrealSteamEmu {
             }
             return &g_steamUserInstance;
         }
-        virtual ISteamGameServer *GetISteamGameServer(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamGameServer *GetISteamGameServer(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamGameServer *>(rfv_);
             if (pchVersion && (strstr(pchVersion, "SteamGameServer012") || strstr(pchVersion, "SteamGameServer011") ||
                 strstr(pchVersion, "SteamGameServer010") || strstr(pchVersion, "SteamGameServer009") ||
                 strstr(pchVersion, "SteamGameServer008"))) {
@@ -6471,70 +6472,70 @@ namespace UnrealSteamEmu {
             return &g_steamGameServerInstance;
         }
         virtual void SetLocalIPBinding(const SteamIPAddress_t &unIP, uint16 usPort) override {}
-        virtual ISteamFriends *GetISteamFriends(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamFriends *GetISteamFriends(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamFriends *>(rfv_);
             if (pchVersion && (strstr(pchVersion, "018") || strstr(pchVersion, "019") || strstr(pchVersion, "020") || strstr(pchVersion, "021"))) {
                 return (ISteamFriends*)&g_steamFriends018Instance;
             }
             return reinterpret_cast<ISteamFriends*>(&g_steamFriendsInstance);
         }
-        virtual ISteamUtils *GetISteamUtils(HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUtils *GetISteamUtils(HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUtils *>(rfv_);
             return &g_steamUtilsInstance;
         }
-        virtual ISteamMatchmaking *GetISteamMatchmaking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamMatchmaking *GetISteamMatchmaking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamMatchmaking *>(rfv_);
             return &g_steamMatchmakingInstance;
         }
-        virtual ISteamMatchmakingServers *GetISteamMatchmakingServers(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamMatchmakingServers *GetISteamMatchmakingServers(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamMatchmakingServers *>(rfv_);
             return &g_steamMatchmakingServersInstance;
         }
-        virtual void *GetISteamGenericInterface(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual void *GetISteamGenericInterface(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<void *>(rfv_);
             return GetGenericInterface(pchVersion);
         }
-        virtual ISteamUserStats *GetISteamUserStats(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUserStats *GetISteamUserStats(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUserStats *>(rfv_);
             return &g_steamUserStatsInstance;
         }
-        virtual ISteamGameServerStats *GetISteamGameServerStats(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamGameServerStats *GetISteamGameServerStats(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamGameServerStats *>(rfv_);
             return &g_steamGameServerStatsInstance;
         }
-        virtual ISteamApps *GetISteamApps(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamApps *GetISteamApps(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamApps *>(rfv_);
             return &g_steamAppsInstance;
         }
-        virtual ISteamNetworking *GetISteamNetworking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamNetworking *GetISteamNetworking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamNetworking *>(rfv_);
             return &g_steamNetworkingInstance;
         }
-        virtual ISteamRemoteStorage *GetISteamRemoteStorage(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamRemoteStorage *GetISteamRemoteStorage(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamRemoteStorage *>(rfv_);
             return &g_steamRemoteStorageInstance;
         }
-        virtual ISteamScreenshots *GetISteamScreenshots(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamScreenshots *GetISteamScreenshots(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamScreenshots *>(rfv_);
             return &g_steamScreenshotsInstance;
         }
         virtual void RunFrame() override {}
         virtual uint32 GetIPCCallCount() override { return 0; }
         virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t pFunction) override {}
         virtual bool BShutdownIfAllPipesClosed() override { return true; }
-        virtual ISteamHTTP *GetISteamHTTP(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamHTTP *GetISteamHTTP(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamHTTP *>(rfv_);
             return &g_steamHTTPInstance;
         }
-        virtual ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamController *>(rfv_);
             return (ISteamController*)&g_steamInputInstance;
         }
-        virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUGC *>(rfv_);
             return &g_steamUGCInstance;
         }
-        virtual ISteamMusic *GetISteamMusic(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamMusicInstance; }
-        virtual ISteamHTMLSurface *GetISteamHTMLSurface(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamHTMLSurfaceInstance; }
+        virtual ISteamMusic *GetISteamMusic(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamMusic *>(rfv_); return &g_steamMusicInstance; }
+        virtual ISteamHTMLSurface *GetISteamHTMLSurface(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamHTMLSurface *>(rfv_); return &g_steamHTMLSurfaceInstance; }
         virtual void DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
         virtual void DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
         virtual void Set_SteamAPI_CCheckCallbackRegisteredInProcess(SteamAPI_CheckCallbackRegistered_t func) override {}
-        virtual ISteamInventory *GetISteamInventory(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamInventory *GetISteamInventory(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamInventory *>(rfv_);
             return &g_steamInventoryInstance;
         }
-        virtual ISteamVideo *GetISteamVideo(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamVideoInstance; }
-        virtual ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamParentalSettingsInstance; }
-        virtual ISteamInput *GetISteamInput(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamVideo *GetISteamVideo(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamVideo *>(rfv_); return &g_steamVideoInstance; }
+        virtual ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamParentalSettings *>(rfv_); return &g_steamParentalSettingsInstance; }
+        virtual ISteamInput *GetISteamInput(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamInput *>(rfv_);
             return &g_steamInputInstance;
         }
-        virtual ISteamParties *GetISteamParties(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamPartiesInstance; }
-        virtual ISteamRemotePlay *GetISteamRemotePlay(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamRemotePlayInstance; }
+        virtual ISteamParties *GetISteamParties(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamParties *>(rfv_); return &g_steamPartiesInstance; }
+        virtual ISteamRemotePlay *GetISteamRemotePlay(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamRemotePlay *>(rfv_); return &g_steamRemotePlayInstance; }
         virtual void DestroyAllInterfaces() override {}
     };
     static CSteamClientEmu g_steamClientInstance;
@@ -6551,7 +6552,7 @@ namespace UnrealSteamEmu {
         }
         virtual void ReleaseUser(HSteamPipe hSteamPipe, HSteamUser hUser) override {}
 
-        virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUser *GetISteamUser(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUser *>(rfv_);
             if (pchVersion && (strstr(pchVersion, "SteamUser023") || strstr(pchVersion, "SteamUser022") ||
                 strstr(pchVersion, "STEAMUSER023") || strstr(pchVersion, "STEAMUSER022"))) {
                 return (ISteamUser*)&g_steamUserInstance;
@@ -6567,7 +6568,7 @@ namespace UnrealSteamEmu {
             }
             return &g_steamUserInstance;
         }
-        virtual ISteamGameServer *GetISteamGameServer(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamGameServer *GetISteamGameServer(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamGameServer *>(rfv_);
             if (pchVersion && (strstr(pchVersion, "SteamGameServer012") || strstr(pchVersion, "SteamGameServer011") ||
                 strstr(pchVersion, "SteamGameServer010") || strstr(pchVersion, "SteamGameServer009") ||
                 strstr(pchVersion, "SteamGameServer008"))) {
@@ -6576,74 +6577,74 @@ namespace UnrealSteamEmu {
             return &g_steamGameServerInstance;
         }
         virtual void SetLocalIPBinding(const SteamIPAddress_t &unIP, uint16 usPort) override {}
-        virtual ISteamFriends *GetISteamFriends(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamFriends *GetISteamFriends(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamFriends *>(rfv_);
             if (pchVersion && (strstr(pchVersion, "018") || strstr(pchVersion, "019") || strstr(pchVersion, "020") || strstr(pchVersion, "021"))) {
                 return (ISteamFriends*)&g_steamFriends018Instance;
             }
             return reinterpret_cast<ISteamFriends*>(&g_steamFriendsInstance);
         }
-        virtual ISteamUtils *GetISteamUtils(HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUtils *GetISteamUtils(HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUtils *>(rfv_);
             return &g_steamUtilsInstance;
         }
-        virtual ISteamMatchmaking *GetISteamMatchmaking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamMatchmaking *GetISteamMatchmaking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamMatchmaking *>(rfv_);
             return &g_steamMatchmakingInstance;
         }
-        virtual ISteamMatchmakingServers *GetISteamMatchmakingServers(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamMatchmakingServers *GetISteamMatchmakingServers(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamMatchmakingServers *>(rfv_);
             return &g_steamMatchmakingServersInstance;
         }
-        virtual void *GetISteamGenericInterface(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual void *GetISteamGenericInterface(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<void *>(rfv_);
             return GetGenericInterface(pchVersion);
         }
-        virtual ISteamUserStats *GetISteamUserStats(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUserStats *GetISteamUserStats(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUserStats *>(rfv_);
             return &g_steamUserStatsInstance;
         }
-        virtual ISteamGameServerStats *GetISteamGameServerStats(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamGameServerStats *GetISteamGameServerStats(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamGameServerStats *>(rfv_);
             return &g_steamGameServerStatsInstance;
         }
-        virtual ISteamApps *GetISteamApps(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamApps *GetISteamApps(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamApps *>(rfv_);
             return &g_steamAppsInstance;
         }
-        virtual ISteamNetworking *GetISteamNetworking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamNetworking *GetISteamNetworking(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamNetworking *>(rfv_);
             return &g_steamNetworkingInstance;
         }
-        virtual ISteamRemoteStorage *GetISteamRemoteStorage(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamRemoteStorage *GetISteamRemoteStorage(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamRemoteStorage *>(rfv_);
             return &g_steamRemoteStorageInstance;
         }
-        virtual ISteamScreenshots *GetISteamScreenshots(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamScreenshots *GetISteamScreenshots(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamScreenshots *>(rfv_);
             return &g_steamScreenshotsInstance;
         }
-        virtual ISteamGameSearch *GetISteamGameSearch(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamGameSearch *GetISteamGameSearch(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamGameSearch *>(rfv_);
             return &g_steamGameSearchInstance;
         }
         virtual void RunFrame() override {}
         virtual uint32 GetIPCCallCount() override { return 0; }
         virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t pFunction) override {}
         virtual bool BShutdownIfAllPipesClosed() override { return true; }
-        virtual ISteamHTTP *GetISteamHTTP(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamHTTP *GetISteamHTTP(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamHTTP *>(rfv_);
             return &g_steamHTTPInstance;
         }
-        virtual ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamController *>(rfv_);
             return (ISteamController*)&g_steamInputInstance;
         }
-        virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUGC *>(rfv_);
             return &g_steamUGCInstance;
         }
-        virtual ISteamMusic *GetISteamMusic(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamMusicInstance; }
-        virtual ISteamMusicRemote *GetISteamMusicRemote(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamMusicRemoteInstance; }
-        virtual ISteamHTMLSurface *GetISteamHTMLSurface(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamHTMLSurfaceInstance; }
+        virtual ISteamMusic *GetISteamMusic(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamMusic *>(rfv_); return &g_steamMusicInstance; }
+        virtual ISteamMusicRemote *GetISteamMusicRemote(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamMusicRemote *>(rfv_); return &g_steamMusicRemoteInstance; }
+        virtual ISteamHTMLSurface *GetISteamHTMLSurface(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamHTMLSurface *>(rfv_); return &g_steamHTMLSurfaceInstance; }
         virtual void DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
         virtual void DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess(void (*)()) override {}
         virtual void Set_SteamAPI_CCheckCallbackRegisteredInProcess(SteamAPI_CheckCallbackRegistered_t func) override {}
-        virtual ISteamInventory *GetISteamInventory(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamInventory *GetISteamInventory(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamInventory *>(rfv_);
             return &g_steamInventoryInstance;
         }
-        virtual ISteamVideo *GetISteamVideo(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamVideoInstance; }
-        virtual ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamParentalSettingsInstance; }
-        virtual ISteamInput *GetISteamInput(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override {
+        virtual ISteamVideo *GetISteamVideo(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamVideo *>(rfv_); return &g_steamVideoInstance; }
+        virtual ISteamParentalSettings *GetISteamParentalSettings(HSteamUser hSteamuser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamParentalSettings *>(rfv_); return &g_steamParentalSettingsInstance; }
+        virtual ISteamInput *GetISteamInput(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamInput *>(rfv_);
             return &g_steamInputInstance;
         }
-        virtual ISteamParties *GetISteamParties(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamPartiesInstance; }
-        virtual ISteamRemotePlay *GetISteamRemotePlay(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { return &g_steamRemotePlayInstance; }
+        virtual ISteamParties *GetISteamParties(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamParties *>(rfv_); return &g_steamPartiesInstance; }
+        virtual ISteamRemotePlay *GetISteamRemotePlay(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamRemotePlay *>(rfv_); return &g_steamRemotePlayInstance; }
         virtual void DestroyAllInterfaces() override {}
     };
     static CSteamClient021Emu g_steamClient021Instance;
@@ -6654,6 +6655,7 @@ namespace UnrealSteamEmu {
     void* GetGenericInterface(const char* pchVersion) {
         RecordCall();
         if (!pchVersion) return nullptr;
+        if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return rfv_;
 
         ReFixLog("[UnrealSteam] Resolving Interface Version: '%s'", pchVersion);
 
@@ -6787,6 +6789,20 @@ namespace UnrealSteamEmu {
         return g_steamFriendsInstance.GetFriendPersonaName(CSteamID(steamIDFriend));
     }
     uint32_t GetAppID() { return g_appID; }
+
+    // Latest-version interface accessors for generated versioned adapters
+    ISteamClient* LatestClient() { return static_cast<ISteamClient*>(&g_steamClientInstance); }
+    ISteamUser* LatestUser() { return static_cast<ISteamUser*>(&g_steamUserInstance); }
+    ISteamFriends* LatestFriends() { return static_cast<ISteamFriends*>(&g_steamFriends018Instance); }
+    ISteamUtils* LatestUtils() { return static_cast<ISteamUtils*>(&g_steamUtilsInstance); }
+    ISteamMatchmaking* LatestMatchmaking() { return static_cast<ISteamMatchmaking*>(&g_steamMatchmakingInstance); }
+    ISteamNetworking* LatestNetworking() { return static_cast<ISteamNetworking*>(&g_steamNetworkingInstance); }
+    ISteamUserStats* LatestUserStats() { return static_cast<ISteamUserStats*>(&g_steamUserStatsInstance); }
+    ISteamApps* LatestApps() { return static_cast<ISteamApps*>(&g_steamAppsInstance); }
+    ISteamRemoteStorage* LatestRemoteStorage() { return static_cast<ISteamRemoteStorage*>(&g_steamRemoteStorageInstance); }
+    ISteamUGC* LatestUGC() { return static_cast<ISteamUGC*>(&g_steamUGCInstance); }
+    ISteamHTTP* LatestHTTP() { return static_cast<ISteamHTTP*>(&g_steamHTTPInstance); }
+    ISteamScreenshots* LatestScreenshots() { return static_cast<ISteamScreenshots*>(&g_steamScreenshotsInstance); }
 
     void* GetSteamClient() { return &g_steamClientInstance; }
     void* GetSteamUser() { return &g_steamUser021Instance; }

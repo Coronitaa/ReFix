@@ -33,6 +33,7 @@
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
 #include "lan_core/refix_lan_core.h"
+#include "refix_module_dedupe.h"
 
 static bool EnsureOriginal();
 
@@ -4014,9 +4015,29 @@ struct PendingAuthCallback {
 static std::vector<PendingAuthCallback> g_pendingAuthCallbacks;
 static std::mutex g_pendingAuthMutex;
 
+#ifndef _WIN64
+// Same virtual layout as Valve's CCallbackBase (declaration order identical, so MSVC emits the
+// identical vtable); kept local because steam_api_common.h is not included in this TU.
+struct ReFixCallbackBaseAbi {
+    virtual void Run(void* pvParam) = 0;
+    virtual void Run(void* pvParam, bool bIOFailure, uint64_t hSteamAPICall) = 0;
+    virtual int GetCallbackSizeBytes() = 0;
+};
+#endif
+
 static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 0) {
     if (!pCallback) return false;
     __try {
+#ifndef _WIN64
+        // x86: MSVC lays the two CCallbackBase::Run overloads out in reverse declaration order
+        // (slot 0 = Run(pv,bIOFailure,hCall), slot 1 = Run(pv)) and they are __thiscall
+        // (callee pops args). Let the compiler pick slot + convention via a real virtual call;
+        // hand-indexing slots here would unbalance the stack. x64 path below is unchanged.
+        if (!*(void***)pCallback) return false;
+        if (hAPICall != 0) ((ReFixCallbackBaseAbi*)pCallback)->Run(pData, false, hAPICall);
+        else ((ReFixCallbackBaseAbi*)pCallback)->Run(pData);
+        return true;
+#else
         void** vtable = *(void***)pCallback;
         if (!vtable) return false;
 
@@ -4035,6 +4056,7 @@ static bool SafeCallRun(void* pCallback, void* pData, uint64_t hAPICall = 0) {
                 return true;
             }
         }
+#endif
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         DWORD code = GetExceptionCode();
         ReFixLog("SafeCallRun: Handled exception 0x%08X on %p", code, pCallback);
@@ -5551,6 +5573,24 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
 // ZERO-CRASH LAN FORWARD TABLE SAFETY & CORE STEAMWORKS IMPLEMENTATIONS
 // =============================================================================
 
+
+extern "C" __declspec(dllexport) int32_t SteamAPI_GetHSteamUser();
+#ifndef _WIN64
+// x86 build has no steam_fwd.asm / .def forwarders: export the legacy entry points that
+// CSteamworks.dll (Steamworks.NET era wrappers, e.g. Overcooked 2) imports by name.
+extern "C" {
+__declspec(dllexport) const char* SteamAPI_GetSteamInstallPath() { return ""; }
+__declspec(dllexport) void SteamAPI_SetBreakpadAppID(uint32_t) {}
+__declspec(dllexport) void SteamAPI_SetMiniDumpComment(const char*) {}
+__declspec(dllexport) void SteamAPI_SetTryCatchCallbacks(bool) {}
+__declspec(dllexport) void SteamAPI_UseBreakpadCrashHandler(const char*, const char*, const char*, void*, void*, void*) {}
+__declspec(dllexport) void SteamAPI_WriteMiniDump(uint32_t, void*, uint32_t) {}
+__declspec(dllexport) int32_t Steam_GetHSteamUserCurrent() { return SteamAPI_GetHSteamUser(); }
+__declspec(dllexport) void Steam_RegisterInterfaceFuncs(void*) {}
+__declspec(dllexport) void Steam_RunCallbacks(int32_t, bool) { SteamAPI_RunCallbacks(); }
+}
+#endif
+
 extern "C" void* SafeUnsupportedExportStub();
 
 static std::atomic<uint64_t> s_unsupportedLanCallCount{ 0 };
@@ -6821,6 +6861,8 @@ static void CustomInvalidParameterHandler(
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
+            // One emulator per process: a second ReFix copy only redirects its exports to the primary.
+            if (ReFix_ModuleDedupeAttach(hModule)) return TRUE;
             _set_invalid_parameter_handler(CustomInvalidParameterHandler);
             _CrtSetReportMode(_CRT_ASSERT, 0);
             g_hSelfModule = hModule;
@@ -6834,6 +6876,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             // In Online mode, EnsureOriginal is explicitly invoked during normal initialization.
             break;
         case DLL_PROCESS_DETACH:
+            if (ReFix_ModuleDedupeDetach(hModule, lpReserved != nullptr)) return TRUE;
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
             SteamP2PHook::Uninstall();

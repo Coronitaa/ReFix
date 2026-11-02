@@ -100,7 +100,7 @@ static HMODULE LoadProdDll(const std::string& customPath) {
         candidates.push_back(p);
     }
     candidates.push_back("build\\verify_bin\\steam_api64.dll");
-    candidates.push_back("bin\\steam_api64.dll");
+    candidates.push_back("bin\\lan\\steam_api64.dll");
     candidates.push_back("build\\steam_api64.dll");
     candidates.push_back("steam_api64.dll");
 

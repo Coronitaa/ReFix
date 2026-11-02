@@ -35,3 +35,20 @@
 - **Deploy (lan mode)**: no Goldberg backend on x64; in auto mode no `force_steamid.txt` is written.
 - **Tests**: all unit suites, `refix_net_test entrypoints`, `tests/test_identity_mode.ps1`,
   `tests/test_steam_adapter_multiprocess.ps1` PASS. Two physical PCs: not yet validated.
+
+## 2026-11-02 (2) — Dual product AutoDeploy, 32-bit LAN, physical tests
+- **Layout**: `bin\online\` = ReFix Online (built by `build_online.bat` from a detached worktree of
+  `feature/photon-p2p-phasmophobia-interop` in `build\online_src`: steam_api64, winmm, EOS, x86 proxy, ReFix\FusionShared).
+  `bin\lan\` = ReFix LAN (`build.bat`, which also runs `build_x86_lan.bat` for `bin\lan\x86\steam_api.dll`).
+  AutoDeploy option 1 deploys only `bin\online` + its ReFix.ini; option 2 only `bin\lan`. deploy_helper refuses to
+  run if the chosen product folder is missing (no fallback that could mix products).
+- **32-bit LAN**: modern SDK games (exports `SteamInternal_ContextInit`, e.g. Overcooked! 2 via CSteamworks) get the
+  native x86 ReFix LAN emulator; legacy SDK games (CS 1.6, early CS:GO, L4D2) get standalone Goldberg x86
+  (no Steam either). Legacy old-interface vtables (SteamUser016, SteamFriends013...) are not in the ReFix emulator yet.
+- **One emulator per process** (`src/refix_module_dedupe.cpp`): a second ReFix copy loaded in the same process
+  (root + Plugins) redirects its exports to the first via MinHook.
+- **Fixes from physical runs**: PeerDiscovered re-fired when a peer's SteamID arrives late (one-way discovery);
+  EOS→P2P hook IP byte order; AutoDeploy firewall prompt honoured "N" (was always applied); unattended deploy
+  (`REFIX_NON_INTERACTIVE=1`, `REFIX_DEPLOY_MODE=1|2`) never touches the firewall unless `REFIX_FIREWALL=Y`.
+- **Physical harness**: `tests\physical\run_lan_pair.ps1` (+ `lan_matrix.csv`): backup → deploy → 2 instances →
+  log analysis → restore (byte-identical). `-Product online` verifies the Online deploy statically.

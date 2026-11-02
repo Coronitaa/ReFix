@@ -113,7 +113,7 @@ typedef bool (*fn_SteamAPI_ManualDispatch_GetAPICallResult)(uint32_t hSteamPipe,
 static HMODULE LoadSteamDll() {
     HMODULE hSteam = LoadLibraryA("bin\\steam_api64_test.dll");
     if (!hSteam) hSteam = LoadLibraryA("build\\steam_api64_test.dll");
-    if (!hSteam) hSteam = LoadLibraryA("bin\\steam_api64.dll");
+    if (!hSteam) hSteam = LoadLibraryA("bin\\lan\\steam_api64.dll");
     if (!hSteam) hSteam = LoadLibraryA("build\\steam_api64.dll");
     if (!hSteam) hSteam = LoadLibraryA("steam_api64.dll");
     return hSteam;
@@ -422,7 +422,7 @@ static bool RunStandaloneAdapterTests(HMODULE hSteam) {
     pfnShutdown();
 
     // 4. Test Production Export Table Isolation (Production DLL must NOT export test hooks)
-    HMODULE hProd = LoadLibraryA("bin\\steam_api64.dll");
+    HMODULE hProd = LoadLibraryA("bin\\lan\\steam_api64.dll");
     if (!hProd) hProd = LoadLibraryA("build\\steam_api64.dll");
     if (hProd) {
         TEST_ASSERT(GetProcAddress(hProd, "ReFix_Test_ResetLobbyMappings") == nullptr,

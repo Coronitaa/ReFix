@@ -256,7 +256,7 @@ static void NotifyP2PHookOfPeer(uint64_t steamId, uint32_t ipv4) {
     if (hSteam) {
         typedef void (*fn_Reg_t)(uint64_t, uint32_t);
         auto fn = (fn_Reg_t)GetProcAddress(hSteam, "ReFix_RegisterP2PPeer");
-        if (fn) fn(steamId, ipv4);
+        if (fn) fn(steamId, _byteswap_ulong(ipv4)); // EOS keeps Ipv4 in network order; the hook wants host order
     }
 }
 

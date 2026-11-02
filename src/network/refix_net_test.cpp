@@ -236,6 +236,15 @@ bool InitSteamExports() {
     SetEnvironmentVariableA("REFIX_HEADLESS_TEST", "1");
     g_hSteamApi = LoadLibraryA("steam_api64.dll");
     if (!g_hSteamApi) {
+        // The ReFix LAN production DLL lives in bin\lan\ next to this tester
+        char exeDir[MAX_PATH] = { 0 };
+        GetModuleFileNameA(nullptr, exeDir, MAX_PATH);
+        char* slash = strrchr(exeDir, '\\');
+        if (slash) *(slash + 1) = '\0';
+        std::string lanDll = std::string(exeDir) + "lan\\steam_api64.dll";
+        g_hSteamApi = LoadLibraryA(lanDll.c_str());
+    }
+    if (!g_hSteamApi) {
         std::cerr << "[FAIL] Could not load steam_api64.dll. Error: " << GetLastError() << std::endl;
         return false;
     }

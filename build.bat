@@ -56,15 +56,15 @@ if %ERRORLEVEL% neq 0 ( echo [!] Error compiling EOSSDK-Win64-Shipping.dll & exi
 copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
 
 set "LAN_CORE_SRC=src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp"
-set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp src\network\fault_injector.cpp src\network\message_tracker.cpp !LAN_CORE_SRC!"
+set "UNREAL_SRC=src\unreal_detect.cpp src\unreal_steam_emu.cpp src\network\fault_injector.cpp src\network\message_tracker.cpp !LAN_CORE_SRC! src\generated\iface_registry.cpp src\generated\iface_client.cpp src\generated\iface_user.cpp src\generated\iface_friends.cpp src\generated\iface_utils.cpp src\generated\iface_matchmaking.cpp src\generated\iface_networking.cpp src\generated\iface_userstats.cpp src\generated\iface_apps.cpp src\generated\iface_remotestorage.cpp src\generated\iface_ugc.cpp src\generated\iface_http.cpp src\generated\iface_screenshots.cpp"
 
 echo [*] Building steam_api64.dll proxy (production)...
-cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_LAN_EDITION=1 /LD /Fobuild\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
+cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_LAN_EDITION=1 /LD /Fobuild\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64.dll /Fdbuild\steam_api64.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64.dll & exit /b 1 )
 
 if not exist build\test_obj mkdir build\test_obj
 echo [*] Building steam_api64_test.dll proxy (test variant with test hooks)...
-cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_BUILD_TESTS=1 /DREFIX_LAN_EDITION=1 /LD /Fobuild\test_obj\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64_test.dll /Fdbuild\steam_api64_test.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64_test.map
+cl /nologo /O2 /Zi /EHsc /std:c++17 /DREFIX_BUILD_TESTS=1 /DREFIX_LAN_EDITION=1 /LD /Fobuild\test_obj\ /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam src\steam_proxy.cpp src\refix_module_dedupe.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64_test.dll /Fdbuild\steam_api64_test.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64_test.map
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64_test.dll & exit /b 1 )
 
 echo.
@@ -79,13 +79,18 @@ echo ====================================================================
 
 :: Automatically synchronize freshly built binaries to bin/
 if exist bin\ (
-    copy /Y build\winmm.dll bin\winmm.dll >nul
-    copy /Y build\EOSSDK-Win64-Shipping.dll bin\EOSSDK-Win64-Shipping.dll >nul
-    copy /Y build\RedboneEOS.dll bin\RedboneEOS.dll >nul
-    copy /Y build\steam_api64.dll bin\steam_api64.dll >nul
+    if not exist bin\lan mkdir bin\lan
+    copy /Y build\EOSSDK-Win64-Shipping.dll bin\lan\EOSSDK-Win64-Shipping.dll >nul
+    copy /Y build\RedboneEOS.dll bin\lan\RedboneEOS.dll >nul
+    copy /Y build\steam_api64.dll bin\lan\steam_api64.dll >nul
     copy /Y build\steam_api64_test.dll bin\steam_api64_test.dll >nul
-    echo [OK] Synchronized freshly compiled proxies to bin\
+    echo [OK] Synchronized ReFix LAN binaries to bin\lan\ ^(ReFix Online: run build_online.bat^)
 )
+
+:: 32-bit ReFix LAN (bin\lan\x86\steam_api.dll) in a fresh cmd so vcvars32 does not mix with the x64 env
+echo [*] Building ReFix LAN x86 (32-bit games)...
+cmd /c ""%~dp0build_x86_lan.bat" <nul"
+if %ERRORLEVEL% neq 0 ( echo [!] Error building ReFix LAN x86 & exit /b 1 )
 
 echo [*] Building refix_net_test.exe (Phase 3.6 loopback tester)...
 cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ src\network\refix_net_test.cpp /Febin\refix_net_test.exe
@@ -116,6 +121,16 @@ echo [*] Building test_lan_concurrency_contract.exe (Dedicated Concurrency Contr
 cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Isrc\eossdk /Fobuild\ tests\test_lan_concurrency_contract.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp src\eossdk\core\lobby_model.cpp /Febin\test_lan_concurrency_contract.exe ws2_32.lib advapi32.lib iphlpapi.lib user32.lib
 if %ERRORLEVEL% neq 0 ( echo [!] Error building test_lan_concurrency_contract.exe & exit /b 1 )
 echo [OK] test_lan_concurrency_contract.exe built and placed in bin\
+
+echo [*] Building test_module_dedupe.exe (one-emulator-per-process regression tester)...
+cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ tests\test_module_dedupe.cpp /Febin\test_module_dedupe.exe
+if %ERRORLEVEL% neq 0 ( echo [!] Error building test_module_dedupe.exe & exit /b 1 )
+echo [OK] test_module_dedupe.exe built and placed in bin\
+
+echo [*] Building test_iface_versions.exe (versioned interface adapter tester)...
+cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_iface_versions.cpp /Febin\test_iface_versions.exe user32.lib
+if %ERRORLEVEL% neq 0 ( echo [!] Error building test_iface_versions.exe & exit /b 1 )
+echo [OK] test_iface_versions.exe built and placed in bin\
 
 echo [*] Building test_identity_probe.exe (IdentityMode auto/fixed probe)...
 cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ tests\test_identity_probe.cpp /Febin\test_identity_probe.exe

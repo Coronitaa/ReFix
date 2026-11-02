@@ -967,10 +967,13 @@ public:
 
             if (r.HasError()) return;
 
-            bool isNewPeer = !m_peers.FindByPeerId(pid).has_value();
+            auto existing = m_peers.FindByPeerId(pid);
+            bool isNewPeer = !existing.has_value();
+            // A peer's first beacons can go out before its Steam adapter binds the SteamID. Announce it
+            // again when the SteamID shows up, or adapters that need the ID never see the peer.
+            bool gainedSteamId = existing && existing->externalId.numericId == 0 && extSteamId != 0;
 
             PeerInfo info;
-            auto existing = m_peers.FindByPeerId(pid);
             if (existing) {
                 info = *existing; // Preserve externalId, verified state, pingMs
             } else {
@@ -987,7 +990,7 @@ public:
             }
             m_peers.RegisterOrUpdatePeer(info);
 
-            if (isNewPeer) {
+            if (isNewPeer || gainedSteamId) {
                 LanEvent ev;
                 ev.type = LanEvent::Type::PeerDiscovered;
                 ev.peerId = pid;

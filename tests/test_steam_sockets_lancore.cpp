@@ -175,7 +175,7 @@ static fn_SteamAPI_SteamNetworkingUtils_SteamAPI_v004 pfn_SteamNetworkingUtils =
 static bool LoadSteamApi() {
     g_hSteam = LoadLibraryA("bin\\steam_api64_test.dll");
     if (!g_hSteam) g_hSteam = LoadLibraryA("build\\steam_api64_test.dll");
-    if (!g_hSteam) g_hSteam = LoadLibraryA("bin\\steam_api64.dll");
+    if (!g_hSteam) g_hSteam = LoadLibraryA("bin\\lan\\steam_api64.dll");
     if (!g_hSteam) g_hSteam = LoadLibraryA("steam_api64.dll");
 
     if (!g_hSteam) {

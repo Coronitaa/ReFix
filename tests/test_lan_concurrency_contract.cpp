@@ -459,7 +459,7 @@ static bool TestSteamNetworkingSocketsResolutionLAN() {
     // Candidates for proxy DLL
     std::vector<std::string> dllCandidates = {
         "bin\\steam_api64_test.dll",
-        "bin\\steam_api64.dll",
+        "bin\\lan\\steam_api64.dll",
         "build\\steam_api64_test.dll",
         "build\\steam_api64.dll",
         "steam_api64.dll"
