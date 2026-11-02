@@ -6578,6 +6578,8 @@ extern "C" {
     void ReFix_IPAddr_ToString(); void ReFix_IPAddr_ParseString();
 }
 
+FARPROC ReFixFlatDispatchLookup(const char* name);  // generated/flat_dispatch.cpp
+
 static FARPROC LookupLanExport(const char* name) {
     static const std::unordered_map<std::string, FARPROC> s_lanExports = {
         { "SteamAPI_SteamNetworkingIdentity_Clear", (FARPROC)ReFix_Identity_Clear },
@@ -6842,6 +6844,10 @@ static FARPROC LookupLanExport(const char* name) {
     auto it = s_lanExports.find(name);
     if (it != s_lanExports.end()) {
         return it->second;
+    }
+    // Everything else calls the emulator's interface method (generated from steam_api_flat.h).
+    if (FARPROC generated = ReFixFlatDispatchLookup(name)) {
+        return generated;
     }
     return (FARPROC)SafeUnsupportedExportStub;
 }

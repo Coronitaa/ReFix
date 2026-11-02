@@ -18,6 +18,12 @@ constexpr const wchar_t* kSingletonNames[] = {
     L"ValveHalfLifeLauncherMutex",
     L"hl2_singleton_mutex",
 };
+// Substrings of singleton mutex names that embed per-game text.
+//  - -SingleInstanceMutex-: UnityPlayer.dll with Player Settings "Force Single Instance"
+//                           (name is built from the company and product names)
+constexpr const wchar_t* kSingletonFragments[] = {
+    L"-SingleInstanceMutex-",
+};
 constexpr DWORD kRescanDelayMs = 2000;
 
 constexpr LONG kStatusInfoLengthMismatch = (LONG)0xC0000004L;
@@ -95,6 +101,9 @@ bool IsKnownSingleton(const std::wstring& objectName, const wchar_t** matched) {
     for (const wchar_t* known : kSingletonNames) {
         if (_wcsicmp(leaf, known) == 0) { *matched = known; return true; }
     }
+    for (const wchar_t* fragment : kSingletonFragments) {
+        if (wcsstr(leaf, fragment)) { *matched = fragment; return true; }
+    }
     return false;
 }
 
@@ -159,7 +168,7 @@ int ReFix_MultiInstanceReleaseNow() {
         if (!IsKnownSingleton(name, &matched)) return;
         if (CloseHandle(h)) {
             ++closed;
-            ReFixLog("[MultiInstance] Released singleton mutex '%ls'", matched);
+            ReFixLog("[MultiInstance] Released singleton mutex '%ls' (rule '%ls')", name.c_str(), matched);
         }
     };
     std::vector<NtProcessHandleEntry> handles;

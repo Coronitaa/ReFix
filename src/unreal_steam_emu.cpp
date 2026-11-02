@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <map>
 #include <set>
@@ -5767,11 +5768,24 @@ namespace UnrealSteamEmu {
 
     // --- ISteamRemoteStorage ---
     class CSteamRemoteStorageEmu : public ISteamRemoteStorage {
+        struct WriteStream { std::string file; std::vector<uint8_t> data; };
+        std::map<UGCFileWriteStreamHandle_t, WriteStream> m_writeStreams;
+        std::map<SteamAPICall_t, std::vector<uint8_t>> m_asyncReads;
+        UGCFileWriteStreamHandle_t m_nextStream = 0;
+
+        // saves/<file>, creating the sub-folders cloud file names may contain ("characters/x.fch").
+        static std::string SavePathForWrite(const char* pchFile) {
+            std::string path = std::string("saves/") + pchFile;
+            for (size_t i = 0; i < path.size(); ++i) {
+                if (path[i] == '/' || path[i] == '\\') CreateDirectoryA(path.substr(0, i).c_str(), NULL);
+            }
+            return path;
+        }
+
     public:
         virtual bool FileWrite(const char *pchFile, const void *pvData, int32 cubData) override {
-            if (!pchFile || !pvData) return false;
-            CreateDirectoryA("saves", NULL);
-            std::string path = std::string("saves/") + pchFile;
+            if (!pchFile || (!pvData && cubData > 0) || cubData < 0) return false;
+            std::string path = SavePathForWrite(pchFile);
             std::ofstream f(path, std::ios::binary);
             if (f.is_open()) {
                 f.write((const char*)pvData, cubData);
@@ -5796,13 +5810,47 @@ namespace UnrealSteamEmu {
             return PostCallResult(RemoteStorageFileWriteAsyncComplete_t::k_iCallback, &resp, sizeof(resp));
         }
         virtual SteamAPICall_t FileReadAsync(const char *pchFile, uint32 nOffset, uint32 cubToRead) override {
+            std::vector<uint8_t> data;
             RemoteStorageFileReadAsyncComplete_t resp = {};
-            resp.m_eResult = k_EResultOK;
+            resp.m_eResult = k_EResultFileNotFound;
             resp.m_nOffset = nOffset;
-            resp.m_cubRead = cubToRead;
-            return PostCallResult(RemoteStorageFileReadAsyncComplete_t::k_iCallback, &resp, sizeof(resp));
+            if (pchFile) {
+                std::ifstream f(std::string("saves/") + pchFile, std::ios::binary);
+                if (f.is_open()) {
+                    f.seekg(0, std::ios::end);
+                    std::streamoff size = f.tellg();
+                    if (size >= 0 && (std::streamoff)nOffset <= size) {
+                        data.resize((size_t)std::min<std::streamoff>(cubToRead, size - nOffset));
+                        f.seekg(nOffset);
+                        if (!data.empty()) f.read((char*)data.data(), (std::streamsize)data.size());
+                        data.resize((size_t)f.gcount() > 0 ? (size_t)f.gcount() : 0);
+                        resp.m_eResult = k_EResultOK;
+                    } else {
+                        resp.m_eResult = k_EResultInvalidParam;
+                    }
+                }
+            }
+            resp.m_cubRead = (uint32)data.size();
+            // The result carries its own call handle, which is only known once posted.
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            SteamAPICall_t call = PostCallResult(RemoteStorageFileReadAsyncComplete_t::k_iCallback, &resp, sizeof(resp));
+            auto posted = g_callResultMap.find(call);
+            if (posted != g_callResultMap.end() && posted->second.data.size() >= sizeof(resp)) {
+                resp.m_hFileReadAsync = call;
+                memcpy(posted->second.data.data(), &resp, sizeof(resp));
+            }
+            if (resp.m_eResult == k_EResultOK) m_asyncReads[call] = std::move(data);
+            return call;
         }
-        virtual bool FileReadAsyncComplete(SteamAPICall_t hReadCall, void *pvBuffer, uint32 cubToRead) override { return true; }
+        virtual bool FileReadAsyncComplete(SteamAPICall_t hReadCall, void *pvBuffer, uint32 cubToRead) override {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            auto it = m_asyncReads.find(hReadCall);
+            if (it == m_asyncReads.end() || !pvBuffer) return false;
+            bool ok = cubToRead >= it->second.size();
+            if (ok && !it->second.empty()) memcpy(pvBuffer, it->second.data(), it->second.size());
+            m_asyncReads.erase(it);
+            return ok;
+        }
         virtual bool FileForget(const char *pchFile) override { return true; }
         virtual bool FileDelete(const char *pchFile) override {
             if (pchFile) {
@@ -5815,10 +5863,38 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t FileShare(const char *pchFile) override { return 0; }
         virtual bool SetSyncPlatforms(const char *pchFile, ERemoteStoragePlatform eRemoteStoragePlatform) override { return true; }
 
-        virtual UGCFileWriteStreamHandle_t FileWriteStreamOpen(const char *pchFile) override { return 1; }
-        virtual bool FileWriteStreamWriteChunk(UGCFileWriteStreamHandle_t writeHandle, const void *pvData, int32 cubData) override { return true; }
-        virtual bool FileWriteStreamClose(UGCFileWriteStreamHandle_t writeHandle) override { return true; }
-        virtual bool FileWriteStreamCancel(UGCFileWriteStreamHandle_t writeHandle) override { return true; }
+        // Streams are buffered and written on Close, so a cancelled stream leaves the old file intact.
+        virtual UGCFileWriteStreamHandle_t FileWriteStreamOpen(const char *pchFile) override {
+            if (!pchFile || !*pchFile) return k_UGCFileStreamHandleInvalid;
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            UGCFileWriteStreamHandle_t h = ++m_nextStream;
+            m_writeStreams[h] = WriteStream{ pchFile, {} };
+            return h;
+        }
+        virtual bool FileWriteStreamWriteChunk(UGCFileWriteStreamHandle_t writeHandle, const void *pvData, int32 cubData) override {
+            if (cubData < 0 || (!pvData && cubData > 0)) return false;
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            auto it = m_writeStreams.find(writeHandle);
+            if (it == m_writeStreams.end()) return false;
+            const uint8_t* bytes = static_cast<const uint8_t*>(pvData);
+            it->second.data.insert(it->second.data.end(), bytes, bytes + cubData);
+            return true;
+        }
+        virtual bool FileWriteStreamClose(UGCFileWriteStreamHandle_t writeHandle) override {
+            WriteStream stream;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = m_writeStreams.find(writeHandle);
+                if (it == m_writeStreams.end()) return false;
+                stream = std::move(it->second);
+                m_writeStreams.erase(it);
+            }
+            return FileWrite(stream.file.c_str(), stream.data.data(), (int32)stream.data.size());
+        }
+        virtual bool FileWriteStreamCancel(UGCFileWriteStreamHandle_t writeHandle) override {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            return m_writeStreams.erase(writeHandle) > 0;
+        }
 
         virtual bool FileExists(const char *pchFile) override {
             if (!pchFile) return false;
@@ -7035,6 +7111,46 @@ namespace UnrealSteamEmu {
     ISteamHTTP* LatestHTTP() { return static_cast<ISteamHTTP*>(&g_steamHTTPInstance); }
     ISteamScreenshots* LatestScreenshots() { return static_cast<ISteamScreenshots*>(&g_steamScreenshotsInstance); }
 
+    // Latest-version object by SDK class name, for the generated flat dispatcher.
+    // static_cast keeps each entry compile-checked against the SDK class it serves.
+    void* LatestByClassName(const char* className) {
+        static const std::unordered_map<std::string, void*> s_latest = {
+            { "ISteamClient", static_cast<ISteamClient*>(&g_steamClientInstance) },
+            { "ISteamUser", static_cast<ISteamUser*>(&g_steamUserInstance) },
+            { "ISteamFriends", static_cast<ISteamFriends*>(&g_steamFriends018Instance) },
+            { "ISteamUtils", static_cast<ISteamUtils*>(&g_steamUtilsInstance) },
+            { "ISteamMatchmaking", static_cast<ISteamMatchmaking*>(&g_steamMatchmakingInstance) },
+            { "ISteamMatchmakingServers", static_cast<ISteamMatchmakingServers*>(&g_steamMatchmakingServersInstance) },
+            { "ISteamUserStats", static_cast<ISteamUserStats*>(&g_steamUserStatsInstance) },
+            { "ISteamApps", static_cast<ISteamApps*>(&g_steamAppsInstance) },
+            { "ISteamNetworking", static_cast<ISteamNetworking*>(&g_steamNetworkingInstance) },
+            { "ISteamNetworkingSockets", static_cast<ISteamNetworkingSockets*>(&g_steamNetworkingSocketsInstance) },
+            { "ISteamNetworkingUtils", static_cast<ISteamNetworkingUtils*>(&g_steamNetworkingUtilsInstance) },
+            { "ISteamNetworkingMessages", static_cast<ISteamNetworkingMessages*>(&g_steamNetworkingMessagesInstance) },
+            { "ISteamRemoteStorage", static_cast<ISteamRemoteStorage*>(&g_steamRemoteStorageInstance) },
+            { "ISteamUGC", static_cast<ISteamUGC*>(&g_steamUGCInstance) },
+            { "ISteamGameServer", static_cast<ISteamGameServer*>(&g_steamGameServerInstance) },
+            { "ISteamGameServerStats", static_cast<ISteamGameServerStats*>(&g_steamGameServerStatsInstance) },
+            { "ISteamHTTP", static_cast<ISteamHTTP*>(&g_steamHTTPInstance) },
+            { "ISteamInput", static_cast<ISteamInput*>(&g_steamInputInstance) },
+            { "ISteamInventory", static_cast<ISteamInventory*>(&g_steamInventoryInstance) },
+            { "ISteamScreenshots", static_cast<ISteamScreenshots*>(&g_steamScreenshotsInstance) },
+            { "ISteamTimeline", static_cast<ISteamTimeline*>(&g_steamTimelineInstance) },
+            { "ISteamGameSearch", static_cast<ISteamGameSearch*>(&g_steamGameSearchInstance) },
+            { "ISteamAppList", static_cast<ISteamAppList*>(&g_steamAppListInstance) },
+            { "ISteamMusic", static_cast<ISteamMusic*>(&g_steamMusicInstance) },
+            { "ISteamMusicRemote", static_cast<ISteamMusicRemote*>(&g_steamMusicRemoteInstance) },
+            { "ISteamHTMLSurface", static_cast<ISteamHTMLSurface*>(&g_steamHTMLSurfaceInstance) },
+            { "ISteamVideo", static_cast<ISteamVideo*>(&g_steamVideoInstance) },
+            { "ISteamParentalSettings", static_cast<ISteamParentalSettings*>(&g_steamParentalSettingsInstance) },
+            { "ISteamParties", static_cast<ISteamParties*>(&g_steamPartiesInstance) },
+            { "ISteamRemotePlay", static_cast<ISteamRemotePlay*>(&g_steamRemotePlayInstance) },
+        };
+        if (!className) return nullptr;
+        auto it = s_latest.find(className);
+        return it == s_latest.end() ? nullptr : it->second;
+    }
+
     void* GetSteamClient() { return &g_steamClientInstance; }
     void* GetSteamUser() { return &g_steamUser021Instance; }
     void* GetSteamFriends() { return &g_steamFriendsInstance; }
@@ -7956,3 +8072,7 @@ extern "C" __declspec(dllexport) uint16_t ReFix_Test_GetEffectiveDiscoveryPort()
     return 0;
 }
 #endif
+
+void* ReFixLatestInterface(const char* className) {
+    return UnrealSteamEmu::LatestByClassName(className);
+}

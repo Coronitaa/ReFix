@@ -1633,6 +1633,21 @@ if ($EngineType -eq "Unity") {
 
         foreach ($dllItem in $candidateDlls) {
             try {
+                # Re-patch from the pristine backup so earlier (possibly broken) patches never accumulate.
+                $backupPath = "$($dllItem.FullName).orig"
+                if (Test-Path $backupPath) {
+                    try {
+                        $curName = [System.Reflection.AssemblyName]::GetAssemblyName($dllItem.FullName)
+                        $bakName = [System.Reflection.AssemblyName]::GetAssemblyName($backupPath)
+                        if ($curName.FullName -eq $bakName.FullName) {
+                            Copy-Item -Path $backupPath -Destination $dllItem.FullName -Force
+                            Write-Host "  [OK] Restored $($dllItem.Name) from .orig before patching" -ForegroundColor Green
+                        }
+                    } catch {
+                        Write-Host "  [NOTICE] Could not compare $($dllItem.Name) with its .orig backup: $_" -ForegroundColor Yellow
+                    }
+                }
+
                 $readerParams = New-Object Mono.Cecil.ReaderParameters
                 $readerParams.ReadWrite = $true
                 $readerParams.AssemblyResolver = $resolver
@@ -1664,6 +1679,7 @@ if ($EngineType -eq "Unity") {
                         $testPlat = if ($shutdownMethod -and $shutdownMethod.HasBody -and $shutdownMethod.Body.Instructions.Count -gt 0) { $shutdownMethod.Body.Instructions[0].Operand } else { $null }
 
                         $apiInit.Body.Instructions.Clear()
+                        $apiInit.Body.ExceptionHandlers.Clear()
                         $apiInit.Body.Variables.Clear()
 
                         $il = $apiInit.Body.GetILProcessor()
@@ -1690,6 +1706,7 @@ if ($EngineType -eq "Unity") {
                         $apiInitEx = $apiType.Methods | Where-Object { $_.Name -eq "InitEx" }
                         if ($apiInitEx) {
                             $apiInitEx.Body.Instructions.Clear()
+                            $apiInitEx.Body.ExceptionHandlers.Clear()
                             $apiInitEx.Body.Variables.Clear()
 
                             $ilEx = $apiInitEx.Body.GetILProcessor()
@@ -1855,6 +1872,7 @@ if ($EngineType -eq "Unity") {
                                 $targetType = if ($isT1) { $mapType.GenericParameters[1] } else { $mapType.GenericParameters[0] }
 
                                 $m.Body.Instructions.Clear()
+                                $m.Body.ExceptionHandlers.Clear()
                                 $m.Body.Variables.Clear()
 
                                 $var0 = New-Object Mono.Cecil.Cil.VariableDefinition($targetType)
