@@ -115,6 +115,7 @@ namespace UnrealSteamEmu {
     static uint64_t g_localSteamID = 0;
     static std::string g_personaName = "Player";
     static std::string g_basePersonaName = "Player";
+    static bool g_autoIdentity = true;
     static uint32_t g_appID = 480;
     static std::string g_language = "english";
     static uint16_t g_listenPort = 47584;
@@ -457,6 +458,21 @@ namespace UnrealSteamEmu {
             bAutoGenExplicitTrue = true;
         }
 
+        // IdentityMode=auto (default): the SteamID belongs to this PC, not to the game folder. A patched
+        // game copied to another PC as-is must not share the SteamID stored in ReFix.ini/steam_settings,
+        // or both players would see each other as themselves. IdentityMode=fixed honours stored IDs.
+        char bufIdentityMode[16] = { 0 };
+        GetPrivateProfileStringA("User", "IdentityMode", "", bufIdentityMode, sizeof(bufIdentityMode), iniPath.c_str());
+        bool bAutoIdentity;
+        if (_stricmp(bufIdentityMode, "fixed") == 0) {
+            bAutoIdentity = false;
+        } else if (_stricmp(bufIdentityMode, "auto") == 0) {
+            bAutoIdentity = true;
+        } else {
+            bAutoIdentity = !(_stricmp(bufAutoGen, "false") == 0 || strcmp(bufAutoGen, "0") == 0);
+        }
+        g_autoIdentity = bAutoIdentity;
+
         // 4. Resolve Persona Name
         std::string nameSource = "fallback:Player";
         char buf[256] = { 0 };
@@ -511,8 +527,15 @@ namespace UnrealSteamEmu {
         if (buf[0] != '\0') {
             g_personaName = buf;
         } else {
-            g_personaName = "Player";
-            nameSource = "fallback:Player";
+            char osUser[256] = { 0 };
+            DWORD osUserLen = sizeof(osUser);
+            if (GetUserNameA(osUser, &osUserLen) && osUser[0]) {
+                g_personaName = osUser;
+                nameSource = "os:GetUserName";
+            } else {
+                g_personaName = "Player";
+                nameSource = "fallback:Player";
+            }
         }
 
         g_basePersonaName = g_personaName;
@@ -543,6 +566,11 @@ namespace UnrealSteamEmu {
                 g_localSteamID = _strtoui64(envSid, nullptr, 10);
                 if (g_localSteamID != 0) sidSource = "env:numeric";
             }
+        }
+
+        if (g_localSteamID == 0 && bAutoIdentity) {
+            g_localSteamID = GenerateDeterministicSteamID();
+            sidSource = "IdentityMode=auto->GenerateDeterministicSteamID(MachineGuid)";
         }
 
         if (g_localSteamID == 0) {
@@ -609,6 +637,7 @@ namespace UnrealSteamEmu {
         ReFixLog("[ConfigDiag] ExePath: '%s'", exePath);
         ReFixLog("[ConfigDiag] Selected IniPath: '%s'", iniPath.c_str());
         ReFixLog("[ConfigDiag] Multi-Instance Slot: %d", slot);
+        ReFixLog("[ConfigDiag] IdentityMode: %s", bAutoIdentity ? "auto" : "fixed");
         ReFixLog("[ConfigDiag] SteamID Source: '%s' -> %llu", sidSource.c_str(), g_localSteamID);
         ReFixLog("[ConfigDiag] AppID Source: '%s' -> %u", appIdSource.c_str(), g_appID);
         ReFixLog("[ConfigDiag] Persona Name Source: '%s' -> '%s'", nameSource.c_str(), g_personaName.c_str());
@@ -7014,7 +7043,18 @@ namespace UnrealSteamEmu {
             auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (pInfo && pInfo->externalId.platform == refix::lan::ExternalPlatform::Steam && pInfo->externalId.numericId != 0) {
                 uint64_t sid = pInfo->externalId.numericId;
-                if (sid == g_localSteamID) return;
+                if (sid == g_localSteamID) {
+                    if (ev.peerId != refix::lan::ILanCore::Get().Identity().GetLocalPeerId()) {
+                        static std::atomic<bool> s_warned{ false };
+                        if (!s_warned.exchange(true)) {
+                            ReFixLog("[UnrealSteam] IDENTITY COLLISION: peer %s at %s uses our SteamID %llu (IdentityMode=%s). "
+                                     "Set [User] IdentityMode=auto or give each PC its own SteamId.",
+                                     pInfo->displayName.c_str(), pInfo->endpoint.ToString().c_str(), sid,
+                                     g_autoIdentity ? "auto" : "fixed");
+                        }
+                    }
+                    return;
+                }
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 DiscoveredPeer& dp = g_peers[sid];
                 dp.steamID = sid;

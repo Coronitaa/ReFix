@@ -414,9 +414,13 @@ BypassLicenseCheck = $bypassVal
 DLCs = $($P.DLCs)
 
 [User]
+; IdentityMode = auto  -> SteamID is derived from each PC (MachineGuid + instance slot). The patched game
+;                         can be copied to other PCs as-is and every player still gets a distinct identity.
+; IdentityMode = fixed -> always use SteamId below (same identity wherever this folder runs).
+IdentityMode = $(if ($P.AutoGenerateSteamId -eq "true") { "auto" } else { "fixed" })
 Name = $($P.UserName)
 AutoGenerateSteamId = $($P.AutoGenerateSteamId)
-SteamId = $($P.SteamId)
+SteamId = $(if ($P.AutoGenerateSteamId -eq "true") { "" } else { $P.SteamId })
 
 [Matchmaking]
 EnableLobbyFilter = false
@@ -905,12 +909,9 @@ switch ($OnlineMode) {
         # --- Mode 2: Re:Goldberg LAN sin Steam ---
         # Deploys Goldberg Steam Emulator backend with complete local settings synchronization,
         # persistent identity, LAN matchmaking discovery, and portable saves.
-        Write-Host "  [Re:Goldberg LAN Mode] Deploying Goldberg Steam Emulator backend..." -ForegroundColor Cyan
-        $goldbergDll = Join-Path $BinDir "goldberg\steam_api64.dll"
-        if (-not (Test-Path $goldbergDll)) {
-            Write-Host "  [ERROR] Goldberg steam_api64.dll not found at: $goldbergDll" -ForegroundColor Red
-            exit 1
-        }
+        # ReFix LAN emulates Steam inside steam_api64.dll (LanCore): no Steam client, no Valve DLL and no
+        # Goldberg backend are needed on x64. Goldberg is only used as the 32-bit backend further below.
+        Write-Host "  [ReFix LAN Mode] Deploying standalone ReFix LAN Steam emulator..." -ForegroundColor Cyan
 
         # Step 2a: Generate steam_interfaces.txt from original DLL if interface generator is available
         $genTool = Join-Path $BinDir "goldberg\tools\generate_interfaces_file.exe"
@@ -967,18 +968,10 @@ switch ($OnlineMode) {
             $proxyPath = Join-Path $BinDir "steam_api64.dll"
             $origPath  = Join-Path $dir "steam_api64_original.dll"
 
-            # Preserve genuine Valve DLL before placing Goldberg as steam_api64_valve.dll
-            if (Test-Path -LiteralPath $valvePath) {
-                if ((Get-Item -LiteralPath $valvePath).Length -ne (Get-Item -LiteralPath $goldbergDll).Length) {
-                    if (-not (Test-Path -LiteralPath $origPath)) {
-                        Copy-Item -LiteralPath $valvePath -Destination $origPath -Force
-                        Write-Host "  [OK] Preserved genuine Valve DLL -> steam_api64_original.dll in $dir" -ForegroundColor Green
-                    }
-                }
-            } elseif (Test-Path -LiteralPath $steamPath) {
+            # Preserve the game's genuine Steam DLL so Uninstall can restore it
+            if (Test-Path -LiteralPath $steamPath) {
                 $isAlreadyProxy = (Test-Path -LiteralPath $proxyPath) -and ((Get-Item -LiteralPath $steamPath).Length -eq (Get-Item -LiteralPath $proxyPath).Length)
-                $isAlreadyGoldberg = ((Get-Item -LiteralPath $steamPath).Length -eq (Get-Item -LiteralPath $goldbergDll).Length)
-                if ((-not $isAlreadyProxy) -and (-not $isAlreadyGoldberg)) {
+                if (-not $isAlreadyProxy) {
                     if (-not (Test-Path -LiteralPath $origPath)) {
                         Copy-Item -LiteralPath $steamPath -Destination $origPath -Force
                         Write-Host "  [OK] Preserved genuine Valve DLL -> steam_api64_original.dll in $dir" -ForegroundColor Green
@@ -987,17 +980,12 @@ switch ($OnlineMode) {
             }
 
             try {
-                # Place Goldberg DLL as steam_api64_valve.dll
-                Copy-Item -LiteralPath $goldbergDll -Destination $valvePath -Force -ErrorAction Stop
-                if (-not (Test-Path -LiteralPath $valvePath)) { throw "Target file not created: $valvePath" }
-                Write-Host "  [OK] Deployed Goldberg emulator backend as steam_api64_valve.dll to $dir" -ForegroundColor Green
-
-                # Deploy ReFix proxy as steam_api64.dll (provides SteamInternal_SteamAPI_Init and all API exports)
+                # Deploy ReFix LAN as steam_api64.dll (provides SteamInternal_SteamAPI_Init and all API exports)
                 Copy-Item -LiteralPath $proxyPath -Destination $steamPath -Force -ErrorAction Stop
                 if (-not (Test-Path -LiteralPath $steamPath)) { throw "Target file not created: $steamPath" }
                 Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
             } catch {
-                Write-Host "  [ERROR] Failed to deploy Goldberg backend / proxy to $dir : $_" -ForegroundColor Red
+                Write-Host "  [ERROR] Failed to deploy ReFix LAN proxy to $dir : $_" -ForegroundColor Red
                 exit 1
             }
         }
@@ -1131,8 +1119,15 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
         # 1. Base legacy text configuration files (guaranteed support across all Goldberg versions)
         [System.IO.File]::WriteAllText((Join-Path $settingsDir "steam_appid.txt"), "$finalRealAppId`r`n")
         [System.IO.File]::WriteAllText((Join-Path $settingsDir "force_account_name.txt"), "$($identity.Name)")
-        [System.IO.File]::WriteAllText((Join-Path $settingsDir "force_steamid.txt"), "$($identity.SteamId)")
-        [System.IO.File]::WriteAllText((Join-Path $settingsDir "user_steam_id.txt"), "$($identity.SteamId)")
+        if ($identity.AutoGenerateSteamId -eq "true") {
+            foreach ($sidFile in @("force_steamid.txt", "user_steam_id.txt")) {
+                $sidPath = Join-Path $settingsDir $sidFile
+                if (Test-Path -LiteralPath $sidPath) { Remove-Item -LiteralPath $sidPath -Force -ErrorAction SilentlyContinue }
+            }
+        } else {
+            [System.IO.File]::WriteAllText((Join-Path $settingsDir "force_steamid.txt"), "$($identity.SteamId)")
+            [System.IO.File]::WriteAllText((Join-Path $settingsDir "user_steam_id.txt"), "$($identity.SteamId)")
+        }
         [System.IO.File]::WriteAllText((Join-Path $settingsDir "force_language.txt"), "$finalLanguage")
         [System.IO.File]::WriteAllText((Join-Path $settingsDir "force_listen_port.txt"), "$finalListenPort")
         [System.IO.File]::WriteAllText((Join-Path $settingsDir "local_save.txt"), "saves")
@@ -1144,7 +1139,7 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
 ; =============================================================================
 [user::general]
 account_name=$($identity.Name)
-account_steamid=$($identity.SteamId)
+$(if ($identity.AutoGenerateSteamId -eq "true") { "" } else { "account_steamid=$($identity.SteamId)" })
 language=$finalLanguage
 
 [user::saves]
@@ -2279,7 +2274,12 @@ function Verify-ReFixDeployment {
             $valveBackup = Join-Path $pDir "steam_api64_valve.dll"
             $origBackup  = Join-Path $pDir "steam_api64_original.dll"
             if ((-not (Test-Path -LiteralPath $valveBackup)) -and (-not (Test-Path -LiteralPath $origBackup))) {
-                $errors += "Mandatory original/backend DLL backup missing in $pDir (neither steam_api64_valve.dll nor steam_api64_original.dll exists)"
+                if ($OnlineMode -eq "valve") {
+                    $errors += "Mandatory original/backend DLL backup missing in $pDir (neither steam_api64_valve.dll nor steam_api64_original.dll exists)"
+                } else {
+                    # ReFix LAN runs without any backend DLL; the backup only matters for Uninstall.
+                    Write-Host "  [VERIFY NOTICE] No original steam_api64.dll backup in $pDir (not needed by ReFix LAN)" -ForegroundColor Yellow
+                }
             } else {
                 $bkName = if (Test-Path -LiteralPath $valveBackup) { "steam_api64_valve.dll" } else { "steam_api64_original.dll" }
                 Write-Host "  [VERIFY OK] Backup DLL $bkName verified in $pDir" -ForegroundColor Green

@@ -6,7 +6,17 @@
 
 namespace ReFix {
 
+#ifdef REFIX_LAN_EDITION
+// ReFix LAN is a standalone product: it never forwards to Valve's DLL nor talks to Steam.
+// Online mode cannot be selected from ReFix.ini, the environment or a test hook.
+static ReFixNetworkMode ClampMode(ReFixNetworkMode mode) {
+    return mode == ReFixNetworkMode::Online ? ReFixNetworkMode::Lan : mode;
+}
+std::atomic<ReFixNetworkMode> NetworkModeManager::s_mode{ ReFixNetworkMode::Lan };
+#else
+static ReFixNetworkMode ClampMode(ReFixNetworkMode mode) { return mode; }
 std::atomic<ReFixNetworkMode> NetworkModeManager::s_mode{ ReFixNetworkMode::Online };
+#endif
 
 bool NetworkModeManager::IsSteamClientRunning() {
     bool running = false;
@@ -27,6 +37,15 @@ bool NetworkModeManager::IsSteamClientRunning() {
 }
 
 void NetworkModeManager::LoadMode(const std::string& iniPath) {
+#ifdef REFIX_LAN_EDITION
+    char lanBuf[64] = {0};
+    GetPrivateProfileStringA("Network", "Mode", "", lanBuf, sizeof(lanBuf), iniPath.c_str());
+    bool offline = (_stricmp(lanBuf, "offline") == 0);
+    GetPrivateProfileStringA("Online", "Mode", "", lanBuf, sizeof(lanBuf), iniPath.c_str());
+    offline = offline || (_stricmp(lanBuf, "offline") == 0);
+    s_mode = offline ? ReFixNetworkMode::Offline : ReFixNetworkMode::Lan;
+    return;
+#endif
     char buf[64] = {0};
     
     // Modern UNAE config (highest priority)
@@ -78,7 +97,7 @@ ReFixNetworkMode NetworkModeManager::GetMode() {
 }
 
 void NetworkModeManager::SetMode(ReFixNetworkMode mode) {
-    s_mode.store(mode, std::memory_order_release);
+    s_mode.store(ClampMode(mode), std::memory_order_release);
 }
 
 bool NetworkModeManager::IsOnline() {

@@ -21,3 +21,17 @@
   4. Interface routing: `steam_proxy.cpp` properly routes `SteamNetworkingSockets` and `SteamNetworkingUtils` to `UnrealSteamEmu` in LAN mode, while strictly preserving native Valve DLL passthrough in Online mode.
   5. Localhost multi-process port collision: Configured distinct listen ports (47584 Host, 47585 Client) on localhost so Winsock can direct unicast UDP packets correctly.
 - **NEXT EXACT ACTION:** Do NOT advance to Phase 4 until user explicitly directs.
+
+## 2026-11-02 — ReFix LAN standalone (branch `refix_lan`)
+- **Online merged selectively** (`feature/photon-p2p-phasmophobia-interop`): Steam core keeps the LAN
+  architecture; Steam-independent fixes ported (log truncation, AppID log-once, deploy/uninstall fixes).
+  Online-only modules (Photon emulator, Fusion Shared, Party Animals, store/inventory, IL2CPP, UNAE) are in
+  the tree but not compiled into the LAN build.
+- **LAN edition** (`/DREFIX_LAN_EDITION=1` in `build.bat`): `NetworkModeManager` never selects Online
+  (ini, env or `ReFix_SetNetworkMode(0)` all clamp to LAN), so the Valve DLL and Steam client are never used.
+- **Identity** (`[User] IdentityMode`): `auto` (default) derives the SteamID from the PC's MachineGuid + instance
+  slot and ignores SteamIDs copied in `ReFix.ini` / `steam_settings`; `fixed` honours them. Name falls back to
+  the Windows user name. A peer announcing our SteamID from another PC is logged as `IDENTITY COLLISION`.
+- **Deploy (lan mode)**: no Goldberg backend on x64; in auto mode no `force_steamid.txt` is written.
+- **Tests**: all unit suites, `refix_net_test entrypoints`, `tests/test_identity_mode.ps1`,
+  `tests/test_steam_adapter_multiprocess.ps1` PASS. Two physical PCs: not yet validated.

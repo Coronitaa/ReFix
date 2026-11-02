@@ -504,70 +504,23 @@ int RunEntrypointsTest() {
     std::cout << "  [PASS] LAN Valve isolation verified: EnsureOriginal count=0, Valve DLL load count=0." << std::endl;
 
     // ------------------------------------------------------------------------
-    // Part B: ONLINE Mode Routing Matrix (Genuine Valve DLL)
+    // Part B: LAN edition refuses Online mode (ReFix LAN never touches Steam)
     // ------------------------------------------------------------------------
-    if (pfn_ReFix_SetNetworkMode) pfn_ReFix_SetNetworkMode(0); // Mode 0 = Online
-    if (pfn_ReFix_ResetUnrealSteamEmuCallCount) pfn_ReFix_ResetUnrealSteamEmuCallCount();
+    if (pfn_ReFix_SetNetworkMode) pfn_ReFix_SetNetworkMode(0); // Mode 0 = Online (must be clamped to LAN)
 
-    if (pfn_ReFix_EnsureOriginalDll && !pfn_ReFix_EnsureOriginalDll()) {
-        std::cerr << "[FAIL] EnsureOriginalDll failed to load genuine Valve DLL in Online mode!" << std::endl;
+    const char* clampedProv = pfn_ReFix_GetSteamProviderName ? pfn_ReFix_GetSteamProviderName() : "Unknown";
+    if (strcmp(clampedProv, "LanSteamProvider") != 0) {
+        std::cerr << "[FAIL] LAN edition switched to Online provider: " << clampedProv << std::endl;
         return 1;
     }
-
-    uint64_t onlEnsureCount = pfn_ReFix_GetEnsureOriginalCallCount ? pfn_ReFix_GetEnsureOriginalCallCount() : 0;
-    uint64_t onlValveLoadCount = pfn_ReFix_GetValveDllLoadCount ? pfn_ReFix_GetValveDllLoadCount() : 0;
-    if (onlEnsureCount < 1) {
-        std::cerr << "[FAIL] EnsureOriginal count < 1 in Online mode! Count=" << onlEnsureCount << std::endl;
+    void* pClampedSockets = pfn_FindOrCreateUserInterface(0, "SteamNetworkingSockets012");
+    uint64_t clampedValveLoads = pfn_ReFix_GetValveDllLoadCount ? pfn_ReFix_GetValveDllLoadCount() : 0;
+    if (!pClampedSockets || clampedValveLoads != 0) {
+        std::cerr << "[FAIL] Online request leaked out of LAN: sockets=" << pClampedSockets
+                  << " valveLoadCount=" << clampedValveLoads << std::endl;
         return 1;
     }
-    std::cout << "  [PASS] Online mode properly invoked EnsureOriginal: ensureCount=" << onlEnsureCount << " (>= 1)." << std::endl;
-
-    const char* onlProv = pfn_ReFix_GetSteamProviderName ? pfn_ReFix_GetSteamProviderName() : "Unknown";
-    std::cout << "  Online Active Provider: " << onlProv << std::endl;
-    if (strcmp(onlProv, "OnlineSteamProvider") != 0) {
-        std::cerr << "[FAIL] Expected OnlineSteamProvider in Online mode, got: " << onlProv << std::endl;
-        return 1;
-    }
-
-    // Query entrypoints in Online mode
-    void* pOnlSockets = pfn_FindOrCreateUserInterface(0, "SteamNetworkingSockets012");
-    void* pOnlUtils = pfn_FindOrCreateUserInterface(0, "SteamNetworkingUtils004");
-    void* pOnlMsgs = pfn_FindOrCreateUserInterface(0, "SteamNetworkingMessages002");
-    void* pOnlCI = pfn_SteamInternal_CreateInterface ? pfn_SteamInternal_CreateInterface("SteamNetworkingSockets012") : nullptr;
-    int onlCiRet = -1;
-    void* pOnlCI2 = pfn_CreateInterface ? pfn_CreateInterface("SteamNetworkingSockets012", &onlCiRet) : nullptr;
-    void* pOnlFlatSockets = pfn_FlatSockets ? pfn_FlatSockets() : nullptr;
-    void* pOnlFlatUtils = pfn_FlatUtils ? pfn_FlatUtils() : nullptr;
-    void* pOnlFlatMsgs = pfn_FlatMsgs ? pfn_FlatMsgs() : nullptr;
-
-    // Verify pointers come from genuine Valve DLL, and UnrealSteamEmu was strictly NOT called
-    uint64_t onlCallCount = pfn_ReFix_GetUnrealSteamEmuCallCount ? pfn_ReFix_GetUnrealSteamEmuCallCount() : 0;
-    if (onlCallCount != 0) {
-        std::cerr << "[FAIL] UnrealSteamEmu WAS CALLED in Online mode! Online leak detected! Calls=" << onlCallCount << std::endl;
-        return 1;
-    }
-    std::cout << "  [PASS] Online matrix verified: Provider=OnlineSteamProvider, UnrealSteamEmuCallCount=" << onlCallCount << " (ZERO fallback)." << std::endl;
-
-    // ------------------------------------------------------------------------
-    // Part C: ONLINE Intentionally Unavailable Interface (Blocker 1 & 2)
-    // ------------------------------------------------------------------------
-    if (pfn_ReFix_ResetUnrealSteamEmuCallCount) pfn_ReFix_ResetUnrealSteamEmuCallCount();
-
-    void* pFakeIface1 = pfn_FindOrCreateUserInterface(0, "NonExistentInterface_v999");
-    void* pFakeIface2 = pfn_SteamInternal_CreateInterface ? pfn_SteamInternal_CreateInterface("NonExistentInterface_v999") : nullptr;
-    int fakeRet = -1;
-    void* pFakeIface3 = pfn_CreateInterface ? pfn_CreateInterface("NonExistentInterface_v999", &fakeRet) : nullptr;
-
-    if (pFakeIface1 != nullptr || pFakeIface2 != nullptr || pFakeIface3 != nullptr) {
-        std::cerr << "[FAIL] Intentionally unavailable interface returned non-null pointer!" << std::endl;
-        return 1;
-    }
-    uint64_t fakeCallCount = pfn_ReFix_GetUnrealSteamEmuCallCount ? pfn_ReFix_GetUnrealSteamEmuCallCount() : 0;
-    if (fakeCallCount != 0) {
-        std::cerr << "[FAIL] UnrealSteamEmu fallback occurred on unavailable Valve interface! Calls=" << fakeCallCount << std::endl;
-        return 1;
-    }
-    std::cout << "  [PASS] Unavailable Valve interface returned nullptr and UnrealSteamEmu was strictly NOT called (Calls=0)." << std::endl;
+    std::cout << "  [PASS] Online request clamped to LAN: Provider=LanSteamProvider, Valve DLL load count=0." << std::endl;
 
     // Restore LAN mode for remaining tests
     if (pfn_ReFix_SetNetworkMode) pfn_ReFix_SetNetworkMode(1);
