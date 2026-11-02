@@ -52,3 +52,17 @@
   (`REFIX_NON_INTERACTIVE=1`, `REFIX_DEPLOY_MODE=1|2`) never touches the firewall unless `REFIX_FIREWALL=Y`.
 - **Physical harness**: `tests\physical\run_lan_pair.ps1` (+ `lan_matrix.csv`): backup → deploy → 2 instances →
   log analysis → restore (byte-identical). `-Product online` verifies the Online deploy statically.
+
+## 2026-11-02 (3) — Source/GoldSrc, multi-instance and discovery hardening
+- Versioned interface adapters now include SteamGameServer001-014 (149 adapters); x86 exports used by Source
+  engines (g_pSteamClientGameServer, SteamGameServer_GetIPCCallCount, SteamInternal_GameServer_Init_V2).
+- Multi-instance for Valve engines: ReFix LAN closes the process's own handle to `ValveHalfLifeLauncherMutex` /
+  `hl2_singleton_mutex` after init (`src/refix_multi_instance.cpp`, `[User] AllowMultipleInstances`, default on).
+- Instance slots keyed by exe name; AppID learned late (game-written steam_appid.txt, RestartAppIfNecessary)
+  is adopted at runtime and moves LanCore to the new scope (`ILanCore::SetAppScope`).
+- Discovery: EOS uses ports 47610-47615; local peer refreshed before stale pruning (beacons used to carry
+  SteamID 0 after 12 s); idle Tick pump thread for games that stop calling SteamAPI_RunCallbacks;
+  PeerDiscovered re-posted on SteamID change and replayed after subscription.
+- Diagnostics: `REFIX_LOG_VERBOSE=1` (pid/tid/module prefix), `REFIX_LAN_TRACE=1` (packet trace).
+- Games that enforce a single instance by themselves (Scam With Your Friends, Shift At Midnight) or need UI
+  input before Steam init (Lethal Company's ONLINE/LAN menu) need two PCs or manual input to test.
