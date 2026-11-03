@@ -1,10 +1,12 @@
-﻿// Profile screens: the chip menu (switch / create / edit), the restart confirmation, the profile editor
-// (overlay modal and first-run dialog) and the picker shown when every profile is already in use.
+﻿// Profile screens: the chip menu (switch / create / edit / delete), the restart and delete confirmations, the
+// language switch, the profile editor (overlay modal and first-run dialog) and the "Who's playing?" picker shown to
+// a second window of the same game or when every profile is already in use.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include "overlay_app.h"
 #include "avatar_image.h"
+#include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "refix_overlay.h"
 
@@ -15,12 +17,15 @@
 extern void ReFixLog(const char* fmt, ...);
 
 namespace refix::overlay {
+using i18n::T;
 namespace {
 
 constexpr float kMenuWidth = 320.0f;
 constexpr float kMenuRow = 42.0f;
 constexpr float kEditorWidth = 540.0f;
 constexpr int kGridColumns = 6;
+constexpr int kPickerColumns = 3;
+constexpr float kPickerCardHeight = 150.0f;
 
 int g_imageSerial = 0;
 
@@ -30,16 +35,18 @@ std::wstring TempAvatarPath() {
 
 void ClearTempAvatar() { DeleteFileW(TempAvatarPath().c_str()); }
 
-// Full-width clickable row: avatar or glyph, label, optional right-hand note.
-bool MenuRow(const char* id, const char* glyph, const ui::AvatarRef* avatar, const std::string& label,
-             const char* note, bool enabled) {
+enum class RowAction { None, Open, Delete };
+
+// Full-width clickable row: avatar or glyph, label, optional note and an optional trash button on the right.
+RowAction MenuRow(const char* id, const char* glyph, const ui::AvatarRef* avatar, const std::string& label,
+                  const char* note, bool enabled, bool deletable = false) {
     const float w = ImGui::GetContentRegionAvail().x;
     const float h = ui::S(kMenuRow);
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::PushID(id);
+    if (deletable) ImGui::SetNextItemAllowOverlap();
     const bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h)) && enabled;
-    const bool hover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
-    ImGui::PopID();
+    const bool hover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (hover && enabled) {
         dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), ui::color::RowHover, ui::S(10));
@@ -55,19 +62,31 @@ bool MenuRow(const char* id, const char* glyph, const ui::AvatarRef* avatar, con
         dl->AddText(f.body, f.body->FontSize, ImVec2(p0.x + ui::S(24) - gs.x * 0.5f, cy - gs.y * 0.5f),
                     enabled ? ui::color::Accent : ui::color::Faint, glyph);
     }
-    float noteW = 0;
+    float right = p0.x + w - ui::S(12);
+    RowAction action = clicked ? RowAction::Open : RowAction::None;
+    if (deletable) {
+        const float d = ui::S(28);
+        right -= d;
+        ImGui::SetCursorScreenPos(ImVec2(right, cy - d * 0.5f));
+        if (ui::IconButton("del", ui::icon::Delete, T("Delete profile", "Eliminar perfil"), ui::color::Danger, true, d))
+            action = RowAction::Delete;
+        right -= ui::S(8);
+    }
     if (note) {
         const ImVec2 ns = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, note);
-        noteW = ns.x + ui::S(12);
-        dl->AddText(f.caption, f.caption->FontSize, ImVec2(p0.x + w - ui::S(12) - ns.x, cy - ns.y * 0.5f),
-                    ui::color::Muted, note);
+        right -= ns.x;
+        dl->AddText(f.caption, f.caption->FontSize, ImVec2(right, cy - ns.y * 0.5f), ui::color::Muted, note);
+        right -= ui::S(8);
     }
     ImGui::PushFont(f.body);
-    const std::string text = ui::Ellipsize(label, w - ui::S(48) - noteW - ui::S(8));
+    const std::string text = ui::Ellipsize(label, right - (p0.x + ui::S(48)));
     const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
     ImGui::PopFont();
     dl->AddText(f.body, f.body->FontSize, ImVec2(p0.x + ui::S(48), cy - ts.y * 0.5f), ink, text.c_str());
-    return clicked;
+    ImGui::PopID();
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::Dummy(ImVec2(w, h));
+    return action;
 }
 
 void CenteredText(ImFont* font, ImU32 col, const char* text, float width) {
@@ -91,7 +110,57 @@ void Message(ImU32 col, const char* glyph, const std::string& text) {
     ImGui::PopFont();
 }
 
+bool BeginCenteredModal(const char* id, float width) {
+    if (!ImGui::IsPopupOpen(id)) ImGui::OpenPopup(id);
+    const ImVec2 vp = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(ui::S(width), vp.x - ui::S(24)), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(22)));
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar();
+    return open;
+}
+
+std::string ProfileName(const std::vector<Profile>& all, const std::wstring& id, const char* fallback) {
+    for (const Profile& p : all) {
+        if (p.id == id) return ToUtf8(p.name);
+    }
+    return fallback;
+}
+
 } // namespace
+
+// ---------------------------------------------------------------------------------------------------------------
+// Language switch: "EN | ES" pill whose right edge sits at `rightEdgeCenter`.
+// ---------------------------------------------------------------------------------------------------------------
+
+void App::DrawLanguageSwitch(ImVec2 rightEdgeCenter) {
+    const float h = ui::S(30), segW = ui::S(40);
+    const ImVec2 p0(rightEdgeCenter.x - segW * 2, rightEdgeCenter.y - h * 0.5f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, ImVec2(p0.x + segW * 2, p0.y + h), ui::color::PanelRaised, h * 0.5f);
+    dl->AddRect(p0, ImVec2(p0.x + segW * 2, p0.y + h), ui::color::Border, h * 0.5f);
+    const struct { const char* label; i18n::Lang lang; } segs[] = { { "EN", i18n::Lang::En }, { "ES", i18n::Lang::Es } };
+    for (int i = 0; i < 2; ++i) {
+        const ImVec2 a(p0.x + segW * i, p0.y), b(a.x + segW, p0.y + h);
+        const bool active = i18n::Current() == segs[i].lang;
+        ImGui::SetCursorScreenPos(a);
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##lang", ImVec2(segW, h)) && !active) i18n::Set(segs[i].lang);
+        const bool hover = ImGui::IsItemHovered();
+        ImGui::PopID();
+        if (hover && !active) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (active) dl->AddRectFilled(ImVec2(a.x + ui::S(3), a.y + ui::S(3)), ImVec2(b.x - ui::S(3), b.y - ui::S(3)), ui::color::Accent, h * 0.5f);
+        ImFont* font = ui::F().caption;
+        const ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, segs[i].label);
+        dl->AddText(font, font->FontSize, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f),
+                    active ? ui::color::AccentInk : (hover ? ui::color::Text : ui::color::Muted), segs[i].label);
+    }
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::Dummy(ImVec2(segW * 2, h));
+    ui::Tooltip(T("Language", "Idioma"));
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Chip menu
@@ -108,6 +177,7 @@ void App::DrawProfileMenu() {
     }
     const ui::Fonts& f = ui::F();
     const std::wstring activeId = active_ ? active_->id : L"";
+    const bool guest = active_ && active_->guest;
 
     // Header: who is playing.
     {
@@ -121,39 +191,49 @@ void App::DrawProfileMenu() {
         const std::string name = ui::Ellipsize(LocalName(), tw);
         ImGui::PopFont();
         dl->AddText(f.strong, f.strong->FontSize, ImVec2(tx, p0.y + ui::S(9)), ui::color::Text, name.c_str());
-        const char* sub = active_ ? "Perfil activo" : "Sin perfil: identidad de este PC";
+        const char* sub = !active_ ? T("No profile: this PC's identity", "Sin perfil: identidad de este PC")
+                        : guest    ? T("Guest: saves are temporary", "Invitado: partidas temporales")
+                                   : T("Active profile", "Perfil activo");
         dl->AddText(f.caption, f.caption->FontSize, ImVec2(tx, p0.y + ui::S(9) + f.strong->FontSize + ui::S(2)),
                     ui::color::Muted, sub);
         ImGui::Dummy(ImVec2(0, r * 2 + ui::S(14)));
     }
-    if (active_ && MenuRow("edit", ui::icon::Edit, nullptr, "Editar perfil", nullptr, true)) {
+    if (active_ && !guest && MenuRow("edit", ui::icon::Edit, nullptr, T("Edit profile", "Editar perfil"), nullptr, true) == RowAction::Open) {
         ImGui::CloseCurrentPopup();
         BeginEditor(false);
     }
     ImGui::Dummy(ImVec2(0, ui::S(4)));
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0, ui::S(4)));
-    ui::SectionLabel("Cambiar de perfil");
+    ui::SectionLabel(T("Switch profile", "Cambiar de perfil"));
     ImGui::Dummy(ImVec2(0, ui::S(2)));
     int others = 0;
     for (const Profile& p : profiles_) {
         if (p.id == activeId) continue;
         ++others;
         const bool inUse = profiles::IsLockedByOther(p.id, activeId);
+        const bool busyElsewhere = !inUse && profiles::IsInUseAnywhere(p.id);
         const ui::AvatarRef av = ProfileAvatar(p);
-        if (MenuRow(ToUtf8(p.id).c_str(), nullptr, &av, ToUtf8(p.name), inUse ? "En uso" : nullptr, !inUse)) {
+        const RowAction a = MenuRow(ToUtf8(p.id).c_str(), nullptr, &av, ToUtf8(p.name),
+                                    inUse ? T("Playing", "En uso") : nullptr, !inUse, !inUse && !busyElsewhere);
+        if (a == RowAction::Open) {
             pendingSwitch_ = p.id;
             ImGui::CloseCurrentPopup();
+        } else if (a == RowAction::Delete) {
+            pendingDelete_ = p.id;
+            deleteUnderstood_ = false;
+            ImGui::CloseCurrentPopup();
         }
-        if (inUse) ui::Tooltip("Se está usando en otra ventana de este juego");
+        if (inUse) ui::Tooltip(T("Open in another window of this game", "Se está usando en otra ventana de este juego"));
     }
     if (others == 0) {
         ImGui::PushFont(f.caption);
-        ui::TextColored(ui::color::Faint, "  No hay otros perfiles en este PC.");
+        ui::TextColored(ui::color::Faint, T("  No other profiles on this PC.", "  No hay otros perfiles en este PC."));
         ImGui::PopFont();
     }
     const bool canCreate = profiles_.size() < (size_t)kMaxProfiles;
-    if (MenuRow("new", ui::icon::Add, nullptr, "Crear perfil nuevo", canCreate ? nullptr : "Máximo 10", canCreate)) {
+    if (MenuRow("new", ui::icon::Add, nullptr, T("Create new profile", "Crear perfil nuevo"),
+                canCreate ? nullptr : T("Max. 10", "Máximo 10"), canCreate) == RowAction::Open) {
         ImGui::CloseCurrentPopup();
         BeginEditor(true);
     }
@@ -162,56 +242,84 @@ void App::DrawProfileMenu() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Restart confirmation
+// Confirmations
 // ---------------------------------------------------------------------------------------------------------------
 
 void App::DrawSwitchConfirm() {
     if (pendingSwitch_.empty()) return;
-    if (!ImGui::IsPopupOpen("##switch")) ImGui::OpenPopup("##switch");
-    const ImVec2 vp = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(ui::S(460), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(22)));
-    if (!ImGui::BeginPopupModal("##switch", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                                                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
-        ImGui::PopStyleVar();
-        return;
-    }
-    std::string name = "este perfil";
-    for (const Profile& p : profiles_) {
-        if (p.id == pendingSwitch_) name = ToUtf8(p.name);
-    }
+    if (!BeginCenteredModal("##switch", 460)) return;
+    const std::string name = ProfileName(profiles_, pendingSwitch_, T("this profile", "este perfil"));
     ImGui::PushFont(ui::F().heading);
-    ImGui::TextUnformatted(("Cambiar a " + name).c_str());
+    ImGui::TextUnformatted((T("Switch to ", "Cambiar a ") + name).c_str());
     ImGui::PopFont();
     ImGui::PushFont(ui::F().body);
     ImGui::PushTextWrapPos(0.0f);
-    ui::TextColored(ui::color::Muted,
-                    "Para cambiar de perfil el juego tiene que reiniciarse. Guarda tu partida antes de continuar.");
+    ui::TextColored(ui::color::Muted, T("The game has to restart to switch profiles. Save your game before you continue.",
+                                        "Para cambiar de perfil el juego tiene que reiniciarse. Guarda tu partida antes de continuar."));
     ImGui::PopTextWrapPos();
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, ui::S(8)));
     const float w = ImGui::GetContentRegionAvail().x;
     const ImVec2 bs((w - ui::S(10)) * 0.5f, ui::S(42));
     const std::wstring id = pendingSwitch_;
-    if (ui::PrimaryButton("Reiniciar ahora", bs)) {
+    if (ui::PrimaryButton(T("Restart now", "Reiniciar ahora"), bs)) {
         ImGui::CloseCurrentPopup();
         pendingSwitch_.clear();
         RestartWithProfile(id);
     }
     ImGui::SameLine(0, ui::S(10));
-    if (ui::SecondaryButton("Al próximo inicio", bs)) {
+    if (ui::SecondaryButton(T("Next time I start", "Al próximo inicio"), bs)) {
         ImGui::CloseCurrentPopup();
         DeferProfile(id);
     }
     ImGui::Dummy(ImVec2(0, ui::S(2)));
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w - ImGui::CalcTextSize("Cancelar").x) * 0.5f);
-    if (ui::LinkButton("Cancelar") || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+    const char* cancel = T("Cancel", "Cancelar");
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w - ImGui::CalcTextSize(cancel).x) * 0.5f);
+    if (ui::LinkButton(cancel) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         ImGui::CloseCurrentPopup();
         pendingSwitch_.clear();
     }
     ImGui::EndPopup();
-    ImGui::PopStyleVar();
+}
+
+// Two steps: the "I understand" box has to be ticked before the red button works.
+void App::DrawDeleteConfirm() {
+    if (pendingDelete_.empty()) return;
+    if (!BeginCenteredModal("##delete", 480)) return;
+    const std::string name = ProfileName(profiles_, pendingDelete_, T("this profile", "este perfil"));
+    ImGui::PushFont(ui::F().heading);
+    ui::TextColored(ui::color::Danger, ui::icon::Warning);
+    ImGui::SameLine();
+    ImGui::TextUnformatted((T("Delete ", "Eliminar ") + name + "?").c_str());
+    ImGui::PopFont();
+    ImGui::PushFont(ui::F().body);
+    ImGui::PushTextWrapPos(0.0f);
+    ui::TextColored(ui::color::Muted,
+                    T("Its name, avatar, SteamID and favourites are deleted, together with the saves ReFix LAN keeps for "
+                      "this profile. It cannot be undone.",
+                      "Se borran su nombre, su avatar, su SteamID y sus favoritos, junto con las partidas que ReFix LAN "
+                      "guarda para este perfil. No se puede deshacer."));
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    ImGui::Checkbox(T("I understand, delete it", "Lo entiendo, quiero eliminarlo"), &deleteUnderstood_);
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 bs((w - ui::S(10)) * 0.5f, ui::S(42));
+    bool close = false;
+    if (ui::SecondaryButton(T("Cancel", "Cancelar"), bs) || ImGui::IsKeyPressed(ImGuiKey_Escape)) close = true;
+    ImGui::SameLine(0, ui::S(10));
+    if (ui::DangerButton(T("Delete profile", "Eliminar perfil"), bs, deleteUnderstood_)) {
+        const std::wstring id = pendingDelete_;
+        if (DeleteProfile(id)) ShowInfo(T("Profile deleted", "Perfil eliminado"), name);
+        close = true;
+    }
+    if (close) {
+        ImGui::CloseCurrentPopup();
+        pendingDelete_.clear();
+        deleteUnderstood_ = false;
+    }
+    ImGui::EndPopup();
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -241,15 +349,15 @@ void App::ImportImage() {
     editor_.info.clear();
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) {
-        editor_.error = "No se pudo abrir el selector de archivos.";
+        editor_.error = T("Could not open the file picker.", "No se pudo abrir el selector de archivos.");
         return;
     }
     const COMDLG_FILTERSPEC types[] = {
-        { L"Imágenes", L"*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.tif;*.tiff;*.ico;*.webp;*.heic;*.heif" },
-        { L"Todos los archivos", L"*.*" },
+        { i18n::TW(L"Images", L"Imágenes"), L"*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.tif;*.tiff;*.ico;*.webp;*.heic;*.heif" },
+        { i18n::TW(L"All files", L"Todos los archivos"), L"*.*" },
     };
     dlg->SetFileTypes(2, types);
-    dlg->SetTitle(L"Elige una imagen para tu avatar");
+    dlg->SetTitle(i18n::TW(L"Choose a picture for your avatar", L"Elige una imagen para tu avatar"));
     DWORD opts = 0;
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
@@ -275,7 +383,7 @@ void App::ImportImage() {
     editor_.custom = true;
     editor_.imagePath = TempAvatarPath();
     editor_.imageVersion = ++g_imageSerial;
-    editor_.info = "Imagen lista: se ha recortado en cuadrado.";
+    editor_.info = T("Picture ready: it was cropped to a square.", "Imagen lista: se ha recortado en cuadrado.");
 }
 
 void App::ImportFromSteam() {
@@ -290,7 +398,8 @@ void App::ImportFromSteam() {
     if (editor_.creating) {
         for (const Profile& p : profiles_) {
             if (p.steamId == s->steamId) {
-                editor_.error = "Ya tienes un perfil con esta cuenta de Steam (" + ToUtf8(p.name) + ").";
+                editor_.error = std::string(T("You already have a profile with this Steam account (",
+                                              "Ya tienes un perfil con esta cuenta de Steam (")) + ToUtf8(p.name) + ").";
                 return;
             }
         }
@@ -308,17 +417,19 @@ void App::ImportFromSteam() {
         }
     }
     if (editor_.creating)
-        editor_.info = avatar ? "Importados tu nombre, tu avatar y tu SteamID de Steam."
-                              : "Importados tu nombre y tu SteamID (Steam no tiene tu avatar en caché).";
+        editor_.info = avatar ? T("Imported your Steam name, avatar and SteamID.", "Importados tu nombre, tu avatar y tu SteamID de Steam.")
+                              : T("Imported your Steam name and SteamID (Steam has no cached avatar).",
+                                  "Importados tu nombre y tu SteamID (Steam no tiene tu avatar en caché).");
     else
-        editor_.info = avatar ? "Importados tu nombre y tu avatar de Steam." : "Importado tu nombre de Steam.";
+        editor_.info = avatar ? T("Imported your Steam name and avatar.", "Importados tu nombre y tu avatar de Steam.")
+                              : T("Imported your Steam name.", "Importado tu nombre de Steam.");
 }
 
 bool App::SaveEditor() {
     editor_.error.clear();
     std::wstring name = Trim(FromUtf8(editor_.name));
     if (name.empty()) {
-        editor_.error = "Escribe un nombre para el perfil.";
+        editor_.error = T("Type a name for the profile.", "Escribe un nombre para el perfil.");
         return false;
     }
     name = name.substr(0, kMaxNameChars);
@@ -326,7 +437,7 @@ bool App::SaveEditor() {
 
     if (editor_.creating) {
         if (profiles_.size() >= (size_t)kMaxProfiles) {
-            editor_.error = "Ya hay 10 perfiles en este PC, el máximo.";
+            editor_.error = T("This PC already has 10 profiles, the maximum.", "Ya hay 10 perfiles en este PC, el máximo.");
             return false;
         }
         Profile p = profiles::MakeNew(name, profiles_);
@@ -337,7 +448,7 @@ bool App::SaveEditor() {
         p.stockAvatar = editor_.stock;
         p.nativeSaves = editor_.offerNative && editor_.native;
         if (!profiles::Save(p)) {
-            editor_.error = "No se pudo guardar el perfil en %APPDATA%\\ReFix LAN.";
+            editor_.error = T("Could not save the profile in %APPDATA%\\ReFix LAN.", "No se pudo guardar el perfil en %APPDATA%\\ReFix LAN.");
             return false;
         }
         if (customFromFile && CopyFileW(editor_.imagePath.c_str(), profiles::AvatarPath(p.id).c_str(), FALSE)) {
@@ -347,7 +458,7 @@ bool App::SaveEditor() {
         editor_.savedId = p.id;
         ReFixLog("[Overlay] Profile created: %s (%llu)", ToUtf8(p.id).c_str(), (unsigned long long)p.steamId);
     } else {
-        if (!active_) return false;
+        if (!active_ || active_->guest) return false;
         Profile p = *active_;
         const bool renamed = p.name != name;
         p.name = name;
@@ -358,7 +469,7 @@ bool App::SaveEditor() {
             p.customAvatar = false;
         }
         if (!profiles::Save(p)) {
-            editor_.error = "No se pudo guardar el perfil.";
+            editor_.error = T("Could not save the profile.", "No se pudo guardar el perfil.");
             return false;
         }
         active_ = p;
@@ -375,13 +486,14 @@ bool App::SaveEditor() {
 bool App::DrawEditorBody(bool firstRun) {
     const ui::Fonts& f = ui::F();
     const float w = ImGui::GetContentRegionAvail().x;
-    const char* title = firstRun ? "Te damos la bienvenida a ReFix LAN"
-                                 : editor_.creating ? "Nuevo perfil" : "Editar perfil";
+    const char* title = firstRun ? T("Welcome to ReFix LAN", "Te damos la bienvenida a ReFix LAN")
+                                 : editor_.creating ? T("New profile", "Nuevo perfil") : T("Edit profile", "Editar perfil");
     CenteredText(f.title, ui::color::Text, title, w);
     if (firstRun) {
         CenteredText(f.caption, ui::color::Muted,
-                     "Crea tu perfil para jugar en la LAN. Cada perfil tiene su nombre, su avatar, su SteamID y sus "
-                     "partidas guardadas.",
+                     T("Create your profile to play on the LAN. Every profile has its own name, avatar, SteamID and saves.",
+                       "Crea tu perfil para jugar en la LAN. Cada perfil tiene su nombre, su avatar, su SteamID y sus "
+                       "partidas guardadas."),
                      w);
     }
     ImGui::Dummy(ImVec2(0, ui::S(10)));
@@ -396,12 +508,12 @@ bool App::DrawEditorBody(bool firstRun) {
     ui::DrawAvatar(dl, c, r, EditorAvatar());
     const int count = ui::StockCount();
     ImGui::SetCursorScreenPos(ImVec2(c.x - r - ui::S(28) - d, c.y - d * 0.5f));
-    if (ui::IconButton("prev", ui::icon::ChevronLeft, "Avatar anterior", ui::color::Text, true, d)) {
+    if (ui::IconButton("prev", ui::icon::ChevronLeft, T("Previous avatar", "Avatar anterior"), ui::color::Text, true, d)) {
         editor_.stock = editor_.custom ? editor_.stock : (editor_.stock + count - 1) % count;
         editor_.custom = false;
     }
     ImGui::SetCursorScreenPos(ImVec2(c.x + r + ui::S(28), c.y - d * 0.5f));
-    if (ui::IconButton("next", ui::icon::ChevronRight, "Avatar siguiente", ui::color::Text, true, d)) {
+    if (ui::IconButton("next", ui::icon::ChevronRight, T("Next avatar", "Avatar siguiente"), ui::color::Text, true, d)) {
         editor_.stock = editor_.custom ? editor_.stock : (editor_.stock + 1) % count;
         editor_.custom = false;
     }
@@ -435,30 +547,33 @@ bool App::DrawEditorBody(bool firstRun) {
 
     // Import buttons.
     const float bw = (w - ui::S(10)) * 0.5f;
-    const std::string imgLabel = std::string(ui::icon::Folder) + "  Importar imagen…";
-    const std::string steamLabel = std::string(ui::icon::Import) + "  Importar desde Steam";
+    const std::string imgLabel = std::string(ui::icon::Folder) + "  " + T("Import picture…", "Importar imagen…") + "##img";
+    const std::string steamLabel = std::string(ui::icon::Import) + "  " + T("Import from Steam", "Importar desde Steam") + "##steam";
     if (ui::SecondaryButton(imgLabel.c_str(), ImVec2(bw, ui::S(40)))) ImportImage();
     ImGui::SameLine(0, ui::S(10));
     if (ui::SecondaryButton(steamLabel.c_str(), ImVec2(bw, ui::S(40)))) ImportFromSteam();
-    ui::Tooltip("Usa el nombre, el avatar y el SteamID de la cuenta abierta en Steam");
+    ui::Tooltip(T("Uses the name, avatar and SteamID of the account signed in to Steam",
+                  "Usa el nombre, el avatar y el SteamID de la cuenta abierta en Steam"));
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
     // Name.
     ImGui::PushFont(f.caption);
-    ui::TextColored(ui::color::Muted, "Nombre");
+    ui::TextColored(ui::color::Muted, T("Name", "Nombre"));
     ImGui::PopFont();
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-    const bool enter = ImGui::InputTextWithHint("##name", "Tu nombre en la LAN", editor_.name, sizeof(editor_.name),
-                                                ImGuiInputTextFlags_EnterReturnsTrue);
+    const bool enter = ImGui::InputTextWithHint("##name", T("Your name on the LAN", "Tu nombre en la LAN"), editor_.name,
+                                                sizeof(editor_.name), ImGuiInputTextFlags_EnterReturnsTrue);
     if (editor_.offerNative) {
         ImGui::Dummy(ImVec2(0, ui::S(2)));
-        ImGui::Checkbox("Usar las partidas guardadas que ya hay en este PC", &editor_.native);
-        ui::Tooltip("Si lo desmarcas, este perfil empieza sin partidas y las actuales se guardan aparte");
+        ImGui::Checkbox(T("Use the saves already on this PC##native", "Usar las partidas guardadas que ya hay en este PC##native"),
+                        &editor_.native);
+        ui::Tooltip(T("If you untick it, this profile starts with no saves and the current ones are kept aside",
+                      "Si lo desmarcas, este perfil empieza sin partidas y las actuales se guardan aparte"));
     }
     if (editor_.steamId) {
         ImGui::PushFont(f.caption);
-        ui::TextColored(ui::color::Faint, ("SteamID de Steam: " + std::to_string(editor_.steamId)).c_str());
+        ui::TextColored(ui::color::Faint, (std::string(T("Steam SteamID: ", "SteamID de Steam: ")) + std::to_string(editor_.steamId)).c_str());
         ImGui::PopFont();
     }
     ImGui::Dummy(ImVec2(0, ui::S(4)));
@@ -476,20 +591,21 @@ bool App::DrawEditorBody(bool firstRun) {
     const float rowY = ImGui::GetCursorPosY();
     if (firstRun) {
         ImGui::SetCursorPosY(rowY + (footerH - ImGui::GetTextLineHeight()) * 0.5f);
-        if (ui::LinkButton("Ahora no")) {
+        if (ui::LinkButton(T("Not now", "Ahora no"))) {
             editor_.savedId.clear();
             done = true;
         }
-        ui::Tooltip("Juega con la identidad de este PC; podrás crear el perfil más tarde con Shift+Tab");
+        ui::Tooltip(T("Play with this PC's identity; you can create the profile later with Shift+Tab",
+                      "Juega con la identidad de este PC; podrás crear el perfil más tarde con Shift+Tab"));
     } else {
-        if (ui::SecondaryButton("Cancelar", bs) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (ui::SecondaryButton(T("Cancel##editor", "Cancelar##editor"), bs) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             editor_.savedId.clear();
             done = true;
         }
     }
     ImGui::SameLine();
     ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - bs.x, rowY));
-    const char* primary = editor_.creating ? "Crear perfil" : "Guardar";
+    const char* primary = editor_.creating ? T("Create profile##save", "Crear perfil##save") : T("Save##save", "Guardar##save");
     if ((ui::PrimaryButton(primary, bs, hasName) || (enter && hasName)) && SaveEditor()) done = true;
     if (done) ClearTempAvatar();
     return done;
@@ -515,7 +631,8 @@ void App::DrawEditorModal() {
         ImGui::CloseCurrentPopup();
         // A new profile only takes effect after a restart: ask now.
         if (creating && !editor_.savedId.empty()) pendingSwitch_ = editor_.savedId;
-        else if (!creating && !editor_.savedId.empty()) ShowInfo("Perfil guardado", "Los cambios ya están aplicados.");
+        else if (!creating && !editor_.savedId.empty())
+            ShowInfo(T("Profile saved", "Perfil guardado"), T("The changes are already applied.", "Los cambios ya están aplicados."));
     }
     ImGui::EndPopup();
     ImGui::PopStyleVar();
@@ -538,6 +655,11 @@ void App::DrawDialog(ImVec2 viewport) {
     bg->AddRect(ImVec2(0.5f, 0.5f), ImVec2(viewport.x - 0.5f, viewport.y - 0.5f), ui::color::Border, ui::S(14));
     bg->AddRectFilled(ImVec2(ui::S(14), 0), ImVec2(viewport.x - ui::S(14), ui::S(3)), ui::color::Accent);
 
+    // Language first, on a row of its own above the title.
+    const ImVec2 body = ImGui::GetCursorScreenPos();
+    DrawLanguageSwitch(ImVec2(viewport.x - ui::S(18), ui::S(26)));
+    ImGui::SetCursorScreenPos(ImVec2(body.x, body.y + ui::S(18)));
+
     if (dialog_ == DialogKind::FirstRun || dialogEditing_) {
         if (!editor_.open) BeginEditor(true);
         if (DrawEditorBody(dialog_ == DialogKind::FirstRun)) {
@@ -556,41 +678,120 @@ void App::DrawDialog(ImVec2 viewport) {
     } else {
         DrawPicker();
     }
+    DrawDeleteConfirm();
     ImGui::End();
 }
 
 void App::DrawPicker() {
     const ui::Fonts& f = ui::F();
     const float w = ImGui::GetContentRegionAvail().x;
-    CenteredText(f.title, ui::color::Text, "¿Quién juega?", w);
+    CenteredText(f.title, ui::color::Text, T("Who's playing?", "¿Quién juega?"), w);
     CenteredText(f.caption, ui::color::Muted,
-                 "Todos los perfiles están abiertos en otra ventana de este juego. Elige uno que se haya liberado o "
-                 "crea uno nuevo.",
+                 T("Profiles already playing in another window of this game are locked. Pick yours, create one or play "
+                   "as a guest.",
+                   "Los perfiles que ya están jugando en otra ventana de este juego aparecen bloqueados. Elige el tuyo, "
+                   "crea uno o juega como invitado."),
                  w);
     ImGui::Dummy(ImVec2(0, ui::S(12)));
-    const float footer = ui::S(110);
+
+    const float footer = ui::S(56);
     ImGui::BeginChild("##profiles", ImVec2(0, ImGui::GetContentRegionAvail().y - footer), ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoBackground);
-    for (const Profile& p : profiles_) {
-        const bool inUse = profiles::IsLockedByOther(p.id, L"");
-        const ui::AvatarRef av = ProfileAvatar(p);
-        if (MenuRow(ToUtf8(p.id).c_str(), nullptr, &av, ToUtf8(p.name), inUse ? "En uso" : "Libre", !inUse)) {
-            if (profiles::TryLock(p.id)) {
-                FinishDialog(p);
-                break;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float gap = ui::S(12);
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float cardW = (avail - gap * (kPickerColumns - 1)) / kPickerColumns;
+    const float cardH = ui::S(kPickerCardHeight);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const bool canCreate = profiles_.size() < (size_t)kMaxProfiles;
+    const int cards = (int)profiles_.size() + 1;   // + the "new profile" card
+    std::optional<Profile> chosen;
+    for (int i = 0; i < cards; ++i) {
+        const ImVec2 p0(origin.x + (i % kPickerColumns) * (cardW + gap), origin.y + (i / kPickerColumns) * (cardH + gap));
+        const ImVec2 p1(p0.x + cardW, p0.y + cardH);
+        const bool isNew = i == (int)profiles_.size();
+        const Profile* p = isNew ? nullptr : &profiles_[i];
+        const bool locked = p && profiles::IsLockedByOther(p->id, L"");
+        const bool busyElsewhere = p && !locked && profiles::IsInUseAnywhere(p->id);
+        const bool enabled = isNew ? canCreate : !locked;
+        ImGui::SetCursorScreenPos(p0);
+        ImGui::PushID(i);
+        ImGui::SetNextItemAllowOverlap();
+        const bool clicked = ImGui::InvisibleButton("##card", ImVec2(cardW, cardH)) && enabled;
+        const bool hover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem);
+        if (hover && enabled) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        dl->AddRectFilled(p0, p1, hover && enabled ? ui::color::RowHover : ui::color::Row, ui::S(14));
+        if (hover && enabled) dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.7f), ui::S(14), 0, ui::S(1.5f));
+        const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(18 + 34));
+        if (isNew) {
+            dl->AddCircle(ac, ui::S(34), enabled ? ui::color::Accent : ui::color::Faint, 48, ui::S(2));
+            const ImVec2 gs = f.title->CalcTextSizeA(f.title->FontSize, FLT_MAX, 0, ui::icon::Add);
+            dl->AddText(f.title, f.title->FontSize, ImVec2(ac.x - gs.x * 0.5f, ac.y - gs.y * 0.5f),
+                        enabled ? ui::color::Accent : ui::color::Faint, ui::icon::Add);
+        } else {
+            ui::DrawAvatar(dl, ac, ui::S(34), ProfileAvatar(*p));
+            if (locked) {
+                dl->AddCircleFilled(ac, ui::S(34), IM_COL32(10, 13, 18, 170), 48);
+                const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Lock);
+                dl->AddText(f.heading, f.heading->FontSize, ImVec2(ac.x - gs.x * 0.5f, ac.y - gs.y * 0.5f), ui::color::Text,
+                            ui::icon::Lock);
             }
         }
+        const std::string label = isNew ? (canCreate ? T("New profile", "Nuevo perfil") : T("Max. 10 profiles", "Máximo 10 perfiles"))
+                                        : ToUtf8(p->name);
+        ImGui::PushFont(f.strong);
+        const std::string name = ui::Ellipsize(label, cardW - ui::S(20));
+        const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
+        ImGui::PopFont();
+        dl->AddText(f.strong, f.strong->FontSize, ImVec2(ac.x - ns.x * 0.5f, p0.y + ui::S(98)), enabled ? ui::color::Text : ui::color::Faint,
+                    name.c_str());
+        const char* status = isNew ? "" : locked ? T("Playing now", "Jugando ahora") : T("Available", "Disponible");
+        const ImVec2 ss = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, status);
+        dl->AddText(f.caption, f.caption->FontSize, ImVec2(ac.x - ss.x * 0.5f, p0.y + ui::S(98) + f.strong->FontSize + ui::S(4)),
+                    locked ? ui::color::Faint : ui::color::Accent, status);
+        // Delete: only for profiles no game is using.
+        // Hover by rectangle: while the trash button is held the card itself does not count as hovered.
+        if (p && !locked && !busyElsewhere && ImGui::IsMouseHoveringRect(p0, p1) &&
+            ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+            const float d = ui::S(28);
+            ImGui::SetCursorScreenPos(ImVec2(p1.x - d - ui::S(8), p0.y + ui::S(8)));
+            if (ui::IconButton("del", ui::icon::Delete, T("Delete profile", "Eliminar perfil"), ui::color::Danger, true, d)) {
+                pendingDelete_ = p->id;
+                deleteUnderstood_ = false;
+            } else if (clicked && pendingDelete_.empty()) {
+                chosen = *p;
+            }
+        } else if (clicked) {
+            if (isNew) {
+                BeginEditor(true);
+                dialogEditing_ = true;
+            } else {
+                chosen = *p;
+            }
+        }
+        ImGui::PopID();
     }
+    const int rowsUsed = (cards + kPickerColumns - 1) / kPickerColumns;
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rowsUsed * (cardH + gap)));
+    ImGui::Dummy(ImVec2(avail, 0));
     ImGui::EndChild();
-    ImGui::Dummy(ImVec2(0, ui::S(6)));
-    const bool canCreate = profiles_.size() < (size_t)kMaxProfiles;
-    if (ui::PrimaryButton(canCreate ? "Crear perfil nuevo" : "Máximo de 10 perfiles", ImVec2(w, ui::S(44)), canCreate)) {
-        BeginEditor(true);
-        dialogEditing_ = true;
+
+    ImGui::Dummy(ImVec2(0, ui::S(10)));
+    const char* guestLabel = T("I'd rather play as a guest", "Prefiero jugar como invitado");
+    ImGui::PushFont(f.strong);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w - ImGui::CalcTextSize(guestLabel).x) * 0.5f);
+    const bool guest = ui::LinkButton(guestLabel);
+    ImGui::PopFont();
+    ui::Tooltip(T("Standard name and avatar, temporary saves that are deleted when the game closes",
+                  "Nombre y avatar estándar, partidas temporales que se borran al cerrar el juego"));
+
+    if (chosen && profiles::TryLock(chosen->id)) {
+        FinishDialog(chosen);
+    } else if (guest) {
+        Profile g = profiles::MakeGuest(i18n::TW(L"Guest", L"Invitado"), profiles_);
+        ReFixLog("[Overlay] Playing as a guest (SteamID %llu)", (unsigned long long)g.steamId);
+        FinishDialog(g);
     }
-    ImGui::Dummy(ImVec2(0, ui::S(4)));
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w - ImGui::CalcTextSize("Jugar sin perfil").x) * 0.5f);
-    if (ui::LinkButton("Jugar sin perfil")) FinishDialog(std::nullopt);
 }
 
 } // namespace refix::overlay

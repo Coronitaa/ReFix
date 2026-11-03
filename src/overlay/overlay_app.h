@@ -90,6 +90,7 @@ public:
     void RestartWithProfile(const std::wstring& id);
     void DeferProfile(const std::wstring& id);
     void AcceptInvite(const net::Invite& inv);
+    bool DeleteProfile(const std::wstring& id);   // false when it is in use somewhere
     void ShowInfo(const std::string& title, const std::string& body);
 
     // Data for the screens.
@@ -107,6 +108,8 @@ public:
     std::string inviteConnect_;
     EditorState editor_;
     std::wstring pendingSwitch_;     // profile id waiting for the restart confirmation
+    std::wstring pendingDelete_;     // profile id waiting for the delete confirmation
+    bool deleteUnderstood_ = false;  // "I understand" box of that confirmation
     char filter_[64] = {};
     ImVec2 chipMin_{}, chipMax_{};
     bool popupOpenLastFrame_ = false;   // profile chip in the top bar (anchors its menu)
@@ -136,6 +139,8 @@ private:
     void DrawToasts(ImVec2 viewport, bool ownWindow);
     void DrawProfileMenu();
     void DrawSwitchConfirm();
+    void DrawDeleteConfirm();
+    void DrawLanguageSwitch(ImVec2 rightEdgeCenter);
     void DrawEditorModal();
     bool DrawEditorBody(bool firstRun);   // true when the editor finished (saved or cancelled)
     void DrawDialog(ImVec2 viewport);

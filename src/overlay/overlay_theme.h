@@ -37,6 +37,9 @@ constexpr const char* ChevronLeft = "\xEE\x9D\xAB";  // E76B
 constexpr const char* ChevronRight = "\xEE\x9D\xAC"; // E76C
 constexpr const char* ChevronDown = "\xEE\x9C\x8D";  // E70D
 constexpr const char* Search = "\xEE\x9C\xA1";       // E721
+constexpr const char* Delete = "\xEE\x9D\x8D";       // E74D trash
+constexpr const char* Lock = "\xEE\x9C\xAE";         // E72E
+constexpr const char* Language = "\xEE\x9D\xBD";     // E775 globe/keyboard
 } // namespace icon
 
 namespace color {
@@ -86,6 +89,7 @@ int StockCount();
 // Widgets. Ids are taken from the label/icon unless `id` is given.
 bool PrimaryButton(const char* label, ImVec2 size = ImVec2(0, 0), bool enabled = true);
 bool SecondaryButton(const char* label, ImVec2 size = ImVec2(0, 0), bool enabled = true);
+bool DangerButton(const char* label, ImVec2 size = ImVec2(0, 0), bool enabled = true);
 bool LinkButton(const char* label);
 // Round icon button with a tooltip; `tint` colours the glyph when enabled.
 bool IconButton(const char* id, const char* glyph, const char* tooltip, ImU32 tint, bool enabled = true,

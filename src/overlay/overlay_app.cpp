@@ -3,7 +3,9 @@
 #endif
 #include "overlay_app.h"
 #include "avatar_image.h"
+#include "overlay_i18n.h"
 #include "overlay_text.h"
+#include "save_swap.h"
 #include "refix_overlay.h"
 
 #include "../include/steam/steam_api.h"
@@ -107,7 +109,7 @@ ImVec2 App::ToastSize() {
 }
 
 ImVec2 App::DialogSize() {
-    if (dialog_ == DialogKind::Picker && !dialogEditing_) return ImVec2(ui::S(500), ui::S(600));
+    if (dialog_ == DialogKind::Picker && !dialogEditing_) return ImVec2(ui::S(620), ui::S(660));
     return ImVec2(ui::S(540), ui::S(720));
 }
 
@@ -228,9 +230,9 @@ void App::PublishPresence() {
 void App::PollInvites() {
     for (const net::Invite& inv : net::TakeInvites()) {
         const net::RemotePlayer* from = FindPlayer(inv.from);
-        const std::string who = from ? from->name : "Un jugador";
+        const std::string who = from ? from->name : i18n::T("A player", "Un jugador");
         if (inv.appId != appId_) {
-            ShowInfo(who + " te invita", "a una partida de otro juego.");
+            ShowInfo(who + i18n::T(" invited you", " te invita"), i18n::T("to a match of another game.", "a una partida de otro juego."));
             continue;
         }
         if (inv.lobbyId) {
@@ -243,7 +245,7 @@ void App::PollInvites() {
         Toast t;
         t.kind = Toast::Kind::Invite;
         t.title = who;
-        t.body = "te invita a su partida";
+        t.body = i18n::T("invited you to their match", "te invita a su partida");
         t.invite = inv;
         t.born = GetTickCount64();
         t.life = kInviteToastMs;
@@ -317,8 +319,9 @@ void App::Invite(const net::RemotePlayer& p) {
 }
 
 void App::ToggleFavorite(const net::RemotePlayer& p) {
-    if (!active_) {
-        ShowInfo("Crea un perfil", "para guardar jugadores favoritos.");
+    if (!active_ || active_->guest) {
+        ShowInfo(i18n::T("Create a profile", "Crea un perfil"),
+                 i18n::T("to keep favourite players.", "para guardar jugadores favoritos."));
         return;
     }
     auto& fav = active_->favorites;
@@ -338,7 +341,8 @@ void App::OpenUrl(const std::wstring& url) {
 void App::DeferProfile(const std::wstring& id) {
     profiles::SetLastProfileId(id);
     pendingSwitch_.clear();
-    ShowInfo("Perfil guardado", "Se usará la próxima vez que abras el juego.");
+    ShowInfo(i18n::T("Profile saved", "Perfil guardado"),
+             i18n::T("It will be used the next time you open the game.", "Se usará la próxima vez que abras el juego."));
 }
 
 void App::RestartWithProfile(const std::wstring& id) {
@@ -352,13 +356,26 @@ void App::RestartWithProfile(const std::wstring& id) {
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        ShowInfo("No se pudo reiniciar", "Cierra y abre el juego para usar el perfil.");
+        ShowInfo(i18n::T("Could not restart", "No se pudo reiniciar"),
+                 i18n::T("Close and open the game to use the profile.", "Cierra y abre el juego para usar el perfil."));
         return;
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     ReFixLog("[Overlay] Restarting with profile %s", ToUtf8(id).c_str());
     TerminateProcess(GetCurrentProcess(), 0);
+}
+
+bool App::DeleteProfile(const std::wstring& id) {
+    if ((active_ && active_->id == id) || !profiles::Remove(id)) {
+        ShowInfo(i18n::T("Could not delete the profile", "No se pudo eliminar el perfil"),
+                 i18n::T("It is in use in a game right now.", "Ahora mismo se está usando en un juego."));
+        return false;
+    }
+    saves::ForgetOwner(id);
+    profiles_ = profiles::LoadAll();
+    ++profileVersion_;
+    return true;
 }
 
 void App::AcceptInvite(const net::Invite& inv) {

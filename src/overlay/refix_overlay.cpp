@@ -127,7 +127,8 @@ bool Allowed() {
     return IsGuiProcess() && !HasHeadlessSwitch();
 }
 
-std::optional<Profile> PickProfile(const std::vector<Profile>& all) {
+// `otherInstance`: another window of this game is open, so the player of this one has to say who they are.
+std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherInstance) {
     wchar_t forced[32] = {};
     if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", forced, 32) > 0) {
         SetEnvironmentVariableW(L"REFIX_PROFILE_ID", nullptr);   // not for child processes of the game
@@ -136,6 +137,7 @@ std::optional<Profile> PickProfile(const std::vector<Profile>& all) {
             ReFixLog("[Overlay] Profile %s from REFIX_PROFILE_ID is still in use", ToUtf8(p->id).c_str());
         }
     }
+    if (otherInstance) return std::nullopt;
     if (auto last = profiles::Load(profiles::LastProfileId())) {
         if (profiles::TryLock(last->id)) return last;
     }
@@ -185,11 +187,14 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
         ReFixLog("[Overlay] Profiles off for this process (disabled, console or headless)");
         return false;
     }
+    profiles::CleanupGuestFolders();
     std::vector<Profile> all = profiles::LoadAll();
-    std::optional<Profile> chosen = PickProfile(all);
+    const bool otherInstance = saves::OtherInstanceRunning();
+    std::optional<Profile> chosen = PickProfile(all, otherInstance);
     if (!chosen) {
-        const DialogKind kind = all.empty() ? DialogKind::FirstRun : DialogKind::Picker;
-        ReFixLog("[Overlay] No free profile (%zu on this PC): showing the %s", all.size(),
+        const DialogKind kind = all.empty() && !otherInstance ? DialogKind::FirstRun : DialogKind::Picker;
+        ReFixLog("[Overlay] %s (%zu profiles on this PC): showing the %s",
+                 otherInstance ? "Another instance of this game is running" : "No free profile", all.size(),
                  kind == DialogKind::FirstRun ? "first-run dialog" : "profile picker");
         chosen = App::Get().RunDialog(kind);
         all = profiles::LoadAll();
@@ -199,17 +204,19 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
         return false;
     }
     Profile p = *chosen;
-    profiles::Touch(p);
-    profiles::Save(p);
-    profiles::SetLastProfileId(p.id);
-    if (g_cfg.isolateSaves) saves::SwitchTo(p, all);
+    if (!p.guest) {
+        profiles::Touch(p);
+        profiles::Save(p);
+        profiles::SetLastProfileId(p.id);
+        if (g_cfg.isolateSaves) saves::SwitchTo(p, all);
+    }
     {
         std::lock_guard<std::mutex> lock(g_mu);
         g_active = p;
     }
     out.steamId = p.steamId;
     out.name = ToUtf8(p.name);
-    ReFixLog("[Overlay] Profile %s '%s' -> SteamID %llu (app %u)", ToUtf8(p.id).c_str(), out.name.c_str(),
+    ReFixLog("[Overlay] %s %s '%s' -> SteamID %llu (app %u)", p.guest ? "Guest" : "Profile", ToUtf8(p.id).c_str(), out.name.c_str(),
              (unsigned long long)p.steamId, appId);
     return true;
 }
@@ -219,7 +226,7 @@ std::wstring CloudFolder(uint32_t appId) {
     if (!g_active) return {};
     if (g_cloudFolder.empty() || g_cloudApp != appId) {
         g_cloudApp = appId;
-        g_cloudFolder = profiles::CloudRoot(g_active->id, appId);
+        g_cloudFolder = g_active->guest ? profiles::GuestCloudRoot(appId) : profiles::CloudRoot(g_active->id, appId);
         for (size_t i = 3; i <= g_cloudFolder.size(); ++i) {
             if (i == g_cloudFolder.size() || g_cloudFolder[i] == L'\\')
                 CreateDirectoryW(g_cloudFolder.substr(0, i).c_str(), nullptr);

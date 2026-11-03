@@ -3,6 +3,7 @@
 #define NOMINMAX
 #endif
 #include "profile_store.h"
+#include "overlay_i18n.h"
 #include "overlay_text.h"
 
 #include <shlobj.h>
@@ -24,6 +25,7 @@ constexpr uint32_t kGeneratedAccountSpan = 0x1FFFFFFF;
 constexpr DWORD kLockPollMs = 200;
 
 HANDLE g_lock = nullptr;
+HANDLE g_anyLock = nullptr;
 std::wstring g_lockedId;
 
 std::wstring IniPath(const std::wstring& id) { return ProfileDir(id) + L"\\profile.ini"; }
@@ -31,6 +33,34 @@ std::wstring IndexPath() { return RootDir() + L"\\profiles.ini"; }
 
 std::wstring LockName(const std::wstring& id) {
     return L"Local\\ReFixLAN_Profile_" + ExeKey() + L"_" + id;
+}
+
+// Held next to the per-exe lock: tells every game that the profile is in use somewhere.
+std::wstring AnyLockName(const std::wstring& id) { return L"Local\\ReFixLAN_ProfileAny_" + id; }
+
+std::wstring GuestRoot() {
+    wchar_t tmp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmp);
+    return std::wstring(tmp) + L"ReFix LAN";
+}
+
+void DeleteTree(const std::wstring& path) {
+    const DWORD attr = GetFileAttributesW(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) return;
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((path + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..")) DeleteTree(path + L"\\" + fd.cFileName);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        RemoveDirectoryW(path.c_str());
+    } else {
+        SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(path.c_str());
+    }
 }
 
 void EnsureDir(const std::wstring& path) {
@@ -229,10 +259,40 @@ bool Save(const Profile& p) {
 }
 
 bool Remove(const std::wstring& id) {
-    if (!IsValidId(id)) return false;
-    const std::wstring dir = ProfileDir(id);
-    // Keep the folder (saves) but drop the definition so the profile no longer counts.
-    return MoveFileExW(IniPath(id).c_str(), (dir + L"\\profile.removed.ini").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    if (!IsValidId(id) || IsInUseAnywhere(id)) return false;
+    // The definition goes first: a half-deleted folder never shows up as a profile again.
+    if (!DeleteFileW(IniPath(id).c_str())) return false;
+    DeleteTree(ProfileDir(id));
+    if (LastProfileId() == id) SetLastProfileId(L"");
+    ReFixLog("[Profiles] Profile %s deleted", ToUtf8(id).c_str());
+    return true;
+}
+
+Profile MakeGuest(const std::wstring& name, const std::vector<Profile>& existing) {
+    Profile p = MakeNew(name, existing);
+    p.id = L"guest";
+    p.guest = true;
+    return p;
+}
+
+std::wstring GuestCloudRoot(uint32_t appId) {
+    return GuestRoot() + L"\\Guest-" + std::to_wstring(GetCurrentProcessId()) + L"\\Cloud\\" + std::to_wstring(appId);
+}
+
+void CleanupGuestFolders() {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((GuestRoot() + L"\\Guest-*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const DWORD pid = wcstoul(fd.cFileName + 6, nullptr, 10);
+        if (pid == GetCurrentProcessId()) continue;
+        HANDLE proc = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+        DWORD code = 0;
+        const bool alive = proc && GetExitCodeProcess(proc, &code) && code == STILL_ACTIVE;
+        if (proc) CloseHandle(proc);
+        if (!alive) DeleteTree(GuestRoot() + L"\\" + fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
 }
 
 Profile MakeNew(const std::wstring& name, const std::vector<Profile>& existing) {
@@ -270,6 +330,7 @@ bool TryLock(const std::wstring& id) {
     }
     g_lock = h;
     g_lockedId = id;
+    g_anyLock = CreateMutexW(nullptr, FALSE, AnyLockName(id).c_str());
     return true;
 }
 
@@ -279,6 +340,13 @@ bool WaitLock(const std::wstring& id, DWORD timeoutMs) {
         if (GetTickCount64() >= deadline) return false;
         Sleep(kLockPollMs);
     }
+    return true;
+}
+
+bool IsInUseAnywhere(const std::wstring& id) {
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, AnyLockName(id).c_str());
+    if (!h) return false;
+    CloseHandle(h);
     return true;
 }
 
@@ -293,11 +361,13 @@ bool IsLockedByOther(const std::wstring& id, const std::wstring& activeId) {
 std::optional<SteamSession> ReadSteamSession(std::wstring& error) {
     DWORD pid = 0, accountId = 0;
     if (!ReadActiveProcess(pid, accountId) || !IsProcessAlive(pid)) {
-        error = L"Steam no está abierto. Ábrelo e inicia sesión para importar tu cuenta.";
+        error = i18n::TW(L"Steam is not running. Open it and sign in to import your account.",
+                         L"Steam no está abierto. Ábrelo e inicia sesión para importar tu cuenta.");
         return std::nullopt;
     }
     if (accountId == 0) {
-        error = L"Steam está abierto pero no hay ninguna sesión iniciada.";
+        error = i18n::TW(L"Steam is open but no account is signed in.",
+                         L"Steam está abierto pero no hay ninguna sesión iniciada.");
         return std::nullopt;
     }
     SteamSession s;

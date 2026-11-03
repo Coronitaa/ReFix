@@ -27,4 +27,10 @@ std::vector<Location> DetectLocations();
 // same executable is running, since its files would be moved from under it.
 void SwitchTo(const Profile& active, const std::vector<Profile>& all);
 
+// Another process of this game's executable is running on this PC.
+bool OtherInstanceRunning();
+
+// A deleted profile no longer owns any folder; whatever is in place is treated as data from before profiles.
+void ForgetOwner(const std::wstring& profileId);
+
 } // namespace refix::overlay::saves

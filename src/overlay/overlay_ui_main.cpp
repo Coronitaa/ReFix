@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 #include "overlay_app.h"
+#include "overlay_i18n.h"
 #include "overlay_text.h"
 
 #include <algorithm>
@@ -37,14 +38,14 @@ bool HasStorePage(uint32_t appId) { return appId != 0 && appId != 480; }
 
 std::string StatusLine(const PlayerRow& r, uint64_t localLobby) {
     char buf[128];
-    if (!r.sameGame) return r.p.game.empty() ? "En otro juego" : r.p.game;
-    if (!r.p.lobbyId) return "En este juego";
-    if (r.p.lobbyId == localLobby) return "En tu sala";
+    if (!r.sameGame) return r.p.game.empty() ? i18n::T("In another game", "En otro juego") : r.p.game;
+    if (!r.p.lobbyId) return i18n::T("In this game", "En este juego");
+    if (r.p.lobbyId == localLobby) return i18n::T("In your lobby", "En tu sala");
     if (r.p.joinable && r.p.maxMembers) {
-        snprintf(buf, sizeof(buf), "En una sala · %u/%u", r.p.members, r.p.maxMembers);
+        snprintf(buf, sizeof(buf), i18n::T("In a lobby · %u/%u", "En una sala · %u/%u"), r.p.members, r.p.maxMembers);
         return buf;
     }
-    return r.p.joinable ? "En una sala" : "En una sala cerrada";
+    return r.p.joinable ? i18n::T("In a lobby", "En una sala") : i18n::T("In a closed lobby", "En una sala cerrada");
 }
 
 bool CanJoin(const PlayerRow& r, uint64_t localLobby) {
@@ -96,10 +97,11 @@ void App::DrawOverlay(ImVec2 viewport) {
             ImGui::PushFont(ui::F().heading);
             ui::TextColored(ui::color::Star, ui::icon::Trophy);
             ImGui::SameLine();
-            ImGui::TextUnformatted("Logros");
+            ImGui::TextUnformatted(i18n::T("Achievements", "Logros"));
             ImGui::PopFont();
             ImGui::PushFont(ui::F().caption);
-            ui::TextColored(ui::color::Muted, "Próximamente: aquí verás los logros de este juego.");
+            ui::TextColored(ui::color::Muted, i18n::T("Coming soon: this game's achievements will show up here.",
+                                                      "Próximamente: aquí verás los logros de este juego."));
             ImGui::PopFont();
             ui::EndCard();
         }
@@ -109,6 +111,7 @@ void App::DrawOverlay(ImVec2 viewport) {
 
     DrawProfileMenu();
     DrawSwitchConfirm();
+    DrawDeleteConfirm();
     DrawEditorModal();
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
@@ -122,7 +125,7 @@ void App::DrawTopBar(ImVec2 viewport) {
     const ui::Fonts& f = ui::F();
 
     // Left: game title.
-    const std::string title = gameTitle_.empty() ? "Juego" : ToUtf8(gameTitle_);
+    const std::string title = gameTitle_.empty() ? i18n::T("Game", "Juego") : ToUtf8(gameTitle_);
     const float cy = m + h * 0.5f;
     dl->AddCircleFilled(ImVec2(m + ui::S(20), cy), ui::S(20), ui::Fade(ui::color::Accent, 0.16f), 32);
     const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Game);
@@ -132,7 +135,7 @@ void App::DrawTopBar(ImVec2 viewport) {
     // Right, from the edge inwards: close, profile chip, clock.
     float x = viewport.x - m - ui::S(kIconButton);
     ImGui::SetCursorScreenPos(ImVec2(x, cy - ui::S(kIconButton) * 0.5f));
-    if (ui::IconButton("close", ui::icon::Close, "Cerrar (Shift+Tab)", ui::color::Text)) CloseOverlay();
+    if (ui::IconButton("close", ui::icon::Close, i18n::T("Close (Shift+Tab)", "Cerrar (Shift+Tab)"), ui::color::Text)) CloseOverlay();
 
     const std::string name = ui::Ellipsize(LocalName(), ui::S(180));
     ImGui::PushFont(f.strong);
@@ -147,7 +150,9 @@ void App::DrawTopBar(ImVec2 viewport) {
     if (ImGui::InvisibleButton("##chip", ImVec2(chipW, chipH))) ImGui::OpenPopup("##profilemenu");
     const bool hover = ImGui::IsItemHovered();
     if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    ui::Tooltip(active_ ? "Perfil: cambiar, crear o editar" : "Jugando sin perfil");
+    ui::Tooltip(!active_ ? i18n::T("Playing without a profile", "Jugando sin perfil")
+                : active_->guest ? i18n::T("Playing as a guest", "Jugando como invitado")
+                                 : i18n::T("Profile: switch, create or edit", "Perfil: cambiar, crear o editar"));
     dl->AddRectFilled(chipMin_, chipMax_, hover ? ui::color::RowHover : ui::color::PanelRaised, chipH * 0.5f);
     dl->AddRect(chipMin_, chipMax_, ui::color::Border, chipH * 0.5f);
     const ui::AvatarRef avatar = active_ ? ProfileAvatar(*active_) : ui::AvatarRef{};
@@ -163,6 +168,9 @@ void App::DrawTopBar(ImVec2 viewport) {
     const ImVec2 cs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, clock);
     x -= ui::S(20) + cs.x;
     TextAt(dl, f.heading, ImVec2(x, cy - cs.y * 0.5f), ui::color::Muted, clock);
+    x -= ui::S(16);
+    DrawLanguageSwitch(ImVec2(x, cy));
+    x -= ui::S(96);
 
     ImGui::PushFont(f.title);
     const std::string shown = ui::Ellipsize(title, std::max(ui::S(80), x - ui::S(24) - titleX));
@@ -173,23 +181,24 @@ void App::DrawTopBar(ImVec2 viewport) {
 void App::DrawCommunity(ImVec2 pos, float width) {
     struct Link {
         const char* glyph;
-        const char* label;
+        const char* en;
+        const char* es;
         const wchar_t* format;
     };
     static const Link kLinks[] = {
-        { ui::icon::Store, "Tienda", L"https://store.steampowered.com/app/%u/" },
-        { ui::icon::People, "Comunidad", L"https://steamcommunity.com/app/%u" },
-        { ui::icon::Chat, "Discusiones", L"https://steamcommunity.com/app/%u/discussions/" },
-        { ui::icon::Guides, "Guías", L"https://steamcommunity.com/app/%u/guides/" },
-        { ui::icon::Workshop, "Workshop", L"https://steamcommunity.com/app/%u/workshop/" },
-        { ui::icon::News, "Noticias", L"https://store.steampowered.com/news/app/%u" },
+        { ui::icon::Store, "Store", "Tienda", L"https://store.steampowered.com/app/%u/" },
+        { ui::icon::People, "Community", "Comunidad", L"https://steamcommunity.com/app/%u" },
+        { ui::icon::Chat, "Discussions", "Discusiones", L"https://steamcommunity.com/app/%u/discussions/" },
+        { ui::icon::Guides, "Guides", "Guías", L"https://steamcommunity.com/app/%u/guides/" },
+        { ui::icon::Workshop, "Workshop", "Workshop", L"https://steamcommunity.com/app/%u/workshop/" },
+        { ui::icon::News, "News", "Noticias", L"https://store.steampowered.com/news/app/%u" },
     };
     const float height = ui::S(56 + 2 * kTileHeight + 10 + 40);
     ui::BeginCard("##community", pos, ImVec2(width, height));
     ImGui::PushFont(ui::F().heading);
     ui::TextColored(ui::color::Accent, ui::icon::Globe);
     ImGui::SameLine();
-    ImGui::TextUnformatted("Centro de la comunidad");
+    ImGui::TextUnformatted(i18n::T("Community hub", "Centro de la comunidad"));
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, ui::S(4)));
 
@@ -211,7 +220,7 @@ void App::DrawCommunity(ImVec2 pos, float width) {
         if (hover) dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.55f), ui::S(10));
         TextAt(dl, ui::F().heading, ImVec2(p0.x + ui::S(12), p0.y + ui::S(10)), ui::color::Accent, kLinks[i].glyph);
         ImGui::PushFont(ui::F().caption);
-        const std::string label = ui::Ellipsize(kLinks[i].label, tileW - ui::S(20));
+        const std::string label = ui::Ellipsize(i18n::T(kLinks[i].en, kLinks[i].es), tileW - ui::S(20));
         ImGui::PopFont();
         TextAt(dl, ui::F().caption, ImVec2(p0.x + ui::S(12), p1.y - ui::S(26)), ui::color::Text, label);
         if (clicked) {
@@ -234,13 +243,14 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
         ImGui::PushFont(ui::F().heading);
         ui::TextColored(ui::color::Accent, ui::icon::Lan);
         ImGui::SameLine();
-        ImGui::TextUnformatted("Jugadores en la LAN");
+        ImGui::TextUnformatted(i18n::T("Players on the LAN", "Jugadores en la LAN"));
         ImGui::PopFont();
         ImGui::SameLine();
         ImGui::PushFont(ui::F().caption);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ui::S(5));
         char count[48];
-        snprintf(count, sizeof(count), rows_.size() == 1 ? "%zu conectado" : "%zu conectados", rows_.size());
+        snprintf(count, sizeof(count), rows_.size() == 1 ? i18n::T("%zu online", "%zu conectado") : i18n::T("%zu online", "%zu conectados"),
+                 rows_.size());
         ui::TextColored(ui::color::Muted, count);
         ImGui::PopFont();
     }
@@ -249,7 +259,7 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
     const ImVec2 sp = ImGui::GetCursorScreenPos();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ui::S(38), ui::S(9)));
-    ImGui::InputTextWithHint("##filter", "Buscar jugador o juego", filter_, sizeof(filter_));
+    ImGui::InputTextWithHint("##filter", i18n::T("Search a player or game", "Buscar jugador o juego"), filter_, sizeof(filter_));
     ImGui::PopStyleVar();
     ImGui::GetWindowDrawList()->AddText(ui::F().body, ui::F().body->FontSize, ImVec2(sp.x + ui::S(13), sp.y + ui::S(9)),
                                         ui::color::Faint, ui::icon::Search);
@@ -270,19 +280,21 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
         shown += n;
     };
     if (pickerStyle) {
-        section("Favoritos", [](const PlayerRow& r) { return r.favorite; });
-        section("En la LAN", [](const PlayerRow& r) { return !r.favorite; });
+        section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite; });
+        section(i18n::T("On the LAN", "En la LAN"), [](const PlayerRow& r) { return !r.favorite; });
     } else {
-        section("Favoritos", [](const PlayerRow& r) { return r.favorite; });
-        section("En este juego", [](const PlayerRow& r) { return !r.favorite && r.sameGame; });
-        section("En otros juegos", [](const PlayerRow& r) { return !r.favorite && !r.sameGame; });
+        section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite; });
+        section(i18n::T("In this game", "En este juego"), [](const PlayerRow& r) { return !r.favorite && r.sameGame; });
+        section(i18n::T("In other games", "En otros juegos"), [](const PlayerRow& r) { return !r.favorite && !r.sameGame; });
     }
     if (shown == 0) {
         ImGui::Dummy(ImVec2(0, ui::S(36)));
-        const char* head = rows_.empty() ? "Nadie más en la LAN por ahora" : "Ningún jugador coincide";
+        const char* head = rows_.empty() ? i18n::T("Nobody else on the LAN yet", "Nadie más en la LAN por ahora")
+                                         : i18n::T("No player matches", "Ningún jugador coincide");
         const char* body = rows_.empty()
-                               ? "Los jugadores aparecen aquí en cuanto abren un juego con ReFix LAN en esta red."
-                               : "Prueba con otro nombre o borra la búsqueda.";
+                               ? i18n::T("Players show up here as soon as they open a game with ReFix LAN on this network.",
+                                         "Los jugadores aparecen aquí en cuanto abren un juego con ReFix LAN en esta red.")
+                               : i18n::T("Try another name or clear the search.", "Prueba con otro nombre o borra la búsqueda.");
         ImGui::PushFont(ui::F().title);
         const float gw = ImGui::CalcTextSize(ui::icon::Lan).x;
         ImGui::SetCursorPosX((width - gw) * 0.5f);
@@ -343,30 +355,31 @@ void App::DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle) {
         x -= bs.x;
         ImGui::SetCursorScreenPos(ImVec2(x, p0.y + (h - bs.y) * 0.5f));
         if (invited) {
-            ui::SecondaryButton("Enviada", bs, false);
-        } else if (ui::PrimaryButton("Invitar", bs)) {
+            ui::SecondaryButton(i18n::T("Sent", "Enviada"), bs, false);
+        } else if (ui::PrimaryButton(i18n::T("Invite", "Invitar"), bs)) {
             Invite(p);
         }
     } else {
         x -= d;
         ImGui::SetCursorScreenPos(ImVec2(x, by));
         if (ui::IconButton("fav", row.favorite ? ui::icon::StarFill : ui::icon::Star,
-                           row.favorite ? "Quitar de favoritos" : "Añ" "adir a favoritos",
+                           row.favorite ? i18n::T("Remove from favourites", "Quitar de favoritos")
+                                        : i18n::T("Add to favourites", "Añadir a favoritos"),
                            row.favorite ? ui::color::Star : ui::color::Muted))
             ToggleFavorite(p);
         if (canInvite) {
             x -= d + ui::S(6);
             ImGui::SetCursorScreenPos(ImVec2(x, by));
             if (invited) {
-                ui::IconButton("inv", ui::icon::Check, "Invitación enviada", ui::color::Accent, false);
-            } else if (ui::IconButton("inv", ui::icon::Invite, "Invitar a mi sala", ui::color::Invite)) {
+                ui::IconButton("inv", ui::icon::Check, i18n::T("Invite sent", "Invitación enviada"), ui::color::Accent, false);
+            } else if (ui::IconButton("inv", ui::icon::Invite, i18n::T("Invite to my lobby", "Invitar a mi sala"), ui::color::Invite)) {
                 Invite(p);
             }
         }
         if (CanJoin(row, localLobby_)) {
             x -= d + ui::S(6);
             ImGui::SetCursorScreenPos(ImVec2(x, by));
-            if (ui::IconButton("join", ui::icon::Join, "Unirse a su partida", ui::color::Accent)) Join(p);
+            if (ui::IconButton("join", ui::icon::Join, i18n::T("Join their match", "Unirse a su partida"), ui::color::Accent)) Join(p);
         }
     }
 
@@ -394,10 +407,11 @@ void App::DrawInvitePicker(ImVec2 viewport) {
     const ImVec2 pos((viewport.x - size.x) * 0.5f, (viewport.y - size.y) * 0.5f);
     ui::BeginCard("##invitepicker", pos, size, 24.0f);
     ImGui::PushFont(ui::F().title);
-    ImGui::TextUnformatted("Invitar a la partida");
+    ImGui::TextUnformatted(i18n::T("Invite to the match", "Invitar a la partida"));
     ImGui::PopFont();
     ImGui::PushFont(ui::F().caption);
-    ui::TextColored(ui::color::Muted, "Elige a quién invitar. Recibirá un aviso con el botón Unirse.");
+    ui::TextColored(ui::color::Muted, i18n::T("Choose who to invite. They get a notification with a Join button.",
+                                              "Elige a quién invitar. Recibirá un aviso con el botón Unirse."));
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, ui::S(4)));
     const float footer = ui::S(56);
@@ -405,7 +419,7 @@ void App::DrawInvitePicker(ImVec2 viewport) {
     DrawPlayers(ImGui::GetCursorScreenPos(), ImVec2(avail.x, avail.y - footer), true);
     const ImVec2 bs(ui::S(120), ui::S(40));
     ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - ui::S(24) - bs.x, pos.y + size.y - ui::S(24) - bs.y));
-    if (ui::SecondaryButton("Cerrar", bs)) CloseOverlay();
+    if (ui::SecondaryButton(i18n::T("Close", "Cerrar"), bs)) CloseOverlay();
     ui::EndCard();
 }
 
@@ -459,7 +473,7 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             line(f.strong, y, ui::color::Text, LocalName());
             ImGui::SetCursorScreenPos(ImVec2(tx, y + f.strong->FontSize + ui::S(4)));
             ImGui::PushFont(f.caption);
-            ui::TextColored(ui::color::Muted, "Pulsa");
+            ui::TextColored(ui::color::Muted, i18n::T("Press", "Pulsa"));
             ImGui::SameLine(0, ui::S(6));
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ui::S(2));
             ImGui::PopFont();
@@ -469,7 +483,7 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             ImGui::SameLine(0, ui::S(6));
             ImGui::PushFont(f.caption);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ui::S(2));
-            ui::TextColored(ui::color::Muted, "para abrir ReFix LAN");
+            ui::TextColored(ui::color::Muted, i18n::T("to open ReFix LAN", "para abrir ReFix LAN"));
             ImGui::PopFont();
         } else if (invite) {
             const net::RemotePlayer* from = FindPlayer(t.invite.from);
@@ -481,9 +495,9 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             line(f.caption, ac.y + ui::S(2), ui::color::Muted, t.body);
             const ImVec2 bs(ui::S(118), ui::S(36));
             ImGui::SetCursorScreenPos(ImVec2(p1.x - ui::S(16) - bs.x * 2 - ui::S(8), p1.y - ui::S(14) - bs.y));
-            if (ui::SecondaryButton("Ignorar", bs) && !t.closing) { t.closing = true; t.closingAt = now; }
+            if (ui::SecondaryButton(i18n::T("Ignore", "Ignorar"), bs) && !t.closing) { t.closing = true; t.closingAt = now; }
             ImGui::SameLine(0, ui::S(8));
-            if (ui::PrimaryButton("Unirse", bs) && !t.closing) {
+            if (ui::PrimaryButton(i18n::T("Join", "Unirse"), bs) && !t.closing) {
                 t.closing = true;
                 t.closingAt = now;
                 AcceptInvite(t.invite);

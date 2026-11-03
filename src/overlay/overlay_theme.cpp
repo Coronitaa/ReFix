@@ -208,6 +208,10 @@ bool SecondaryButton(const char* label, ImVec2 size, bool enabled) {
     return StyledButton(label, size, enabled, color::Row, color::RowHover, color::Text, color::Border);
 }
 
+bool DangerButton(const char* label, ImVec2 size, bool enabled) {
+    return StyledButton(label, size, enabled, color::Danger, IM_COL32(255, 135, 135, 255), IM_COL32(40, 8, 8, 255), 0);
+}
+
 bool LinkButton(const char* label) {
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(color::Muted));
     const ImVec2 pos = ImGui::GetCursorScreenPos();

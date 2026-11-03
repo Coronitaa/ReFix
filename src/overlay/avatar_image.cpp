@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "avatar_image.h"
+#include "overlay_i18n.h"
 
 #include <windows.h>
 #include <wincodec.h>
@@ -170,12 +171,13 @@ bool Encode(IWICBitmapSource* src, const GUID& container, IStream* stream, bool 
 bool ImportAvatar(const std::wstring& source, const std::wstring& destPng, std::wstring& error) {
     Com<IWICBitmapFrameDecode> frame;
     if (!OpenFrame(source, &frame)) {
-        error = L"No se pudo leer la imagen. Prueba con un archivo PNG, JPG o BMP.";
+        error = i18n::TW(L"Could not read the image. Try a PNG, JPG or BMP file.",
+                         L"No se pudo leer la imagen. Prueba con un archivo PNG, JPG o BMP.");
         return false;
     }
     Com<IWICBitmapSource> square;
     if (!BuildSquare(frame, frame, kAvatarSize, false, &square)) {
-        error = L"No se pudo convertir la imagen.";
+        error = i18n::TW(L"Could not convert the image.", L"No se pudo convertir la imagen.");
         return false;
     }
     const std::wstring tmp = destPng + L".tmp";
@@ -187,7 +189,7 @@ bool ImportAvatar(const std::wstring& source, const std::wstring& destPng, std::
     stream.Reset(); // close the file before the rename
     if (!ok || !MoveFileExW(tmp.c_str(), destPng.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         DeleteFileW(tmp.c_str());
-        error = L"No se pudo guardar la imagen convertida.";
+        error = i18n::TW(L"Could not save the converted image.", L"No se pudo guardar la imagen convertida.");
         return false;
     }
     ReFixLog("[Overlay] Avatar imported and converted to %dx%d PNG", kAvatarSize, kAvatarSize);

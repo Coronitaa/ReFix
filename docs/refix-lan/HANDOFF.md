@@ -234,3 +234,29 @@
   notifications are drawn inside the overlay there. No overlay over exclusive-fullscreen games that do not
   minimise and do not let a top-most window through. "Importar imagen…" (IFileOpenDialog), the profile editor
   in the overlay and the Community links were not exercised in-game; two real PCs not tested.
+
+## 2026-11-03 (11) - Overlay: English/Spanish, second-instance picker, guest, delete profiles, test release
+- Languages: every UI string goes through `i18n::T("English", "Español")` / `TW(...)` (`overlay_i18n.h/.cpp`).
+  English by default; the choice is `[General] Language=en|es` in `%APPDATA%\ReFix LAN\profiles.ini` and changes
+  live from the EN|ES pill (top bar of the overlay, top right of the profile dialog).
+- Second instance of the same exe on one PC: always gets "Who's playing?" (no silent pick of the last profile).
+  Profiles held by a running game are dimmed with a lock and "Playing now"; free ones say "Available"; a "+" card
+  creates a new profile (up to 10); "I'd rather play as a guest" gives a guest. The first-run dialog only shows
+  with no profiles and no other instance. "In use" is a second mutex `Local\ReFixLAN_ProfileAny_<id>` held for
+  any game, next to the per-exe one.
+- Guest: id `guest`, standard name "Guest"/"Invitado", stock avatar, its own random SteamID, never written to
+  disk; no favourites, no save swap; Steam Cloud goes to `%TEMP%\ReFix LAN\Guest-<pid>\Cloud\<appid>`, removed
+  on a later start once that pid is gone. Games that save outside Steam Cloud (Lethal Company: LocalLow) share
+  the save folder in place, same as any second instance (see (10), "Not covered").
+- Delete: trash icon on hover in the picker and in the chip menu, only for profiles no game is using (not the
+  active one). Confirmation modal with an "I understand, delete it" box that enables the red button.
+  `profiles::Remove` refuses a profile in use, removes profile.ini then the folder (avatar, Cloud, stashed
+  saves), clears LastProfile, and `saves::ForgetOwner` drops it from saves.ini so the folder in place is treated
+  as pre-profile data.
+- Verified in-game (Lethal Company, two instances): picker on both instances, lock on the profile of the other
+  instance, delete with the box unticked does nothing and ticked removes the folder (`[Profiles] Profile ...
+  deleted`), ES switch in the picker and EN switch in the overlay, guest "Invitado" with its own SteamID and the
+  other instance in its player list. x64 and x86 rebuilt; identity modes, multi-instance, module dedupe, iface
+  versions and the 3-instance mesh pass.
+- Test package: `tools\make_release.ps1 -OutDir ReFix_LAN_Test_Release` (kept out of git with .git/info/exclude;
+  `ReFix_LAN_2.0_Release` is the tracked package and was not touched).

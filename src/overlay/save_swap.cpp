@@ -206,6 +206,8 @@ bool DetectUnity(Location& out) {
     return true;
 }
 
+} // namespace
+
 bool OtherInstanceRunning() {
     const std::wstring self = Leaf(ExePath());
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -218,6 +220,19 @@ bool OtherInstanceRunning() {
     CloseHandle(snap);
     return found;
 }
+
+void ForgetOwner(const std::wstring& profileId) {
+    std::vector<wchar_t> buf(32 * 1024);
+    const DWORD n = GetPrivateProfileSectionW(L"Owners", buf.data(), (DWORD)buf.size(), OwnersIni().c_str());
+    for (const wchar_t* p = buf.data(); p < buf.data() + n && *p; p += wcslen(p) + 1) {
+        const std::wstring entry = p;
+        const size_t eq = entry.find(L'=');
+        if (eq != std::wstring::npos && entry.substr(eq + 1) == profileId)
+            WritePrivateProfileStringW(L"Owners", entry.substr(0, eq).c_str(), nullptr, OwnersIni().c_str());
+    }
+}
+
+namespace {
 
 bool HasEntries(const std::wstring& dir, const std::vector<std::wstring>& keep) {
     for (const std::wstring& e : Entries(dir)) {

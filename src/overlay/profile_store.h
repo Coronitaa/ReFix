@@ -22,6 +22,7 @@ struct Profile {
     bool customAvatar = false;       // avatar.png (184x184) in the profile folder
     bool nativeSaves = false;        // plays with the PC's real save folders (data from before profiles)
     bool importedFromSteam = false;
+    bool guest = false;              // "play as a guest": never saved, temporary Cloud folder, no lock
     uint64_t lastUsed = 0;           // FILETIME ticks
     std::vector<uint64_t> favorites; // SteamIDs, in the order they were starred
 };
@@ -43,9 +44,14 @@ std::wstring CloudRoot(const std::wstring& id, uint32_t appId); // emulated Stea
 std::vector<Profile> LoadAll();                  // most recently used first
 std::optional<Profile> Load(const std::wstring& id);
 bool Save(const Profile& p);
+// Deletes the profile folder (definition, avatar, Cloud files and stashed saves). Refused while any game uses it.
 bool Remove(const std::wstring& id);
 // New profile with a fresh id and SteamID (not saved yet).
 Profile MakeNew(const std::wstring& name, const std::vector<Profile>& existing);
+// Guest for this session: standard name, stock avatar, fresh SteamID; Cloud files under %TEMP%.
+Profile MakeGuest(const std::wstring& name, const std::vector<Profile>& existing);
+std::wstring GuestCloudRoot(uint32_t appId);
+void CleanupGuestFolders();                      // removes the temporary folders of guests no longer running
 void Touch(Profile& p);                          // lastUsed = now
 
 std::wstring LastProfileId();
@@ -56,6 +62,7 @@ void SetLastProfileId(const std::wstring& id);
 bool TryLock(const std::wstring& id);            // held for the rest of the process
 bool WaitLock(const std::wstring& id, DWORD timeoutMs);
 bool IsLockedByOther(const std::wstring& id, const std::wstring& activeId);
+bool IsInUseAnywhere(const std::wstring& id);    // by any game on this PC (this process included)
 
 // Session of the Steam client running on this PC. Empty with `error` set when Steam is closed or no
 // account is logged in.
