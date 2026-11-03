@@ -1024,8 +1024,8 @@ switch ($OnlineMode) {
         # Modern Steamworks SDK (flat API, e.g. Unity/Steamworks.NET like Overcooked! 2): the native 32-bit
         # ReFix LAN emulator (bin\lan\x86\steam_api.dll) replaces steam_api.dll. Same LanCore discovery and
         # identity rules as x64, no backend DLL and no Steam client.
-        # Legacy SDK (GoldSrc/Source era: CS 1.6, early CS:GO, L4D2) predates the flat API the emulator
-        # implements: Goldberg x86 is deployed directly as a standalone steam_api.dll (no Steam either).
+        # Pre-flat-API SDKs (CS:GO 1.37, SDK ~1.39) use the same emulator: it serves their interface versions
+        # and exports (verified in-game). Goldberg x86 is only a fallback when bin\lan\x86 was not built.
         if ($pluginDirs32.Count -gt 0) {
             $goldbergDll32 = Join-Path $BinDir "goldberg\steam_api.dll"
             $lanDll32      = Join-Path $ProductBinDir "x86\steam_api.dll"
@@ -1046,23 +1046,14 @@ switch ($OnlineMode) {
                     }
                 }
 
-                # Which SDK generation does the game ship? Modern steam_api.dll exports SteamInternal_ContextInit.
-                $sdkProbe = if (Test-Path -LiteralPath $origPath32) { $origPath32 } else { $steamPath32 }
-                $isModernSdk = $true
-                if (Test-Path -LiteralPath $sdkProbe) {
-                    $sdkText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($sdkProbe))
-                    $isModernSdk = $sdkText.Contains("SteamInternal_ContextInit")
-                }
-
                 try {
-                    if ($isModernSdk -and (Test-Path -LiteralPath $lanDll32)) {
+                    if (Test-Path -LiteralPath $lanDll32) {
                         Copy-Item -LiteralPath $lanDll32 -Destination $steamPath32 -Force -ErrorAction Stop
                         Write-Host "  [OK] Deployed ReFix LAN x86 steam_api.dll to $dir32" -ForegroundColor Green
                     } elseif (Test-Path -LiteralPath $goldbergDll32) {
-                        $why = if ($isModernSdk) { "ReFix LAN x86 not built (run build_x86_lan.bat)" } else { "legacy Steamworks SDK" }
                         Copy-Item -LiteralPath $goldbergDll32 -Destination $steamPath32 -Force -ErrorAction Stop
                         $backendPath32 = $steamPath32
-                        Write-Host "  [OK] Deployed standalone Goldberg x86 steam_api.dll to $dir32 ($why)" -ForegroundColor Green
+                        Write-Host "  [OK] Deployed standalone Goldberg x86 steam_api.dll to $dir32 (ReFix LAN x86 not built)" -ForegroundColor Green
                     } else {
                         Write-Host "  [ERROR] No 32-bit LAN emulator available (bin\lan\x86 or bin\goldberg) for $dir32" -ForegroundColor Red
                         exit 1

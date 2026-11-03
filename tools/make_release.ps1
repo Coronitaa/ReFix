@@ -21,7 +21,7 @@ $required = @(
     "bin\lan\x86\steam_api.dll",
     "bin\online\steam_api64.dll", "bin\online\winmm.dll", "bin\online\EOSSDK-Win64-Shipping.dll",
     "bin\online\x86\steam_api.dll",
-    "bin\deploy_helper.ps1", "AutoDeploy.bat", "Uninstall_ReFix.bat", "ReFix.ini"
+    "bin\deploy_helper.ps1", "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "ReFix.ini", "LICENSE"
 )
 $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $repo $_)) })
 if ($missing.Count -gt 0) {
@@ -39,7 +39,7 @@ function Copy-Into([string]$relative) {
 }
 
 # Entry points
-foreach ($f in "AutoDeploy.bat", "Uninstall_ReFix.bat", "ReFix.ini") { Copy-Into $f }
+foreach ($f in "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "ReFix.ini", "LICENSE") { Copy-Into $f }
 
 # Deploy scripts and the small helpers they call
 Get-ChildItem -LiteralPath $bin -File | Where-Object {
@@ -78,6 +78,13 @@ ReFix LAN
 - Players on the same network find each other automatically.
 
 Uninstall_ReFix.bat restores the game's original files.
+
+Linux (Steam Play / Proton)
+- Run: bash AutoDeploy.sh
+  or:  bash AutoDeploy.sh "<game folder>" lan|online [appid]
+- ReFix Online: start the game from Steam. ReFix LAN: start the .exe with Proton/Wine
+  or add it to Steam as a non-Steam game.
+- Undo: bash AutoDeploy.sh --uninstall "<game folder>"
 "@
 Set-Content -LiteralPath (Join-Path $OutDir "README.txt") -Value $readme -Encoding UTF8
 
