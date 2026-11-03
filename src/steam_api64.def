@@ -1060,6 +1060,7 @@ EXPORTS
     SteamGameServer_Shutdown
     SteamInternal_ContextInit
     SteamInternal_CreateInterface
+    SteamGameServerInternal_CreateInterface
     SteamInternal_FindOrCreateGameServerInterface
     SteamInternal_FindOrCreateUserInterface
     SteamInternal_GameServer_Init

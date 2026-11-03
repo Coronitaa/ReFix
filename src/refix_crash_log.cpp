@@ -18,6 +18,7 @@ constexpr int kMaxFrames = 24;
 
 std::atomic<int> g_logged{ 0 };
 HMODULE g_self = nullptr;
+bool g_logForeign = false; // REFIX_CRASH_ALL=1: also log faults outside ReFix (vtable mismatches crash in the game)
 
 bool IsFatal(DWORD code) {
     switch (code) {
@@ -61,10 +62,29 @@ bool ReadSlot(const uintptr_t* slot, uintptr_t& value) {
     __try { value = *slot; return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+// Printable C string at p (>= 6 chars), for spotting error messages pushed on the stack.
+bool ReadText(const char* p, char* out, size_t cap) {
+    __try {
+        size_t n = 0;
+        for (; n + 1 < cap && p[n]; n++) {
+            unsigned char c = (unsigned char)p[n];
+            if (c < 0x20 && c != '\n' && c != '\t') return false;
+            if (c > 0x7E) return false;
+            out[n] = (char)(c == '\n' ? ' ' : c);
+        }
+        out[n] = 0;
+        return n >= 6;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 LONG CALLBACK OnException(PEXCEPTION_POINTERS ep) {
     const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
-    if (!IsFatal(rec->ExceptionCode) || !InSelf(rec->ExceptionAddress)) return EXCEPTION_CONTINUE_SEARCH;
+    // Probing the stack faults by design (guarded by __try); the vectored handler sees those first.
+    static thread_local bool inHandler = false;
+    if (inHandler || !IsFatal(rec->ExceptionCode)) return EXCEPTION_CONTINUE_SEARCH;
+    if (!g_logForeign && !InSelf(rec->ExceptionAddress)) return EXCEPTION_CONTINUE_SEARCH;
     if (g_logged.fetch_add(1) >= kMaxLoggedCrashes) return EXCEPTION_CONTINUE_SEARCH;
+    inHandler = true;
 
 #ifdef _WIN64
     const uintptr_t sp = ep->ContextRecord->Rsp;
@@ -85,10 +105,16 @@ LONG CALLBACK OnException(PEXCEPTION_POINTERS ep) {
         if (!ReadSlot(slot + i, value)) break;
         if (value < 0x10000) continue;
         std::string where = Describe(reinterpret_cast<const void*>(value));
+        if (g_logForeign) {
+            char text[96] = {};
+            if (ReadText(reinterpret_cast<const char*>(value), text, sizeof(text)))
+                ReFixLog("[Crash]   stack[%d] \"%s\"", i, text);
+        }
         if (where.empty()) continue;
         ReFixLog("[Crash]   stack[%d] %s", i, where.c_str());
         frames++;
     }
+    inHandler = false;
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -99,5 +125,7 @@ void ReFix_InstallCrashLog() {
     if (installed.exchange(true)) return;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCSTR>(&ReFix_InstallCrashLog), &g_self);
+    char flag[8] = {};
+    g_logForeign = GetEnvironmentVariableA("REFIX_CRASH_ALL", flag, sizeof(flag)) > 0 && flag[0] == '1';
     AddVectoredExceptionHandler(1, OnException);
 }

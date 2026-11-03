@@ -135,3 +135,24 @@
 - Diagnostics: `src/refix_crash_log.cpp` logs fatal exceptions raised inside ReFix with a stack scan
   (module+offset, resolve with the .map). `REFIX_LOG_VERBOSE=1` also traces lobby reads by index and ISteamUserStats.
 - Not verified: two-PC runs of these games; CS/GMod joining a second instance's server.
+
+## 2026-11-03 (8) - CS:GO 1.37 (Source, SDK ~1.39): generic Steamworks gaps
+- Missing export `SteamGameServerInternal_CreateInterface` (pre-1.44 SDKs): the loader stopped on a hidden
+  "entry point not found" box. Exported (x86 and x64 .def); Online forwards to Valve's DLL.
+- `ISteamClient017::GetISteamUnifiedMessages` (marked DEPRECATED_ in our header) returned null and Source's
+  CSteamAPIContext aborted with "Failed to connect with local Steam Client process". The adapter generator now routes
+  `DEPRECATED_GetISteam*` through the version lookup and the emulator serves a stub ISteamUnifiedMessages.
+- `SteamController00N` resolved to the ISteamInput object (different vtable; inputsystem.dll crashed). New
+  CSteamControllerEmu plus a `controller` family in `tools/gen_steam_iface_adapters.py` (003-007 adapters; 002 skipped,
+  its header has placeholders).
+- `SteamGameCoordinator001`: stub that accepts and drops messages and never delivers any. The menu shows "connecting
+  to the CS:GO network" forever, which is expected (official matchmaking, inventory and ranks need Valve's GC).
+- Game servers no longer claim VAC-secure (`BSecure` / `GSPolicyResponse_t`): a VAC-secure listen server rejected
+  clients started with `-insecure`. There is no VAC on LAN.
+- Diagnostics: `REFIX_CRASH_ALL=1` also logs fatal exceptions outside ReFix (vtable mismatches crash in the game)
+  and prints printable strings found on the stack, which is how the fatal error text above was found.
+- Verified (two instances, one PC): `+sv_lan 1 +map de_dust2` listen server with bots; the second instance (own
+  SteamID, `Player_2`) joins with `connect 192.168.1.3:27015`. `connect 127.0.0.1:27015` from the second instance
+  fails on one PC (its own socket also holds 27015 on loopback); use the LAN IP.
+- Not verified: LAN tab of the server browser, two PCs. `SteamGameStats001` / `SteamAppDisableUpdate001` stay
+  unrecognised (null) and CS:GO copes.

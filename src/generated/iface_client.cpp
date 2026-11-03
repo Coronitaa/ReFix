@@ -491,7 +491,7 @@ public:
     virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t a0) override { UnrealSteamEmu::LatestClient()->SetWarningMessageHook(a0); }
     virtual bool BShutdownIfAllPipesClosed() override { return (UnrealSteamEmu::LatestClient()->BShutdownIfAllPipesClosed()); }
     virtual ISteamHTTP * GetISteamHTTP(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamHTTP *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamHTTP(a0, a1, a2)); }
-    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { return {}; }
+    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<void *>(v); return {}; }
     virtual ISteamController * GetISteamController(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamController *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamController(a0, a1, a2)); }
     virtual ISteamUGC * GetISteamUGC(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamUGC *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamUGC(a0, a1, a2)); }
     virtual ISteamAppList * GetISteamAppList(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamAppList *>(v); return {}; }
@@ -534,7 +534,7 @@ public:
     virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t a0) override { UnrealSteamEmu::LatestClient()->SetWarningMessageHook(a0); }
     virtual bool BShutdownIfAllPipesClosed() override { return (UnrealSteamEmu::LatestClient()->BShutdownIfAllPipesClosed()); }
     virtual ISteamHTTP * GetISteamHTTP(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamHTTP *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamHTTP(a0, a1, a2)); }
-    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { return {}; }
+    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<void *>(v); return {}; }
     virtual ISteamController * GetISteamController(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamController *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamController(a0, a1, a2)); }
     virtual ISteamUGC * GetISteamUGC(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamUGC *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamUGC(a0, a1, a2)); }
     virtual ISteamAppList * GetISteamAppList(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamAppList *>(v); return {}; }
@@ -579,7 +579,7 @@ public:
     virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t a0) override { UnrealSteamEmu::LatestClient()->SetWarningMessageHook(a0); }
     virtual bool BShutdownIfAllPipesClosed() override { return (UnrealSteamEmu::LatestClient()->BShutdownIfAllPipesClosed()); }
     virtual ISteamHTTP * GetISteamHTTP(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamHTTP *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamHTTP(a0, a1, a2)); }
-    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { return {}; }
+    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<void *>(v); return {}; }
     virtual ISteamController * GetISteamController(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamController *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamController(a0, a1, a2)); }
     virtual ISteamUGC * GetISteamUGC(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamUGC *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamUGC(a0, a1, a2)); }
     virtual ISteamAppList * GetISteamAppList(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamAppList *>(v); return {}; }
@@ -625,7 +625,7 @@ public:
     virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t a0) override { UnrealSteamEmu::LatestClient()->SetWarningMessageHook(a0); }
     virtual bool BShutdownIfAllPipesClosed() override { return (UnrealSteamEmu::LatestClient()->BShutdownIfAllPipesClosed()); }
     virtual ISteamHTTP * GetISteamHTTP(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamHTTP *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamHTTP(a0, a1, a2)); }
-    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { return {}; }
+    virtual void * DEPRECATED_GetISteamUnifiedMessages(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<void *>(v); return {}; }
     virtual ISteamController * GetISteamController(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamController *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamController(a0, a1, a2)); }
     virtual ISteamUGC * GetISteamUGC(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamUGC *>(v); return (UnrealSteamEmu::LatestClient()->GetISteamUGC(a0, a1, a2)); }
     virtual ISteamAppList * GetISteamAppList(HSteamUser a0, HSteamPipe a1, const char * a2) override { if (void* v = UnrealSteamEmu::GetGenericInterface(a2)) return static_cast<ISteamAppList *>(v); return {}; }

@@ -33,11 +33,14 @@ FAMILIES = [
     ("ugc",           "isteamugc",           "STEAMUGC_INTERFACE_VERSION{v}",         "ISteamUGC",           "isteamugc.h",           "UGC",           set()),
     ("http",          "isteamhttp",          "STEAMHTTP_INTERFACE_VERSION{v}",        "ISteamHTTP",          "isteamhttp.h",          "HTTP",          set()),
     ("screenshots",   "isteamscreenshots",   "STEAMSCREENSHOTS_INTERFACE_VERSION{v}", "ISteamScreenshots",   "isteamscreenshots.h",   "Screenshots",   set()),
+    ("controller",    "isteamcontroller",    "SteamController{v}",                    "ISteamController",    "isteamcontroller.h",    "Controller",    {"008"}),
     ("gameserver",    "isteamgameserver",    "SteamGameServer{v}",                    "ISteamGameServer",    "isteamgameserver.h",    "GameServer",    {"012"}),
 ]
 
 # (family, version) -> reason; filled from compile probing of the SDK headers.
-SKIP = {}
+SKIP = {
+    ("controller", "002"): "header declares unknown_ret placeholders",
+}
 
 # Hand written bodies for versioned-only methods that have a clear equivalent.
 SPECIAL_BODIES = {
@@ -308,7 +311,7 @@ def gen_method(m, latest_by_name, fam, counters, is_client):
     body_lines = []
     # Client: GetISteamXxx(..., const char *pchVersion) -> exact version lookup.
     ver_idx = None
-    if is_client and m["name"].startswith("GetISteam") and params:
+    if is_client and re.match(r"(DEPRECATED_)?GetISteam", m["name"]) and params:
         for i, (_, norm) in enumerate(params):
             if norm == "constchar*":
                 ver_idx = i
@@ -417,7 +420,7 @@ def main():
                "// Family: %s  adapters: %d  forwarded methods: %d  defaulted methods: %d" % (fam, len(entries), fam_fwd, fam_def),
                "// Skipped versions:"]
         hdr += ["//   %s%s: %s" % (stem, v, why) for v, why in skipped] or ["//   (none)"]
-        incs = "".join('#include "include/steam/%s%s.h"\n' % (stem, v) for v in versions)
+        incs = "".join('#include "include/steam/%s%s.h"\n' % (stem, v) for v in versions if (fam, v) not in SKIP)
         text = "\n".join(hdr) + "\n" + PREAMBLE + incs + '#include "generated/steam_emu_latest.h"\n\n'
         text += "\n".join(classes)
         text += "\nextern const ReFixIfaceEntry g_ReFixIfaceTable_%s[] = {\n" % fam

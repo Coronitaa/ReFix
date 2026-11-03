@@ -14,6 +14,7 @@ extern const ReFixIfaceEntry g_ReFixIfaceTable_remotestorage[];
 extern const ReFixIfaceEntry g_ReFixIfaceTable_ugc[];
 extern const ReFixIfaceEntry g_ReFixIfaceTable_http[];
 extern const ReFixIfaceEntry g_ReFixIfaceTable_screenshots[];
+extern const ReFixIfaceEntry g_ReFixIfaceTable_controller[];
 extern const ReFixIfaceEntry g_ReFixIfaceTable_gameserver[];
 
 static const ReFixIfaceEntry* const kTables[] = {
@@ -29,6 +30,7 @@ static const ReFixIfaceEntry* const kTables[] = {
     g_ReFixIfaceTable_ugc,
     g_ReFixIfaceTable_http,
     g_ReFixIfaceTable_screenshots,
+    g_ReFixIfaceTable_controller,
     g_ReFixIfaceTable_gameserver,
 };
 

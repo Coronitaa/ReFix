@@ -9,6 +9,9 @@
 #define STEAM_WIN32 1
 #define STEAM_API_NODLL 1
 #include "include/steam/steam_api.h"
+#include "include/steam/isteamcontroller003.h"
+#include "include/steam/isteamgamecoordinator.h"
+#include "include/steam/isteamunifiedmessages.h"
 
 static int g_fail = 0;
 static void Check(bool ok, const char* what) {
@@ -115,6 +118,33 @@ int main(int argc, char** argv) {
     Check(us11 != nullptr, "STEAMUSERSTATS_INTERFACE_VERSION011 resolves");
     ISteamRemoteStorage014* rs14 = (ISteamRemoteStorage014*)findUser(0, "STEAMREMOTESTORAGE_INTERFACE_VERSION014");
     Check(rs14 != nullptr, "STEAMREMOTESTORAGE_INTERFACE_VERSION014 resolves");
+
+    // --- ISteamClient017 tree (SDK ~1.39, e.g. CS:GO 1.37) ---
+    // CSteamAPIContext refuses to start without UnifiedMessages, and SteamController003 has its own vtable
+    // (serving ISteamInput there crashed inputsystem.dll).
+    ISteamClient017* c17 = (ISteamClient017*)create("SteamClient017");
+    Check(c17 != nullptr, "SteamClient017 resolves");
+    if (c17) {
+        void* um = c17->DEPRECATED_GetISteamUnifiedMessages(user, pipe, "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001");
+        Check(um != nullptr, "client017->GetISteamUnifiedMessages(001) non-null");
+        if (um) Check(((ISteamUnifiedMessages*)um)->SendMethod("Test.Method#1", nullptr, 0, 0) == 0, "ISteamUnifiedMessages::SendMethod fails cleanly");
+        ISteamController003* sc3 = (ISteamController003*)c17->GetISteamController(user, pipe, "SteamController003");
+        Check(sc3 != nullptr, "client017->GetISteamController(SteamController003) non-null");
+        if (sc3) {
+            Check(sc3->Init(), "ISteamController003::Init");
+            ControllerHandle_t handles[STEAM_CONTROLLER_MAX_COUNT] = {};
+            Check(sc3->GetConnectedControllers(handles) == 0, "ISteamController003::GetConnectedControllers == 0");
+            sc3->RunFrame();
+        }
+        auto* gc = (ISteamGameCoordinator*)c17->GetISteamGenericInterface(user, pipe, "SteamGameCoordinator001");
+        Check(gc != nullptr, "client017->GetISteamGenericInterface(SteamGameCoordinator001) non-null");
+        if (gc) {
+            uint32 size = 1;
+            Check(!gc->IsMessageAvailable(&size) && size == 0, "ISteamGameCoordinator::IsMessageAvailable false");
+            Check(gc->SendMessage_(4006, "x", 1) == k_EGCResultOK, "ISteamGameCoordinator::SendMessage accepted");
+        }
+    }
+    Check(GetProcAddress(h, "SteamGameServerInternal_CreateInterface") != nullptr, "SteamGameServerInternal_CreateInterface exported");
 
     // Native (latest) versions keep returning the native object.
     void* n23 = findUser(0, "SteamUser023");

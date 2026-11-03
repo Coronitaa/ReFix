@@ -3866,6 +3866,20 @@ extern "C" __declspec(dllexport) void* SteamInternal_CreateInterface(const char*
     return iface;
 }
 
+// Pre-1.44 SDKs (CS:GO, older Source games) import a separate game-server flavour of CreateInterface; the
+// emulator serves both pipes from the same objects.
+extern "C" __declspec(dllexport) void* SteamGameServerInternal_CreateInterface(const char* pszVersion) {
+    if (ReFix::NetworkModeManager::IsOnline() && g_hOriginalDll) {
+        typedef void* (*fn_t)(const char*);
+        if (auto pfn = (fn_t)GetProcAddress(g_hOriginalDll, "SteamGameServerInternal_CreateInterface")) {
+            void* iface = pfn(pszVersion);
+            if (iface) HookInterfaceByVersion(iface, pszVersion);
+            return iface;
+        }
+    }
+    return SteamInternal_CreateInterface(pszVersion);
+}
+
 extern "C" __declspec(dllexport) void* CreateInterface(const char* pszVersion, int* pReturnCode) {
     if (!pszVersion) {
         if (pReturnCode) *pReturnCode = 1;

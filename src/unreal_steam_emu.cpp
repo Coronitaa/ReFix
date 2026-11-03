@@ -59,6 +59,8 @@
 #include "include/steam/isteamvideo.h"
 #include "include/steam/isteamparentalsettings.h"
 #include "include/steam/isteamremoteplay.h"
+#include "include/steam/isteamgamecoordinator.h"
+#include "include/steam/isteamunifiedmessages.h"
 
 #include "unreal_steam_emu.h"
 #include "unreal_detect.h"
@@ -6120,8 +6122,10 @@ namespace UnrealSteamEmu {
             item.triggerTime = std::chrono::steady_clock::now();
             g_callbackQueue.push_back(item);
 
+            // There is no VAC on LAN: a server claiming VAC-secure makes Source refuse clients started with
+            // -insecure (or any client not validated by Steam), so the policy reports an insecure server.
             GSPolicyResponse_t pol = {};
-            pol.m_bSecure = 1;
+            pol.m_bSecure = 0;
             QueuedCallbackItem itemPol;
             itemPol.iCallback = GSPolicyResponse_t::k_iCallback;
             itemPol.data.assign((const uint8_t*)&pol, (const uint8_t*)&pol + sizeof(pol));
@@ -6132,7 +6136,7 @@ namespace UnrealSteamEmu {
         virtual void LogOnAnonymous() override { LogOn(nullptr); }
         virtual void LogOff() override {}
         virtual bool BLoggedOn() override { return true; }
-        virtual bool BSecure() override { return true; }
+        virtual bool BSecure() override { return false; }
         virtual CSteamID GetSteamID() override {
             return CSteamID(0x0110000100000000ULL | (uint64_t)((g_localSteamID & 0xFFFFFFFF) ^ 0x0000000012345678ULL));
         }
@@ -6418,6 +6422,47 @@ namespace UnrealSteamEmu {
     };
     static CSteamInputEmu g_steamInputInstance;
 
+    // ISteamController (pre-ISteamInput SDKs, e.g. CS:GO's SteamController003): no Steam controllers on LAN.
+    // Kept separate from ISteamInput: the two vtables differ, so serving one for the other crashes old games.
+    class CSteamControllerEmu : public ISteamController {
+    public:
+        virtual bool Init() override { return true; }
+        virtual bool Shutdown() override { return true; }
+        virtual void RunFrame() override { }
+        virtual int GetConnectedControllers(ControllerHandle_t * a0) override { return {}; }
+        virtual ControllerActionSetHandle_t GetActionSetHandle(const char * a0) override { return {}; }
+        virtual void ActivateActionSet(ControllerHandle_t a0, ControllerActionSetHandle_t a1) override { }
+        virtual ControllerActionSetHandle_t GetCurrentActionSet(ControllerHandle_t a0) override { return {}; }
+        virtual void ActivateActionSetLayer(ControllerHandle_t a0, ControllerActionSetHandle_t a1) override { }
+        virtual void DeactivateActionSetLayer(ControllerHandle_t a0, ControllerActionSetHandle_t a1) override { }
+        virtual void DeactivateAllActionSetLayers(ControllerHandle_t a0) override { }
+        virtual int GetActiveActionSetLayers(ControllerHandle_t a0, ControllerActionSetHandle_t * a1) override { return {}; }
+        virtual ControllerDigitalActionHandle_t GetDigitalActionHandle(const char * a0) override { return {}; }
+        virtual ControllerDigitalActionData_t GetDigitalActionData(ControllerHandle_t a0, ControllerDigitalActionHandle_t a1) override { return {}; }
+        virtual int GetDigitalActionOrigins(ControllerHandle_t a0, ControllerActionSetHandle_t a1, ControllerDigitalActionHandle_t a2, EControllerActionOrigin * a3) override { return {}; }
+        virtual ControllerAnalogActionHandle_t GetAnalogActionHandle(const char * a0) override { return {}; }
+        virtual ControllerAnalogActionData_t GetAnalogActionData(ControllerHandle_t a0, ControllerAnalogActionHandle_t a1) override { return {}; }
+        virtual int GetAnalogActionOrigins(ControllerHandle_t a0, ControllerActionSetHandle_t a1, ControllerAnalogActionHandle_t a2, EControllerActionOrigin * a3) override { return {}; }
+        virtual const char * GetGlyphForActionOrigin(EControllerActionOrigin a0) override { return ""; }
+        virtual const char * GetStringForActionOrigin(EControllerActionOrigin a0) override { return ""; }
+        virtual void StopAnalogActionMomentum(ControllerHandle_t a0, ControllerAnalogActionHandle_t a1) override { }
+        virtual ControllerMotionData_t GetMotionData(ControllerHandle_t a0) override { return {}; }
+        virtual void TriggerHapticPulse(ControllerHandle_t a0, ESteamControllerPad a1, unsigned short a2) override { }
+        virtual void TriggerRepeatedHapticPulse(ControllerHandle_t a0, ESteamControllerPad a1, unsigned short a2, unsigned short a3, unsigned short a4, unsigned int a5) override { }
+        virtual void TriggerVibration(ControllerHandle_t a0, unsigned short a1, unsigned short a2) override { }
+        virtual void SetLEDColor(ControllerHandle_t a0, uint8 a1, uint8 a2, uint8 a3, unsigned int a4) override { }
+        virtual bool ShowBindingPanel(ControllerHandle_t a0) override { return {}; }
+        virtual ESteamInputType GetInputTypeForHandle(ControllerHandle_t a0) override { return {}; }
+        virtual ControllerHandle_t GetControllerForGamepadIndex(int a0) override { return {}; }
+        virtual int GetGamepadIndexForController(ControllerHandle_t a0) override { return {}; }
+        virtual const char * GetStringForXboxOrigin(EXboxOrigin a0) override { return ""; }
+        virtual const char * GetGlyphForXboxOrigin(EXboxOrigin a0) override { return ""; }
+        virtual EControllerActionOrigin GetActionOriginFromXboxOrigin_(ControllerHandle_t a0, EXboxOrigin a1) override { return {}; }
+        virtual EControllerActionOrigin TranslateActionOrigin(ESteamInputType a0, EControllerActionOrigin a1) override { return {}; }
+        virtual bool GetControllerBindingRevision(ControllerHandle_t a0, int * a1, int * a2) override { return {}; }
+    };
+    static CSteamControllerEmu g_steamControllerInstance;
+
     // --- ISteamInventory ---
     class CSteamInventoryEmu : public ISteamInventory {
     public:
@@ -6679,6 +6724,43 @@ namespace UnrealSteamEmu {
     };
     static CSteamVideoEmu g_steamVideoInstance;
 
+    // --- ISteamGameCoordinator ---
+    // Valve's per-game coordinator (CS:GO, Dota 2, TF2 items) has no LAN equivalent: messages are accepted and
+    // dropped, and none ever arrives, so the game sees a GC that never answers and keeps its offline paths.
+    class CSteamGameCoordinatorEmu : public ISteamGameCoordinator {
+    public:
+        virtual EGCResults SendMessage_(uint32 unMsgType, const void *pubData, uint32 cubData) override {
+            if (m_logged.fetch_add(1) < 4)
+                ReFixLog("[GC] Dropping message type %u (%u bytes): no game coordinator on LAN", unMsgType & 0x7FFFFFFF, cubData);
+            return k_EGCResultOK;
+        }
+        virtual bool IsMessageAvailable(uint32 *pcubMsgSize) override { if (pcubMsgSize) *pcubMsgSize = 0; return false; }
+        virtual EGCResults RetrieveMessage(uint32 *punMsgType, void *pubDest, uint32 cubDest, uint32 *pcubMsgSize) override {
+            if (pcubMsgSize) *pcubMsgSize = 0;
+            return k_EGCResultNoMessage;
+        }
+    private:
+        std::atomic<int> m_logged{ 0 };
+    };
+    static CSteamGameCoordinatorEmu g_steamGameCoordinatorInstance;
+
+    // --- ISteamUnifiedMessages (pre-1.42 SDKs) ---
+    // Steam service RPCs; Source's CSteamAPIContext refuses to start when this interface is missing. Nothing on
+    // LAN can answer a service method, so every send fails cleanly.
+    class CSteamUnifiedMessagesEmu : public ISteamUnifiedMessages {
+    public:
+        virtual ClientUnifiedMessageHandle SendMethod(const char *, const void *, uint32, uint64) override { return k_InvalidUnifiedMessageHandle; }
+        virtual bool GetMethodResponseInfo(ClientUnifiedMessageHandle, uint32 *punResponseSize, EResult *peResult) override {
+            if (punResponseSize) *punResponseSize = 0;
+            if (peResult) *peResult = k_EResultFail;
+            return false;
+        }
+        virtual bool GetMethodResponseData(ClientUnifiedMessageHandle, void *, uint32, bool) override { return false; }
+        virtual bool ReleaseMethod(ClientUnifiedMessageHandle) override { return false; }
+        virtual bool SendNotification(const char *, const void *, uint32) override { return false; }
+    };
+    static CSteamUnifiedMessagesEmu g_steamUnifiedMessagesInstance;
+
     // --- ISteamParentalSettings ---
     class CSteamParentalSettingsEmu : public ISteamParentalSettings {
     public:
@@ -6823,7 +6905,7 @@ namespace UnrealSteamEmu {
             return &g_steamHTTPInstance;
         }
         virtual ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamController *>(rfv_);
-            return (ISteamController*)&g_steamInputInstance;
+            return &g_steamControllerInstance;
         }
         virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUGC *>(rfv_);
             return &g_steamUGCInstance;
@@ -6931,7 +7013,7 @@ namespace UnrealSteamEmu {
             return &g_steamHTTPInstance;
         }
         virtual ISteamController *GetISteamController(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamController *>(rfv_);
-            return (ISteamController*)&g_steamInputInstance;
+            return &g_steamControllerInstance;
         }
         virtual ISteamUGC *GetISteamUGC(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUGC *>(rfv_);
             return &g_steamUGCInstance;
@@ -7023,7 +7105,9 @@ namespace UnrealSteamEmu {
             return &g_steamGameServerInstance;
         if (strstr(pchVersion, "STEAMHTTP") || strstr(pchVersion, "SteamHTTP"))
             return &g_steamHTTPInstance;
-        if (strstr(pchVersion, "SteamInput") || strstr(pchVersion, "STEAMINPUT") || strstr(pchVersion, "SteamController"))
+        if (strstr(pchVersion, "SteamController") || strstr(pchVersion, "STEAMCONTROLLER"))
+            return &g_steamControllerInstance;
+        if (strstr(pchVersion, "SteamInput") || strstr(pchVersion, "STEAMINPUT"))
             return &g_steamInputInstance;
         if (strstr(pchVersion, "STEAMINVENTORY") || strstr(pchVersion, "SteamInventory"))
             return &g_steamInventoryInstance;
@@ -7049,6 +7133,10 @@ namespace UnrealSteamEmu {
             return &g_steamPartiesInstance;
         if (strstr(pchVersion, "STEAMREMOTEPLAY") || strstr(pchVersion, "SteamRemotePlay"))
             return &g_steamRemotePlayInstance;
+        if (strstr(pchVersion, "SteamGameCoordinator") || strstr(pchVersion, "STEAMGAMECOORDINATOR"))
+            return &g_steamGameCoordinatorInstance;
+        if (strstr(pchVersion, "STEAMUNIFIEDMESSAGES") || strstr(pchVersion, "SteamUnifiedMessages"))
+            return &g_steamUnifiedMessagesInstance;
 
         ReFixLog("[UnrealSteam] Warning: Unrecognized interface '%s'", pchVersion);
         return nullptr;
@@ -7131,6 +7219,7 @@ namespace UnrealSteamEmu {
     ISteamUGC* LatestUGC() { return static_cast<ISteamUGC*>(&g_steamUGCInstance); }
     ISteamHTTP* LatestHTTP() { return static_cast<ISteamHTTP*>(&g_steamHTTPInstance); }
     ISteamScreenshots* LatestScreenshots() { return static_cast<ISteamScreenshots*>(&g_steamScreenshotsInstance); }
+    ISteamController* LatestController() { return static_cast<ISteamController*>(&g_steamControllerInstance); }
 
     // Latest-version object by SDK class name, for the generated flat dispatcher.
     // static_cast keeps each entry compile-checked against the SDK class it serves.
