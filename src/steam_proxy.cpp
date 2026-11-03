@@ -38,6 +38,7 @@
 #include "refix_crash_log.h"
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
+#include "overlay/refix_overlay.h"
 #endif
 
 static bool EnsureOriginal();
@@ -5148,6 +5149,7 @@ static void ReFixInitializePost(bool success) {
         ReFixLog("ReFixInitializePost: UnrealSteamEmu LAN initialized");
 #if REFIX_LAN_EDITION
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
+        ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
@@ -7127,6 +7129,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             ApplySteamEnv();
             if (!ReFix::NetworkModeManager::IsOnline()) {
                 InitializeLanForwardTable();
+#if REFIX_LAN_EDITION
+                ReFixOverlay::ArmEarly(); // environment switches only (keeps the Steam overlay out)
+#endif
             }
             // Note: DO NOT call EnsureOriginal() or LoadLibrary in DllMain!
             // In LAN/offline mode, genuine Valve DLL must NEVER be loaded.

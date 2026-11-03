@@ -180,6 +180,13 @@ Name = ${USER_NAME}
 AutoGenerateSteamId = true
 SteamId =
 
+[Overlay]
+; ReFix LAN overlay (Shift+Tab): player profiles, LAN player list, invites. Replaces the Steam overlay.
+Enabled = true
+BlockSteamOverlay = true
+; Each profile keeps its own Steam Cloud files and the game's known save folder (Unreal SaveGames, Unity LocalLow).
+IsolateSaves = true
+
 [EOS]
 Mode = $eos
 

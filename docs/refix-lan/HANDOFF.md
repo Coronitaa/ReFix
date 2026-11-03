@@ -171,3 +171,66 @@
   answer; a real LAN matchmaker for CS:GO would be an addon, not core.
 - Listen server (`+map de_dust2`) still verified with the coordinator active (the server reads its welcome once
   the map runs); second-instance join not re-tested after this change.
+
+## 2026-11-03 (10) - ReFix LAN overlay (src/overlay): profiles, LAN players, invites
+- Own overlay instead of Steam's: a top-most DirectComposition window over the game's client area (D3D11 + ImGui
+  on its own thread). Nothing is injected into the game's renderer, no game or system code is patched and there are
+  no global hooks (Shift+Tab is polled with GetAsyncKeyState only while a window of the game has the focus).
+  `steam_overlay_block.cpp` only sets `DISABLE_VK_LAYER_VALVE_steam_overlay_1` and `SteamNoOverlayUIDrawing`.
+- Flow: DllMain -> `ReFixOverlay::ArmEarly` (LAN only); `LoadConfig` -> `WaitForRestartParent` + `ResolveIdentity`
+  (only with IdentityMode=auto and no SteamID forced through the environment); `ReFixInitializePost` -> `Start`
+  after `UnrealSteamEmu::Initialize`. With a profile active the instance slot no longer offsets the SteamID (each
+  instance holds a different profile; the listen port offset stays).
+- Profile choice: `REFIX_PROFILE_ID` (waits up to 30 s for its per-exe mutex), then the last used if free, then the
+  most recent free one; none at all -> first-run dialog ("Ahora no" keeps the machine identity); all in use ->
+  "¿Quién juega?" picker. Console processes and `-batchmode` / `-nographics` / `-server` never use profiles or the
+  overlay, so the console tests and dedicated servers never block on a window. `[Overlay] Enabled`,
+  `BlockSteamOverlay`, `IsolateSaves` in ReFix.ini (all true by default; added to ReFix.ini, deploy_helper.ps1 and
+  AutoDeploy.sh) and `REFIX_NO_OVERLAY=1`.
+- Profile switch restarts the game: the old process restores the identity variables it was launched with,
+  sets `REFIX_PROFILE_ID` and `REFIX_RESTART_PID`, relaunches and terminates; the new process waits for it.
+- Emulator: `ActivateGameOverlay*` (LobbyInvite -> invite picker, ToUser, WebPage/Store -> browser, InviteDialog,
+  InviteDialogConnectString, RemotePlayTogether), `InviteUserToGame`, `InviteUserToLobby` and `IsOverlayEnabled`
+  go to the overlay; `Overlay_LocalLobby`, `Overlay_ConnectString` (rich presence under a new mutex) and
+  `Overlay_SetPersonaName` (buffer reserved to 256 so `GetPersonaName()` pointers stay valid) implemented.
+- Fix found while testing: `GetFriendCount`/`GetFriendByIndex`/`HasFriend` ignored the flags, so every LAN peer was
+  also "blocked". Lethal Company refused to join ("An error occured!", "blocked user: ..."). LAN peers now count
+  only for `k_EFriendFlagImmediate`.
+- Saves, without hooks (`save_redirect.cpp` stays out of the build):
+  (a) Steam Cloud per profile: `CSteamRemoteStorageEmu` uses `%APPDATA%\ReFix LAN\Profiles\<id>\Cloud\<appid>`
+      (UTF-8 names, wide paths); without a profile it is the old relative `saves/` with ANSI names, unchanged.
+      `GetUserDataFolder` returns that folder as an 8.3 path (falls back to "saves" when it cannot be ANSI).
+  (b) Known save folders swapped at start, before the game reads them (`save_swap.cpp`): Unreal
+      `%LOCALAPPDATA%\<Project>\Saved\SaveGames`, Unity `LocalLow\<Company>\<Product>` from `<exe>_Data\app.info`
+      (Player.log / Player-prev.log / output_log.txt / Unity stay). The folder's owner is in
+      `%APPDATA%\ReFix LAN\saves.ini`; the owner's files go to `Profiles\<owner>\Saves\<label>` and the new
+      profile's come back. All or nothing per folder (refuses on name clashes, rolls back on a locked file).
+      Saves found before any profile belong to the profile created with "Usar las partidas guardadas que ya hay
+      en este PC", or to `%APPDATA%\ReFix LAN\Saves\_pc`; nothing is deleted.
+  Not covered: two instances of the same game open at once with different profiles (the second one finds the
+  first running, skips the swap and plays on the folder of the profile that is in place); playing without a
+  profile ("Ahora no") uses whatever profile's saves are in place; Unity PlayerPrefs in the registry; saves in
+  Documents, Saved Games, the game folder or engine-specific paths; Unity mod settings stored in LocalLow are
+  swapped together with the saves; a crash in the middle of a swap leaves the moved files in the stash (logged
+  as `[Saves]`).
+- Build: `src\overlay\*.cpp` (except save_redirect) + imgui (core, draw, widgets, tables, impl_win32, impl_dx11) in
+  the LAN DLL, the test DLL and x86. d3d11, dcomp, d3dcompiler_47, shell32, ole32, dwmapi, gdi32 and imm32 are
+  delay-loaded (dumpbin: the normal import table is the same as before minus ole32, which moved to delayed);
+  dxgi and windowscodecs are not linked because nothing imports them (LNK4199). LAN builds now use `/utf-8`
+  (Spanish UI strings were compiled to CP1252 and showed "?" / mojibake).
+- Verified on this PC with Lethal Company (two instances, exclusive fullscreen): first-run dialog, "Importar desde
+  Steam" error with Steam closed, picker when the profile is in use, distinct SteamIDs per instance (profile IDs,
+  slot 1 without offset), welcome toast, Shift+Tab overlay with the community card, player list ("En una sala ·
+  1/4"), favourites per profile, Join from the overlay (GameLobbyJoinRequested -> the second instance entered the
+  host's ship), the game's "Invite friends" opening the invite picker, the invite toast on the other instance,
+  restart into another profile with the save swap back. Existing tests pass (identity modes, multi-instance,
+  module dedupe, iface versions, 3-instance mesh).
+- Fixed during the test: the host thread deadlocked against the game thread (GetWindowText sends WM_GETTEXT;
+  now InternalGetWindowText); fullscreen games that minimise when the overlay takes the focus keep the overlay
+  on their last rect (solid backdrop) and are restored on close; a fullscreen game that lost the focus to the
+  profile dialog is minimised and restored so it presents again; Shift+Tab taps shorter than the poll interval;
+  Escape closing a menu no longer closes the overlay too.
+- Known limits: toasts cannot be clicked while the game holds the mouse (in-game cursor lock): open Shift+Tab, the
+  notifications are drawn inside the overlay there. No overlay over exclusive-fullscreen games that do not
+  minimise and do not let a top-most window through. "Importar imagen…" (IFileOpenDialog), the profile editor
+  in the overlay and the Community links were not exercised in-game; two real PCs not tested.

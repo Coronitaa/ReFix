@@ -1203,7 +1203,9 @@ void Install(void* hSteamOriginal) {
 
     Log("Installing Winsock P2P hooks via MinHook...");
 
-    if (MH_Initialize() != MH_OK) {
+    // ALREADY_INITIALIZED: the overlay's save redirection may have started MinHook during SteamAPI_Init.
+    MH_STATUS mhInit = MH_Initialize();
+    if (mhInit != MH_OK && mhInit != MH_ERROR_ALREADY_INITIALIZED) {
         Log("ERROR: MH_Initialize failed");
         return;
     }

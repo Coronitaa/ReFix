@@ -71,6 +71,7 @@
 #include "lan_core/refix_lan_core.h"
 #include "steam_lobby_mapping.h"
 #include "steam_p2p_hook.h"
+#include "overlay/refix_overlay.h"
 #include "generated/steam_emu_latest.h"
 
 class CCallbackMgr {
@@ -317,7 +318,10 @@ namespace UnrealSteamEmu {
         return true;
     }
 
+    static constexpr size_t kPersonaNameCapacity = 256;
+
     static void LoadConfig() {
+        ReFixOverlay::WaitForRestartParent();
         char exePath[MAX_PATH];
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
         std::string exeDir(exePath);
@@ -560,6 +564,9 @@ namespace UnrealSteamEmu {
         }
 
         g_basePersonaName = g_personaName;
+        // The overlay can rename the player while the game runs (Overlay_SetPersonaName). Reserved capacity
+        // keeps the buffer GetPersonaName() hands out at the same address across renames.
+        g_personaName.reserve(kPersonaNameCapacity);
 
         // 5. Resolve SteamID (explicit numeric configuration has strict precedence over auto-gen)
         std::string sidSource = "unknown";
@@ -586,6 +593,24 @@ namespace UnrealSteamEmu {
             } else {
                 g_localSteamID = _strtoui64(envSid, nullptr, 10);
                 if (g_localSteamID != 0) sidSource = "env:numeric";
+            }
+        }
+
+        // ReFix LAN profile (IdentityMode=auto, no SteamID forced through the environment): the profile's
+        // SteamID and name replace the machine identity, and the instance slot no longer offsets the ID
+        // because every instance of a game holds a different profile.
+        bool profileIdentity = false;
+        if (!envSid[0] && bAutoIdentity) {
+            ReFixOverlay::Identity profile;
+            if (ReFixOverlay::ResolveIdentity(g_appID, iniPath, profile) && profile.steamId != 0) {
+                profileIdentity = true;
+                g_localSteamID = profile.steamId;
+                sidSource = "profile";
+                if (!profile.name.empty()) {
+                    g_personaName = profile.name;
+                    g_basePersonaName = profile.name;
+                    nameSource = "profile";
+                }
             }
         }
 
@@ -626,7 +651,7 @@ namespace UnrealSteamEmu {
         }
 
         // Apply slot offset to SteamID if multi-instance slot > 0 (strictly guaranteed across all sources)
-        if (slot > 0) {
+        if (slot > 0 && !profileIdentity) {
             g_localSteamID += slot;
             sidSource += "+slot" + std::to_string(slot);
         }
@@ -3108,11 +3133,23 @@ namespace UnrealSteamEmu {
         virtual void TrackAppUsageEvent(CGameID gameID, int eAppUsageEvent, const char *pchExtraInfo = "") override {}
 
         virtual bool GetUserDataFolder(char *pchBuffer, int cubBuffer) override {
-            if (pchBuffer && cubBuffer > 0) {
-                strcpy_s(pchBuffer, cubBuffer, "saves");
-                return true;
+            if (!pchBuffer || cubBuffer <= 0) return false;
+            // Active ReFix LAN profile: its Steam Cloud folder, as an 8.3 path so ANSI games can open it.
+            const std::wstring cloud = ReFixOverlay::CloudFolder(g_appID);
+            if (!cloud.empty()) {
+                wchar_t shortPath[MAX_PATH] = { 0 };
+                const DWORD n = GetShortPathNameW(cloud.c_str(), shortPath, MAX_PATH);
+                char ansi[MAX_PATH] = { 0 };
+                BOOL lossy = FALSE;
+                if (n > 0 && n < MAX_PATH &&
+                    WideCharToMultiByte(CP_ACP, 0, shortPath, -1, ansi, MAX_PATH, NULL, &lossy) > 0 && !lossy &&
+                    (int)strlen(ansi) < cubBuffer) {
+                    strcpy_s(pchBuffer, cubBuffer, ansi);
+                    return true;
+                }
             }
-            return false;
+            strcpy_s(pchBuffer, cubBuffer, "saves");
+            return true;
         }
 
         virtual void StartVoiceRecording() override {}
@@ -3348,12 +3385,14 @@ namespace UnrealSteamEmu {
     class CSteamFriendsEmu : public ISteamFriends017 {
     private:
         std::map<std::string, std::string> m_richPresence;
+        std::mutex m_richPresenceMu;
     public:
         virtual const char *GetPersonaName() override {
             return g_personaName.c_str();
         }
 
-        virtual SteamAPICall_t SetPersonaName(const char *pchPersonaName) override {
+        // Shared by SetPersonaName and the overlay's profile editor.
+        static void ApplyPersonaName(const char *pchPersonaName) {
             if (pchPersonaName && pchPersonaName[0] != '\0') {
                 g_personaName = pchPersonaName;
                 g_basePersonaName = pchPersonaName;
@@ -3366,6 +3405,10 @@ namespace UnrealSteamEmu {
                     refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
                 }
             }
+        }
+
+        virtual SteamAPICall_t SetPersonaName(const char *pchPersonaName) override {
+            ApplyPersonaName(pchPersonaName);
             SetPersonaNameResponse_t resp = {};
             resp.m_bSuccess = true;
             resp.m_bLocalSuccess = true;
@@ -3377,12 +3420,18 @@ namespace UnrealSteamEmu {
             return k_EPersonaStateOnline;
         }
 
+        // Every LAN peer is an immediate friend and nothing else: queries for blocked/ignored/requesting
+        // users get no one (Lethal Company refused to join a host it found in GetFriendCount(Blocked)).
+        static bool CountsLanPeers(int iFriendFlags) { return (iFriendFlags & k_EFriendFlagImmediate) != 0; }
+
         virtual int GetFriendCount(int iFriendFlags) override {
+            if (!CountsLanPeers(iFriendFlags)) return 0;
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             return (int)g_peers.size();
         }
 
         virtual CSteamID GetFriendByIndex(int iFriend, int iFriendFlags) override {
+            if (!CountsLanPeers(iFriendFlags)) return CSteamID();
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             if (iFriend >= 0 && iFriend < (int)g_peers.size()) {
                 auto it = g_peers.begin();
@@ -3504,7 +3553,7 @@ namespace UnrealSteamEmu {
         virtual int GetFriendsGroupMembersCount(FriendsGroupID_t friendsGroupID) override { return 0; }
         virtual void GetFriendsGroupMembersList(FriendsGroupID_t friendsGroupID, CSteamID *pOutSteamIDMembers, int nMembersCount) override {}
 
-        virtual bool HasFriend(CSteamID steamIDFriend, int iFriendFlags) override { return true; }
+        virtual bool HasFriend(CSteamID steamIDFriend, int iFriendFlags) override { return CountsLanPeers(iFriendFlags); }
         virtual int GetClanCount() override { return 0; }
         virtual CSteamID GetClanByIndex(int iClan) override { return CSteamID(); }
         virtual const char *GetClanName(CSteamID steamIDClan) override { return ""; }
@@ -3517,12 +3566,18 @@ namespace UnrealSteamEmu {
         virtual bool IsUserInSource(CSteamID steamIDUser, CSteamID steamIDSource) override { return false; }
 
         virtual void SetInGameVoiceSpeaking(CSteamID steamIDUser, bool bSpeaking) override {}
-        virtual void ActivateGameOverlay(const char *pchDialog) override {}
-        virtual void ActivateGameOverlayToUser(const char *pchDialog, CSteamID steamID) override {}
-        virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {}
-        virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override {}
+        virtual void ActivateGameOverlay(const char *pchDialog) override { ReFixOverlay::ActivateOverlay(pchDialog); }
+        virtual void ActivateGameOverlayToUser(const char *pchDialog, CSteamID steamID) override {
+            ReFixOverlay::ActivateOverlayToUser(pchDialog, steamID.ConvertToUint64());
+        }
+        virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
+            ReFixOverlay::ActivateWebPage(pchURL);
+        }
+        virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override { ReFixOverlay::ActivateStore(nAppID); }
         virtual void SetPlayedWith(CSteamID steamIDUserPlayedWith) override {}
-        virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override {}
+        virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override {
+            ReFixOverlay::ActivateInviteDialog(steamIDLobby.ConvertToUint64(), nullptr);
+        }
 
         virtual int GetSmallFriendAvatar(CSteamID steamIDFriend) override { return 1; }
         virtual int GetMediumFriendAvatar(CSteamID steamIDFriend) override { return 1; }
@@ -3538,6 +3593,7 @@ namespace UnrealSteamEmu {
 
         virtual bool SetRichPresence(const char *pchKey, const char *pchValue) override {
             if (!pchKey) return false;
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
             if (pchValue && pchValue[0] != '\0') {
                 m_richPresence[pchKey] = pchValue;
             } else {
@@ -3548,7 +3604,15 @@ namespace UnrealSteamEmu {
         }
 
         virtual void ClearRichPresence() override {
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
             m_richPresence.clear();
+        }
+
+        // Copy of a local rich presence value, safe from other threads (the overlay).
+        std::string LocalRichPresence(const char *pchKey) {
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            auto it = m_richPresence.find(pchKey ? pchKey : "");
+            return it != m_richPresence.end() ? it->second : std::string();
         }
 
         virtual const char *GetFriendRichPresence(CSteamID steamIDFriend, const char *pchKey) override {
@@ -3579,6 +3643,7 @@ namespace UnrealSteamEmu {
 
         virtual bool InviteUserToGame(CSteamID steamIDFriend, const char *pchConnectString) override {
             ReFixLog("[UnrealSteam] InviteUserToGame: steamID=%llu, connect='%s'", steamIDFriend.ConvertToUint64(), pchConnectString ? pchConnectString : "");
+            ReFixOverlay::InviteUser(steamIDFriend.ConvertToUint64(), 0, pchConnectString);
             return true;
         }
 
@@ -3610,9 +3675,13 @@ namespace UnrealSteamEmu {
         virtual bool IsClanPublic(CSteamID steamIDClan) override { return false; }
         virtual bool IsClanOfficialGameGroup(CSteamID steamIDClan) override { return false; }
         virtual int GetNumChatsWithUnreadPriorityMessages() override { return 0; }
-        virtual void ActivateGameOverlayRemotePlayTogetherInviteDialog(CSteamID steamIDLobby) override {}
+        virtual void ActivateGameOverlayRemotePlayTogetherInviteDialog(CSteamID steamIDLobby) override {
+            ReFixOverlay::ActivateInviteDialog(steamIDLobby.ConvertToUint64(), nullptr);
+        }
         virtual bool RegisterProtocolInOverlayBrowser(const char *pchProtocol) override { return false; }
-        virtual void ActivateGameOverlayInviteDialogConnectString(const char *pchConnectString) override {}
+        virtual void ActivateGameOverlayInviteDialogConnectString(const char *pchConnectString) override {
+            ReFixOverlay::ActivateInviteDialog(0, pchConnectString);
+        }
         virtual SteamAPICall_t RequestEquippedProfileItems(CSteamID steamID) override { return 0; }
         virtual bool BHasEquippedProfileItem(CSteamID steamID, ECommunityProfileItemType itemType) override { return false; }
         virtual const char *GetProfileItemPropertyString(CSteamID steamID, ECommunityProfileItemType itemType, ECommunityProfileItemProperty prop) override { return ""; }
@@ -3754,7 +3823,7 @@ namespace UnrealSteamEmu {
         }
         virtual uint32 GetIPCCallCount() override { return 0; }
         virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t pFunction) override {}
-        virtual bool IsOverlayEnabled() override { return false; }
+        virtual bool IsOverlayEnabled() override { return ReFixOverlay::IsEnabled(); }
         virtual bool BOverlayNeedsPresent() override { return false; }
         // Source engines (Garry's Mod) check their own binaries at startup and spin on IsAPICallCompleted
         // without pumping callbacks: a 0 handle hung the main thread forever. Complete it immediately.
@@ -4081,7 +4150,10 @@ namespace UnrealSteamEmu {
             ReFixLog("[UnrealSteam] LeaveLobby: Left Lobby %llu", lID);
         }
 
-        virtual bool InviteUserToLobby(CSteamID steamIDLobby, CSteamID steamIDInvitee) override { return true; }
+        virtual bool InviteUserToLobby(CSteamID steamIDLobby, CSteamID steamIDInvitee) override {
+            ReFixOverlay::InviteUser(steamIDInvitee.ConvertToUint64(), steamIDLobby.ConvertToUint64(), nullptr);
+            return true;
+        }
 
         virtual int GetNumLobbyMembers(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
@@ -5831,11 +5903,28 @@ namespace UnrealSteamEmu {
         std::map<SteamAPICall_t, std::vector<uint8_t>> m_asyncReads;
         UGCFileWriteStreamHandle_t m_nextStream = 0;
 
-        // saves/<file>, creating the sub-folders cloud file names may contain ("characters/x.fch").
-        static std::string SavePathForWrite(const char* pchFile) {
-            std::string path = std::string("saves/") + pchFile;
+        // Path of a cloud file: the active ReFix LAN profile's Cloud\<AppID> folder (UTF-8 names, wide paths),
+        // or the relative saves/ folder as before profiles (ANSI names).
+        static std::wstring Widen(const std::string& text, UINT codePage) {
+            if (text.empty()) return std::wstring();
+            int n = MultiByteToWideChar(codePage, 0, text.data(), (int)text.size(), NULL, 0);
+            std::wstring out((size_t)(n > 0 ? n : 0), L'\0');
+            if (n > 0) MultiByteToWideChar(codePage, 0, text.data(), (int)text.size(), &out[0], n);
+            return out;
+        }
+        static std::wstring SavePath(const char* pchFile) {
+            const std::wstring root = ReFixOverlay::CloudFolder(g_appID);
+            if (root.empty()) return Widen(std::string("saves/") + pchFile, CP_ACP);
+            std::wstring rel = Widen(pchFile, CP_UTF8);
+            std::replace(rel.begin(), rel.end(), L'/', L'\\');
+            while (!rel.empty() && rel[0] == L'\\') rel.erase(0, 1);
+            return root + L"\\" + rel;
+        }
+        // Also creates the sub-folders cloud file names may contain ("characters/x.fch").
+        static std::wstring SavePathForWrite(const char* pchFile) {
+            std::wstring path = SavePath(pchFile);
             for (size_t i = 0; i < path.size(); ++i) {
-                if (path[i] == '/' || path[i] == '\\') CreateDirectoryA(path.substr(0, i).c_str(), NULL);
+                if (path[i] == L'/' || path[i] == L'\\') CreateDirectoryW(path.substr(0, i).c_str(), NULL);
             }
             return path;
         }
@@ -5843,7 +5932,7 @@ namespace UnrealSteamEmu {
     public:
         virtual bool FileWrite(const char *pchFile, const void *pvData, int32 cubData) override {
             if (!pchFile || (!pvData && cubData > 0) || cubData < 0) return false;
-            std::string path = SavePathForWrite(pchFile);
+            std::wstring path = SavePathForWrite(pchFile);
             std::ofstream f(path, std::ios::binary);
             if (f.is_open()) {
                 f.write((const char*)pvData, cubData);
@@ -5853,7 +5942,7 @@ namespace UnrealSteamEmu {
         }
         virtual int32 FileRead(const char *pchFile, void *pvData, int32 cubDataToRead) override {
             if (!pchFile || !pvData) return 0;
-            std::string path = std::string("saves/") + pchFile;
+            std::wstring path = SavePath(pchFile);
             std::ifstream f(path, std::ios::binary);
             if (f.is_open()) {
                 f.read((char*)pvData, cubDataToRead);
@@ -5873,7 +5962,7 @@ namespace UnrealSteamEmu {
             resp.m_eResult = k_EResultFileNotFound;
             resp.m_nOffset = nOffset;
             if (pchFile) {
-                std::ifstream f(std::string("saves/") + pchFile, std::ios::binary);
+                std::ifstream f(SavePath(pchFile), std::ios::binary);
                 if (f.is_open()) {
                     f.seekg(0, std::ios::end);
                     std::streamoff size = f.tellg();
@@ -5912,8 +6001,7 @@ namespace UnrealSteamEmu {
         virtual bool FileForget(const char *pchFile) override { return true; }
         virtual bool FileDelete(const char *pchFile) override {
             if (pchFile) {
-                std::string path = std::string("saves/") + pchFile;
-                DeleteFileA(path.c_str());
+                DeleteFileW(SavePath(pchFile).c_str());
                 return true;
             }
             return false;
@@ -5956,15 +6044,13 @@ namespace UnrealSteamEmu {
 
         virtual bool FileExists(const char *pchFile) override {
             if (!pchFile) return false;
-            std::string path = std::string("saves/") + pchFile;
-            return (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES);
+            return (GetFileAttributesW(SavePath(pchFile).c_str()) != INVALID_FILE_ATTRIBUTES);
         }
         virtual bool FilePersisted(const char *pchFile) override { return FileExists(pchFile); }
         virtual int32 GetFileSize(const char *pchFile) override {
             if (!pchFile) return 0;
-            std::string path = std::string("saves/") + pchFile;
             WIN32_FILE_ATTRIBUTE_DATA fad;
-            if (GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad)) {
+            if (GetFileAttributesExW(SavePath(pchFile).c_str(), GetFileExInfoStandard, &fad)) {
                 return (int32)fad.nFileSizeLow;
             }
             return 0;
@@ -7228,6 +7314,43 @@ namespace UnrealSteamEmu {
         ReFixLog("[UnrealSteam] Adopted AppID %u (was %u): LAN discovery scope updated", appId, previous);
     }
     const char* GetPersonaName() { return g_personaName.c_str(); }
+
+    // ---- ReFix LAN overlay bridge (refix_overlay.h); called from the overlay thread ----
+    OverlayLobbyInfo Overlay_LocalLobby() {
+        OverlayLobbyInfo info;
+        info.lobbyId = g_activeLobbyID.load();
+        if (!info.lobbyId) return info;
+        const CSteamID lobby(info.lobbyId);
+        info.members = (uint32_t)(std::max)(1, g_steamMatchmakingInstance.GetNumLobbyMembers(lobby));
+        bool joinable = true;
+        ELobbyType type = k_ELobbyTypePublic;
+        int maxMembers = 0;
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            auto it = g_lobbies.find(info.lobbyId);
+            if (it != g_lobbies.end()) {
+                joinable = it->second.joinable;
+                type = it->second.type;
+                maxMembers = it->second.maxMembers;
+            }
+        }
+        info.maxMembers = maxMembers > 0 ? (uint32_t)maxMembers : 0;
+        info.joinable = joinable && type != k_ELobbyTypePrivate && type != k_ELobbyTypeInvisible &&
+                        (info.maxMembers == 0 || info.members < info.maxMembers);
+        return info;
+    }
+
+    std::string Overlay_ConnectString() { return g_steamFriendsInstance.LocalRichPresence("connect"); }
+
+    void Overlay_SetPersonaName(const std::string& name) {
+        if (name.empty() || name.size() >= kPersonaNameCapacity) return;   // keeps GetPersonaName()'s buffer in place
+        CSteamFriendsEmu::ApplyPersonaName(name.c_str());
+        PersonaStateChange_t change = {};
+        change.m_ulSteamID = g_localSteamID;
+        change.m_nChangeFlags = k_EPersonaChangeName;
+        PostCallback(PersonaStateChange_t::k_iCallback, &change, sizeof(change));
+        ReFixLog("[UnrealSteam] Persona name changed by the overlay: '%s'", name.c_str());
+    }
     const char* GetFriendPersonaName(uint64_t steamIDFriend) {
         return g_steamFriendsInstance.GetFriendPersonaName(CSteamID(steamIDFriend));
     }

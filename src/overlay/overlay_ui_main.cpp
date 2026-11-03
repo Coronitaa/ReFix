@@ -1,0 +1,510 @@
+﻿// Overlay screens: the Shift+Tab overlay (top bar, community, players), the game's invite picker and the
+// notifications. Profile screens are in overlay_ui_profile.cpp.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include "overlay_app.h"
+#include "overlay_text.h"
+
+#include <algorithm>
+#include <cstdio>
+
+namespace refix::overlay {
+namespace {
+
+constexpr ULONGLONG kToastFadeInMs = 200;
+constexpr ULONGLONG kInviteSentMs = 8000;
+constexpr float kMargin = 32.0f;
+constexpr float kTopBarHeight = 56.0f;
+constexpr float kRowHeight = 60.0f;
+constexpr float kRowGap = 6.0f;
+constexpr float kIconButton = 34.0f;
+constexpr float kTileHeight = 72.0f;
+
+std::string Lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
+    return s;
+}
+
+bool Matches(const net::RemotePlayer& p, const char* filter) {
+    if (!filter || !filter[0]) return true;
+    const std::string f = Lower(filter);
+    return Lower(p.name).find(f) != std::string::npos || Lower(p.game).find(f) != std::string::npos;
+}
+
+// Real AppID with a public Steam page (0 = unknown, 480 = Spacewar, the emulator's fallback).
+bool HasStorePage(uint32_t appId) { return appId != 0 && appId != 480; }
+
+std::string StatusLine(const PlayerRow& r, uint64_t localLobby) {
+    char buf[128];
+    if (!r.sameGame) return r.p.game.empty() ? "En otro juego" : r.p.game;
+    if (!r.p.lobbyId) return "En este juego";
+    if (r.p.lobbyId == localLobby) return "En tu sala";
+    if (r.p.joinable && r.p.maxMembers) {
+        snprintf(buf, sizeof(buf), "En una sala · %u/%u", r.p.members, r.p.maxMembers);
+        return buf;
+    }
+    return r.p.joinable ? "En una sala" : "En una sala cerrada";
+}
+
+bool CanJoin(const PlayerRow& r, uint64_t localLobby) {
+    if (!r.sameGame || (r.p.lobbyId && r.p.lobbyId == localLobby)) return false;
+    return (r.p.lobbyId && r.p.joinable) || (!r.p.lobbyId && !r.p.connect.empty());
+}
+
+void TextAt(ImDrawList* dl, ImFont* font, ImVec2 pos, ImU32 col, const std::string& text) {
+    dl->AddText(font, font->FontSize, pos, col, text.c_str());
+}
+
+} // namespace
+
+void App::DrawOverlay(ImVec2 viewport) {
+    // A fullscreen game that minimised when we took the focus leaves the desktop behind: hide it.
+    const bool gameHidden = host::CurrentGame().minimized;
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), viewport,
+                                                  gameHidden ? ui::color::BackdropSolid : ui::color::Backdrop);
+    // Soft top band so the bar reads over bright games.
+    ImGui::GetBackgroundDrawList()->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(viewport.x, ui::S(160)),
+                                                            IM_COL32(0, 0, 0, 90), IM_COL32(0, 0, 0, 90),
+                                                            IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0));
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(viewport);
+    ImGui::Begin("##overlay", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    // ImGui closes a popup on Escape before this runs: only close the overlay if none was open last frame.
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !popupOpenLastFrame_) CloseOverlay();
+
+    if (inviteOnly_) {
+        DrawInvitePicker(viewport);
+    } else {
+        DrawTopBar(viewport);
+        const float m = ui::S(kMargin);
+        const float top = m + ui::S(kTopBarHeight) + ui::S(20);
+        const float height = viewport.y - top - m;
+        const float leftW = std::clamp(viewport.x * 0.34f, ui::S(320), ui::S(440));
+        float leftY = top;
+        if (HasStorePage(appId_)) {
+            DrawCommunity(ImVec2(m, leftY), leftW);
+            leftY += ui::S(56 + 2 * kTileHeight + 10 + 40) + ui::S(20);
+        }
+        // Achievements: extension point, not emulated yet.
+        const float achH = ui::S(104);
+        if (leftY + achH <= top + height) {
+            ui::BeginCard("##achievements", ImVec2(m, leftY), ImVec2(leftW, achH));
+            ImGui::PushFont(ui::F().heading);
+            ui::TextColored(ui::color::Star, ui::icon::Trophy);
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Logros");
+            ImGui::PopFont();
+            ImGui::PushFont(ui::F().caption);
+            ui::TextColored(ui::color::Muted, "Próximamente: aquí verás los logros de este juego.");
+            ImGui::PopFont();
+            ui::EndCard();
+        }
+        const float px = m + leftW + ui::S(20);
+        DrawPlayers(ImVec2(px, top), ImVec2(viewport.x - px - m, height), false);
+    }
+
+    DrawProfileMenu();
+    DrawSwitchConfirm();
+    DrawEditorModal();
+    popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    ImGui::End();
+    DrawToasts(viewport, false);
+}
+
+void App::DrawTopBar(ImVec2 viewport) {
+    const float m = ui::S(kMargin);
+    const float h = ui::S(kTopBarHeight);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ui::Fonts& f = ui::F();
+
+    // Left: game title.
+    const std::string title = gameTitle_.empty() ? "Juego" : ToUtf8(gameTitle_);
+    const float cy = m + h * 0.5f;
+    dl->AddCircleFilled(ImVec2(m + ui::S(20), cy), ui::S(20), ui::Fade(ui::color::Accent, 0.16f), 32);
+    const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Game);
+    TextAt(dl, f.heading, ImVec2(m + ui::S(20) - gs.x * 0.5f, cy - gs.y * 0.5f), ui::color::Accent, ui::icon::Game);
+    const float titleX = m + ui::S(52);
+
+    // Right, from the edge inwards: close, profile chip, clock.
+    float x = viewport.x - m - ui::S(kIconButton);
+    ImGui::SetCursorScreenPos(ImVec2(x, cy - ui::S(kIconButton) * 0.5f));
+    if (ui::IconButton("close", ui::icon::Close, "Cerrar (Shift+Tab)", ui::color::Text)) CloseOverlay();
+
+    const std::string name = ui::Ellipsize(LocalName(), ui::S(180));
+    ImGui::PushFont(f.strong);
+    const float nameW = ImGui::CalcTextSize(name.c_str()).x;
+    ImGui::PopFont();
+    const float chipH = ui::S(44);
+    const float chipW = ui::S(6 + 32 + 10) + nameW + ui::S(10 + 16 + 14);
+    x -= ui::S(12) + chipW;
+    chipMin_ = ImVec2(x, cy - chipH * 0.5f);
+    chipMax_ = ImVec2(x + chipW, cy + chipH * 0.5f);
+    ImGui::SetCursorScreenPos(chipMin_);
+    if (ImGui::InvisibleButton("##chip", ImVec2(chipW, chipH))) ImGui::OpenPopup("##profilemenu");
+    const bool hover = ImGui::IsItemHovered();
+    if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    ui::Tooltip(active_ ? "Perfil: cambiar, crear o editar" : "Jugando sin perfil");
+    dl->AddRectFilled(chipMin_, chipMax_, hover ? ui::color::RowHover : ui::color::PanelRaised, chipH * 0.5f);
+    dl->AddRect(chipMin_, chipMax_, ui::color::Border, chipH * 0.5f);
+    const ui::AvatarRef avatar = active_ ? ProfileAvatar(*active_) : ui::AvatarRef{};
+    ui::DrawAvatar(dl, ImVec2(chipMin_.x + ui::S(6 + 16), cy), ui::S(16), avatar);
+    TextAt(dl, f.strong, ImVec2(chipMin_.x + ui::S(48), cy - f.strong->FontSize * 0.55f), ui::color::Text, name);
+    TextAt(dl, f.caption, ImVec2(chipMax_.x - ui::S(30), cy - f.caption->FontSize * 0.45f), ui::color::Muted,
+           ui::icon::ChevronDown);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char clock[8];
+    snprintf(clock, sizeof(clock), "%02u:%02u", st.wHour, st.wMinute);
+    const ImVec2 cs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, clock);
+    x -= ui::S(20) + cs.x;
+    TextAt(dl, f.heading, ImVec2(x, cy - cs.y * 0.5f), ui::color::Muted, clock);
+
+    ImGui::PushFont(f.title);
+    const std::string shown = ui::Ellipsize(title, std::max(ui::S(80), x - ui::S(24) - titleX));
+    ImGui::PopFont();
+    TextAt(dl, f.title, ImVec2(titleX, cy - f.title->FontSize * 0.55f), ui::color::Text, shown);
+}
+
+void App::DrawCommunity(ImVec2 pos, float width) {
+    struct Link {
+        const char* glyph;
+        const char* label;
+        const wchar_t* format;
+    };
+    static const Link kLinks[] = {
+        { ui::icon::Store, "Tienda", L"https://store.steampowered.com/app/%u/" },
+        { ui::icon::People, "Comunidad", L"https://steamcommunity.com/app/%u" },
+        { ui::icon::Chat, "Discusiones", L"https://steamcommunity.com/app/%u/discussions/" },
+        { ui::icon::Guides, "Guías", L"https://steamcommunity.com/app/%u/guides/" },
+        { ui::icon::Workshop, "Workshop", L"https://steamcommunity.com/app/%u/workshop/" },
+        { ui::icon::News, "Noticias", L"https://store.steampowered.com/news/app/%u" },
+    };
+    const float height = ui::S(56 + 2 * kTileHeight + 10 + 40);
+    ui::BeginCard("##community", pos, ImVec2(width, height));
+    ImGui::PushFont(ui::F().heading);
+    ui::TextColored(ui::color::Accent, ui::icon::Globe);
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Centro de la comunidad");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+    const float gap = ui::S(10);
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float tileW = (avail - gap * 2) / 3.0f;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int i = 0; i < 6; ++i) {
+        const ImVec2 p0(origin.x + (i % 3) * (tileW + gap), origin.y + (i / 3) * (ui::S(kTileHeight) + gap));
+        const ImVec2 p1(p0.x + tileW, p0.y + ui::S(kTileHeight));
+        ImGui::SetCursorScreenPos(p0);
+        ImGui::PushID(i);
+        const bool clicked = ImGui::InvisibleButton("##tile", ImVec2(tileW, ui::S(kTileHeight)));
+        const bool hover = ImGui::IsItemHovered();
+        ImGui::PopID();
+        if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        dl->AddRectFilled(p0, p1, hover ? ui::color::RowHover : ui::color::Row, ui::S(10));
+        if (hover) dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.55f), ui::S(10));
+        TextAt(dl, ui::F().heading, ImVec2(p0.x + ui::S(12), p0.y + ui::S(10)), ui::color::Accent, kLinks[i].glyph);
+        ImGui::PushFont(ui::F().caption);
+        const std::string label = ui::Ellipsize(kLinks[i].label, tileW - ui::S(20));
+        ImGui::PopFont();
+        TextAt(dl, ui::F().caption, ImVec2(p0.x + ui::S(12), p1.y - ui::S(26)), ui::color::Text, label);
+        if (clicked) {
+            wchar_t url[160];
+            swprintf_s(url, kLinks[i].format, appId_);
+            OpenUrl(url);
+        }
+    }
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * ui::S(kTileHeight) + gap));
+    ImGui::Dummy(ImVec2(avail, 0));
+    ui::EndCard();
+}
+
+void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
+    if (pickerStyle) {
+        ImGui::SetCursorScreenPos(pos);
+        ImGui::BeginChild("##pickerplayers", size, ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    } else {
+        ui::BeginCard("##players", pos, size);
+        ImGui::PushFont(ui::F().heading);
+        ui::TextColored(ui::color::Accent, ui::icon::Lan);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("Jugadores en la LAN");
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::PushFont(ui::F().caption);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ui::S(5));
+        char count[48];
+        snprintf(count, sizeof(count), rows_.size() == 1 ? "%zu conectado" : "%zu conectados", rows_.size());
+        ui::TextColored(ui::color::Muted, count);
+        ImGui::PopFont();
+    }
+
+    // Search box with a leading glyph.
+    const ImVec2 sp = ImGui::GetCursorScreenPos();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ui::S(38), ui::S(9)));
+    ImGui::InputTextWithHint("##filter", "Buscar jugador o juego", filter_, sizeof(filter_));
+    ImGui::PopStyleVar();
+    ImGui::GetWindowDrawList()->AddText(ui::F().body, ui::F().body->FontSize, ImVec2(sp.x + ui::S(13), sp.y + ui::S(9)),
+                                        ui::color::Faint, ui::icon::Search);
+    ImGui::Dummy(ImVec2(0, ui::S(2)));
+
+    ImGui::BeginChild("##list", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    const float width = ImGui::GetContentRegionAvail().x;
+    int shown = 0;
+    auto section = [&](const char* label, auto&& pick) {
+        int n = 0;
+        for (const PlayerRow& r : rows_) n += pick(r) && Matches(r.p, filter_) ? 1 : 0;
+        if (n == 0) return;
+        if (shown) ImGui::Dummy(ImVec2(0, ui::S(8)));
+        ui::SectionLabel(label, n);
+        for (const PlayerRow& r : rows_) {
+            if (pick(r) && Matches(r.p, filter_)) DrawPlayerRow(r, width, pickerStyle);
+        }
+        shown += n;
+    };
+    if (pickerStyle) {
+        section("Favoritos", [](const PlayerRow& r) { return r.favorite; });
+        section("En la LAN", [](const PlayerRow& r) { return !r.favorite; });
+    } else {
+        section("Favoritos", [](const PlayerRow& r) { return r.favorite; });
+        section("En este juego", [](const PlayerRow& r) { return !r.favorite && r.sameGame; });
+        section("En otros juegos", [](const PlayerRow& r) { return !r.favorite && !r.sameGame; });
+    }
+    if (shown == 0) {
+        ImGui::Dummy(ImVec2(0, ui::S(36)));
+        const char* head = rows_.empty() ? "Nadie más en la LAN por ahora" : "Ningún jugador coincide";
+        const char* body = rows_.empty()
+                               ? "Los jugadores aparecen aquí en cuanto abren un juego con ReFix LAN en esta red."
+                               : "Prueba con otro nombre o borra la búsqueda.";
+        ImGui::PushFont(ui::F().title);
+        const float gw = ImGui::CalcTextSize(ui::icon::Lan).x;
+        ImGui::SetCursorPosX((width - gw) * 0.5f);
+        ui::TextColored(ui::color::Faint, ui::icon::Lan);
+        ImGui::PopFont();
+        ImGui::PushFont(ui::F().strong);
+        ImGui::SetCursorPosX((width - ImGui::CalcTextSize(head).x) * 0.5f);
+        ImGui::TextUnformatted(head);
+        ImGui::PopFont();
+        ImGui::PushFont(ui::F().caption);
+        ImGui::PushTextWrapPos(width);
+        const float bw = std::min(ImGui::CalcTextSize(body).x, width);
+        ImGui::SetCursorPosX((width - bw) * 0.5f);
+        ui::TextColored(ui::color::Muted, body);
+        ImGui::PopTextWrapPos();
+        ImGui::PopFont();
+    }
+    ImGui::EndChild();
+    if (pickerStyle) ImGui::EndChild();
+    else ui::EndCard();
+}
+
+void App::DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle) {
+    const net::RemotePlayer& p = row.p;
+    const ui::Fonts& f = ui::F();
+    const float h = ui::S(kRowHeight);
+    const float d = ui::S(kIconButton);
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p1(p0.x + width, p0.y + h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGui::PushID((const void*)(uintptr_t)p.steamId);
+
+    const bool hover = ImGui::IsMouseHoveringRect(p0, p1) && ImGui::IsWindowHovered();
+    dl->AddRectFilled(p0, p1, hover ? ui::color::RowHover : ui::color::Row, ui::S(12));
+    if (highlight_ == p.steamId) {
+        dl->AddRect(p0, p1, ui::color::Accent, ui::S(12), 0, ui::S(1.5f));
+        ImGui::SetScrollHereY(0.3f);
+        highlight_ = 0;
+    }
+
+    const float r = ui::S(20);
+    const ImVec2 ac(p0.x + ui::S(12) + r, p0.y + h * 0.5f);
+    ui::DrawAvatar(dl, ac, r, PlayerAvatar(p));
+    const ImU32 dot = row.sameGame ? ui::color::InGame : ui::color::Online;
+    dl->AddCircleFilled(ImVec2(ac.x + r * 0.72f, ac.y + r * 0.72f), ui::S(6), ui::color::Row, 16);
+    dl->AddCircleFilled(ImVec2(ac.x + r * 0.72f, ac.y + r * 0.72f), ui::S(4.5f), dot, 16);
+
+    // Actions, right to left.
+    const ULONGLONG now = GetTickCount64();
+    auto inv = invitedAt_.find(p.steamId);
+    const bool invited = inv != invitedAt_.end() && now - inv->second < kInviteSentMs;
+    const bool alreadyWithMe = localLobby_ != 0 && p.lobbyId == localLobby_;
+    const bool canInvite = pickerStyle ? true : (!alreadyWithMe && (localLobby_ != 0 || !localConnect_.empty()));
+    float x = p1.x - ui::S(12);
+    const float by = p0.y + (h - d) * 0.5f;
+    if (pickerStyle) {
+        const ImVec2 bs(ui::S(112), ui::S(38));
+        x -= bs.x;
+        ImGui::SetCursorScreenPos(ImVec2(x, p0.y + (h - bs.y) * 0.5f));
+        if (invited) {
+            ui::SecondaryButton("Enviada", bs, false);
+        } else if (ui::PrimaryButton("Invitar", bs)) {
+            Invite(p);
+        }
+    } else {
+        x -= d;
+        ImGui::SetCursorScreenPos(ImVec2(x, by));
+        if (ui::IconButton("fav", row.favorite ? ui::icon::StarFill : ui::icon::Star,
+                           row.favorite ? "Quitar de favoritos" : "Añ" "adir a favoritos",
+                           row.favorite ? ui::color::Star : ui::color::Muted))
+            ToggleFavorite(p);
+        if (canInvite) {
+            x -= d + ui::S(6);
+            ImGui::SetCursorScreenPos(ImVec2(x, by));
+            if (invited) {
+                ui::IconButton("inv", ui::icon::Check, "Invitación enviada", ui::color::Accent, false);
+            } else if (ui::IconButton("inv", ui::icon::Invite, "Invitar a mi sala", ui::color::Invite)) {
+                Invite(p);
+            }
+        }
+        if (CanJoin(row, localLobby_)) {
+            x -= d + ui::S(6);
+            ImGui::SetCursorScreenPos(ImVec2(x, by));
+            if (ui::IconButton("join", ui::icon::Join, "Unirse a su partida", ui::color::Accent)) Join(p);
+        }
+    }
+
+    const float tx = ac.x + r + ui::S(12);
+    const float tw = std::max(ui::S(40), x - ui::S(10) - tx);
+    ImGui::PushFont(f.strong);
+    const std::string name = ui::Ellipsize(p.name, tw);
+    ImGui::PopFont();
+    ImGui::PushFont(f.caption);
+    const std::string status = ui::Ellipsize(StatusLine(row, localLobby_), tw);
+    ImGui::PopFont();
+    const float textH = f.strong->FontSize + ui::S(2) + f.caption->FontSize;
+    const float ty = p0.y + (h - textH) * 0.5f - ui::S(1);
+    TextAt(dl, f.strong, ImVec2(tx, ty), ui::color::Text, name);
+    TextAt(dl, f.caption, ImVec2(tx, ty + f.strong->FontSize + ui::S(2)), row.sameGame ? ui::color::InGame : ui::color::Muted,
+           status);
+
+    ImGui::PopID();
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::Dummy(ImVec2(width, h + ui::S(kRowGap)));
+}
+
+void App::DrawInvitePicker(ImVec2 viewport) {
+    const ImVec2 size(std::min(ui::S(560), viewport.x - ui::S(48)), std::min(ui::S(640), viewport.y - ui::S(48)));
+    const ImVec2 pos((viewport.x - size.x) * 0.5f, (viewport.y - size.y) * 0.5f);
+    ui::BeginCard("##invitepicker", pos, size, 24.0f);
+    ImGui::PushFont(ui::F().title);
+    ImGui::TextUnformatted("Invitar a la partida");
+    ImGui::PopFont();
+    ImGui::PushFont(ui::F().caption);
+    ui::TextColored(ui::color::Muted, "Elige a quién invitar. Recibirá un aviso con el botón Unirse.");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    const float footer = ui::S(56);
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    DrawPlayers(ImGui::GetCursorScreenPos(), ImVec2(avail.x, avail.y - footer), true);
+    const ImVec2 bs(ui::S(120), ui::S(40));
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + size.x - ui::S(24) - bs.x, pos.y + size.y - ui::S(24) - bs.y));
+    if (ui::SecondaryButton("Cerrar", bs)) CloseOverlay();
+    ui::EndCard();
+}
+
+void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
+    if (toasts_.empty()) return;
+    const ImVec2 area = ToastSize();
+    const float margin = ownWindow ? 0.0f : ui::S(24);
+    const ImVec2 origin(viewport.x - margin - area.x, viewport.y - margin - area.y);
+    ImGui::SetNextWindowPos(origin);
+    ImGui::SetNextWindowSize(area);
+    ImGui::Begin("##toasts", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ui::Fonts& f = ui::F();
+    const ULONGLONG now = GetTickCount64();
+    const float w = ui::S(kToastWidth);
+    float bottom = origin.y + area.y - ui::S(6);
+    int index = 0;
+    // Newest at the bottom, closest to the corner.
+    for (auto it = toasts_.rbegin(); it != toasts_.rend(); ++it, ++index) {
+        Toast& t = *it;
+        const bool invite = t.kind == Toast::Kind::Invite;
+        const float h = ToastHeight(invite);
+        float a = std::min(1.0f, (float)(now - t.born) / kToastFadeInMs);
+        if (t.closing) a = std::min(a, 1.0f - std::min(1.0f, (float)(now - t.closingAt) / kToastFadeMs));
+        const float slide = (1.0f - a) * ui::S(28);
+        const ImVec2 p0(origin.x + area.x - ui::S(8) - w + slide, bottom - h);
+        const ImVec2 p1(p0.x + w, bottom);
+        bottom -= h + ui::S(kToastGap);
+        ImGui::PushID(index);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, a);
+
+        ui::Card(dl, p0, p1, ui::Fade(ui::color::PanelRaised, a), 14.0f);
+        dl->AddRectFilled(ImVec2(p0.x, p0.y + ui::S(14)), ImVec2(p0.x + ui::S(3), p1.y - ui::S(14)),
+                          ui::Fade(invite ? ui::color::Invite : ui::color::Accent, a), ui::S(2));
+        const float r = ui::S(22);
+        const ImVec2 ac(p0.x + ui::S(18) + r, p0.y + (invite ? ui::S(18) + r : h * 0.5f));
+        const float tx = ac.x + r + ui::S(14);
+        const float tw = p1.x - ui::S(16) - tx;
+        auto line = [&](ImFont* font, float y, ImU32 col, const std::string& text) {
+            ImGui::PushFont(font);
+            const std::string s = ui::Ellipsize(text, tw);
+            ImGui::PopFont();
+            dl->AddText(font, font->FontSize, ImVec2(tx, y), ui::Fade(col, a), s.c_str());
+        };
+
+        if (t.kind == Toast::Kind::Welcome) {
+            ui::DrawAvatar(dl, ac, r, active_ ? ProfileAvatar(*active_) : ui::AvatarRef{});
+            const float y = ac.y - (f.strong->FontSize + ui::S(26)) * 0.5f;
+            line(f.strong, y, ui::color::Text, LocalName());
+            ImGui::SetCursorScreenPos(ImVec2(tx, y + f.strong->FontSize + ui::S(4)));
+            ImGui::PushFont(f.caption);
+            ui::TextColored(ui::color::Muted, "Pulsa");
+            ImGui::SameLine(0, ui::S(6));
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ui::S(2));
+            ImGui::PopFont();
+            ui::Keycap("Shift");
+            ImGui::SameLine(0, ui::S(4));
+            ui::Keycap("Tab");
+            ImGui::SameLine(0, ui::S(6));
+            ImGui::PushFont(f.caption);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ui::S(2));
+            ui::TextColored(ui::color::Muted, "para abrir ReFix LAN");
+            ImGui::PopFont();
+        } else if (invite) {
+            const net::RemotePlayer* from = FindPlayer(t.invite.from);
+            ui::AvatarRef av;
+            if (from) av = PlayerAvatar(*from);
+            else av.stock = (int)(t.invite.from % (uint64_t)ui::StockCount());
+            ui::DrawAvatar(dl, ac, r, av);
+            line(f.strong, ac.y - f.strong->FontSize - ui::S(1), ui::color::Text, t.title);
+            line(f.caption, ac.y + ui::S(2), ui::color::Muted, t.body);
+            const ImVec2 bs(ui::S(118), ui::S(36));
+            ImGui::SetCursorScreenPos(ImVec2(p1.x - ui::S(16) - bs.x * 2 - ui::S(8), p1.y - ui::S(14) - bs.y));
+            if (ui::SecondaryButton("Ignorar", bs) && !t.closing) { t.closing = true; t.closingAt = now; }
+            ImGui::SameLine(0, ui::S(8));
+            if (ui::PrimaryButton("Unirse", bs) && !t.closing) {
+                t.closing = true;
+                t.closingAt = now;
+                AcceptInvite(t.invite);
+            }
+        } else {
+            dl->AddCircleFilled(ac, r, ui::Fade(ui::color::Accent, 0.16f * a), 32);
+            const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Info);
+            dl->AddText(f.heading, f.heading->FontSize, ImVec2(ac.x - gs.x * 0.5f, ac.y - gs.y * 0.5f),
+                        ui::Fade(ui::color::Accent, a), ui::icon::Info);
+            line(f.strong, ac.y - f.strong->FontSize - ui::S(1), ui::color::Text, t.title);
+            line(f.caption, ac.y + ui::S(2), ui::color::Muted, t.body);
+        }
+        // A click anywhere else on a notification dismisses it.
+        if (!invite && !t.closing && ImGui::IsMouseHoveringRect(p0, p1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            t.closing = true;
+            t.closingAt = now;
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopID();
+    }
+    ImGui::End();
+}
+
+} // namespace refix::overlay

@@ -435,6 +435,13 @@ Name = $($P.UserName)
 AutoGenerateSteamId = $($P.AutoGenerateSteamId)
 SteamId = $(if ($P.AutoGenerateSteamId -eq "true") { "" } else { $P.SteamId })
 
+[Overlay]
+; ReFix LAN overlay (Shift+Tab): player profiles, LAN player list, invites. Replaces the Steam overlay.
+Enabled = true
+BlockSteamOverlay = true
+; Each profile keeps its own Steam Cloud files and the game's known save folder (Unreal SaveGames, Unity LocalLow).
+IsolateSaves = true
+
 [Matchmaking]
 EnableLobbyFilter = false
 LobbyFilterKey = game_filter
