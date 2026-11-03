@@ -60,4 +60,5 @@ struct OverlayLobbyInfo {
 OverlayLobbyInfo Overlay_LocalLobby();
 std::string Overlay_ConnectString();            // rich presence "connect" of the local player
 void Overlay_SetPersonaName(const std::string& name);
+uint64_t Overlay_MachineSteamID();              // IdentityMode=auto SteamID of this PC (instance slot 0)
 } // namespace UnrealSteamEmu

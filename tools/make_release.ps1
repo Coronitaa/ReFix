@@ -28,7 +28,8 @@ if ($missing.Count -gt 0) {
     throw "Missing build outputs (run build.bat and build_online.bat first): $($missing -join ', ')"
 }
 
-if (Test-Path -LiteralPath $OutDir) { Remove-Item -LiteralPath $OutDir -Recurse -Force }
+# Empty the folder instead of deleting it: a File Explorer window open on it would make that fail.
+if (Test-Path -LiteralPath $OutDir) { Get-ChildItem -LiteralPath $OutDir -Force | Remove-Item -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $OutDir "bin") -Force | Out-Null
 
 function Copy-Into([string]$relative) {

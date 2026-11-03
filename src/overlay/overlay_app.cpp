@@ -68,6 +68,11 @@ std::optional<Profile> App::RunDialog(DialogKind kind) {
         return std::nullopt;
     }
     host::Wake();
+    // The game thread stays blocked here until a profile is chosen. After 5 s Windows takes its window for
+    // a hung one and puts a "ghost" copy in its place, which cannot show DirectX content: the game vanished
+    // behind the dialog. Without ghosting its last frame stays on screen under the dialog. Only games that
+    // show the profile dialog get this call (it lasts for the process).
+    DisableProcessWindowsGhosting();
     WaitForSingleObject(dialogDone_, INFINITE);
     CloseHandle(dialogDone_);
     dialogDone_ = nullptr;

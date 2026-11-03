@@ -131,6 +131,9 @@ std::string ProfileName(const std::vector<Profile>& all, const std::wstring& id,
 
 } // namespace
 
+std::wstring EditorTempAvatarPath() { return TempAvatarPath(); }
+int NextEditorImageSerial() { return ++g_imageSerial; }
+
 // ---------------------------------------------------------------------------------------------------------------
 // Language switch: "EN | ES" pill whose right edge sits at `rightEdgeCenter`.
 // ---------------------------------------------------------------------------------------------------------------
@@ -344,87 +347,6 @@ void App::BeginEditor(bool creating) {
     }
 }
 
-void App::ImportImage() {
-    editor_.error.clear();
-    editor_.info.clear();
-    IFileOpenDialog* dlg = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) {
-        editor_.error = T("Could not open the file picker.", "No se pudo abrir el selector de archivos.");
-        return;
-    }
-    const COMDLG_FILTERSPEC types[] = {
-        { i18n::TW(L"Images", L"Imágenes"), L"*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.tif;*.tiff;*.ico;*.webp;*.heic;*.heif" },
-        { i18n::TW(L"All files", L"Todos los archivos"), L"*.*" },
-    };
-    dlg->SetFileTypes(2, types);
-    dlg->SetTitle(i18n::TW(L"Choose a picture for your avatar", L"Elige una imagen para tu avatar"));
-    DWORD opts = 0;
-    dlg->GetOptions(&opts);
-    dlg->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
-    std::wstring path;
-    if (SUCCEEDED(dlg->Show(host::Window()))) {
-        IShellItem* item = nullptr;
-        if (SUCCEEDED(dlg->GetResult(&item))) {
-            PWSTR p = nullptr;
-            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) {
-                path = p;
-                CoTaskMemFree(p);
-            }
-            item->Release();
-        }
-    }
-    dlg->Release();
-    if (path.empty()) return;   // cancelled
-    std::wstring err;
-    if (!image::ImportAvatar(path, TempAvatarPath(), err)) {
-        editor_.error = ToUtf8(err);
-        return;
-    }
-    editor_.custom = true;
-    editor_.imagePath = TempAvatarPath();
-    editor_.imageVersion = ++g_imageSerial;
-    editor_.info = T("Picture ready: it was cropped to a square.", "Imagen lista: se ha recortado en cuadrado.");
-}
-
-void App::ImportFromSteam() {
-    editor_.error.clear();
-    editor_.info.clear();
-    std::wstring err;
-    const std::optional<SteamSession> s = profiles::ReadSteamSession(err);
-    if (!s) {
-        editor_.error = ToUtf8(err);
-        return;
-    }
-    if (editor_.creating) {
-        for (const Profile& p : profiles_) {
-            if (p.steamId == s->steamId) {
-                editor_.error = std::string(T("You already have a profile with this Steam account (",
-                                              "Ya tienes un perfil con esta cuenta de Steam (")) + ToUtf8(p.name) + ").";
-                return;
-            }
-        }
-        editor_.steamId = s->steamId;
-    }
-    strncpy_s(editor_.name, ToUtf8(s->name.substr(0, kMaxNameChars)).c_str(), _TRUNCATE);
-    bool avatar = false;
-    if (!s->avatarPath.empty()) {
-        std::wstring imgErr;
-        avatar = image::ImportAvatar(s->avatarPath, TempAvatarPath(), imgErr);
-        if (avatar) {
-            editor_.custom = true;
-            editor_.imagePath = TempAvatarPath();
-            editor_.imageVersion = ++g_imageSerial;
-        }
-    }
-    if (editor_.creating)
-        editor_.info = avatar ? T("Imported your Steam name, avatar and SteamID.", "Importados tu nombre, tu avatar y tu SteamID de Steam.")
-                              : T("Imported your Steam name and SteamID (Steam has no cached avatar).",
-                                  "Importados tu nombre y tu SteamID (Steam no tiene tu avatar en caché).");
-    else
-        editor_.info = avatar ? T("Imported your Steam name and avatar.", "Importados tu nombre y tu avatar de Steam.")
-                              : T("Imported your Steam name.", "Importado tu nombre de Steam.");
-}
-
 bool App::SaveEditor() {
     editor_.error.clear();
     std::wstring name = Trim(FromUtf8(editor_.name));
@@ -443,7 +365,7 @@ bool App::SaveEditor() {
         Profile p = profiles::MakeNew(name, profiles_);
         if (editor_.steamId) {
             p.steamId = editor_.steamId;
-            p.importedFromSteam = true;
+            p.importedFromSteam = editor_.steamIdFromSteam;
         }
         p.stockAvatar = editor_.stock;
         p.nativeSaves = editor_.offerNative && editor_.native;
@@ -554,6 +476,11 @@ bool App::DrawEditorBody(bool firstRun) {
     if (ui::SecondaryButton(steamLabel.c_str(), ImVec2(bw, ui::S(40)))) ImportFromSteam();
     ui::Tooltip(T("Uses the name, avatar and SteamID of the account signed in to Steam",
                   "Usa el nombre, el avatar y el SteamID de la cuenta abierta en Steam"));
+    const std::string refixLabel = std::string(ui::icon::Game) + "  " +
+                                   T("Import from another ReFix game…", "Importar de otro juego con ReFix…") + "##refix";
+    if (ui::SecondaryButton(refixLabel.c_str(), ImVec2(w, ui::S(40)))) ImportFromReFixGame();
+    ui::Tooltip(T("Uses the name, SteamID and picture another game patched with ReFix uses",
+                  "Usa el nombre, el SteamID y la imagen que usa otro juego parcheado con ReFix"));
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
     // Name.
@@ -573,7 +500,9 @@ bool App::DrawEditorBody(bool firstRun) {
     }
     if (editor_.steamId) {
         ImGui::PushFont(f.caption);
-        ui::TextColored(ui::color::Faint, (std::string(T("Steam SteamID: ", "SteamID de Steam: ")) + std::to_string(editor_.steamId)).c_str());
+        ui::TextColored(ui::color::Faint, (std::string(editor_.steamIdFromSteam ? T("Steam SteamID: ", "SteamID de Steam: ")
+                                                                  : T("Imported SteamID: ", "SteamID importado: ")) +
+                         std::to_string(editor_.steamId)).c_str());
         ImGui::PopFont();
     }
     ImGui::Dummy(ImVec2(0, ui::S(4)));

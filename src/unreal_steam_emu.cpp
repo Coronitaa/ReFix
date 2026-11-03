@@ -7342,6 +7342,9 @@ namespace UnrealSteamEmu {
 
     std::string Overlay_ConnectString() { return g_steamFriendsInstance.LocalRichPresence("connect"); }
 
+    // Identity another ReFix game of this PC uses with IdentityMode=auto (profile import).
+    uint64_t Overlay_MachineSteamID() { return GenerateDeterministicSteamID(); }
+
     void Overlay_SetPersonaName(const std::string& name) {
         if (name.empty() || name.size() >= kPersonaNameCapacity) return;   // keeps GetPersonaName()'s buffer in place
         CSteamFriendsEmu::ApplyPersonaName(name.c_str());

@@ -287,3 +287,30 @@
   X button; no msedgewebview2 process left after the game exits. x64/x86 rebuilt, tests pass.
 - Known limits: ImGui tooltips and menus cannot draw over the page area (it is a separate window); the page is not
   dimmed behind other overlay dialogs (none open while the browser is up).
+
+## 2026-11-03 (13) - Profile dialog over the game (no ghost window), import from another ReFix game
+- The game "minimised" behind the profile dialog: it is not minimised. The game thread waits inside
+  `SteamAPI_Init` (ResolveIdentity -> RunDialog) and after 5 s Windows treats its window as hung and puts a dwm
+  "Ghost" window in its place, which cannot show DirectX/flip content, so the desktop showed through. RunDialog now
+  calls `DisableProcessWindowsGhosting()` (documented user32, no hook) just before the wait, only in games that show
+  the dialog: the game's last frame stays under the dialog. Checked with two Lethal Company instances: no Ghost
+  window, `IsHungAppWindow` true but the game visible around the picker.
+- The minimise/restore "kick" after the dialog is gone (it was hiding the same ghost problem): after the dialog the
+  game keeps presenting without it. Closing the dialog/overlay now hands the foreground back to the game before
+  hiding the overlay window (hiding first activated the desktop and then SetForegroundWindow was refused, so the
+  game was left without focus and Shift+Tab did nothing until it was clicked).
+- "Import from another ReFix game..." in the profile editor (`identity_import.cpp`, editor importers moved to
+  `overlay_ui_import.cpp`): pick a game folder (any level above its ReFix.ini, up to 4 folders down) or a ReFix LAN
+  profile folder. Name and SteamID come from the last `[ConfigDiag]` lines of that game's ReFix.log (what the
+  emulator really used), then ReFix.ini [User], then steam_settings (force_steamid.txt, user_steam_id.txt,
+  force_account_name.txt, configs.user.ini); IdentityMode=auto without a fixed SteamId gives this PC's automatic
+  SteamID (`UnrealSteamEmu::Overlay_MachineSteamID`). Picture: steam_settings `account_avatar.*` or the profile's
+  avatar.png. A game whose log shows `SteamID Source: 'profile'` is refused (its profiles are already the shared
+  ones). Duplicate SteamIDs are refused like the Steam import. `tests/test_identity_import.cpp` (23 checks, built by
+  build.bat); checked in game with D:\Games\CSGO (Player_4903 + the PC's automatic SteamID, saved in profile.ini).
+- make_release.ps1 empties the output folder instead of deleting it (fails when File Explorer has it open).
+- Open question: one run started from AutoDeploy at 17:42 showed the first-run dialog with three profiles on disk
+  and moved the existing Lethal Company saves to `Saves\_pc` although saves.ini named their owner: in that process
+  the existing ini files read back empty. Logging was off (EnableLog=false in the deployed ReFix.ini) and
+  launching the same way again did not reproduce it. The saves were put back by hand (owner Valen; the new profile's
+  data in its own stash).

@@ -173,20 +173,6 @@ BOOL CALLBACK FindGameWindow(HWND w, LPARAM lp) {
 // overlay then stays on the area the game had.
 HWND g_lastGameHwnd = nullptr;
 RECT g_lastGameClient{};
-// Exclusive-fullscreen games that lost the focus to the profile dialog stop presenting until they are
-// minimised and restored: ApplyMode minimises, the loop restores at this tick.
-ULONGLONG g_restoreGameAt = 0;
-HWND g_restoreGame = nullptr;
-constexpr ULONGLONG kRestoreDelayMs = 400;
-
-bool CoversMonitor(HWND w) {
-    RECT wr{};
-    if (!GetWindowRect(w, &wr)) return false;
-    MONITORINFO mi{ sizeof(mi) };
-    GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi);
-    return wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top && wr.right >= mi.rcMonitor.right &&
-           wr.bottom >= mi.rcMonitor.bottom;
-}
 
 void ScanGameWindow() {
     std::pair<HWND, LONG> best{ nullptr, 160 * 120 };
@@ -262,22 +248,20 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     if (m != g_mode) {
         const Mode from = g_mode;
         g_mode = m;
+        // Give the focus back to the game (restoring it if it minimised when we took the focus) while our
+        // window still has it: hiding first lets Windows activate the desktop, and then we may no longer
+        // move the foreground.
+        const bool giveBack = (from == Mode::Overlay || from == Mode::Dialog) && gw.hwnd;
+        if (giveBack) {
+            if (gw.minimized) ShowWindowAsync(gw.hwnd, SW_RESTORE);
+            SetForegroundWindow(gw.hwnd);
+        }
         if (m == Mode::Hidden) {
             ShowWindow(g_hwnd, SW_HIDE);
         } else {
             SetStyles(m);
         }
-        // Give the focus back to the game (restoring it if it minimised when we took the focus).
-        if ((from == Mode::Overlay || from == Mode::Dialog) && gw.hwnd) {
-            if (gw.minimized) {
-                ShowWindowAsync(gw.hwnd, SW_RESTORE);
-            } else if (from == Mode::Dialog && CoversMonitor(gw.hwnd)) {
-                ShowWindowAsync(gw.hwnd, SW_MINIMIZE);
-                g_restoreGame = gw.hwnd;
-                g_restoreGameAt = GetTickCount64() + kRestoreDelayMs;
-            }
-            SetForegroundWindow(gw.hwnd);
-        }
+        if (giveBack && GetForegroundWindow() != gw.hwnd) SetForegroundWindow(gw.hwnd);
         g_client->OnModeChanged(from, m);
     }
     if (m == Mode::Hidden) return;
@@ -364,11 +348,6 @@ DWORD WINAPI HostThread(LPVOID) {
         if (now - lastScan >= kGameScanMs || g_mode == Mode::Overlay || g_mode == Mode::Toast) {
             ScanGameWindow();
             lastScan = now;
-        }
-        if (g_restoreGame && now >= g_restoreGameAt) {
-            ShowWindowAsync(g_restoreGame, SW_RESTORE);
-            SetForegroundWindow(g_restoreGame);
-            g_restoreGame = nullptr;
         }
         if (g_hotkeyPending.exchange(false)) g_client->OnHotkey();
         const GameWindow gw = CurrentGame();

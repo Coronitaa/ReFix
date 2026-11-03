@@ -22,6 +22,10 @@ constexpr float kToastWidth = 360.0f;
 constexpr float kToastGap = 10.0f;
 inline float ToastHeight(bool invite) { return ui::S(invite ? 128.0f : 84.0f); }
 
+// Temporary avatar of the profile editor and the serial that refreshes its preview (overlay_ui_profile.cpp).
+std::wstring EditorTempAvatarPath();
+int NextEditorImageSerial();
+
 // Restores the identity variables the emulator exported (refix_overlay.cpp), for the profile restart.
 void RestoreLaunchEnvironment();
 
@@ -35,7 +39,8 @@ struct EditorState {
     bool custom = false;
     std::wstring imagePath;          // converted PNG to use as the avatar
     int imageVersion = 0;            // bumps the preview texture
-    uint64_t steamId = 0;            // imported from Steam, 0 = generate
+    uint64_t steamId = 0;            // imported (Steam or another ReFix game), 0 = generate
+    bool steamIdFromSteam = false;   // the SteamID came from the Steam account
     bool offerNative = false;        // first profile on this PC: may keep the existing saves
     bool native = false;
     std::string error;
@@ -152,6 +157,7 @@ private:
     bool SaveEditor();
     void ImportImage();
     void ImportFromSteam();
+    void ImportFromReFixGame();
 
     std::mutex postMu_;
     std::vector<std::function<void()>> posts_;
