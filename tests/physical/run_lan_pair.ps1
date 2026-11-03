@@ -10,7 +10,7 @@ param(
     [Parameter(Mandatory = $true)][string]$GameDir,
     [Parameter(Mandatory = $true)][string]$Exe,          # relative to GameDir
     [int]$Seconds = 75,
-    [int]$StartGapSeconds = 6,   # delay between the two launches (heavy engines need the first to reach its menu)
+    [int]$StartGapSeconds = 15,  # delay between the two launches: the first must reach Steam init (Unity single-instance mutex is released there)
     [string]$GameArgs = "",
     [string]$ReportDir = "",
     [ValidateSet("lan", "online")][string]$Product = "lan",
