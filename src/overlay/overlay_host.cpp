@@ -130,7 +130,8 @@ bool CreateDeviceAndSurface(UINT w, UINT h) {
     sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
     hr = factory ? factory->CreateSwapChainForComposition(g_device, &sd, nullptr, &g_swap) : E_FAIL;
     if (SUCCEEDED(hr)) hr = DCompositionCreateDevice(dxgiDevice, IID_PPV_ARGS(&g_dcomp));
-    if (SUCCEEDED(hr)) hr = g_dcomp->CreateTargetForHwnd(g_hwnd, TRUE, &g_target);
+    // Not topmost: child windows (the overlay browser) are drawn above the ImGui visual.
+    if (SUCCEEDED(hr)) hr = g_dcomp->CreateTargetForHwnd(g_hwnd, FALSE, &g_target);
     if (SUCCEEDED(hr)) hr = g_dcomp->CreateVisual(&g_visual);
     if (SUCCEEDED(hr)) hr = g_visual->SetContent(g_swap);
     if (SUCCEEDED(hr)) hr = g_target->SetRoot(g_visual);

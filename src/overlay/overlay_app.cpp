@@ -5,6 +5,7 @@
 #include "avatar_image.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
+#include "overlay_web.h"
 #include "save_swap.h"
 #include "refix_overlay.h"
 
@@ -149,6 +150,7 @@ void App::OpenOverlay(bool inviteOnly, uint64_t inviteLobby, const std::string& 
 }
 
 void App::CloseOverlay() {
+    if (webOpen_) webOpenRequested_ = true;   // the page is still there when the overlay reopens
     overlayOpen_ = false;
     inviteOnly_ = false;
     highlight_ = 0;
@@ -265,6 +267,9 @@ void App::ShowInfo(const std::string& title, const std::string& body) {
 }
 
 void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
+    // The web view is a child window: it shows only while last frame drew the browser modal.
+    web::SetVisible(webDrawn_);
+    webDrawn_ = false;
     DrainPosts();
     const ULONGLONG now = GetTickCount64();
     if (started_) {
@@ -330,6 +335,24 @@ void App::ToggleFavorite(const net::RemotePlayer& p) {
     else fav.push_back(p.steamId);
     profiles::Save(*active_);
     lastRefresh_ = 0;
+}
+
+void App::OpenWeb(const std::wstring& url) {
+    if (url.rfind(L"https://", 0) != 0 && url.rfind(L"http://", 0) != 0) return;
+    if (!web::Open(host::Window(), url)) {
+        OpenUrl(url);
+        return;
+    }
+    if (!overlayOpen_) OpenOverlay();
+    webUrl_ = url;
+    webOpen_ = true;
+    webOpenRequested_ = true;
+}
+
+void App::CloseWeb() {
+    webOpen_ = false;
+    webOpenRequested_ = false;
+    web::Close();
 }
 
 void App::OpenUrl(const std::wstring& url) {

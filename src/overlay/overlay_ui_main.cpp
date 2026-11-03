@@ -113,6 +113,7 @@ void App::DrawOverlay(ImVec2 viewport) {
     DrawSwitchConfirm();
     DrawDeleteConfirm();
     DrawEditorModal();
+    if (!inviteOnly_) DrawWebModal(viewport);
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
     DrawToasts(viewport, false);
@@ -226,7 +227,7 @@ void App::DrawCommunity(ImVec2 pos, float width) {
         if (clicked) {
             wchar_t url[160];
             swprintf_s(url, kLinks[i].format, appId_);
-            OpenUrl(url);
+            OpenWeb(url);
         }
     }
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * ui::S(kTileHeight) + gap));

@@ -486,7 +486,7 @@ bool App::SaveEditor() {
 bool App::DrawEditorBody(bool firstRun) {
     const ui::Fonts& f = ui::F();
     const float w = ImGui::GetContentRegionAvail().x;
-    const char* title = firstRun ? T("Welcome to ReFix LAN", "Te damos la bienvenida a ReFix LAN")
+    const char* title = firstRun ? T("Welcome to ReFix", "Te damos la bienvenida a ReFix")
                                  : editor_.creating ? T("New profile", "Nuevo perfil") : T("Edit profile", "Editar perfil");
     CenteredText(f.title, ui::color::Text, title, w);
     if (firstRun) {

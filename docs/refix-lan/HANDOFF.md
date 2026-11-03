@@ -260,3 +260,30 @@
   versions and the 3-instance mesh pass.
 - Test package: `tools\make_release.ps1 -OutDir ReFix_LAN_Test_Release` (kept out of git with .git/info/exclude;
   `ReFix_LAN_2.0_Release` is the tracked package and was not touched).
+
+## 2026-11-03 (12) - Overlay browser (WebView2), AutoDeploy option 2 closing, "Welcome to ReFix"
+- AutoDeploy.bat closed itself on option [2] (ReFix LAN): the working copy had LF line endings (the index is LF,
+  `.gitattributes` asks for CRLF but the file had been rewritten), and with LF cmd.exe misses labels
+  ("No se encuentra la etiqueta por lotes especificada: GOLDBERG_PROMPTS" / SUCCESS_EXIT) and exits.
+  make_release.ps1 copied the file as it was. Working copies of AutoDeploy.bat, build.bat and build_x86_lan.bat
+  are CRLF again, and make_release.ps1 now writes every .bat/.cmd of the package as CRLF and every .sh as LF
+  (bash would fail with `$'\r'` the other way round). Checked: LAN deploy of a Unity test folder with the CRLF
+  copy succeeds and with an LF copy fails on GOLDBERG_PROMPTS; `bash AutoDeploy.sh <folder>` with option 2 works.
+- Web pages in the overlay, like Steam: the Community hub tiles and the game's `ActivateGameOverlayToWebPage` /
+  `ActivateGameOverlayToStore` open a browser modal inside the overlay (back, forward, reload/stop, title and
+  address, open in the system browser, close; Esc closes it, also while the page has the keyboard).
+  `overlay_web.cpp` hosts WebView2 (windowed hosting) as a child window of the overlay window on the host thread,
+  started on the first page only; the DirectComposition target is now created non-topmost so that child window is
+  drawn above the ImGui visual. Only http/https pages; links that open a new window stay in the same view. The page
+  stays loaded while the overlay is closed and comes back with it; closing the modal unloads it (video/sound stop).
+  Browser data (cookies, logins) in `%APPDATA%\ReFix LAN\WebView2`. Without the WebView2 runtime the old behaviour
+  stays (system browser).
+- WebView2 SDK 1.0.2903.40 vendored in `src/webview2` (headers + WebView2LoaderStatic.lib x64/x86, BSD licence):
+  the static loader is linked, nothing extra ships. dumpbin: the import tables of the x64 and x86 DLLs are the same
+  as before (no new DLL loaded at start); the DLLs grow by about 0.9 MB.
+- First-run dialog title: "Welcome to ReFix" / "Te damos la bienvenida a ReFix".
+- Verified in Lethal Company: Store, Community and News pages in the modal, scrolling, video, a link, Back,
+  Shift+Tab with the page focused (closes and reopens with the page), Esc in the page, Esc again closes the overlay,
+  X button; no msedgewebview2 process left after the game exits. x64/x86 rebuilt, tests pass.
+- Known limits: ImGui tooltips and menus cannot draw over the page area (it is a separate window); the page is not
+  dimmed behind other overlay dialogs (none open while the browser is up).

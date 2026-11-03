@@ -86,7 +86,9 @@ public:
     void Join(const net::RemotePlayer& p);
     void Invite(const net::RemotePlayer& p);
     void ToggleFavorite(const net::RemotePlayer& p);
-    void OpenUrl(const std::wstring& url);
+    void OpenUrl(const std::wstring& url);   // system browser; closes the overlay
+    void OpenWeb(const std::wstring& url);   // page inside the overlay (system browser as fallback)
+    void CloseWeb();
     void RestartWithProfile(const std::wstring& id);
     void DeferProfile(const std::wstring& id);
     void AcceptInvite(const net::Invite& inv);
@@ -142,6 +144,7 @@ private:
     void DrawDeleteConfirm();
     void DrawLanguageSwitch(ImVec2 rightEdgeCenter);
     void DrawEditorModal();
+    void DrawWebModal(ImVec2 viewport);
     bool DrawEditorBody(bool firstRun);   // true when the editor finished (saved or cancelled)
     void DrawDialog(ImVec2 viewport);
     void DrawPicker();
@@ -164,6 +167,10 @@ private:
     uint32_t avatarKey_ = 0;
     std::wstring avatarKeyFor_;
     int profileVersion_ = 0;
+    std::wstring webUrl_;            // page of the browser modal
+    bool webOpen_ = false;
+    bool webOpenRequested_ = false;  // (re)open the modal popup on the next overlay frame
+    bool webDrawn_ = false;          // the modal was drawn this frame: the web view may show
 };
 
 } // namespace refix::overlay

@@ -40,6 +40,8 @@ constexpr const char* Search = "\xEE\x9C\xA1";       // E721
 constexpr const char* Delete = "\xEE\x9D\x8D";       // E74D trash
 constexpr const char* Lock = "\xEE\x9C\xAE";         // E72E
 constexpr const char* Language = "\xEE\x9D\xBD";     // E775 globe/keyboard
+constexpr const char* Refresh = "\xEE\x9C\xAC";      // E72C
+constexpr const char* OpenExternal = "\xEE\xA2\xA7"; // E8A7 open in new window
 } // namespace icon
 
 namespace color {

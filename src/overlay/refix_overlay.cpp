@@ -274,13 +274,13 @@ void ActivateOverlayToUser(const char* dialog, uint64_t steamId) {
 void ActivateWebPage(const char* url) {
     if (!IsEnabled() || !url) return;
     const std::wstring u = FromUtf8(url);
-    App::Get().Post([u] { App::Get().OpenUrl(u); });
+    App::Get().Post([u] { App::Get().OpenWeb(u); });
 }
 
 void ActivateStore(uint32_t appId) {
     if (!IsEnabled() || appId == 0) return;
     const std::wstring u = L"https://store.steampowered.com/app/" + std::to_wstring(appId) + L"/";
-    App::Get().Post([u] { App::Get().OpenUrl(u); });
+    App::Get().Post([u] { App::Get().OpenWeb(u); });
 }
 
 void ActivateInviteDialog(uint64_t lobbyId, const char* connect) {

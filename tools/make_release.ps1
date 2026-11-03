@@ -58,6 +58,16 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object {
 } | Remove-Item -Force
 Get-ChildItem -LiteralPath $OutDir -Recurse -Directory -Filter "steam_settings" | Remove-Item -Recurse -Force
 
+# Line endings are whatever the working copy has, which is not always what .gitattributes says. cmd.exe
+# needs CRLF in .bat/.cmd (with LF, "goto LABEL" misses labels and the window closes halfway through
+# AutoDeploy) and bash needs LF in .sh ($'\r': command not found). Normalise both here.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension -in ".bat", ".cmd", ".sh" } | ForEach-Object {
+    $text = [System.IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"
+    if ($_.Extension -ne ".sh") { $text = $text -replace "`n", "`r`n" }
+    [System.IO.File]::WriteAllText($_.FullName, $text, $utf8NoBom)
+}
+
 $readme = @"
 ReFix 2.0 - LAN / Online
 ========================
