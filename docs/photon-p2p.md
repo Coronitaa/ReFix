@@ -75,6 +75,12 @@ Emulator sockets are registered with `SteamP2PHook::ExcludeSocket`. `PreserveLoo
   aborts. Making it work would mean evading its anti-cheat, so it is not supported.
 - Tests: `tests\run_photon_tests.bat` (codec, transport, crypto, room flow, master routing).
 
+## ReFix LAN
+ReFix LAN builds the same emulator with `src/photon/pn_lan_backend.cpp` in place of the Valve-backed
+`refix_steam_flat.cpp`: peers are the ReFix LAN players of the same game, the envelope travels on LanCore channel
+248, and room hosts are found through the room query/announce messages and LAN lobby owners. No Steam client or
+internet is needed. See docs/refix-lan/HANDOFF.md (2026-11-03) for details and what was verified.
+
 ## Not implemented
 - Photon TCP and WebSocket (WSS) transports. AuthOnceWss would need TLS.
 - Datagram encryption, legacy merge/replace caching, webhooks, lobby room lists.

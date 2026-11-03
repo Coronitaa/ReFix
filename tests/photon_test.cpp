@@ -14,9 +14,9 @@
 
 using namespace PnProto18;
 
-namespace SteamP2PHook {
-    void ExcludeSocket(uintptr_t) {}
-    void IncludeSocket(uintptr_t) {}
+namespace SteamP2PHook { // ExcludeSocket/IncludeSocket are inline wrappers over these in ReFix LAN
+    void RegisterInternalSocket(uintptr_t) {}
+    void UnregisterInternalSocket(uintptr_t) {}
 }
 
 static int g_failures = 0;

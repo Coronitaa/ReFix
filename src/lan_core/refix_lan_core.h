@@ -268,6 +268,13 @@ public:
     virtual ICallbackDispatcher& Callbacks() = 0;
     virtual ILocalRelayService& Relay() = 0;
     virtual LanTransport& Transport() = 0;
+
+    // Delivers every packet of `channel` to `handler` on the transport's reactor thread instead of the Tick-driven
+    // event queue (which games pump once per frame, at most 50 events per tick). For latency-sensitive tunnels
+    // such as the Photon emulator. The handler must be quick and must not call back into LanCore under its own
+    // locks. An empty handler restores normal DataPacketReceived delivery.
+    using ChannelHandler = std::function<void(const PeerId& sender, const uint8_t* data, size_t len)>;
+    virtual void SetChannelHandler(uint8_t channel, ChannelHandler handler) = 0;
 };
 
 } // namespace refix::lan

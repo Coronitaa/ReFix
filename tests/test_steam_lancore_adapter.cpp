@@ -573,11 +573,15 @@ static bool RunGenericLobbyCreationAuditTests(HMODULE hSteam) {
     const char* val = pfnFlatGetLobbyData(pMatchmaking, steamLobbyId, "GameType");
     TEST_ASSERT(strcmp(val, "LAN_Deathmatch") == 0, "GetLobbyData flat export must return set value");
 
-    // Verify canonical pre-populated networking attributes
+    // The game sees exactly the keys it set, as on Steam: ReFix's host bookkeeping must stay hidden (Unreal's
+    // OnlineSubsystemSteam drops lobbies carrying unknown untyped keys such as HostAddress / SERVER_IP).
     const char* hostAddr = pfnFlatGetLobbyData(pMatchmaking, steamLobbyId, "HostAddress");
-    TEST_ASSERT(hostAddr && hostAddr[0] != '\0', "HostAddress in created lobby must be pre-populated");
+    TEST_ASSERT(hostAddr && hostAddr[0] == '\0', "HostAddress must not be visible in lobby data");
     const char* serverIp = pfnFlatGetLobbyData(pMatchmaking, steamLobbyId, "SERVER_IP");
-    TEST_ASSERT(serverIp && serverIp[0] != '\0', "SERVER_IP in created lobby must be pre-populated");
+    TEST_ASSERT(serverIp && serverIp[0] == '\0', "SERVER_IP must not be visible in lobby data");
+    auto pfnFlatGetLobbyDataCount = (int (*)(void*, uint64_t))GetProcAddress(hSteam, "SteamAPI_ISteamMatchmaking_GetLobbyDataCount");
+    TEST_ASSERT(pfnFlatGetLobbyDataCount != nullptr, "SteamAPI_ISteamMatchmaking_GetLobbyDataCount must exist");
+    TEST_ASSERT(pfnFlatGetLobbyDataCount(pMatchmaking, steamLobbyId) == 1, "Lobby data must hold only the game's own key");
 
     // Verify flat utils exports
     auto pfnGetIPCountry = (const char* (*)(void*))GetProcAddress(hSteam, "SteamAPI_ISteamUtils_GetIPCountry");

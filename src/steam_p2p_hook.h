@@ -14,6 +14,7 @@
 // =============================================================================
 #pragma once
 #include <cstdint>
+#include <vector>
 
 namespace SteamP2PHook {
 
@@ -46,6 +47,13 @@ namespace SteamP2PHook {
     void RegisterInternalSocket(uintptr_t s);
     void UnregisterInternalSocket(uintptr_t s);
     bool IsInternalSocket(uintptr_t s);
+
+    // Names the Photon emulator (shared with ReFix Online) uses for the same exemption.
+    inline void ExcludeSocket(uintptr_t s) { RegisterInternalSocket(s); }
+    inline void IncludeSocket(uintptr_t s) { UnregisterInternalSocket(s); }
+
+    // Returns all known SteamIDs currently mapped as P2P peers.
+    std::vector<uint64_t> GetRegisteredPeers();
 
 } // namespace SteamP2PHook
 

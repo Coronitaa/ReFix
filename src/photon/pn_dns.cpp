@@ -15,8 +15,8 @@ namespace PnDns {
 
 namespace {
 
-constexpr const char* kLoopback = "127.0.0.1";
-constexpr const wchar_t* kLoopbackW = L"127.0.0.1";
+std::string g_target = "127.0.0.1";
+std::wstring g_targetW = L"127.0.0.1";
 
 typedef int (WSAAPI* fn_getaddrinfo_t)(PCSTR, PCSTR, const ADDRINFOA*, PADDRINFOA*);
 typedef int (WSAAPI* fn_GetAddrInfoW_t)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
@@ -34,7 +34,7 @@ bool Matches(std::string host) {
     for (const auto& suffix : g_suffixes) {
         if (host.size() >= suffix.size() && host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0) {
             std::lock_guard<std::mutex> lock(g_logMutex);
-            if (g_logged.insert(host).second) ReFixLog("[Photon-DNS] %s -> %s (local emulator)", host.c_str(), kLoopback);
+            if (g_logged.insert(host).second) ReFixLog("[Photon-DNS] %s -> %s (local emulator)", host.c_str(), g_target.c_str());
             return true;
         }
     }
@@ -48,17 +48,17 @@ std::string Narrow(PCWSTR w) {
 }
 
 int WSAAPI Hooked_getaddrinfo(PCSTR node, PCSTR service, const ADDRINFOA* hints, PADDRINFOA* result) {
-    if (node && Matches(node)) node = kLoopback;
+    if (node && Matches(node)) node = g_target.c_str();
     return g_origGetAddrInfo(node, service, hints, result);
 }
 
 int WSAAPI Hooked_GetAddrInfoW(PCWSTR node, PCWSTR service, const ADDRINFOW* hints, PADDRINFOW* result) {
-    if (node && Matches(Narrow(node))) node = kLoopbackW;
+    if (node && Matches(Narrow(node))) node = g_targetW.c_str();
     return g_origGetAddrInfoW(node, service, hints, result);
 }
 
 hostent* WSAAPI Hooked_gethostbyname(const char* name) {
-    if (name && Matches(name)) name = kLoopback;
+    if (name && Matches(name)) name = g_target.c_str();
     return g_origGetHostByName(name);
 }
 
@@ -71,7 +71,9 @@ bool Hook(HMODULE ws2, const char* name, void* detour, void** original) {
 
 } // namespace
 
-bool Install(const std::vector<std::string>& hostSuffixes) {
+bool Install(const std::vector<std::string>& hostSuffixes, const std::string& target) {
+    g_target = target;
+    g_targetW.assign(target.begin(), target.end());
     g_suffixes.clear();
     for (std::string s : hostSuffixes) {
         std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });

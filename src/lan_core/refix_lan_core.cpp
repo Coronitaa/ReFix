@@ -1324,7 +1324,21 @@ public:
         }
     }
 
+    void SetChannelHandler(uint8_t channel, ILanCore::ChannelHandler handler) {
+        std::lock_guard<std::mutex> lock(m_channelMutex);
+        m_channelHandlers[channel] = handler ? std::make_shared<ILanCore::ChannelHandler>(std::move(handler)) : nullptr;
+    }
+
     void OnInboundData(const InboundPacket& packet) override {
+        std::shared_ptr<ILanCore::ChannelHandler> direct;
+        {
+            std::lock_guard<std::mutex> lock(m_channelMutex);
+            direct = m_channelHandlers[packet.channel];
+        }
+        if (direct) {
+            (*direct)(packet.senderPeerId, packet.payload.data(), packet.payload.size());
+            return;
+        }
         LanEvent ev;
         ev.type = LanEvent::Type::DataPacketReceived;
         ev.peerId = packet.senderPeerId;
@@ -1352,6 +1366,8 @@ private:
     mutable std::mutex m_scopeMutex;
     std::mutex m_announcedMutex;
     std::set<PeerId> m_announced;   // peers announced (PeerDiscovered posted) with a known external ID
+    std::mutex m_channelMutex;
+    std::shared_ptr<ILanCore::ChannelHandler> m_channelHandlers[256]; // SetChannelHandler, by channel
 };
 
 // =============================================================================
@@ -1443,6 +1459,9 @@ public:
     ICallbackDispatcher& Callbacks() override { return m_callbacks; }
     ILocalRelayService& Relay() override { return m_relay; }
     LanTransport& Transport() override { return m_transport; }
+    void SetChannelHandler(uint8_t channel, ChannelHandler handler) override {
+        m_discovery.SetChannelHandler(channel, std::move(handler));
+    }
 
 private:
     std::mutex m_tickMutex;

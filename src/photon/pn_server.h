@@ -82,6 +82,10 @@ public:
     // Returns table of local public rooms hosted on this machine (suitable for P_GAME_LIST).
     PnProto18::Table LocalPublicRooms() const;
 
+    // Pushes a GameListUpdate to the clients sitting in the lobby when a remote room appears, changes or (with
+    // null props) disappears. Remote rooms arrive asynchronously, after the JoinLobby reply already went out.
+    void PublishLobbyRoom(const std::string& name, const PnProto18::Table* props);
+
 private:
     struct Actor {
         uint64_t peerKey = 0;
@@ -128,6 +132,7 @@ private:
         std::string aesKey;   // payload encryption key once InitEncryption completed
         Room* room = nullptr;
         int32_t actor = 0;
+        bool inLobby = false;  // Master peer that joined the lobby (receives GameList updates)
     };
 
     void HandleOperation(Peer& peer, uint64_t key, uint8_t op, const PnProto18::Params& params, bool reliable, uint8_t channel);

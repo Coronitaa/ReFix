@@ -3716,7 +3716,16 @@ namespace UnrealSteamEmu {
         virtual void SetWarningMessageHook(SteamAPIWarningMessageHook_t pFunction) override {}
         virtual bool IsOverlayEnabled() override { return false; }
         virtual bool BOverlayNeedsPresent() override { return false; }
-        virtual SteamAPICall_t CheckFileSignature(const char *szFileName) override { return 0; }
+        // Source engines (Garry's Mod) check their own binaries at startup and spin on IsAPICallCompleted
+        // without pumping callbacks: a 0 handle hung the main thread forever. Complete it immediately.
+        virtual SteamAPICall_t CheckFileSignature(const char *szFileName) override {
+            uint64_t hCall = ++g_nextAPICall;
+            CheckFileSignature_t result = {};
+            result.m_eCheckFileSignature = k_ECheckFileSignatureValidSignature;
+            CompleteCallResult(hCall, CheckFileSignature_t::k_iCallback, &result, sizeof(result), false);
+            ReFixLog("[UnrealSteam] CheckFileSignature('%s') -> valid (call %llu)", szFileName ? szFileName : "", hCall);
+            return hCall;
+        }
         virtual bool ShowGamepadTextInput(EGamepadTextInputMode eInputMode, EGamepadTextInputLineMode eLineInputMode, const char *pchDescription, uint32 unCharMax, const char *pchExistingText) override { return false; }
         virtual uint32 GetEnteredGamepadTextLength() override { return 0; }
         virtual bool GetEnteredGamepadTextInput(char *pchText, uint32 cchText) override { return false; }
@@ -3894,16 +3903,10 @@ namespace UnrealSteamEmu {
             size_t colonPos = localIpStr.find(':');
             if (colonPos != std::string::npos) localIpStr = localIpStr.substr(0, colonPos);
 
-            std::string hostSteamIdStr = std::to_string(g_localSteamID);
-            lob.data["HostAddress"] = hostSteamIdStr;
-            lob.data["HostSteamID"] = hostSteamIdStr;
-            lob.data["SERVER_IP"] = localIpStr;
-            lob.data["ServerAddress"] = localIpStr;
-            lob.data["Port"] = std::to_string(localEp.port != 0 ? localEp.port : 27015);
-
-            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "HostAddress", refix::lan::AttributeValue(hostSteamIdStr));
-            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "HostSteamID", refix::lan::AttributeValue(hostSteamIdStr));
-            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "SERVER_IP", refix::lan::AttributeValue(localIpStr));
+            // Host address bookkeeping travels as "__" attributes: games only ever see the keys they set themselves,
+            // as on Steam. Unreal's OnlineSubsystemSteam rejected every LAN lobby that carried extra untyped keys
+            // (HostAddress, SERVER_IP...), so GRAIN ROT's public server list stayed empty.
+            refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "__server_ip", refix::lan::AttributeValue(localIpStr));
 
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -4211,7 +4214,9 @@ namespace UnrealSteamEmu {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             auto it = g_lobbies.find(lID);
             if (it != g_lobbies.end()) {
-                for (const auto& [k, v] : it->second.data) view[k] = v;
+                for (const auto& [k, v] : it->second.data) {
+                    if (k.rfind("__", 0) != 0) view[k] = v;
+                }
             }
             return view;
         }
@@ -4229,6 +4234,9 @@ namespace UnrealSteamEmu {
             std::advance(dIt, iLobbyData);
             if (pchKey && cchKeyBufferSize > 0) strncpy_s(pchKey, cchKeyBufferSize, dIt->first.c_str(), _TRUNCATE);
             if (pchValue && cchValueBufferSize > 0) strncpy_s(pchValue, cchValueBufferSize, dIt->second.c_str(), _TRUNCATE);
+            if (TraceLobbyReads())
+                ReFixLog("[LobbyRead] GetLobbyDataByIndex(%llu, %d) -> '%s' = '%s'", steamIDLobby.ConvertToUint64(), iLobbyData,
+                         dIt->first.c_str(), dIt->second.c_str());
             return true;
         }
 
@@ -4302,7 +4310,7 @@ namespace UnrealSteamEmu {
                     lob.maxMembers = rec->maxMembers;
                     lob.joinable = rec->joinable;
                     for (const auto& [k, v] : rec->attributes) {
-                        lob.data[k] = v.asString;
+                        if (k.rfind("__", 0) != 0) lob.data[k] = v.asString; // "__" keys are ReFix bookkeeping
                     }
                 }
             }
@@ -4382,9 +4390,11 @@ namespace UnrealSteamEmu {
         }
 
         virtual int GetLobbyMemberLimit(CSteamID steamIDLobby) override {
+            int limit = 4;
             auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
-            if (it != g_lobbies.end()) return it->second.maxMembers;
-            return 4;
+            if (it != g_lobbies.end()) limit = it->second.maxMembers;
+            if (TraceLobbyReads()) ReFixLog("[LobbyRead] GetLobbyMemberLimit(%llu) -> %d", steamIDLobby.ConvertToUint64(), limit);
+            return limit;
         }
 
         virtual bool SetLobbyType(CSteamID steamIDLobby, ELobbyType eLobbyType) override {
@@ -4504,11 +4514,19 @@ namespace UnrealSteamEmu {
     // --- ISteamUserStats ---
     class CSteamUserStatsEmu : public ISteamUserStats {
     private:
+        // REFIX_LOG_VERBOSE=1: which stats/achievement calls a game makes (and so what it waits for).
+        static void TraceStats(const char* method, const char* name) {
+            static const bool on = []() {
+                char v[8] = {};
+                return GetEnvironmentVariableA("REFIX_LOG_VERBOSE", v, sizeof(v)) > 0 && v[0] == '1';
+            }();
+            if (on) ReFixLog("[UserStats] %s(%s)", method, name ? name : "");
+        }
         std::map<std::string, int32_t> m_intStats;
         std::map<std::string, float> m_floatStats;
         std::set<std::string> m_achievements;
     public:
-        virtual bool RequestCurrentStats() {
+        virtual bool RequestCurrentStats() { TraceStats("RequestCurrentStats", nullptr);
             UserStatsReceived_t resp = {};
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
@@ -4517,7 +4535,7 @@ namespace UnrealSteamEmu {
             return true;
         }
 
-        virtual bool GetStat(const char *pchName, int32 *pData) override {
+        virtual bool GetStat(const char *pchName, int32 *pData) override { TraceStats("GetStat", pchName);
             if (!pchName || !pData) return false;
             auto it = m_intStats.find(pchName);
             if (it != m_intStats.end()) { *pData = it->second; return true; }
@@ -4525,7 +4543,7 @@ namespace UnrealSteamEmu {
             return true;
         }
 
-        virtual bool GetStat(const char *pchName, float *pData) override {
+        virtual bool GetStat(const char *pchName, float *pData) override { TraceStats("GetStat", pchName);
             if (!pchName || !pData) return false;
             auto it = m_floatStats.find(pchName);
             if (it != m_floatStats.end()) { *pData = it->second; return true; }
@@ -4533,27 +4551,27 @@ namespace UnrealSteamEmu {
             return true;
         }
 
-        virtual bool SetStat(const char *pchName, int32 nData) override {
+        virtual bool SetStat(const char *pchName, int32 nData) override { TraceStats("SetStat", pchName);
             if (!pchName) return false;
             m_intStats[pchName] = nData;
             return true;
         }
 
-        virtual bool SetStat(const char *pchName, float fData) override {
+        virtual bool SetStat(const char *pchName, float fData) override { TraceStats("SetStat", pchName);
             if (!pchName) return false;
             m_floatStats[pchName] = fData;
             return true;
         }
 
-        virtual bool UpdateAvgRateStat(const char *pchName, float flCountThisSession, double dSessionLength) override { return true; }
+        virtual bool UpdateAvgRateStat(const char *pchName, float flCountThisSession, double dSessionLength) override { TraceStats("UpdateAvgRateStat", pchName); return true; }
 
-        virtual bool GetAchievement(const char *pchName, bool *pbAchieved) override {
+        virtual bool GetAchievement(const char *pchName, bool *pbAchieved) override { TraceStats("GetAchievement", pchName);
             if (!pchName || !pbAchieved) return false;
             *pbAchieved = (m_achievements.find(pchName) != m_achievements.end());
             return true;
         }
 
-        virtual bool SetAchievement(const char *pchName) override {
+        virtual bool SetAchievement(const char *pchName) override { TraceStats("SetAchievement", pchName);
             if (!pchName) return false;
             m_achievements.insert(pchName);
 
@@ -4569,12 +4587,12 @@ namespace UnrealSteamEmu {
             return true;
         }
 
-        virtual bool ClearAchievement(const char *pchName) override {
+        virtual bool ClearAchievement(const char *pchName) override { TraceStats("ClearAchievement", pchName);
             if (pchName) m_achievements.erase(pchName);
             return true;
         }
 
-        virtual bool GetAchievementAndUnlockTime(const char *pchName, bool *pbAchieved, uint32 *punUnlockTime) override {
+        virtual bool GetAchievementAndUnlockTime(const char *pchName, bool *pbAchieved, uint32 *punUnlockTime) override { TraceStats("GetAchievementAndUnlockTime", pchName);
             if (GetAchievement(pchName, pbAchieved)) {
                 if (punUnlockTime) *punUnlockTime = (uint32)::time(NULL);
                 return true;
@@ -4582,7 +4600,7 @@ namespace UnrealSteamEmu {
             return false;
         }
 
-        virtual bool StoreStats() override {
+        virtual bool StoreStats() override { TraceStats("StoreStats", nullptr);
             UserStatsStored_t resp = {};
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
@@ -4590,13 +4608,13 @@ namespace UnrealSteamEmu {
             return true;
         }
 
-        virtual int GetAchievementIcon(const char *pchName) override { return 0; }
-        virtual const char *GetAchievementDisplayAttribute(const char *pchName, const char *pchKey) override { return ""; }
-        virtual bool IndicateAchievementProgress(const char *pchName, uint32 nCurProgress, uint32 nMaxProgress) override { return true; }
-        virtual uint32 GetNumAchievements() override { return (uint32)m_achievements.size(); }
-        virtual const char *GetAchievementName(uint32 iAchievement) override { return ""; }
+        virtual int GetAchievementIcon(const char *pchName) override { TraceStats("GetAchievementIcon", pchName); return 0; }
+        virtual const char *GetAchievementDisplayAttribute(const char *pchName, const char *pchKey) override { TraceStats("GetAchievementDisplayAttribute", pchName); return ""; }
+        virtual bool IndicateAchievementProgress(const char *pchName, uint32 nCurProgress, uint32 nMaxProgress) override { TraceStats("IndicateAchievementProgress", pchName); return true; }
+        virtual uint32 GetNumAchievements() override { TraceStats("GetNumAchievements", nullptr); return (uint32)m_achievements.size(); }
+        virtual const char *GetAchievementName(uint32 iAchievement) override { TraceStats("GetAchievementName", nullptr); return ""; }
 
-        virtual SteamAPICall_t RequestUserStats(CSteamID steamIDUser) override {
+        virtual SteamAPICall_t RequestUserStats(CSteamID steamIDUser) override { TraceStats("RequestUserStats", nullptr);
             UserStatsReceived_t resp = {};
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
@@ -4604,47 +4622,47 @@ namespace UnrealSteamEmu {
             return PostCallResult(UserStatsReceived_t::k_iCallback, &resp, sizeof(resp));
         }
 
-        virtual bool GetUserStat(CSteamID steamIDUser, const char *pchName, int32 *pData) override { return GetStat(pchName, pData); }
-        virtual bool GetUserStat(CSteamID steamIDUser, const char *pchName, float *pData) override { return GetStat(pchName, pData); }
-        virtual bool GetUserAchievement(CSteamID steamIDUser, const char *pchName, bool *pbAchieved) override { return GetAchievement(pchName, pbAchieved); }
-        virtual bool GetUserAchievementAndUnlockTime(CSteamID steamIDUser, const char *pchName, bool *pbAchieved, uint32 *punUnlockTime) override {
+        virtual bool GetUserStat(CSteamID steamIDUser, const char *pchName, int32 *pData) override { TraceStats("GetUserStat", pchName); return GetStat(pchName, pData); }
+        virtual bool GetUserStat(CSteamID steamIDUser, const char *pchName, float *pData) override { TraceStats("GetUserStat", pchName); return GetStat(pchName, pData); }
+        virtual bool GetUserAchievement(CSteamID steamIDUser, const char *pchName, bool *pbAchieved) override { TraceStats("GetUserAchievement", pchName); return GetAchievement(pchName, pbAchieved); }
+        virtual bool GetUserAchievementAndUnlockTime(CSteamID steamIDUser, const char *pchName, bool *pbAchieved, uint32 *punUnlockTime) override { TraceStats("GetUserAchievementAndUnlockTime", pchName);
             return GetAchievementAndUnlockTime(pchName, pbAchieved, punUnlockTime);
         }
-        virtual bool ResetAllStats(bool bAchievementsToo) override {
+        virtual bool ResetAllStats(bool bAchievementsToo) override { TraceStats("ResetAllStats", nullptr);
             m_intStats.clear();
             m_floatStats.clear();
             if (bAchievementsToo) m_achievements.clear();
             return true;
         }
 
-        virtual SteamAPICall_t FindOrCreateLeaderboard(const char *pchLeaderboardName, ELeaderboardSortMethod eLeaderboardSortMethod, ELeaderboardDisplayType eLeaderboardDisplayType) override { return 0; }
-        virtual SteamAPICall_t FindLeaderboard(const char *pchLeaderboardName) override { return 0; }
-        virtual const char *GetLeaderboardName(SteamLeaderboard_t hSteamLeaderboard) override { return ""; }
-        virtual int GetLeaderboardEntryCount(SteamLeaderboard_t hSteamLeaderboard) override { return 0; }
-        virtual ELeaderboardSortMethod GetLeaderboardSortMethod(SteamLeaderboard_t hSteamLeaderboard) override { return k_ELeaderboardSortMethodNone; }
-        virtual ELeaderboardDisplayType GetLeaderboardDisplayType(SteamLeaderboard_t hSteamLeaderboard) override { return k_ELeaderboardDisplayTypeNone; }
-        virtual SteamAPICall_t DownloadLeaderboardEntries(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, int nRangeStart, int nRangeEnd) override { return 0; }
-        virtual SteamAPICall_t DownloadLeaderboardEntriesForUsers(SteamLeaderboard_t hSteamLeaderboard, CSteamID *prgUsers, int cUsers) override { return 0; }
-        virtual bool GetDownloadedLeaderboardEntry(SteamLeaderboardEntries_t hSteamLeaderboardEntries, int index, LeaderboardEntry_t *pLeaderboardEntry, int32 *pDetails, int cDetailsMax) override { return false; }
-        virtual SteamAPICall_t UploadLeaderboardScore(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardUploadScoreMethod eLeaderboardUploadScoreMethod, int32 nScore, const int32 *pScoreDetails, int cScoreDetailsCount) override { return 0; }
-        virtual SteamAPICall_t AttachLeaderboardUGC(SteamLeaderboard_t hSteamLeaderboard, UGCHandle_t hUGC) override { return 0; }
-        virtual SteamAPICall_t GetNumberOfCurrentPlayers() override {
+        virtual SteamAPICall_t FindOrCreateLeaderboard(const char *pchLeaderboardName, ELeaderboardSortMethod eLeaderboardSortMethod, ELeaderboardDisplayType eLeaderboardDisplayType) override { TraceStats("FindOrCreateLeaderboard", nullptr); return 0; }
+        virtual SteamAPICall_t FindLeaderboard(const char *pchLeaderboardName) override { TraceStats("FindLeaderboard", nullptr); return 0; }
+        virtual const char *GetLeaderboardName(SteamLeaderboard_t hSteamLeaderboard) override { TraceStats("GetLeaderboardName", nullptr); return ""; }
+        virtual int GetLeaderboardEntryCount(SteamLeaderboard_t hSteamLeaderboard) override { TraceStats("GetLeaderboardEntryCount", nullptr); return 0; }
+        virtual ELeaderboardSortMethod GetLeaderboardSortMethod(SteamLeaderboard_t hSteamLeaderboard) override { TraceStats("GetLeaderboardSortMethod", nullptr); return k_ELeaderboardSortMethodNone; }
+        virtual ELeaderboardDisplayType GetLeaderboardDisplayType(SteamLeaderboard_t hSteamLeaderboard) override { TraceStats("GetLeaderboardDisplayType", nullptr); return k_ELeaderboardDisplayTypeNone; }
+        virtual SteamAPICall_t DownloadLeaderboardEntries(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, int nRangeStart, int nRangeEnd) override { TraceStats("DownloadLeaderboardEntries", nullptr); return 0; }
+        virtual SteamAPICall_t DownloadLeaderboardEntriesForUsers(SteamLeaderboard_t hSteamLeaderboard, CSteamID *prgUsers, int cUsers) override { TraceStats("DownloadLeaderboardEntriesForUsers", nullptr); return 0; }
+        virtual bool GetDownloadedLeaderboardEntry(SteamLeaderboardEntries_t hSteamLeaderboardEntries, int index, LeaderboardEntry_t *pLeaderboardEntry, int32 *pDetails, int cDetailsMax) override { TraceStats("GetDownloadedLeaderboardEntry", nullptr); return false; }
+        virtual SteamAPICall_t UploadLeaderboardScore(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardUploadScoreMethod eLeaderboardUploadScoreMethod, int32 nScore, const int32 *pScoreDetails, int cScoreDetailsCount) override { TraceStats("UploadLeaderboardScore", nullptr); return 0; }
+        virtual SteamAPICall_t AttachLeaderboardUGC(SteamLeaderboard_t hSteamLeaderboard, UGCHandle_t hUGC) override { TraceStats("AttachLeaderboardUGC", nullptr); return 0; }
+        virtual SteamAPICall_t GetNumberOfCurrentPlayers() override { TraceStats("GetNumberOfCurrentPlayers", nullptr);
             NumberOfCurrentPlayers_t resp = {};
             resp.m_bSuccess = 1;
             resp.m_cPlayers = 1;
             return PostCallResult(NumberOfCurrentPlayers_t::k_iCallback, &resp, sizeof(resp));
         }
-        virtual SteamAPICall_t RequestGlobalAchievementPercentages() override { return 0; }
-        virtual int GetMostAchievedAchievementInfo(char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved) override { return -1; }
-        virtual int GetNextMostAchievedAchievementInfo(int iIterator, char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved) override { return -1; }
-        virtual bool GetAchievementAchievedPercent(const char *pchName, float *pflPercent) override { if (pflPercent) *pflPercent = 100.0f; return true; }
-        virtual SteamAPICall_t RequestGlobalStats(int nHistoryDays) override { return 0; }
-        virtual bool GetGlobalStat(const char *pchStatName, int64 *pData) override { return false; }
-        virtual bool GetGlobalStat(const char *pchStatName, double *pData) override { return false; }
-        virtual int32 GetGlobalStatHistory(const char *pchStatName, int64 *pData, uint32 cubData) override { return 0; }
-        virtual int32 GetGlobalStatHistory(const char *pchStatName, double *pData, uint32 cubData) override { return 0; }
-        virtual bool GetAchievementProgressLimits(const char *pchName, int32 *pnMinProgress, int32 *pnMaxProgress) override { if (pnMinProgress) *pnMinProgress = 0; if (pnMaxProgress) *pnMaxProgress = 100; return true; }
-        virtual bool GetAchievementProgressLimits(const char *pchName, float *pfMinProgress, float *pfMaxProgress) override { if (pfMinProgress) *pfMinProgress = 0.0f; if (pfMaxProgress) *pfMaxProgress = 100.0f; return true; }
+        virtual SteamAPICall_t RequestGlobalAchievementPercentages() override { TraceStats("RequestGlobalAchievementPercentages", nullptr); return 0; }
+        virtual int GetMostAchievedAchievementInfo(char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved) override { TraceStats("GetMostAchievedAchievementInfo", nullptr); return -1; }
+        virtual int GetNextMostAchievedAchievementInfo(int iIterator, char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved) override { TraceStats("GetNextMostAchievedAchievementInfo", nullptr); return -1; }
+        virtual bool GetAchievementAchievedPercent(const char *pchName, float *pflPercent) override { TraceStats("GetAchievementAchievedPercent", pchName); if (pflPercent) *pflPercent = 100.0f; return true; }
+        virtual SteamAPICall_t RequestGlobalStats(int nHistoryDays) override { TraceStats("RequestGlobalStats", nullptr); return 0; }
+        virtual bool GetGlobalStat(const char *pchStatName, int64 *pData) override { TraceStats("GetGlobalStat", nullptr); return false; }
+        virtual bool GetGlobalStat(const char *pchStatName, double *pData) override { TraceStats("GetGlobalStat", nullptr); return false; }
+        virtual int32 GetGlobalStatHistory(const char *pchStatName, int64 *pData, uint32 cubData) override { TraceStats("GetGlobalStatHistory", nullptr); return 0; }
+        virtual int32 GetGlobalStatHistory(const char *pchStatName, double *pData, uint32 cubData) override { TraceStats("GetGlobalStatHistory", nullptr); return 0; }
+        virtual bool GetAchievementProgressLimits(const char *pchName, int32 *pnMinProgress, int32 *pnMaxProgress) override { TraceStats("GetAchievementProgressLimits", pchName); if (pnMinProgress) *pnMinProgress = 0; if (pnMaxProgress) *pnMaxProgress = 100; return true; }
+        virtual bool GetAchievementProgressLimits(const char *pchName, float *pfMinProgress, float *pfMaxProgress) override { TraceStats("GetAchievementProgressLimits", pchName); if (pfMinProgress) *pfMinProgress = 0.0f; if (pfMaxProgress) *pfMaxProgress = 100.0f; return true; }
     };
     static CSteamUserStatsEmu g_steamUserStatsInstance;
 
@@ -6952,6 +6970,10 @@ namespace UnrealSteamEmu {
             return &g_steamClient021Instance;
         if (strstr(pchVersion, "SteamClient") || strstr(pchVersion, "STEAMCLIENT"))
             return &g_steamClientInstance;
+        // Before the ISteamUser checks: "STEAMUSER" is a prefix of "STEAMUSERSTATS_INTERFACE_VERSION0xx", and
+        // Garry's Mod got the ISteamUser object for its user stats (crash in GetUserDataFolder).
+        if (strstr(pchVersion, "STEAMUSERSTATS") || strstr(pchVersion, "SteamUserStats"))
+            return &g_steamUserStatsInstance;
         if (strstr(pchVersion, "SteamUser023") || strstr(pchVersion, "STEAMUSER023") ||
             strstr(pchVersion, "SteamUser022") || strstr(pchVersion, "STEAMUSER022"))
             return (ISteamUser*)&g_steamUserInstance;
@@ -6977,8 +6999,6 @@ namespace UnrealSteamEmu {
             return &g_steamMatchmakingServersInstance;
         if (strstr(pchVersion, "SteamMatchMaking") || strstr(pchVersion, "STEAMMATCHMAKING") || strstr(pchVersion, "SteamMatchmaking"))
             return &g_steamMatchmakingInstance;
-        if (strstr(pchVersion, "STEAMUSERSTATS") || strstr(pchVersion, "SteamUserStats"))
-            return &g_steamUserStatsInstance;
         if (strstr(pchVersion, "STEAMAPPS") || strstr(pchVersion, "SteamApps"))
             return &g_steamAppsInstance;
         if (strstr(pchVersion, "SteamNetworkingSockets") || strstr(pchVersion, "STEAMNETWORKINGSOCKETS"))
@@ -7073,6 +7093,7 @@ namespace UnrealSteamEmu {
     int32_t GameServer_GetHSteamUser() { return g_hGameServerUser; }
 
     uint64_t GetLocalSteamID() { return g_localSteamID; }
+    uint64_t GetActiveLobbyID() { return g_activeLobbyID.load(); }
 
     // The real AppID can arrive after init (steam_appid.txt written by the game, RestartAppIfNecessary).
     // Every instance must end up in the same discovery scope, so move LanCore to the new scope.
@@ -7857,6 +7878,15 @@ namespace UnrealSteamEmu {
         // Queue SteamServersConnected_t on startup (outside state lock)
         SteamServersConnected_t conn = {};
         PostCallback(SteamServersConnected_t::k_iCallback, &conn, sizeof(conn), 0.01);
+
+        // Since SDK 1.61 Steam delivers the local user's stats by itself after init (RequestCurrentStats is gone),
+        // and Unreal 5.x waits for this UserStatsReceived_t before it treats stats/achievements as ready
+        // (GRAIN ROT's "new game" did nothing without it). Delayed so listeners registered after init get it.
+        UserStatsReceived_t stats = {};
+        stats.m_nGameID = g_appID;
+        stats.m_eResult = k_EResultOK;
+        stats.m_steamIDUser = CSteamID(g_localSteamID);
+        PostCallback(UserStatsReceived_t::k_iCallback, &stats, sizeof(stats), 1.0);
 
         // Broadcast NetPacket Ping with our persona name so LAN peers discover us immediately (legacy only)
         if (IsLegacyFallbackActive()) {

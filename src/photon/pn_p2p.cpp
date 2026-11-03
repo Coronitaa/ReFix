@@ -9,6 +9,7 @@
 #include "../refix_steam_flat.h"
 #include <steamnetworkingtypes.h>
 #include "../steam_p2p_hook.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
@@ -83,6 +84,12 @@ std::map<uint64_t, Forwarder> g_forwarders;     // host SteamID -> forwarder
 std::mutex g_discoveryMutex;
 std::map<std::string, uint64_t> g_resolvedRooms;           // roomName -> hostSteamId
 std::map<std::string, PnProto18::Table> g_remotePublicLobbies; // roomName -> properties
+std::map<std::string, DWORD> g_remoteLobbySeen;                 // roomName -> last announce (GetTickCount)
+// Hosts re-announce their public rooms; a room not heard of for kRemoteRoomTtlMs is dropped (host quit or crashed).
+constexpr DWORD kRoomAnnounceIntervalMs = 3000, kRemoteRoomTtlMs = 10000;
+// JoinLobby waits this long for peers to answer the lobby query: games such as R.E.P.O. read only the first
+// GameList and disconnect, so rooms arriving later as GameListUpdate would never be listed.
+constexpr DWORD kLobbyQueryWaitMs = 300;
 Forwarder* ForwarderFor(uint64_t host);
 void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size);
 
@@ -95,6 +102,11 @@ std::map<uint64_t, TunnelStats> g_tunnelStats;
 std::unique_ptr<PnServer::Emulator> g_emulator;
 std::string g_masterAddress, g_gameAddress;
 uint16_t g_gamePort = 0;
+// Several game instances on one PC each run an emulator: instance k listens on 127.0.0.(1+k) and puts its
+// forwarders in 127.(80+k)/16, so their fixed Photon ports and forwarder addresses never collide.
+constexpr uint32_t kMaxLocalInstances = 16;
+uint32_t g_instance = 0;
+uint32_t g_listenIp = INADDR_LOOPBACK;
 
 std::string GameDir() {
     char buf[MAX_PATH] = { 0 };
@@ -195,13 +207,15 @@ std::vector<uint64_t> KnownPeers() {
     return std::vector<uint64_t>(peers.begin(), peers.end());
 }
 
-void BroadcastLobbyQuery() {
+// Returns false when there is nobody to ask.
+bool BroadcastLobbyQuery() {
     std::vector<uint64_t> peers = KnownPeers();
-    if (peers.empty()) return;
+    if (peers.empty()) return false;
     const char query[4] = { (char)kLobbyAnnounce, 0, 0, 0 };
     for (uint64_t peer : peers) {
         ReFixSteamFlat::SendMessage(peer, query, sizeof(query), g_channel);
     }
+    return true;
 }
 
 void BroadcastRoomAnnounce(const std::string& roomName, bool open) {
@@ -371,7 +385,7 @@ Forwarder* ForwarderFor(uint64_t host) {
     auto it = g_forwarders.find(host);
     if (it != g_forwarders.end()) return &it->second;
     uint32_t index = (uint32_t)g_forwarders.size() + 1;
-    uint32_t ip = (uint32_t)kForwarderNet0 << 24 | (uint32_t)kForwarderNet1 << 16 | (index & 0xFFFF);
+    uint32_t ip = (uint32_t)kForwarderNet0 << 24 | (uint32_t)(kForwarderNet1 + g_instance) << 16 | (index & 0xFFFF);
     Forwarder f;
     for (uint16_t port : kGamePorts) {
         SOCKET s = OpenUdp(ip, port);
@@ -514,6 +528,31 @@ void SendSteam(uint64_t steamId, uint8_t kind, uint16_t clientPort, const char* 
             (unsigned long long)steamId, kind == kToHost ? "to host" : "to client", size, count);
 }
 
+// Periodic directory upkeep: re-announces this host's public rooms and drops remote rooms that went silent.
+void RefreshRoomDirectory(DWORD now) {
+    static DWORD s_lastAnnounce = 0;
+    if (now - s_lastAnnounce < kRoomAnnounceIntervalMs) return;
+    s_lastAnnounce = now;
+    for (const auto& entry : g_emulator->LocalPublicRooms().entries) {
+        std::string name;
+        if (PnProto18::AsString(entry.first, name)) BroadcastRoomAnnounce(name, true);
+    }
+    std::vector<std::string> expired;
+    {
+        std::lock_guard<std::mutex> lock(g_discoveryMutex);
+        for (auto it = g_remoteLobbySeen.begin(); it != g_remoteLobbySeen.end();) {
+            if (now - it->second < kRemoteRoomTtlMs) { ++it; continue; }
+            expired.push_back(it->first);
+            g_remotePublicLobbies.erase(it->first);
+            it = g_remoteLobbySeen.erase(it);
+        }
+    }
+    for (const std::string& name : expired) {
+        Log("[Photon] Remote public room '%s' expired (no announce for %u ms)", name.c_str(), kRemoteRoomTtlMs);
+        g_emulator->PublishLobbyRoom(name, nullptr);
+    }
+}
+
 // Region ping (Photon.Realtime.PhotonPing): 12 x 0x7D + ping id, answered by echoing it.
 bool IsRegionPing(const char* data, int size) {
     if (size != kRegionPingSize) return false;
@@ -620,15 +659,25 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
             std::string rawProps((const char*)data + 4 + nameLen, size - (4 + nameLen));
             PnProto18::Table props;
             if (PnProto18::AsTable(rawProps, props)) {
-                std::lock_guard<std::mutex> lock(g_discoveryMutex);
-                g_remotePublicLobbies[roomName] = props;
-                g_resolvedRooms[roomName] = from;
-                Log("[Photon] Stored remote public room '%s' from host %llu", roomName.c_str(), (unsigned long long)from);
+                bool isNew;
+                {
+                    std::lock_guard<std::mutex> lock(g_discoveryMutex);
+                    isNew = g_remotePublicLobbies.count(roomName) == 0;
+                    g_remotePublicLobbies[roomName] = props;
+                    g_remoteLobbySeen[roomName] = GetTickCount();
+                    g_resolvedRooms[roomName] = from;
+                }
+                if (isNew) Log("[Photon] Stored remote public room '%s' from host %llu", roomName.c_str(), (unsigned long long)from);
+                if (g_emulator && !g_emulator->HostsRoom(roomName)) g_emulator->PublishLobbyRoom(roomName, &props);
             }
         } else if (action == 2) {
-            std::lock_guard<std::mutex> lock(g_discoveryMutex);
-            g_remotePublicLobbies.erase(roomName);
+            {
+                std::lock_guard<std::mutex> lock(g_discoveryMutex);
+                g_remotePublicLobbies.erase(roomName);
+                g_remoteLobbySeen.erase(roomName);
+            }
             Log("[Photon] Removed remote public room '%s'", roomName.c_str());
+            if (g_emulator) g_emulator->PublishLobbyRoom(roomName, nullptr);
         }
         return;
     }
@@ -703,6 +752,7 @@ void Pump() {
     DWORD now = GetTickCount();
     g_emulator->Tick(now);
     LogTunnelStats(now);
+    if (g_photonActive.load(std::memory_order_relaxed)) RefreshRoomDirectory(now);
     for (auto it = g_connections.begin(); it != g_connections.end();) {
         it->second.enet->Tick(now);
         if (it->second.enet->IsClosed()) {
@@ -760,7 +810,13 @@ DWORD WINAPI Thread(LPVOID) {
     env.joinableRooms = JoinableRooms;
     env.roomHosted = RoomHosted;
     env.publicLobbies = []() {
-        BroadcastLobbyQuery();
+        if (BroadcastLobbyQuery()) {
+            // Runs on the pump thread: collect the answers here (they are applied by OnSteamMessage).
+            for (DWORD start = GetTickCount(); GetTickCount() - start < kLobbyQueryWaitMs;) {
+                Sleep(10);
+                while (ReFixSteamFlat::ReceiveMessages(g_channel, kSteamBatch, OnSteamMessage) == kSteamBatch) {}
+            }
+        }
         std::lock_guard<std::mutex> lock(g_discoveryMutex);
         return g_remotePublicLobbies;
     };
@@ -781,18 +837,84 @@ DWORD WINAPI Thread(LPVOID) {
     for (;;) Pump();
 }
 
-void OpenListeners(const uint16_t* ports, size_t count, PnServer::Role role, std::string* firstAddress) {
+bool OpenListeners(const uint16_t* ports, size_t count, PnServer::Role role, std::string* firstAddress) {
+    bool any = false;
     for (size_t i = 0; i < count; i++) {
-        SOCKET s = OpenUdp(INADDR_LOOPBACK, ports[i]);
+        SOCKET s = OpenUdp(g_listenIp, ports[i]);
         if (s == INVALID_SOCKET) {
-            Log("[Photon] Port 127.0.0.1:%u unavailable (%d)", ports[i], WSAGetLastError());
+            Log("[Photon] Port %s unavailable (%d)", AddressString(g_listenIp, ports[i]).c_str(), WSAGetLastError());
             continue;
         }
+        any = true;
         g_listeners.push_back({ s, role, ports[i] });
-        if (firstAddress && firstAddress->empty()) *firstAddress = AddressString(INADDR_LOOPBACK, ports[i]);
+        if (firstAddress && firstAddress->empty()) *firstAddress = AddressString(g_listenIp, ports[i]);
         if (role == PnServer::Role::Game && !g_gamePort) g_gamePort = ports[i];
     }
+    return any;
 }
+
+void CloseListeners() {
+    for (const Listener& l : g_listeners) closesocket(l.socket);
+    g_listeners.clear();
+    g_masterAddress.clear();
+    g_gameAddress.clear();
+    g_gamePort = 0;
+}
+
+// Takes the first loopback address where every role gets a port (another instance of the game on this PC
+// already holds 127.0.0.1).
+bool OpenAllListeners() {
+    for (g_instance = 0; g_instance < kMaxLocalInstances; g_instance++) {
+        g_listenIp = INADDR_LOOPBACK + g_instance;
+        bool ns = OpenListeners(kNameServerPorts, _countof(kNameServerPorts), PnServer::Role::NameServer, nullptr);
+        bool master = OpenListeners(kMasterPorts, _countof(kMasterPorts), PnServer::Role::Master, &g_masterAddress);
+        bool game = OpenListeners(kGamePorts, _countof(kGamePorts), PnServer::Role::Game, &g_gameAddress);
+        if (ns && master && game) return true;
+        CloseListeners();
+    }
+    return false;
+}
+
+#if REFIX_LAN_EDITION
+bool FileExists(const std::string& path) {
+    DWORD attr = GetFileAttributesA(path.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool FileContains(const std::string& path, const std::vector<std::string>& needles) {
+    HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    constexpr DWORD kChunk = 1 << 20;
+    size_t overlap = 0;
+    for (const auto& n : needles) overlap = (std::max)(overlap, n.size());
+    std::string window;
+    std::vector<char> buf(kChunk);
+    bool found = false;
+    for (DWORD got = 0; !found && ReadFile(f, buf.data(), kChunk, &got, nullptr) && got;) {
+        window.append(buf.data(), got);
+        for (const auto& n : needles) if (window.find(n) != std::string::npos) { found = true; break; }
+        if (window.size() > overlap) window.erase(0, window.size() - overlap);
+    }
+    CloseHandle(f);
+    return found;
+}
+
+// ReFix LAN has no Photon Cloud (internet is blocked), so a game with a Photon stack gets the emulator even when
+// ReFix.ini has no [Photon] Backend (a copied or hand-made install). Mono: the Photon/Fusion assemblies;
+// IL2CPP: their type names in global-metadata.dat.
+bool DetectPhotonStack() {
+    char exe[MAX_PATH] = { 0 };
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    std::string stem(exe);
+    size_t dot = stem.find_last_of('.');
+    if (dot != std::string::npos) stem.resize(dot);
+    const std::string data = stem + "_Data\\";
+    for (const char* dll : { "Photon3Unity3D.dll", "PhotonRealtime.dll", "Fusion.Runtime.dll", "PhotonUnityNetworking.dll" })
+        if (FileExists(data + "Managed\\" + dll)) return true;
+    return FileContains(data + "il2cpp_data\\Metadata\\global-metadata.dat",
+                        { "ExitGames.Client.Photon", "Photon.Realtime", "Fusion.NetworkRunner" });
+}
+#endif
 
 } // namespace
 
@@ -802,7 +924,15 @@ void Initialize() {
     char backend[64] = { 0 };
     // Off unless ReFix.ini selects it: deploy_helper writes Backend=ReFixCloud only for games where it detected
     // a Photon stack, so other games never get the emulator's DNS hooks and loopback listeners.
-    GetPrivateProfileStringA("Photon", "Backend", "OfficialPhoton", backend, sizeof(backend), ini.c_str());
+    const char* defaultBackend = "OfficialPhoton";
+#if REFIX_LAN_EDITION
+    GetPrivateProfileStringA("Photon", "Backend", "", backend, sizeof(backend), ini.c_str());
+    if (!backend[0] && DetectPhotonStack()) {
+        defaultBackend = kP2PBackend;
+        Log("[Photon] Photon stack detected and no [Photon] Backend in ReFix.ini: using the LAN emulator");
+    }
+#endif
+    GetPrivateProfileStringA("Photon", "Backend", defaultBackend, backend, sizeof(backend), ini.c_str());
     if (_stricmp(backend, kP2PBackend) != 0 && _stricmp(backend, kP2PBackendLegacy) != 0) {
         Log("[Photon] Backend '%s' selected in ReFix.ini; local Photon emulator off (real/self-hosted Photon)", backend);
         return;
@@ -814,14 +944,13 @@ void Initialize() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
     g_socketEvent = WSACreateEvent();
-    OpenListeners(kNameServerPorts, _countof(kNameServerPorts), PnServer::Role::NameServer, nullptr);
-    OpenListeners(kMasterPorts, _countof(kMasterPorts), PnServer::Role::Master, &g_masterAddress);
-    OpenListeners(kGamePorts, _countof(kGamePorts), PnServer::Role::Game, &g_gameAddress);
-    if (g_masterAddress.empty() || g_gameAddress.empty()) {
+    if (!OpenAllListeners()) {
         Log("[Photon] Emulator ports unavailable; Photon P2P disabled");
         return;
     }
-    PnDns::Install(Split(suffixes, ';'));
+    const std::string listenAddress = AddressString(g_listenIp, 0);
+    PnDns::Install(Split(suffixes, ';'), listenAddress.substr(0, listenAddress.find(':')));
+    if (g_instance) Log("[Photon] Another instance holds 127.0.0.1: this one listens on %s", g_masterAddress.c_str());
     HANDLE h = CreateThread(nullptr, 0, Thread, nullptr, 0, nullptr);
     if (h) CloseHandle(h);
 }

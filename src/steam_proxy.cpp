@@ -35,6 +35,10 @@
 #include "lan_core/refix_lan_core.h"
 #include "refix_module_dedupe.h"
 #include "refix_multi_instance.h"
+#include "refix_crash_log.h"
+#if REFIX_LAN_EDITION
+#include "photon/pn_p2p.h"
+#endif
 
 static bool EnsureOriginal();
 
@@ -5119,6 +5123,9 @@ static void ReFixInitializePost(bool success) {
     if (!ReFix::NetworkModeManager::IsOnline()) {
         UnrealSteamEmu::Initialize();
         ReFixLog("ReFixInitializePost: UnrealSteamEmu LAN initialized");
+#if REFIX_LAN_EDITION
+        ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
+#endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
     }
@@ -5315,9 +5322,27 @@ static const char* ReFixLegacyGameServerClientVersion() {
 }
 #endif
 
+// SDKs up to 1.47 (GoldSrc/Source-era games such as CS 1.6) export the same name with an extra usSteamPort:
+// (unIP, usSteamPort, usGamePort, usQueryPort, eServerMode, pchVersionString). Read as the modern layout,
+// eServerMode lands in the version pointer (0x1) and the init log crashed in strnlen. The 5th argument tells
+// them apart: a server mode (1..3) in the legacy layout, a string pointer (or null) in the modern one.
+// Reading a 6th argument the caller did not pass is harmless: the caller cleans up the stack (cdecl / x64).
+static bool SteamInternal_GameServer_InitImpl(uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort,
+                                              int eServerMode, const char* pchVersionString);
+
 extern "C" __declspec(dllexport) bool SteamInternal_GameServer_Init(
-    uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort,
-    int eServerMode, const char* pchVersionString)
+    uint32_t unIP, uint16_t arg2, uint16_t arg3, uintptr_t arg4, uintptr_t arg5, uintptr_t arg6)
+{
+    constexpr uintptr_t kMaxServerMode = 3; // eServerModeAuthenticationAndSecure
+    if (arg5 >= 1 && arg5 <= kMaxServerMode) {
+        ReFixLog("SteamInternal_GameServer_Init: legacy layout (SteamPort=%u)", arg2);
+        return SteamInternal_GameServer_InitImpl(unIP, arg3, (uint16_t)arg4, (int)arg5, (const char*)arg6);
+    }
+    return SteamInternal_GameServer_InitImpl(unIP, arg2, arg3, (int)arg4, (const char*)arg5);
+}
+
+static bool SteamInternal_GameServer_InitImpl(uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort,
+                                              int eServerMode, const char* pchVersionString)
 {
     ReFixInitializePre();
     ReFixLog("SteamInternal_GameServer_Init: IP=%u, GamePort=%u, QueryPort=%u, Mode=%d, Ver=%s",
@@ -5342,7 +5367,7 @@ extern "C" __declspec(dllexport) int SteamInternal_GameServer_Init_V2(
     const char* pchVersionString, const char* pszInternalCheckInterfaceVersions, char* pOutErrMsg)
 {
     (void)pszInternalCheckInterfaceVersions;
-    bool ok = SteamInternal_GameServer_Init(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
+    bool ok = SteamInternal_GameServer_InitImpl(unIP, usGamePort, usQueryPort, eServerMode, pchVersionString);
     if (!ok && pOutErrMsg) strcpy_s(pOutErrMsg, 1024, "ReFix LAN game server init failed");
     return ok ? 0 : 1;
 }
@@ -6988,6 +7013,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         case DLL_PROCESS_ATTACH:
             // One emulator per process: a second ReFix copy only redirects its exports to the primary.
             if (ReFix_ModuleDedupeAttach(hModule)) return TRUE;
+            ReFix_InstallCrashLog();
             _set_invalid_parameter_handler(CustomInvalidParameterHandler);
             _CrtSetReportMode(_CRT_ASSERT, 0);
             g_hSelfModule = hModule;

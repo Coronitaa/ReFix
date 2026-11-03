@@ -108,3 +108,30 @@
   identity, so broken earlier patches are repaired on redeploy.
 - `refix_net_test all` fails "Host failed to create incoming connection from handshake" (legacy UDP path);
   it fails the same way on 0b599d6, so it is not caused by these changes.
+
+## 2026-11-03 (7) - Photon over LAN, GRAIN ROT public list, CS 1.6 / Garry's Mod start
+- **Photon in ReFix LAN**: the Photon emulator (`src/photon`, shared with Online) is now built into the LAN DLLs.
+  `src/photon/pn_lan_backend.cpp` implements the `ReFixSteamFlat` calls it uses on top of UnrealSteamEmu + LanCore
+  (LanCore channel 248, delivered on the transport thread via the new `ILanCore::SetChannelHandler`, so tunnel
+  traffic skips the per-frame callback queue). Started from `ReFixInitializePost`; enabled by `[Photon] Backend =
+  ReFixCloud` or, without that key, automatically when the game ships Photon/Fusion (Mono assemblies or IL2CPP
+  metadata). Several instances on one PC: instance k listens on `127.0.0.(1+k)` (DNS hook follows) and puts its
+  forwarders in `127.(80+k)/16`.
+- **Photon room lists**: hosts re-announce their public rooms every 3 s, peers drop rooms silent for 10 s, and
+  JoinLobby waits 300 ms for answers before sending the GameList (R.E.P.O. reads only the first list and
+  disconnects); rooms that arrive later go out as GameListUpdate (event 229).
+- **Verified in-game (2 instances, one PC)**: R.E.P.O. public server list shows the host's server, the second
+  instance joins (room + voice room) and both load the level when the host starts.
+- **GRAIN ROT (UE 5.7)**: the public list stayed empty because the emulator added untyped keys (`HostAddress`,
+  `HostSteamID`, `SERVER_IP`, plus LanCore `__` bookkeeping copied by RequestLobbyData) and OnlineSubsystemSteam
+  dropped the lobby. Games now see only the keys they set. Verified: listed and joined (P2P connection state 3).
+  Note: the game has 5 save slots; "Nueva partida" does nothing when all are used.
+- **Counter-Strike 1.6**: crashed creating a server: SDK <= 1.47 `SteamInternal_GameServer_Init` has an extra
+  `usSteamPort`; both layouts are now told apart by the 5th argument. Verified: `+map de_dust2` listen server runs.
+- **Garry's Mod**: hung on start (spin on `CheckFileSignature`, which returned call 0) and then crashed
+  (`STEAMUSERSTATS_INTERFACE_VERSION013` matched the "STEAMUSER" prefix and got ISteamUser). Verified: menu and
+  `+map gm_construct`.
+- SDK 1.61 behaviour: `UserStatsReceived_t` for the local user is posted 1 s after init.
+- Diagnostics: `src/refix_crash_log.cpp` logs fatal exceptions raised inside ReFix with a stack scan
+  (module+offset, resolve with the .map). `REFIX_LOG_VERBOSE=1` also traces lobby reads by index and ISteamUserStats.
+- Not verified: two-PC runs of these games; CS/GMod joining a second instance's server.

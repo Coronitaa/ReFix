@@ -29,7 +29,7 @@ constexpr uint8_t P_ROOM_NAME = 255, P_ACTOR_NR = 254, P_TARGET_ACTOR = 253, P_A
                   P_PUBLISH_USER_ID = 239, P_ADD = 238, P_IS_INACTIVE = 233, P_EXPECTED = 231, P_ADDRESS = 230,
                   P_USER_ID = 225, P_GAME_LIST = 222, P_TOKEN = 221, P_JOIN_MODE = 215, P_REGION = 210,
                   P_MASTER_CLIENT = 203, P_CLUSTER = 196, P_ROOM_FLAGS = 191;
-constexpr uint8_t EV_GAME_LIST = 230, EV_JOIN = 255, EV_LEAVE = 254, EV_PROPERTIES_CHANGED = 253;
+constexpr uint8_t EV_GAME_LIST_UPDATE = 229, EV_GAME_LIST = 230, EV_JOIN = 255, EV_LEAVE = 254, EV_PROPERTIES_CHANGED = 253;
 constexpr uint8_t GP_MAX_PLAYERS = 255, GP_IS_OPEN = 253, GP_MASTER_CLIENT = 248, GP_MAX_PLAYERS_INT = 243;
 constexpr uint8_t AP_USER_ID = 253;
 constexpr int16_t ERR_GAME_EXISTS = 32766, ERR_GAME_FULL = 32765, ERR_GAME_CLOSED = 32764,
@@ -119,6 +119,22 @@ Table Emulator::LocalPublicRooms() const {
         gameList.Set(Str(room->name), props.Encode());
     }
     return gameList;
+}
+
+void Emulator::PublishLobbyRoom(const std::string& name, const Table* props) {
+    constexpr uint8_t kGpRemoved = 251; // GamePropertyKey.Removed
+    Table entry;
+    if (props) {
+        entry = *props;
+    } else {
+        entry.Set(Byte(kGpRemoved), Bool(true));
+    }
+    Table update;
+    update.Set(Str(name), entry.Encode());
+    const Bytes event = Message(MT_EVENT, EventData(EV_GAME_LIST_UPDATE, { { P_GAME_LIST, update.Encode() } }));
+    for (auto& [key, peer] : m_peers) {
+        if (peer.role == Role::Master && peer.inLobby) peer.send(event, true, 0);
+    }
 }
 
 void Emulator::OnConnect(uint64_t peerKey, Role role, const std::string& userId, SendFn send) {
@@ -228,6 +244,7 @@ void Emulator::HandleMaster(Peer& peer, uint8_t op, const Params& params) {
                 }
             }
             peer.send(Message(MT_EVENT, EventData(EV_GAME_LIST, { { P_GAME_LIST, gameList.Encode() } })), true, 0);
+            peer.inLobby = true; // after the GameList: updates gathered while building it are already in it
             return;
         }
         case OP_CREATE_GAME: {
