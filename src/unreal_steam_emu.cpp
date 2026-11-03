@@ -3051,11 +3051,38 @@ namespace UnrealSteamEmu {
     // STEAM INTERFACE IMPLEMENTATIONS (ABI & VTABLE COMPATIBLE)
     // =========================================================================
 
+    // FromSoftware's Dantelion engine (Dark Souls III, Sekiro, Elden Ring, Armored Core VI, ...) only plays online through
+    // FromSoftware's login servers, which LAN cannot reach. While Steam reports a signed-in user these games show the
+    // online user agreement and then fail the server login; signed out, they start in their own offline mode.
+    static bool GameHasServerOnlyMultiplayer() {
+        static const bool s_serverOnly = [] {
+            char exePath[MAX_PATH] = { 0 };
+            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+            FILE* f = nullptr;
+            if (fopen_s(&f, exePath, "rb") != 0 || !f) return false;
+            static const char kMarker[] = "Dantelion";
+            constexpr size_t kMarkerLen = sizeof(kMarker) - 1;
+            std::vector<char> chunk(4 * 1024 * 1024 + kMarkerLen);
+            size_t carried = 0;
+            bool found = false;
+            for (size_t n; !found && (n = fread(chunk.data() + carried, 1, chunk.size() - carried, f)) > 0;) {
+                const size_t len = carried + n;
+                found = std::search(chunk.begin(), chunk.begin() + len, kMarker, kMarker + kMarkerLen) != chunk.begin() + len;
+                carried = (std::min)(len, kMarkerLen - 1);
+                memmove(chunk.data(), chunk.data() + len - carried, carried);
+            }
+            fclose(f);
+            if (found) ReFixLog("[UnrealSteam] FromSoftware Dantelion engine detected: reporting Steam as signed out (game starts offline)");
+            return found;
+        }();
+        return s_serverOnly;
+    }
+
     // --- ISteamUser ---
     class CSteamUserEmu : public ISteamUser {
     public:
         virtual HSteamUser GetHSteamUser() override { return g_hSteamUser; }
-        virtual bool BLoggedOn() override { return true; }
+        virtual bool BLoggedOn() override { return !GameHasServerOnlyMultiplayer(); }
         virtual CSteamID GetSteamID() override {
             static std::atomic<bool> s_logged{ false };
             if (!s_logged.exchange(true)) {
