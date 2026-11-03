@@ -3805,6 +3805,14 @@ static void EnsureMatchmakingInterfaceHooked(void* pMM, const char* pszVersion) 
              pMM, pszVersion ? pszVersion : "unknown");
 }
 
+// Trailing digits of an interface version string ("SteamFriends013" -> 13), 0 when there are none.
+static int ReFixInterfaceVersionNumber(const char* pszVersion) {
+    const char* end = pszVersion + strlen(pszVersion);
+    const char* digits = end;
+    while (digits > pszVersion && digits[-1] >= '0' && digits[-1] <= '9') --digits;
+    return digits < end ? atoi(digits) : 0;
+}
+
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (!iface || !pszVersion) return;
     if (strstr(pszVersion, "SteamMatchMakingServers") || strstr(pszVersion, "SteamMatchmakingServers")) {
@@ -3820,7 +3828,8 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
         HookVTableMethod(iface, 6, (void*)Hooked_ISteamApps_BIsSubscribedApp, (void**)&g_orig_VTable_BIsSubscribedApp);
         HookVTableMethod(iface, 7, (void*)Hooked_ISteamApps_BIsDlcInstalled, (void**)&g_orig_VTable_BIsDlcInstalled);
     }
-    else if (strstr(pszVersion, "SteamFriends")) {
+    else if (strstr(pszVersion, "SteamFriends") && ReFixInterfaceVersionNumber(pszVersion) >= 15) {
+        // These slots are the SteamFriends015+ layout; older ABIs (SteamFriends013 in Dark Souls III) hold other methods there
         HookVTableMethod(iface, 8, (void*)Hooked_ISteamFriends_GetFriendGamePlayed, (void**)&g_orig_VTable_GetFriendGamePlayed);
         HookVTableMethod(iface, 15, (void*)Hooked_ISteamFriends_ActivateGameOverlayInviteDialog, (void**)&g_orig_VTable_ActivateGameOverlayInviteDialog);
         HookVTableMethod(iface, 16, (void*)Hooked_ISteamFriends_InviteUserToGame, (void**)&g_orig_VTable_InviteUserToGame);
@@ -5300,39 +5309,59 @@ extern "C" __declspec(dllexport) bool SteamAPI_RestartAppIfNecessary(unsigned in
     return false;
 }
 
+// Bytes of the game's own steam_api, preserved next to ours by the deployer (Online keeps it as _original,
+// LAN as _valve). Old SDKs bake their interface version strings into that DLL; empty when none is found.
+static const std::string& ReFixGameSteamApiImage() {
+    static std::string s_image;
+    static std::once_flag s_once;
+    std::call_once(s_once, [] {
+        char self[MAX_PATH] = { 0 };
+        GetModuleFileNameA(g_hSelfModule, self, MAX_PATH);
+        char* slash = strrchr(self, '\\');
+        if (!slash) return;
+#ifdef _WIN64
+        const char* backups[] = { "steam_api64_original.dll", "steam_api64_o.dll", "steam_api64_valve.dll" };
+#else
+        const char* backups[] = { "steam_api_original.dll", "steam_api_o.dll", "steam_api_valve.dll" };
+#endif
+        for (const char* name : backups) {
+            std::string path = std::string(self, slash + 1) + name;
+            FILE* f = nullptr;
+            if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) continue;
+            char chunk[65536];
+            size_t n;
+            while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) s_image.append(chunk, n);
+            fclose(f);
+            if (!s_image.empty()) return;
+        }
+    });
+    return s_image;
+}
+
+// Interface version the game's steam_api was built with: versionPrefix followed by its digits
+// (e.g. "SteamNetworking" -> "SteamNetworking005"), else fallbackVersion.
+static std::string ReFixLegacyInterfaceVersion(const char* versionPrefix, const char* fallbackVersion) {
+    const std::string& image = ReFixGameSteamApiImage();
+    const size_t prefixLen = strlen(versionPrefix);
+    for (size_t pos = image.find(versionPrefix); pos != std::string::npos; pos = image.find(versionPrefix, pos + 1)) {
+        size_t end = pos + prefixLen;
+        while (end < image.size() && image[end] >= '0' && image[end] <= '9') ++end;
+        if (end > pos + prefixLen && (end == image.size() || image[end] == '\0')) return image.substr(pos, end - pos);
+    }
+    return fallbackVersion;
+}
+
 #ifndef _WIN64
 extern "C" __declspec(dllexport) void* g_pSteamClientGameServer;
 
-// ISteamClient version behind g_pSteamClientGameServer: the one the game's own steam_api was built
-// with (preserved as steam_api_original.dll / steam_api_o.dll next to ours), else SteamClient017.
+// ISteamClient version behind g_pSteamClientGameServer: the one the game's own steam_api was built with, else SteamClient017.
 static const char* ReFixLegacyGameServerClientVersion() {
-    static char s_version[32] = "SteamClient017";
-    static bool s_resolved = false;
-    if (s_resolved) return s_version;
-    s_resolved = true;
-    char self[MAX_PATH] = { 0 };
-    GetModuleFileNameA(g_hSelfModule, self, MAX_PATH);
-    char* slash = strrchr(self, '\\');
-    if (!slash) return s_version;
-    const char* backups[] = { "steam_api_original.dll", "steam_api_o.dll" };
-    for (const char* name : backups) {
-        std::string path = std::string(self, slash + 1) + name;
-        FILE* f = nullptr;
-        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) continue;
-        std::string data;
-        char chunk[65536];
-        size_t n;
-        while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) data.append(chunk, n);
-        fclose(f);
-        size_t pos = data.find("SteamClient0");
-        if (pos != std::string::npos && pos + 14 <= data.size()) {
-            memcpy(s_version, data.data() + pos, 14);
-            s_version[14] = '\0';
-            break;
-        }
-    }
-    ReFixLog("g_pSteamClientGameServer will use %s", s_version);
-    return s_version;
+    static const std::string s_version = [] {
+        std::string version = ReFixLegacyInterfaceVersion("SteamClient", "SteamClient017");
+        ReFixLog("g_pSteamClientGameServer will use %s", version.c_str());
+        return version;
+    }();
+    return s_version.c_str();
 }
 #endif
 
@@ -6518,6 +6547,69 @@ extern "C" __declspec(dllexport) int32_t SteamGameServer_GetHSteamPipe() {
     }
     return 0;
 }
+
+// SDKs before ~1.42 (Dark Souls III and other 2016-era games) import the interface accessors from steam_api instead
+// of inlining them: SteamUser(), SteamNetworking(), ... each returns the version that SDK's steam_api was built with.
+// Online asks the game's own DLL when it still exports the accessor; otherwise (LAN, or a modern Valve backend) the
+// version is resolved from the preserved DLL and served through the FindOrCreate*Interface path.
+namespace {
+struct LegacyAccessor {
+    const char* exportName;
+    const char* versionPrefix;
+    const char* fallbackVersion;
+    bool gameServer;
+};
+}
+
+static void* ReFixLegacyAccessor(const LegacyAccessor& accessor) {
+    const std::string version = ReFixLegacyInterfaceVersion(accessor.versionPrefix, accessor.fallbackVersion);
+    if (ReFix::NetworkModeManager::IsOnline() && EnsureOriginal() && g_hOriginalDll) {
+        typedef void* (*fn_t)();
+        if (auto pfn = (fn_t)GetProcAddress(g_hOriginalDll, accessor.exportName)) {
+            void* iface = pfn();
+            if (iface) HookInterfaceByVersion(iface, version.c_str());
+            return iface;
+        }
+    }
+    return accessor.gameServer
+        ? SteamInternal_FindOrCreateGameServerInterface(SteamGameServer_GetHSteamUser(), version.c_str())
+        : SteamInternal_FindOrCreateUserInterface((uint32_t)SteamAPI_GetHSteamUser(), version.c_str());
+}
+
+#define REFIX_LEGACY_ACCESSOR(name, prefix, fallback, gameServer)                         \
+    extern "C" __declspec(dllexport) void* name() {                                      \
+        static const LegacyAccessor kAccessor = { #name, prefix, fallback, gameServer }; \
+        return ReFixLegacyAccessor(kAccessor);                                           \
+    }
+
+REFIX_LEGACY_ACCESSOR(SteamUser, "SteamUser", "SteamUser019", false)
+REFIX_LEGACY_ACCESSOR(SteamFriends, "SteamFriends", "SteamFriends015", false)
+REFIX_LEGACY_ACCESSOR(SteamUtils, "SteamUtils", "SteamUtils009", false)
+REFIX_LEGACY_ACCESSOR(SteamMatchmaking, "SteamMatchMaking", "SteamMatchMaking009", false)
+REFIX_LEGACY_ACCESSOR(SteamMatchmakingServers, "SteamMatchMakingServers", "SteamMatchMakingServers002", false)
+REFIX_LEGACY_ACCESSOR(SteamUserStats, "STEAMUSERSTATS_INTERFACE_VERSION", "STEAMUSERSTATS_INTERFACE_VERSION011", false)
+REFIX_LEGACY_ACCESSOR(SteamApps, "STEAMAPPS_INTERFACE_VERSION", "STEAMAPPS_INTERFACE_VERSION008", false)
+REFIX_LEGACY_ACCESSOR(SteamNetworking, "SteamNetworking", "SteamNetworking005", false)
+REFIX_LEGACY_ACCESSOR(SteamRemoteStorage, "STEAMREMOTESTORAGE_INTERFACE_VERSION", "STEAMREMOTESTORAGE_INTERFACE_VERSION014", false)
+REFIX_LEGACY_ACCESSOR(SteamScreenshots, "STEAMSCREENSHOTS_INTERFACE_VERSION", "STEAMSCREENSHOTS_INTERFACE_VERSION002", false)
+REFIX_LEGACY_ACCESSOR(SteamHTTP, "STEAMHTTP_INTERFACE_VERSION", "STEAMHTTP_INTERFACE_VERSION002", false)
+REFIX_LEGACY_ACCESSOR(SteamUnifiedMessages, "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION", "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION001", false)
+REFIX_LEGACY_ACCESSOR(SteamController, "SteamController", "SteamController005", false)
+REFIX_LEGACY_ACCESSOR(SteamUGC, "STEAMUGC_INTERFACE_VERSION", "STEAMUGC_INTERFACE_VERSION010", false)
+REFIX_LEGACY_ACCESSOR(SteamAppList, "STEAMAPPLIST_INTERFACE_VERSION", "STEAMAPPLIST_INTERFACE_VERSION001", false)
+REFIX_LEGACY_ACCESSOR(SteamMusic, "STEAMMUSIC_INTERFACE_VERSION", "STEAMMUSIC_INTERFACE_VERSION001", false)
+REFIX_LEGACY_ACCESSOR(SteamMusicRemote, "STEAMMUSICREMOTE_INTERFACE_VERSION", "STEAMMUSICREMOTE_INTERFACE_VERSION001", false)
+REFIX_LEGACY_ACCESSOR(SteamHTMLSurface, "STEAMHTMLSURFACE_INTERFACE_VERSION_", "STEAMHTMLSURFACE_INTERFACE_VERSION_003", false)
+REFIX_LEGACY_ACCESSOR(SteamInventory, "STEAMINVENTORY_INTERFACE_V", "STEAMINVENTORY_INTERFACE_V001", false)
+REFIX_LEGACY_ACCESSOR(SteamVideo, "STEAMVIDEO_INTERFACE_V", "STEAMVIDEO_INTERFACE_V001", false)
+REFIX_LEGACY_ACCESSOR(SteamGameServer, "SteamGameServer", "SteamGameServer012", true)
+REFIX_LEGACY_ACCESSOR(SteamGameServerUtils, "SteamUtils", "SteamUtils009", true)
+REFIX_LEGACY_ACCESSOR(SteamGameServerNetworking, "SteamNetworking", "SteamNetworking005", true)
+REFIX_LEGACY_ACCESSOR(SteamGameServerStats, "SteamGameServerStats", "SteamGameServerStats001", true)
+REFIX_LEGACY_ACCESSOR(SteamGameServerHTTP, "STEAMHTTP_INTERFACE_VERSION", "STEAMHTTP_INTERFACE_VERSION002", true)
+REFIX_LEGACY_ACCESSOR(SteamGameServerApps, "STEAMAPPS_INTERFACE_VERSION", "STEAMAPPS_INTERFACE_VERSION008", true)
+REFIX_LEGACY_ACCESSOR(SteamGameServerUGC, "STEAMUGC_INTERFACE_VERSION", "STEAMUGC_INTERFACE_VERSION010", true)
+#undef REFIX_LEGACY_ACCESSOR
 
 extern "C" __declspec(dllexport) uint64_t SteamGameServer_GetSteamID() {
     if (!ReFix::NetworkModeManager::IsOnline()) {

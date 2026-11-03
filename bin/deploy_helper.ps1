@@ -454,7 +454,7 @@ Mode = $eosMode
 DeviceIdAuth = $eosAuth
 
 [Debug]
-EnableLog = true
+EnableLog = false
 EnableConsole = false
 "@
     [System.IO.File]::WriteAllText($IniPath, $iniContent)

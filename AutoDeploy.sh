@@ -184,7 +184,7 @@ SteamId =
 Mode = $eos
 
 [Debug]
-EnableLog = true
+EnableLog = false
 EOF
         ok "Wrote ReFix.ini in $EXE_DIR"
     else
