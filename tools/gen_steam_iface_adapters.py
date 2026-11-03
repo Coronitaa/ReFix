@@ -316,7 +316,11 @@ def gen_method(m, latest_by_name, fam, counters, is_client):
             if norm == "constchar*":
                 ver_idx = i
     if ver_idx is not None:
-        body_lines.append("if (void* v = UnrealSteamEmu::GetGenericInterface(%s)) return static_cast<%s>(v);" % (names[ver_idx], m["ret"]))
+        if m["name"] == "GetISteamGenericInterface":  # per-pipe objects (game coordinator) need the user handle
+            lookup = "GetGenericInterfaceForUser(%s, %s)" % (names[0], names[ver_idx])
+        else:
+            lookup = "GetGenericInterface(%s)" % names[ver_idx]
+        body_lines.append("if (void* v = UnrealSteamEmu::%s) return static_cast<%s>(v);" % (lookup, m["ret"]))
     if special and ver_idx is None:
         counters["forwarded"] += 1
         body_lines.append(special)

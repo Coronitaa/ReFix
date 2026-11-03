@@ -1,0 +1,21 @@
+// ISteamGameCoordinator for ReFix LAN: answers the GC SDK session handshake shared by Valve's GC games
+// (ClientHello -> ClientWelcome + ConnectionStatus, ServerHello -> ServerWelcome + ServerConnectionStatus) so the
+// game sees a live coordinator session. Game-specific GC messages (matchmaking, ranks, items) get no answer.
+#pragma once
+#include <cstdint>
+#include <vector>
+
+class ISteamGameCoordinator;
+
+namespace ReFixGC {
+
+// One coordinator per pipe: the client and an in-process game server (listen server) poll their own queues.
+ISteamGameCoordinator* Get(bool gameServer);
+
+// Protobuf bodies of the replies, exposed for tests.
+std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId);
+std::vector<uint8_t> BuildConnectionStatus();
+// Field 1 (version) of a CMsgClientHello body, 0 when absent.
+uint32_t ParseHelloVersion(const uint8_t* body, size_t size);
+
+} // namespace ReFixGC

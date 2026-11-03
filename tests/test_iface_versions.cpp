@@ -141,7 +141,21 @@ int main(int argc, char** argv) {
         if (gc) {
             uint32 size = 1;
             Check(!gc->IsMessageAvailable(&size) && size == 0, "ISteamGameCoordinator::IsMessageAvailable false");
-            Check(gc->SendMessage_(4006, "x", 1) == k_EGCResultOK, "ISteamGameCoordinator::SendMessage accepted");
+            // GC SDK handshake: proto ClientHello { version = 42 } -> ClientWelcome (4004) + ConnectionStatus (4009).
+            const uint8_t hello[] = { 0xA6, 0x0F, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x08, 42 };
+            Check(gc->SendMessage_(0x80000000u | 4006, hello, sizeof(hello)) == k_EGCResultOK, "GC ClientHello accepted");
+            uint8_t buf[256] = {};
+            uint32 type = 0;
+            Check(gc->IsMessageAvailable(&size) && size > 8, "GC reply available after ClientHello");
+            Check(gc->RetrieveMessage(&type, buf, 4, &size) == k_EGCResultBufferTooSmall, "GC RetrieveMessage reports small buffer");
+            Check(gc->RetrieveMessage(&type, buf, sizeof(buf), &size) == k_EGCResultOK && type == (0x80000000u | 4004),
+                  "GC first reply is ClientWelcome");
+            Check(size > 10 && buf[8] == 0x08 && buf[9] == 42, "ClientWelcome echoes the hello version");
+            Check(gc->RetrieveMessage(&type, buf, sizeof(buf), &size) == k_EGCResultOK && type == (0x80000000u | 4009),
+                  "GC second reply is ConnectionStatus");
+            Check(!gc->IsMessageAvailable(&size), "GC queue drained");
+            void* serverGc = c17->GetISteamGenericInterface(2 /* game-server user */, pipe, "SteamGameCoordinator001");
+            Check(serverGc != nullptr && serverGc != (void*)gc, "game-server pipe gets its own coordinator");
         }
     }
     Check(GetProcAddress(h, "SteamGameServerInternal_CreateInterface") != nullptr, "SteamGameServerInternal_CreateInterface exported");

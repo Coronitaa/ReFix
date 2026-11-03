@@ -31,6 +31,7 @@ namespace UnrealSteamEmu {
 
     uint64_t PostCallResult(int iCallback, const void* pData, size_t dataSize, double delaySeconds = 0.0);
     void PostCallback(int iCallback, const void* pData, size_t dataSize, double delaySeconds = 0.0);
+    void PostGameServerCallback(int iCallback, const void* pData, size_t dataSize, double delaySeconds = 0.0);
 
     bool IsAPICallCompleted(uint64_t hAPICall, bool* pbFailed);
     bool GetAPICallResult(uint64_t hAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
@@ -47,6 +48,7 @@ namespace UnrealSteamEmu {
 
     // Interface Factory & Accessors
     void* GetGenericInterface(const char* pchVersion);
+    void* GetGenericInterfaceForUser(int32_t hUser, const char* pchVersion);
     void* FindOrCreateUserInterface(int32_t hUser, const char* pszVersion);
     void* FindOrCreateGameServerInterface(int32_t hUser, const char* pszVersion);
     void* CreateInterface(const char* ver);

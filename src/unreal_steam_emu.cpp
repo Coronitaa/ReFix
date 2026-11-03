@@ -60,6 +60,7 @@
 #include "include/steam/isteamparentalsettings.h"
 #include "include/steam/isteamremoteplay.h"
 #include "include/steam/isteamgamecoordinator.h"
+#include "steam_gc_emu.h"
 #include "include/steam/isteamunifiedmessages.h"
 
 #include "unreal_steam_emu.h"
@@ -854,6 +855,16 @@ namespace UnrealSteamEmu {
         item.triggerTime = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(delaySeconds * 1000.0));
         item.isGameServer = false;
 
+        g_callbackQueue.push_back(item);
+    }
+
+    void PostGameServerCallback(int iCallback, const void* pData, size_t dataSize, double delaySeconds) {
+        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+        QueuedCallbackItem item;
+        item.iCallback = iCallback;
+        if (pData && dataSize > 0) item.data.assign((const uint8_t*)pData, (const uint8_t*)pData + dataSize);
+        item.triggerTime = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(delaySeconds * 1000.0));
+        item.isGameServer = true;
         g_callbackQueue.push_back(item);
     }
 
@@ -6724,25 +6735,6 @@ namespace UnrealSteamEmu {
     };
     static CSteamVideoEmu g_steamVideoInstance;
 
-    // --- ISteamGameCoordinator ---
-    // Valve's per-game coordinator (CS:GO, Dota 2, TF2 items) has no LAN equivalent: messages are accepted and
-    // dropped, and none ever arrives, so the game sees a GC that never answers and keeps its offline paths.
-    class CSteamGameCoordinatorEmu : public ISteamGameCoordinator {
-    public:
-        virtual EGCResults SendMessage_(uint32 unMsgType, const void *pubData, uint32 cubData) override {
-            if (m_logged.fetch_add(1) < 4)
-                ReFixLog("[GC] Dropping message type %u (%u bytes): no game coordinator on LAN", unMsgType & 0x7FFFFFFF, cubData);
-            return k_EGCResultOK;
-        }
-        virtual bool IsMessageAvailable(uint32 *pcubMsgSize) override { if (pcubMsgSize) *pcubMsgSize = 0; return false; }
-        virtual EGCResults RetrieveMessage(uint32 *punMsgType, void *pubDest, uint32 cubDest, uint32 *pcubMsgSize) override {
-            if (pcubMsgSize) *pcubMsgSize = 0;
-            return k_EGCResultNoMessage;
-        }
-    private:
-        std::atomic<int> m_logged{ 0 };
-    };
-    static CSteamGameCoordinatorEmu g_steamGameCoordinatorInstance;
 
     // --- ISteamUnifiedMessages (pre-1.42 SDKs) ---
     // Steam service RPCs; Source's CSteamAPIContext refuses to start when this interface is missing. Nothing on
@@ -6877,7 +6869,7 @@ namespace UnrealSteamEmu {
             return &g_steamMatchmakingServersInstance;
         }
         virtual void *GetISteamGenericInterface(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<void *>(rfv_);
-            return GetGenericInterface(pchVersion);
+            return GetGenericInterfaceForUser(hSteamUser, pchVersion);
         }
         virtual ISteamUserStats *GetISteamUserStats(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUserStats *>(rfv_);
             return &g_steamUserStatsInstance;
@@ -6982,7 +6974,7 @@ namespace UnrealSteamEmu {
             return &g_steamMatchmakingServersInstance;
         }
         virtual void *GetISteamGenericInterface(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<void *>(rfv_);
-            return GetGenericInterface(pchVersion);
+            return GetGenericInterfaceForUser(hSteamUser, pchVersion);
         }
         virtual ISteamUserStats *GetISteamUserStats(HSteamUser hSteamUser, HSteamPipe hSteamPipe, const char *pchVersion) override { if (void* rfv_ = ReFixVersionedInterface(pchVersion)) return static_cast<ISteamUserStats *>(rfv_);
             return &g_steamUserStatsInstance;
@@ -7134,12 +7126,21 @@ namespace UnrealSteamEmu {
         if (strstr(pchVersion, "STEAMREMOTEPLAY") || strstr(pchVersion, "SteamRemotePlay"))
             return &g_steamRemotePlayInstance;
         if (strstr(pchVersion, "SteamGameCoordinator") || strstr(pchVersion, "STEAMGAMECOORDINATOR"))
-            return &g_steamGameCoordinatorInstance;
+            return ReFixGC::Get(false);
         if (strstr(pchVersion, "STEAMUNIFIEDMESSAGES") || strstr(pchVersion, "SteamUnifiedMessages"))
             return &g_steamUnifiedMessagesInstance;
 
         ReFixLog("[UnrealSteam] Warning: Unrecognized interface '%s'", pchVersion);
         return nullptr;
+    }
+
+    // The game-server pipe gets its own coordinator: a listen server and its client share the process but must
+    // not consume each other's GC messages.
+    void* GetGenericInterfaceForUser(int32_t hUser, const char* pchVersion) {
+        if (hUser == g_hGameServerUser && pchVersion &&
+            (strstr(pchVersion, "SteamGameCoordinator") || strstr(pchVersion, "STEAMGAMECOORDINATOR")))
+            return ReFixGC::Get(true);
+        return GetGenericInterface(pchVersion);
     }
 
     void* FindOrCreateUserInterface(int32_t hUser, const char* pszVersion) {

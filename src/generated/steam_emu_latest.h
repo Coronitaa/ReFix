@@ -19,6 +19,7 @@ void* ReFixVersionedInterface(const char* pchVersion);
 
 namespace UnrealSteamEmu {
     void* GetGenericInterface(const char* pchVersion);
+    void* GetGenericInterfaceForUser(int32_t hUser, const char* pchVersion);
     int32_t GetHSteamUser();
 
     ISteamClient* LatestClient();

@@ -156,3 +156,18 @@
   fails on one PC (its own socket also holds 27015 on loopback); use the LAN IP.
 - Not verified: LAN tab of the server browser, two PCs. `SteamGameStats001` / `SteamAppDisableUpdate001` stay
   unrecognised (null) and CS:GO copes.
+
+## 2026-11-03 (9) - Generic GC session handshake (src/steam_gc_emu.cpp)
+- ISteamGameCoordinator now answers the GC SDK base handshake shared by Valve's GC games: proto ClientHello (4006)
+  -> ClientWelcome (4004: hello version echoed + empty SO cache for the local SteamID) + ConnectionStatus (4009,
+  HAVE_SESSION); ServerHello (4007) -> ServerWelcome (4005) + ServerConnectionStatus (4010). Replies are queued and
+  announced with GCMessageAvailable_t; a pipe with unread replies gets no new ones.
+- The game-server pipe has its own coordinator (`GetGenericInterfaceForUser`; the adapter generator passes the user
+  handle for GetISteamGenericInterface), so a listen server and its client do not read each other's messages.
+- CS:GO result: the "connecting to the CS:GO network" banner is gone and the official Play menu opens (Casual /
+  Deathmatch / Wingman maps selectable). Starting a queue is refused by CS:GO itself: with `-insecure` ("insecure
+  mode"), without it because the ReFix steam_api.dll is not Valve-signed (VAC file-signature check). That check is
+  anti-cheat and is deliberately not bypassed. Game-specific GC messages (matchmaking, ranks, items) still get no
+  answer; a real LAN matchmaker for CS:GO would be an addon, not core.
+- Listen server (`+map de_dust2`) still verified with the coordinator active (the server reads its welcome once
+  the map runs); second-instance join not re-tested after this change.
