@@ -1,7 +1,7 @@
 // =============================================================================
 // ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
 // =============================================================================
-// Forwards 1141 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
+// Forwards 1168 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
 // Intercepts SteamAPI_Init, ISteamMatchmaking (CreateLobby, RequestLobbyList, SetLobbyData),
 // and callbacks (GameLobbyJoinRequested_t, GameRichPresenceJoinRequested_t).
 //
@@ -45,7 +45,7 @@
 #include "refix_steam_flat.h"
 #include "photon/pn_p2p.h"
 
-#define STEAM_FORWARD_COUNT 1141
+#define STEAM_FORWARD_COUNT 1168
 
 extern "C" {
     __declspec(dllexport) FARPROC g_steamProcs[STEAM_FORWARD_COUNT] = { 0 };
@@ -1193,6 +1193,34 @@ static const char* g_forwardNames[STEAM_FORWARD_COUNT] = {
     "SteamAPI_SteamUserStats_v013",
     "SteamAPI_SteamUser_v023",
     "SteamAPI_SteamVideo_v007",
+    // Pre-1.42 SDKs (Dark Souls III, ...) import the interface accessors themselves instead of inlining them
+    "SteamUser",
+    "SteamFriends",
+    "SteamUtils",
+    "SteamMatchmaking",
+    "SteamMatchmakingServers",
+    "SteamUserStats",
+    "SteamApps",
+    "SteamNetworking",
+    "SteamRemoteStorage",
+    "SteamScreenshots",
+    "SteamHTTP",
+    "SteamUnifiedMessages",
+    "SteamController",
+    "SteamUGC",
+    "SteamAppList",
+    "SteamMusic",
+    "SteamMusicRemote",
+    "SteamHTMLSurface",
+    "SteamInventory",
+    "SteamVideo",
+    "SteamGameServer",
+    "SteamGameServerUtils",
+    "SteamGameServerNetworking",
+    "SteamGameServerStats",
+    "SteamGameServerHTTP",
+    "SteamGameServerApps",
+    "SteamGameServerUGC",
 };
 
 

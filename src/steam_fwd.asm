@@ -3433,5 +3433,86 @@ SteamAPI_SteamUser_v023_proxy ENDP
 SteamAPI_SteamVideo_v007_proxy PROC
     jmp QWORD PTR [g_steamProcs + 9120]
 SteamAPI_SteamVideo_v007_proxy ENDP
+SteamUser_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9128]
+SteamUser_proxy ENDP
+SteamFriends_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9136]
+SteamFriends_proxy ENDP
+SteamUtils_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9144]
+SteamUtils_proxy ENDP
+SteamMatchmaking_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9152]
+SteamMatchmaking_proxy ENDP
+SteamMatchmakingServers_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9160]
+SteamMatchmakingServers_proxy ENDP
+SteamUserStats_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9168]
+SteamUserStats_proxy ENDP
+SteamApps_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9176]
+SteamApps_proxy ENDP
+SteamNetworking_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9184]
+SteamNetworking_proxy ENDP
+SteamRemoteStorage_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9192]
+SteamRemoteStorage_proxy ENDP
+SteamScreenshots_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9200]
+SteamScreenshots_proxy ENDP
+SteamHTTP_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9208]
+SteamHTTP_proxy ENDP
+SteamUnifiedMessages_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9216]
+SteamUnifiedMessages_proxy ENDP
+SteamController_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9224]
+SteamController_proxy ENDP
+SteamUGC_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9232]
+SteamUGC_proxy ENDP
+SteamAppList_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9240]
+SteamAppList_proxy ENDP
+SteamMusic_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9248]
+SteamMusic_proxy ENDP
+SteamMusicRemote_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9256]
+SteamMusicRemote_proxy ENDP
+SteamHTMLSurface_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9264]
+SteamHTMLSurface_proxy ENDP
+SteamInventory_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9272]
+SteamInventory_proxy ENDP
+SteamVideo_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9280]
+SteamVideo_proxy ENDP
+SteamGameServer_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9288]
+SteamGameServer_proxy ENDP
+SteamGameServerUtils_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9296]
+SteamGameServerUtils_proxy ENDP
+SteamGameServerNetworking_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9304]
+SteamGameServerNetworking_proxy ENDP
+SteamGameServerStats_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9312]
+SteamGameServerStats_proxy ENDP
+SteamGameServerHTTP_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9320]
+SteamGameServerHTTP_proxy ENDP
+SteamGameServerApps_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9328]
+SteamGameServerApps_proxy ENDP
+SteamGameServerUGC_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9336]
+SteamGameServerUGC_proxy ENDP
 END
 
