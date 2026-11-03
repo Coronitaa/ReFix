@@ -2,15 +2,18 @@
 #define NOMINMAX
 #endif
 #include "overlay_host.h"
+#include "overlay_gamepad.h"
 #include "overlay_theme.h"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dcomp.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <map>
+#include <vector>
 
 #include "../imgui/imgui_impl_dx11.h"
 #include "../imgui/imgui_impl_win32.h"
@@ -50,6 +53,7 @@ IDCompositionTarget* g_target = nullptr;
 IDCompositionVisual* g_visual = nullptr;
 UINT g_width = 0, g_height = 0;
 Mode g_mode = Mode::Hidden;
+bool g_deviceLost = false;
 std::map<std::string, TextureEntry> g_textures;
 
 SRWLOCK g_gameLock = SRWLOCK_INIT;
@@ -85,6 +89,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CLOSE:
         if (g_client) g_client->OnCloseRequested();
         return 0;
+    case WM_DEVICECHANGE:
+        pad::DeviceChanged();
+        break;
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_KEYMENU) return 0;
         break;
@@ -151,10 +158,11 @@ void ResizeSurface(UINT w, UINT h) {
     h = std::max<UINT>(h, 8);
     if (w == g_width && h == g_height) return;
     SafeRelease(g_rtv);
-    g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    const HRESULT hr = g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     g_width = w;
     g_height = h;
-    CreateRenderTarget();
+    if (FAILED(hr)) g_deviceLost = true;   // recreated before the next frame
+    else CreateRenderTarget();
 }
 
 BOOL CALLBACK FindGameWindow(HWND w, LPARAM lp) {
@@ -209,12 +217,98 @@ void ScanGameWindow() {
     ReleaseSRWLockExclusive(&g_gameLock);
 }
 
-float ScaleFor(HWND anchor) {
-    HMONITOR mon = MonitorFromWindow(anchor ? anchor : GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-    MONITORINFO mi{ sizeof(mi) };
-    GetMonitorInfoW(mon, &mi);
-    const float h = (float)(mi.rcMonitor.bottom - mi.rcMonitor.top);
-    return std::clamp(std::round(h / 1080.0f * 4.0f) / 4.0f, 1.0f, 2.0f);
+// UI scale from the height the overlay is drawn on: the game's picture when there is one (a 1280x720
+// window on a 4K monitor gets small text, a 4K game big text), the monitor otherwise. 1080 px -> 1.2,
+// so text stays readable over a game; steps of 0.05 keep font atlas rebuilds rare.
+constexpr float kScaleAt1080 = 1.2f;
+constexpr float kMinScale = 0.8f;
+constexpr float kMaxScale = 3.0f;
+
+float ScaleFor(const GameWindow* gw) {
+    float h = 0;
+    if (gw && gw->hwnd && !gw->minimized) h = (float)(gw->client.bottom - gw->client.top);
+    if (h < 240) {
+        HMONITOR mon = MonitorFromWindow(gw && gw->hwnd ? gw->hwnd : GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi{ sizeof(mi) };
+        GetMonitorInfoW(mon, &mi);
+        h = (float)(mi.rcMonitor.bottom - mi.rcMonitor.top);
+    }
+    const float scale = h / 1080.0f * kScaleAt1080;
+    return std::clamp(std::round(scale * 20.0f) / 20.0f, kMinScale, kMaxScale);
+}
+
+// While the Shift+Tab overlay is open the overlay window is a child of the game window: taking the
+// keyboard into a child does not deactivate the game's top-level window. Unity (and others) minimise a
+// fullscreen window on WM_ACTIVATE(WA_INACTIVE), which is what activating our own popup sent.
+// Games in real exclusive Direct3D fullscreen would hide a child behind their exclusive image (the shell
+// reports that state): those keep the popup, and minimise as before. Borderless/"fullscreen window" games,
+// topmost or not, take the child.
+HWND g_childOf = nullptr;
+
+bool CanHostAsChild(const GameWindow& gw) {
+    const char* why = nullptr;
+    if (!gw.hwnd || !IsWindow(gw.hwnd)) why = "no game window";
+    else if (gw.minimized || IsIconic(gw.hwnd)) why = "game window minimised";
+    else {
+        QUERY_USER_NOTIFICATION_STATE state{};
+        if (SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN)
+            why = "the game is in exclusive Direct3D fullscreen";
+    }
+    if (why) ReFixLog("[Overlay] Shift+Tab overlay as a popup window: %s", why);
+    return why == nullptr;
+}
+
+// The game keeps the activation while the overlay is its child, so its raw mouse/keyboard input (camera,
+// movement) would keep running under the overlay. Raw input registrations belong to the process: take the
+// game's mouse and keyboard ones away while the overlay is open and give back exactly what it had.
+std::vector<RAWINPUTDEVICE> g_suspendedRaw;
+
+bool IsMouseOrKeyboard(const RAWINPUTDEVICE& d) {
+    return d.usUsagePage == 0x01 && (d.usUsage == 0x02 || d.usUsage == 0x06);
+}
+
+void SuspendGameRawInput() {
+    if (!g_suspendedRaw.empty()) return;
+    UINT count = 0;
+    GetRegisteredRawInputDevices(nullptr, &count, sizeof(RAWINPUTDEVICE));
+    if (count == 0) return;
+    std::vector<RAWINPUTDEVICE> all(count);
+    if (GetRegisteredRawInputDevices(all.data(), &count, sizeof(RAWINPUTDEVICE)) == (UINT)-1) return;
+    all.resize(count);
+    for (const RAWINPUTDEVICE& d : all) {
+        if (!IsMouseOrKeyboard(d)) continue;
+        RAWINPUTDEVICE remove = d;
+        remove.dwFlags = RIDEV_REMOVE;
+        remove.hwndTarget = nullptr;
+        if (RegisterRawInputDevices(&remove, 1, sizeof(remove))) g_suspendedRaw.push_back(d);
+    }
+}
+
+void ResumeGameRawInput() {
+    for (const RAWINPUTDEVICE& d : g_suspendedRaw) {
+        if (d.hwndTarget && !IsWindow(d.hwndTarget)) continue;
+        RegisterRawInputDevices(&d, 1, sizeof(d));
+    }
+    g_suspendedRaw.clear();
+}
+
+void BecomeChild(HWND game) {
+    if (g_childOf == game) return;
+    // SetParent's documentation: set WS_CHILD before parenting a former top-level window.
+    SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_CHILD | WS_CLIPSIBLINGS);
+    SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOPARENTNOTIFY);
+    SetParent(g_hwnd, game);
+    g_childOf = game;
+    SuspendGameRawInput();
+}
+
+void BecomePopup() {
+    if (!g_childOf) return;
+    ResumeGameRawInput();
+    ShowWindow(g_hwnd, SW_HIDE);
+    SetParent(g_hwnd, nullptr);
+    SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_POPUP);
+    g_childOf = nullptr;
 }
 
 void SetStyles(Mode m) {
@@ -225,6 +319,7 @@ void SetStyles(Mode m) {
 
 RECT TargetRect(Mode m, const GameWindow& gw) {
     RECT r{};
+    if (m == Mode::Overlay && g_childOf) return { 0, 0, gw.client.right - gw.client.left, gw.client.bottom - gw.client.top };
     if (m == Mode::Overlay && gw.hwnd) return gw.client;
     if (m == Mode::Toast && gw.hwnd) {
         const ImVec2 sz = g_client->ToastSize();
@@ -252,16 +347,22 @@ void ApplyMode(Mode m, const GameWindow& gw) {
         // window still has it: hiding first lets Windows activate the desktop, and then we may no longer
         // move the foreground.
         const bool giveBack = (from == Mode::Overlay || from == Mode::Dialog) && gw.hwnd;
-        if (giveBack) {
+        if (g_childOf) {
+            // Child of the game: the game never lost the activation, only the keyboard.
+            if (IsWindow(g_childOf)) SetFocus(g_childOf);
+            BecomePopup();
+        } else if (giveBack) {
             if (gw.minimized) ShowWindowAsync(gw.hwnd, SW_RESTORE);
             SetForegroundWindow(gw.hwnd);
         }
-        if (m == Mode::Hidden) {
+        if (m == Mode::Overlay && CanHostAsChild(gw)) {
+            BecomeChild(gw.hwnd);
+        } else if (m == Mode::Hidden) {
             ShowWindow(g_hwnd, SW_HIDE);
         } else {
             SetStyles(m);
         }
-        if (giveBack && GetForegroundWindow() != gw.hwnd) SetForegroundWindow(gw.hwnd);
+        if (giveBack && !g_childOf && GetForegroundWindow() != gw.hwnd) SetForegroundWindow(gw.hwnd);
         g_client->OnModeChanged(from, m);
     }
     if (m == Mode::Hidden) return;
@@ -270,18 +371,75 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     static Mode placedMode = Mode::Hidden;
     if (!EqualRect(&r, &placed) || placedMode != m || !IsWindowVisible(g_hwnd)) {
         const UINT flags = SWP_FRAMECHANGED | (m == Mode::Toast ? SWP_NOACTIVATE : 0) | SWP_SHOWWINDOW;
-        SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
+        SetWindowPos(g_hwnd, g_childOf ? HWND_TOP : HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
         placed = r;
         placedMode = m;
     }
     ResizeSurface((UINT)(r.right - r.left), (UINT)(r.bottom - r.top));
-    if ((m == Mode::Overlay || m == Mode::Dialog) && GetForegroundWindow() != g_hwnd) {
+    if (g_childOf) {
+        // The parent and this thread share an input queue now, so SetFocus works across threads.
+        if (GetFocus() != g_hwnd) {
+            SetFocus(g_hwnd);
+            ClipCursor(nullptr);
+        }
+    } else if ((m == Mode::Overlay || m == Mode::Dialog) && GetForegroundWindow() != g_hwnd) {
         SetForegroundWindow(g_hwnd);
         if (m == Mode::Overlay) ClipCursor(nullptr);
     }
 }
 
-void Render(const GameWindow& gw) {
+// Games that capture the mouse (cursor locked to the window centre, hidden) would leave the overlay without
+// a usable pointer: free the clip each frame and let ImGui draw its own cursor while the OS one is hidden.
+void FreeMouseForOverlay() {
+    RECT clip{}, screen{ GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0 };
+    screen.right = screen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    screen.bottom = screen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (GetClipCursor(&clip) && !EqualRect(&clip, &screen)) ClipCursor(nullptr);
+    CURSORINFO ci{ sizeof(ci) };
+    const bool osCursorShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
+    ImGui::GetIO().MouseDrawCursor = !osCursorShown;
+}
+
+// Controller state into ImGui's gamepad keys (navigation: A/Cross activates, B/Circle goes back).
+void FeedGamepad(const pad::State& s) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (!s.connected) {
+        io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+        return;
+    }
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    auto key = [&](ImGuiKey k, uint32_t b) { io.AddKeyEvent(k, (s.buttons & b) != 0); };
+    key(ImGuiKey_GamepadStart, pad::kStart);
+    key(ImGuiKey_GamepadBack, pad::kBack);
+    key(ImGuiKey_GamepadFaceDown, pad::kA);
+    key(ImGuiKey_GamepadFaceRight, pad::kB);
+    key(ImGuiKey_GamepadFaceLeft, pad::kX);
+    key(ImGuiKey_GamepadFaceUp, pad::kY);
+    key(ImGuiKey_GamepadDpadUp, pad::kUp);
+    key(ImGuiKey_GamepadDpadDown, pad::kDown);
+    key(ImGuiKey_GamepadDpadLeft, pad::kLeft);
+    key(ImGuiKey_GamepadDpadRight, pad::kRight);
+    key(ImGuiKey_GamepadL1, pad::kLB);
+    key(ImGuiKey_GamepadR1, pad::kRB);
+    key(ImGuiKey_GamepadL3, pad::kL3);
+    key(ImGuiKey_GamepadR3, pad::kR3);
+    auto analog = [&](ImGuiKey k, float v) { io.AddKeyAnalogEvent(k, v > 0.10f, std::max(v, 0.0f)); };
+    analog(ImGuiKey_GamepadL2, s.lt);
+    analog(ImGuiKey_GamepadR2, s.rt);
+    analog(ImGuiKey_GamepadLStickLeft, -s.lx);
+    analog(ImGuiKey_GamepadLStickRight, s.lx);
+    analog(ImGuiKey_GamepadLStickUp, s.ly);
+    analog(ImGuiKey_GamepadLStickDown, -s.ly);
+    analog(ImGuiKey_GamepadRStickLeft, -s.rx);
+    analog(ImGuiKey_GamepadRStickRight, s.rx);
+    analog(ImGuiKey_GamepadRStickUp, s.ry);
+    analog(ImGuiKey_GamepadRStickDown, -s.ry);
+}
+
+void Render(const GameWindow& gw, const pad::State& padState) {
+    FeedGamepad(padState);
+    if (g_mode == Mode::Overlay) FreeMouseForOverlay();
+    else ImGui::GetIO().MouseDrawCursor = false;
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -291,7 +449,33 @@ void Render(const GameWindow& gw) {
     g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    g_swap->Present(1, 0);
+    const HRESULT hr = g_swap->Present(1, 0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) g_deviceLost = true;
+}
+
+// The GPU device can go away under us (driver update or crash/TDR, a laptop switching GPUs, an eGPU
+// unplugged). Rebuild device, swap chain and composition on whatever adapter is there now; textures are
+// reloaded on demand.
+bool RecreateDevice() {
+    const HRESULT reason = g_device ? g_device->GetDeviceRemovedReason() : E_FAIL;
+    ReFixLog("[Overlay] GPU device lost (0x%08X); recreating it", (unsigned)reason);
+    ImGui_ImplDX11_Shutdown();
+    for (auto& [key, t] : g_textures) SafeRelease(t.srv);
+    g_textures.clear();
+    SafeRelease(g_rtv);
+    SafeRelease(g_visual);
+    SafeRelease(g_target);
+    SafeRelease(g_dcomp);
+    SafeRelease(g_swap);
+    SafeRelease(g_ctx);
+    SafeRelease(g_device);
+    const UINT w = std::max<UINT>(g_width, 8), h = std::max<UINT>(g_height, 8);
+    g_deviceLost = false;
+    if (!CreateDeviceAndSurface(w, h) || !ImGui_ImplDX11_Init(g_device, g_ctx)) {
+        ReFixLog("[Overlay] Could not recreate the GPU device; overlay stopped");
+        return false;
+    }
+    return true;
 }
 
 bool InitThread() {
@@ -311,7 +495,7 @@ bool InitThread() {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(g_device, g_ctx);
     const float scale = ScaleFor(nullptr);
@@ -321,7 +505,7 @@ bool InitThread() {
 }
 
 void MaybeRescale(const GameWindow& gw) {
-    const float want = ScaleFor(gw.hwnd);
+    const float want = ScaleFor(&gw);
     if (std::fabs(want - ui::F().scale) < 0.01f) return;
     ui::BuildFonts(want);
     ui::ApplyStyle(want);
@@ -349,6 +533,13 @@ DWORD WINAPI HostThread(LPVOID) {
             ScanGameWindow();
             lastScan = now;
         }
+        // Controllers: read only while the game has the foreground or the overlay is up (nothing to do
+        // otherwise); Guide/PS or View+Menu toggles the overlay like Shift+Tab.
+        pad::State padState;
+        if (g_wantHotkeyHook && (g_mode != Mode::Hidden || CurrentGame().foreground)) {
+            padState = pad::Poll();
+            if (pad::ToggleRequested(padState) && IsOurProcessWindow(GetForegroundWindow())) g_hotkeyPending = true;
+        }
         if (g_hotkeyPending.exchange(false)) g_client->OnHotkey();
         const GameWindow gw = CurrentGame();
         Mode m = g_client->DesiredMode();
@@ -365,7 +556,17 @@ DWORD WINAPI HostThread(LPVOID) {
             ImGui::EndFrame();
             continue;
         }
-        Render(gw);
+        if (!IsWindow(g_hwnd)) {
+            // Only possible while we were a child of a game window that got destroyed.
+            ReFixLog("[Overlay] Overlay window destroyed with the game window; overlay stopped");
+            g_running = false;
+            return 0;
+        }
+        if (g_deviceLost && !RecreateDevice()) {
+            g_running = false;
+            return 0;
+        }
+        Render(gw, padState);
     }
 }
 

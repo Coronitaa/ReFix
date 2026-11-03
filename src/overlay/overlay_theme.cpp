@@ -9,6 +9,8 @@
 #include <cmath>
 
 namespace refix::overlay::ui {
+
+static bool g_tooltipsAbove = false;   // see SetTooltipsAbove
 namespace {
 
 Fonts g_fonts;
@@ -118,7 +120,7 @@ void BuildFonts(float scale) {
     if (!Exists(icons)) icons = FontPath("segmdl2.ttf");
     if (!Exists(icons)) icons.clear();
     g_fonts.body = AddFont(regular, icons, 16.0f * scale, 16.0f * scale);
-    g_fonts.caption = AddFont(regular, icons, 13.5f * scale, 13.0f * scale);
+    g_fonts.caption = AddFont(regular, icons, 14.5f * scale, 14.0f * scale);
     g_fonts.strong = AddFont(semibold, icons, 16.0f * scale, 16.0f * scale);
     g_fonts.heading = AddFont(semibold, icons, 20.0f * scale, 19.0f * scale);
     g_fonts.title = AddFont(semibold, icons, 28.0f * scale, 26.0f * scale);
@@ -194,10 +196,7 @@ void DrawAvatar(ImDrawList* dl, ImVec2 c, float r, const AvatarRef& a) {
     dl->AddCircleFilled(c, r, IM_COL32_WHITE, 48);
     ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, first, dl->VtxBuffer.Size, ImVec2(c.x - r, c.y - r),
                                                   ImVec2(c.x + r, c.y + r), s.from, s.to);
-    ImFont* font = F().glyph;
-    const float size = r * 1.05f;
-    const ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, s.glyph);
-    dl->AddText(font, size, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32(255, 255, 255, 235), s.glyph);
+    GlyphCentered(dl, F().glyph, r * 1.05f, c, IM_COL32(255, 255, 255, 235), s.glyph);
 }
 
 bool PrimaryButton(const char* label, ImVec2 size, bool enabled) {
@@ -227,8 +226,30 @@ bool LinkButton(const char* label) {
     return clicked;
 }
 
+void SetTooltipsAbove(bool above) { g_tooltipsAbove = above; }
+
+// Centres a single glyph on its drawn box. CalcTextSize uses the line height of the font the icons are
+// merged into, which put icons below and to the side of the centre.
+void GlyphCentered(ImDrawList* dl, ImFont* font, float size, ImVec2 center, ImU32 col, const char* glyph) {
+    unsigned int cp = 0;
+    ImTextCharFromUtf8(&cp, glyph, nullptr);
+    const ImFontGlyph* g = font->FindGlyphNoFallback((ImWchar)cp);
+    if (!g) {
+        const ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, glyph);
+        dl->AddText(font, size, ImVec2(center.x - ts.x * 0.5f, center.y - ts.y * 0.5f), col, glyph);
+        return;
+    }
+    const float k = size / font->FontSize;
+    const ImVec2 mid((g->X0 + g->X1) * 0.5f * k, (g->Y0 + g->Y1) * 0.5f * k);
+    dl->AddText(font, size, ImVec2(std::round(center.x - mid.x), std::round(center.y - mid.y)), col, glyph);
+}
+
 void Tooltip(const char* text) {
     if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort)) return;
+    if (g_tooltipsAbove) {
+        const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+        ImGui::SetNextWindowPos(ImVec2((mn.x + mx.x) * 0.5f, mn.y - S(6)), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(10), S(6)));
     ImGui::PushFont(F().caption);
     ImGui::SetTooltip("%s", text);
@@ -253,10 +274,7 @@ bool IconButton(const char* id, const char* glyph, const char* tooltip, ImU32 ti
     } else {
         dl->AddCircle(c, d * 0.5f - 0.5f, IM_COL32(255, 255, 255, 18), 32, 1.0f);
     }
-    ImFont* font = F().body;
-    const float fs = d * 0.48f;
-    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, glyph);
-    dl->AddText(font, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), enabled ? tint : color::Faint, glyph);
+    GlyphCentered(dl, F().body, d * 0.48f, c, enabled ? tint : color::Faint, glyph);
     return clicked;
 }
 
@@ -273,6 +291,22 @@ void Keycap(const char* text) {
     dl->AddText(ImVec2(pos.x + pad.x, pos.y + pad.y), color::Text, text);
     ImGui::Dummy(ImVec2(max.x - pos.x, max.y - pos.y + S(2)));
     ImGui::PopFont();
+}
+
+float KeycapHeight() { return F().caption->FontSize + S(4); }
+
+float KeycapAt(ImDrawList* dl, ImVec2 leftCenter, const char* text, float alpha) {
+    ImFont* font = F().caption;
+    const ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, text);
+    const float padX = S(7);
+    const float h = KeycapHeight();
+    const ImVec2 pos(leftCenter.x, leftCenter.y - h * 0.5f);
+    const ImVec2 max(pos.x + ts.x + padX * 2, pos.y + h);
+    dl->AddRectFilled(ImVec2(pos.x, pos.y + S(2)), ImVec2(max.x, max.y + S(2)), Fade(IM_COL32(0, 0, 0, 90), alpha), S(6));
+    dl->AddRectFilled(pos, max, Fade(IM_COL32(48, 56, 70, 255), alpha), S(6));
+    dl->AddRect(pos, max, Fade(IM_COL32(255, 255, 255, 30), alpha), S(6));
+    dl->AddText(font, font->FontSize, ImVec2(pos.x + padX, leftCenter.y - ts.y * 0.5f), Fade(color::Text, alpha), text);
+    return max.x - pos.x;
 }
 
 void Card(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 fill, float rounding) {

@@ -1,4 +1,4 @@
-// Look of the ReFix LAN overlay: fonts, colours, icons and the small widgets every screen shares.
+﻿// Look of the ReFix LAN overlay: fonts, colours, icons and the small widgets every screen shares.
 #pragma once
 #include "../imgui/imgui.h"
 #include <cstdint>
@@ -67,7 +67,7 @@ constexpr ImU32 InGame = IM_COL32(90, 169, 255, 255);
 
 struct Fonts {
     ImFont* body = nullptr;      // 16 px
-    ImFont* caption = nullptr;   // 13.5 px
+    ImFont* caption = nullptr;   // 14.5 px
     ImFont* strong = nullptr;    // 16 px semibold
     ImFont* heading = nullptr;   // 20 px semibold
     ImFont* title = nullptr;     // 28 px semibold
@@ -97,14 +97,20 @@ bool LinkButton(const char* label);
 bool IconButton(const char* id, const char* glyph, const char* tooltip, ImU32 tint, bool enabled = true,
                 float diameter = 0.0f);
 void Tooltip(const char* text);
+// Tooltips of the next items open above them (the browser page, a separate window, covers anything below).
+void SetTooltipsAbove(bool above);
+void GlyphCentered(ImDrawList* dl, ImFont* font, float size, ImVec2 center, ImU32 col, const char* glyph);
 void Keycap(const char* text);   // inline "Shift" / "Tab" chip
+// Keycap drawn at `leftCenter` (left edge, vertical centre of the line); returns its width.
+float KeycapAt(ImDrawList* dl, ImVec2 leftCenter, const char* text, float alpha = 1.0f);
+float KeycapHeight();
 // Card background for the current window region [min, max].
 void Card(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 fill = color::Panel, float rounding = 14.0f);
 void TextColored(ImU32 col, const char* text);
 // Child window drawn as a Card at screen `pos`; the content area is inset by `padding` (unscaled px).
 void BeginCard(const char* id, ImVec2 pos, ImVec2 size, float padding = 20.0f);
 void EndCard();
-// Small upper-case muted heading, with an optional count ("FAVORITOS · 2").
+// Small upper-case muted heading, with an optional count ("FAVORITOS Â· 2").
 void SectionLabel(const char* text, int count = -1);
 ImU32 Fade(ImU32 col, float alpha);
 std::string Ellipsize(const std::string& text, float maxWidth);

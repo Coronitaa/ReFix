@@ -75,7 +75,9 @@ void App::DrawOverlay(ImVec2 viewport) {
                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     // ImGui closes a popup on Escape before this runs: only close the overlay if none was open last frame.
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !popupOpenLastFrame_) CloseOverlay();
+    // B / Circle on a controller goes back the same way.
+    if ((ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) && !popupOpenLastFrame_)
+        CloseOverlay();
 
     if (inviteOnly_) {
         DrawInvitePicker(viewport);
@@ -472,20 +474,17 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             ui::DrawAvatar(dl, ac, r, active_ ? ProfileAvatar(*active_) : ui::AvatarRef{});
             const float y = ac.y - (f.strong->FontSize + ui::S(26)) * 0.5f;
             line(f.strong, y, ui::color::Text, LocalName());
-            ImGui::SetCursorScreenPos(ImVec2(tx, y + f.strong->FontSize + ui::S(4)));
-            ImGui::PushFont(f.caption);
-            ui::TextColored(ui::color::Muted, i18n::T("Press", "Pulsa"));
-            ImGui::SameLine(0, ui::S(6));
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ui::S(2));
-            ImGui::PopFont();
-            ui::Keycap("Shift");
-            ImGui::SameLine(0, ui::S(4));
-            ui::Keycap("Tab");
-            ImGui::SameLine(0, ui::S(6));
-            ImGui::PushFont(f.caption);
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ui::S(2));
-            ui::TextColored(ui::color::Muted, i18n::T("to open ReFix LAN", "para abrir ReFix LAN"));
-            ImGui::PopFont();
+            // "Press [Shift] [Tab] to open ReFix", every piece centred on the same line.
+            const float rowY = y + f.strong->FontSize + ui::S(4) + ui::KeycapHeight() * 0.5f;
+            const ImU32 muted = ui::Fade(ui::color::Muted, a);
+            auto words = [&](float x, const char* text) {
+                dl->AddText(f.caption, f.caption->FontSize, ImVec2(x, rowY - f.caption->FontSize * 0.5f), muted, text);
+                return x + f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, text).x;
+            };
+            float x = words(tx, i18n::T("Press", "Pulsa")) + ui::S(6);
+            x += ui::KeycapAt(dl, ImVec2(x, rowY), "Shift", a) + ui::S(4);
+            x += ui::KeycapAt(dl, ImVec2(x, rowY), "Tab", a) + ui::S(6);
+            words(x, i18n::T("to open ReFix", "para abrir ReFix"));
         } else if (invite) {
             const net::RemotePlayer* from = FindPlayer(t.invite.from);
             ui::AvatarRef av;

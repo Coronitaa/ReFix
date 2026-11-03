@@ -59,7 +59,9 @@ void App::DrawWebModal(ImVec2 viewport) {
     const web::State state = web::GetState();
     bool close = false;
 
-    // Toolbar: back, forward, reload/stop | title and address | open in browser, close.
+    // Toolbar: back, forward, reload/stop | title and address | open in browser, close. Its tooltips open
+    // above the buttons: the page below is a separate window that would cover them.
+    ui::SetTooltipsAbove(true);
     float x = p0.x + pad;
     auto tool = [&](const char* id, const char* glyph, const char* tip, bool enabled) {
         ImGui::SetCursorScreenPos(ImVec2(x, cy - btn * 0.5f));
@@ -85,6 +87,7 @@ void App::DrawWebModal(ImVec2 viewport) {
     const std::wstring url = web::Url().empty() ? webUrl_ : web::Url();
     if (ui::IconButton("external", ui::icon::OpenExternal, i18n::T("Open in your browser", "Abrir en tu navegador"),
                        ui::color::Text, true, btn)) {
+        ui::SetTooltipsAbove(false);
         CloseWeb();
         OpenUrl(url);   // closes the overlay too: the browser comes to the front
         ImGui::CloseCurrentPopup();
@@ -92,6 +95,7 @@ void App::DrawWebModal(ImVec2 viewport) {
         return;
     }
 
+    ui::SetTooltipsAbove(false);
     const float textX = x + ui::S(10);
     const float textW = std::max(ui::S(40), right - ui::S(14) - textX);
     std::string title = ToUtf8(web::Title());
@@ -145,7 +149,8 @@ void App::DrawWebModal(ImVec2 viewport) {
     ImGui::SetCursorScreenPos(c0);
     ImGui::Dummy(ImVec2(c1.x - c0.x, c1.y - c0.y));
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || web::TakeCloseRequest()) close = true;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || web::TakeCloseRequest())
+        close = true;
     if (close) {
         CloseWeb();
         webDrawn_ = false;

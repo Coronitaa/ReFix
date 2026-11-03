@@ -140,3 +140,7 @@ namespace ImGui
     void MyFunction(const char* name, MyMatrix44* mtx);
 }
 */
+
+//---- ReFix LAN: controllers are read by src/overlay/overlay_gamepad.cpp (XInput + PlayStation over HID),
+// which feeds ImGui itself. The Win32 backend must not add its own XInput events on top.
+#define IMGUI_IMPL_WIN32_DISABLE_GAMEPAD

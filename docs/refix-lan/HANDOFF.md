@@ -314,3 +314,36 @@
   the existing ini files read back empty. Logging was off (EnableLog=false in the deployed ReFix.ini) and
   launching the same way again did not reproduce it. The saves were put back by hand (owner Valen; the new profile's
   data in its own stash).
+
+## 2026-11-03 (14) - Overlay over fullscreen games without minimising them, controllers, scale, GPU loss
+- Shift+Tab minimised fullscreen-window Unity games: they minimise on `WM_ACTIVATE(WA_INACTIVE)` (checked by
+  posting it to Lethal Company; `WM_KILLFOCUS` alone does nothing). While the overlay is open its window is now a
+  child of the game window (`BecomeChild`/`BecomePopup` in overlay_host.cpp): keyboard focus moves into the child
+  and the game's top-level window never loses the activation. Dialogs and toasts stay popups. Games in real
+  exclusive Direct3D fullscreen (`SHQueryUserNotificationState` == `QUNS_RUNNING_D3D_FULL_SCREEN`) keep the popup
+  (and minimise as before): a child would be hidden behind the exclusive image. Do not use WS_EX_TOPMOST as the
+  test: Unity sets it on its fullscreen window. The decision is logged when the popup is used.
+- While the overlay is a child the game still has the activation, so its raw mouse/keyboard (camera, movement)
+  kept running: the process's mouse/keyboard raw-input registrations are removed while the overlay is open and
+  re-registered exactly as they were (`GetRegisteredRawInputDevices`, documented API, no hook). The cursor clip is
+  freed every frame and ImGui draws its own cursor when the OS cursor is hidden. Checked in a Lethal Company
+  match: pointer usable, the camera does not move under the overlay, the game is never minimised.
+- Controllers (`overlay_gamepad.cpp`): XInput (xinput1_4/1_3/9_1_0 loaded on use, ordinal 100 for the Guide
+  button) and DualShock 4 / DualSense over USB and Bluetooth read from HID (shared, read-only; hid.dll and
+  setupapi.dll delay-loaded). Guide/PS or View+Menu (Share+Options) toggles the overlay; ImGui gamepad
+  navigation inside (A/Cross activates, B/Circle goes back and closes the overlay or the browser). ImGui's own
+  XInput code is off (`IMGUI_IMPL_WIN32_DISABLE_GAMEPAD` in imconfig.h). Read only while the game has the
+  foreground or the overlay is open. `tests/test_gamepad.cpp` (19 checks: report layouts, toggle) and a live read
+  of the Xbox 360 pad on this PC; the buttons were not pressed in a game here. Games keep reading the pad too
+  (XInput has no exclusivity) while the overlay is open.
+- Scale: from the game's client height (monitor height when there is no game picture), 1080 px -> 1.2, clamp
+  0.8..3.0 in 0.05 steps; caption font 14.5 px. Text and every size follow the game resolution.
+- Welcome toast: "Press [Shift] [Tab] to open ReFix", every piece centred on one line (`KeycapAt`).
+- Icons are centred on their glyph box (`GlyphCentered`); the browser toolbar's tooltips open above the buttons
+  (`SetTooltipsAbove`), the page is a separate window that covered them.
+- GPU: `Present`/`ResizeBuffers` failures with DEVICE_REMOVED/RESET recreate device, swap chain, composition
+  and ImGui's DX11 objects (driver update, TDR, laptop GPU switch); D3D11 feature levels 11_0..10_0, WARP if no
+  hardware device. Nothing in the overlay is vendor specific (D3D11 + DirectComposition only).
+- 32-bit: the x86 DLL was run in Left 4 Dead (Source, D3D9): profile picked, overlay started, welcome toast
+  window created, no D3D11/DirectComposition errors (Shift+Tab inside it not exercised). Import tables of the x64
+  and x86 DLLs unchanged; hid/setupapi only in the delay-load table.
