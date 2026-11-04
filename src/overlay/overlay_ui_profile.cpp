@@ -358,11 +358,11 @@ bool App::SaveEditor() {
     const bool customFromFile = editor_.custom && editor_.imagePath == TempAvatarPath();
 
     if (editor_.creating) {
-        if (profiles_.size() >= (size_t)kMaxProfiles) {
+        if (profiles_.size() >= (size_t)kMaxProfiles || allProfiles_.size() >= (size_t)kMaxStoredProfiles) {
             editor_.error = T("This PC already has 10 profiles, the maximum.", "Ya hay 10 perfiles en este PC, el máximo.");
             return false;
         }
-        Profile p = profiles::MakeNew(name, profiles_);
+        Profile p = profiles::MakeNew(name, allProfiles_);
         if (editor_.steamId) {
             p.steamId = editor_.steamId;
             p.importedFromSteam = editor_.steamIdFromSteam;
@@ -370,7 +370,7 @@ bool App::SaveEditor() {
         p.stockAvatar = editor_.stock;
         p.nativeSaves = editor_.offerNative && editor_.native;
         if (!profiles::Save(p)) {
-            editor_.error = T("Could not save the profile in %APPDATA%\\ReFix LAN.", "No se pudo guardar el perfil en %APPDATA%\\ReFix LAN.");
+            editor_.error = T("Could not save the profile in %APPDATA%\\ReFix.", "No se pudo guardar el perfil en %APPDATA%\\ReFix.");
             return false;
         }
         if (customFromFile && CopyFileW(editor_.imagePath.c_str(), profiles::AvatarPath(p.id).c_str(), FALSE)) {
@@ -400,7 +400,7 @@ bool App::SaveEditor() {
         editor_.savedId = p.id;
         lastRefresh_ = 0;
     }
-    profiles_ = profiles::LoadAll();
+    ReloadProfiles();
     ClearTempAvatar();
     return true;
 }
@@ -476,11 +476,16 @@ bool App::DrawEditorBody(bool firstRun) {
     if (ui::SecondaryButton(steamLabel.c_str(), ImVec2(bw, ui::S(40)))) ImportFromSteam();
     ui::Tooltip(T("Uses the name, avatar and SteamID of the account signed in to Steam",
                   "Usa el nombre, el avatar y el SteamID de la cuenta abierta en Steam"));
-    const std::string refixLabel = std::string(ui::icon::Game) + "  " +
-                                   T("Import from another ReFix game…", "Importar de otro juego con ReFix…") + "##refix";
-    if (ui::SecondaryButton(refixLabel.c_str(), ImVec2(w, ui::S(40)))) ImportFromReFixGame();
-    ui::Tooltip(T("Uses the name, SteamID and picture another game patched with ReFix uses",
-                  "Usa el nombre, el SteamID y la imagen que usa otro juego parcheado con ReFix"));
+    if (editor_.creating) {
+        const bool others = !profiles::FromOtherGames(allProfiles_, profiles::GameKey()).empty();
+        const std::string otherLabel = std::string(ui::icon::Game) + "  " +
+                                       T("Import from another game…", "Importar de otro juego…") + "##othergame";
+        if (ui::SecondaryButton(otherLabel.c_str(), ImVec2(w, ui::S(40)), others)) importRequested_ = true;
+        ui::Tooltip(others ? T("Play with a profile you made in another ReFix game: same name, picture and SteamID",
+                               "Juega con un perfil que creaste en otro juego con ReFix: mismo nombre, imagen y SteamID")
+                           : T("Your other ReFix games have no profiles yet", "Tus otros juegos con ReFix aún no tienen perfiles"));
+        DrawImportPopup();
+    }
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
     // Name.
@@ -601,7 +606,7 @@ void App::DrawDialog(ImVec2 viewport) {
             } else {
                 dialogEditing_ = false;
                 editor_.open = false;
-                profiles_ = profiles::LoadAll();
+                ReloadProfiles();
             }
         }
     } else {
@@ -633,16 +638,18 @@ void App::DrawPicker() {
     const float cardH = ui::S(kPickerCardHeight);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const bool canCreate = profiles_.size() < (size_t)kMaxProfiles;
-    const int cards = (int)profiles_.size() + 1;   // + the "new profile" card
+    const bool canImport = !profiles::FromOtherGames(allProfiles_, profiles::GameKey()).empty();
+    const int cards = (int)profiles_.size() + 1 + (canImport ? 1 : 0);   // + "new profile" (+ "from another game")
     std::optional<Profile> chosen;
     for (int i = 0; i < cards; ++i) {
         const ImVec2 p0(origin.x + (i % kPickerColumns) * (cardW + gap), origin.y + (i / kPickerColumns) * (cardH + gap));
         const ImVec2 p1(p0.x + cardW, p0.y + cardH);
         const bool isNew = i == (int)profiles_.size();
-        const Profile* p = isNew ? nullptr : &profiles_[i];
+        const bool isImport = i == (int)profiles_.size() + 1;
+        const Profile* p = (isNew || isImport) ? nullptr : &profiles_[i];
         const bool locked = p && profiles::IsLockedByOther(p->id, L"");
         const bool busyElsewhere = p && !locked && profiles::IsInUseAnywhere(p->id);
-        const bool enabled = isNew ? canCreate : !locked;
+        const bool enabled = isImport ? true : isNew ? canCreate : !locked;
         ImGui::SetCursorScreenPos(p0);
         ImGui::PushID(i);
         ImGui::SetNextItemAllowOverlap();
@@ -652,11 +659,10 @@ void App::DrawPicker() {
         dl->AddRectFilled(p0, p1, hover && enabled ? ui::color::RowHover : ui::color::Row, ui::S(14));
         if (hover && enabled) dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.7f), ui::S(14), 0, ui::S(1.5f));
         const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(18 + 34));
-        if (isNew) {
+        if (isNew || isImport) {
             dl->AddCircle(ac, ui::S(34), enabled ? ui::color::Accent : ui::color::Faint, 48, ui::S(2));
-            const ImVec2 gs = f.title->CalcTextSizeA(f.title->FontSize, FLT_MAX, 0, ui::icon::Add);
-            dl->AddText(f.title, f.title->FontSize, ImVec2(ac.x - gs.x * 0.5f, ac.y - gs.y * 0.5f),
-                        enabled ? ui::color::Accent : ui::color::Faint, ui::icon::Add);
+            ui::GlyphCentered(dl, f.title, f.title->FontSize, ac, enabled ? ui::color::Accent : ui::color::Faint,
+                              isImport ? ui::icon::Import : ui::icon::Add);
         } else {
             ui::DrawAvatar(dl, ac, ui::S(34), ProfileAvatar(*p));
             if (locked) {
@@ -666,15 +672,16 @@ void App::DrawPicker() {
                             ui::icon::Lock);
             }
         }
-        const std::string label = isNew ? (canCreate ? T("New profile", "Nuevo perfil") : T("Max. 10 profiles", "Máximo 10 perfiles"))
-                                        : ToUtf8(p->name);
+        const std::string label = isImport ? T("From another game", "De otro juego")
+                                  : isNew  ? (canCreate ? T("New profile", "Nuevo perfil") : T("Max. 10 profiles", "Máximo 10 perfiles"))
+                                           : ToUtf8(p->name);
         ImGui::PushFont(f.strong);
         const std::string name = ui::Ellipsize(label, cardW - ui::S(20));
         const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
         ImGui::PopFont();
         dl->AddText(f.strong, f.strong->FontSize, ImVec2(ac.x - ns.x * 0.5f, p0.y + ui::S(98)), enabled ? ui::color::Text : ui::color::Faint,
                     name.c_str());
-        const char* status = isNew ? "" : locked ? T("Playing now", "Jugando ahora") : T("Available", "Disponible");
+        const char* status = (isNew || isImport) ? "" : locked ? T("Playing now", "Jugando ahora") : T("Available", "Disponible");
         const ImVec2 ss = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, status);
         dl->AddText(f.caption, f.caption->FontSize, ImVec2(ac.x - ss.x * 0.5f, p0.y + ui::S(98) + f.strong->FontSize + ui::S(4)),
                     locked ? ui::color::Faint : ui::color::Accent, status);
@@ -691,7 +698,9 @@ void App::DrawPicker() {
                 chosen = *p;
             }
         } else if (clicked) {
-            if (isNew) {
+            if (isImport) {
+                importRequested_ = true;
+            } else if (isNew) {
                 BeginEditor(true);
                 dialogEditing_ = true;
             } else {
@@ -714,10 +723,11 @@ void App::DrawPicker() {
     ui::Tooltip(T("Standard name and avatar, temporary saves that are deleted when the game closes",
                   "Nombre y avatar estándar, partidas temporales que se borran al cerrar el juego"));
 
+    DrawImportPopup();
     if (chosen && profiles::TryLock(chosen->id)) {
         FinishDialog(chosen);
     } else if (guest) {
-        Profile g = profiles::MakeGuest(i18n::TW(L"Guest", L"Invitado"), profiles_);
+        Profile g = profiles::MakeGuest(i18n::TW(L"Guest", L"Invitado"), allProfiles_);
         ReFixLog("[Overlay] Playing as a guest (SteamID %llu)", (unsigned long long)g.steamId);
         FinishDialog(g);
     }

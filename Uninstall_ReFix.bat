@@ -73,7 +73,7 @@ echo ====================================================================
 echo:
 
 :: 0. ReFix LAN profiles swap the game's save folder: give the game this PC's own saves back first.
-::    Every profile keeps its saves in %APPDATA%\ReFix LAN (shared by all games); nothing is deleted.
+::    Every profile keeps its saves in %APPDATA%\ReFix (shared by all games); nothing is deleted.
 if exist "%BIN_DIR%\restore_saves.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%BIN_DIR%\restore_saves.ps1" -GameDir "%TARGET_DIR%"
 
 :: 1. Restore winmm_o.dll to winmm.dll if backup exists
@@ -159,7 +159,7 @@ for /d /r "%TARGET_DIR%" %%D in (steam_settings saves BepInEx) do (
 echo:
 echo ====================================================================
 echo SUCCESS: Game folder successfully restored to original state!
-echo  ReFix LAN profiles and their saves stay in "%APPDATA%\ReFix LAN":
+echo  ReFix LAN profiles and their saves stay in "%APPDATA%\ReFix":
 echo  every ReFix game of this PC shares them. Delete that folder to remove them.
 echo ====================================================================
 

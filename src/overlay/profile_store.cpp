@@ -12,6 +12,7 @@
 #include <cwchar>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <sstream>
 
 extern void ReFixLog(const char* fmt, ...);
@@ -41,8 +42,12 @@ std::wstring AnyLockName(const std::wstring& id) { return L"Local\\ReFixLAN_Prof
 std::wstring GuestRoot() {
     wchar_t tmp[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tmp);
-    return std::wstring(tmp) + L"ReFix LAN";
+    return std::wstring(tmp) + L"ReFix";
 }
+
+constexpr wchar_t kRootName[] = L"\\ReFix";
+constexpr wchar_t kOldRootName[] = L"\\ReFix LAN";
+
 
 void DeleteTree(const std::wstring& path) {
     const DWORD attr = GetFileAttributesW(path.c_str());
@@ -187,9 +192,79 @@ std::wstring PersonaFromLoginUsers(const std::wstring& steamPath, uint64_t steam
     return FromUtf8(text.substr(open + 1, close - open - 1));
 }
 
+// Moves `from` into `to` without replacing anything: missing entries are moved, folders present on both
+// sides are merged one level further down. Returns the number of entries that could not move.
+int MergeInto(const std::wstring& from, const std::wstring& to) {
+    CreateDirectoryW(to.c_str(), nullptr);
+    int left = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((from + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        const std::wstring src = from + L"\\" + fd.cFileName, dst = to + L"\\" + fd.cFileName;
+        const DWORD dstAttr = GetFileAttributesW(dst.c_str());
+        if (dstAttr == INVALID_FILE_ATTRIBUTES) {
+            if (!MoveFileExW(src.c_str(), dst.c_str(), 0)) ++left;
+        } else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (dstAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+            if (MergeInto(src, dst) == 0) RemoveDirectoryW(src.c_str());
+            else ++left;
+        } else {
+            ++left;   // same file on both sides: the one already in place wins
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return left;
+}
+
+// saves.ini owners the new file does not have yet (the new file wins for the rest).
+void MergeOwners(const std::wstring& from, const std::wstring& to) {
+    std::vector<wchar_t> sec(32768, L'\0');
+    const DWORD n = GetPrivateProfileSectionW(L"Owners", sec.data(), (DWORD)sec.size(), from.c_str());
+    for (const wchar_t* e = sec.data(); e < sec.data() + n && *e; e += wcslen(e) + 1) {
+        const wchar_t* eq = wcschr(e, L'=');
+        if (!eq || eq == e) continue;
+        const std::wstring key(e, eq);
+        wchar_t cur[64] = {};
+        if (GetPrivateProfileStringW(L"Owners", key.c_str(), L"", cur, 64, to.c_str()) == 0)
+            WritePrivateProfileStringW(L"Owners", key.c_str(), eq + 1, to.c_str());
+    }
+}
+
+// %APPDATA%\ReFix LAN became %APPDATA%\ReFix. That folder can already exist (ReFix Online's EOS identity
+// keeps user_profile.json there, or an earlier start moved part of the data), so the old folder is merged
+// into it without replacing anything: profiles and stashed saves are moved, saves.ini owners combined,
+// profiles.ini and the browser cache of the new folder kept. What is in use right now (the browser data of a
+// running game) stays and moves on a later start.
+void MigrateOldRoot(const std::wstring& roaming) {
+    const std::wstring oldRoot = roaming + kOldRootName, newRoot = roaming + kRootName;
+    if (GetFileAttributesW(oldRoot.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    HANDLE mu = CreateMutexW(nullptr, FALSE, L"Local\\ReFix_RootMigration");
+    if (mu) WaitForSingleObject(mu, 5000);
+    CreateDirectoryW(newRoot.c_str(), nullptr);
+    const std::wstring oldOwners = oldRoot + L"\\saves.ini", newOwners = newRoot + L"\\saves.ini";
+    if (GetFileAttributesW(oldOwners.c_str()) != INVALID_FILE_ATTRIBUTES &&
+        GetFileAttributesW(newOwners.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        MergeOwners(oldOwners, newOwners);
+        DeleteFileW(oldOwners.c_str());
+    }
+    for (const wchar_t* dup : { L"\\profiles.ini", L"\\WebView2" }) {   // settings and cache: the new ones win
+        if (GetFileAttributesW((newRoot + dup).c_str()) != INVALID_FILE_ATTRIBUTES) DeleteTree(oldRoot + dup);
+    }
+    const int left = MergeInto(oldRoot, newRoot);
+    if (left == 0) RemoveDirectoryW(oldRoot.c_str());
+    ReFixLog("[Profiles] %%APPDATA%%\\ReFix LAN merged into %%APPDATA%%\\ReFix%s",
+             left ? " (some files are in use or exist on both sides; they stay for a later start)" : "");
+    if (mu) {
+        ReleaseMutex(mu);
+        CloseHandle(mu);
+    }
+}
+
 } // namespace
 
 std::wstring RootDir() {
+    static std::once_flag once;
     PWSTR roaming = nullptr;
     std::wstring root;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, nullptr, &roaming))) root = roaming;
@@ -199,7 +274,8 @@ std::wstring RootDir() {
         GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
         root = buf;
     }
-    return root + L"\\ReFix LAN";
+    std::call_once(once, [&] { MigrateOldRoot(root); });
+    return root + kRootName;
 }
 
 std::wstring ProfileDir(const std::wstring& id) { return RootDir() + L"\\Profiles\\" + id; }
@@ -225,6 +301,17 @@ std::optional<Profile> Load(const std::wstring& id) {
     p.importedFromSteam = ReadIni(ini, L"Profile", L"ImportedFromSteam") == L"1";
     p.lastUsed = _wcstoui64(ReadIni(ini, L"Profile", L"LastUsed").c_str(), nullptr, 10);
     p.favorites = SplitIds(ReadIni(ini, L"Favorites", L"List"));
+    p.originGame = ReadIni(ini, L"Profile", L"OriginGame");
+    // [Games] key=name, one line per game that used the profile.
+    std::vector<wchar_t> sec(16384, L'\0');
+    const DWORD n = GetPrivateProfileSectionW(L"Games", sec.data(), (DWORD)sec.size(), ini.c_str());
+    for (const wchar_t* e = sec.data(); e < sec.data() + n && *e; e += wcslen(e) + 1) {
+        const wchar_t* eq = wcschr(e, L'=');
+        if (!eq || eq == e) continue;
+        GameUse g{ std::wstring(e, eq), eq + 1 };
+        if (g.key == p.originGame) p.games.insert(p.games.begin(), g);
+        else p.games.push_back(g);
+    }
     return p;
 }
 
@@ -236,7 +323,7 @@ std::vector<Profile> LoadAll() {
         do {
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             if (auto p = Load(fd.cFileName)) out.push_back(std::move(*p));
-        } while (FindNextFileW(h, &fd) && out.size() < (size_t)kMaxProfiles);
+        } while (FindNextFileW(h, &fd) && out.size() < (size_t)kMaxStoredProfiles);
         FindClose(h);
     }
     std::sort(out.begin(), out.end(), [](const Profile& a, const Profile& b) { return a.lastUsed > b.lastUsed; });
@@ -255,6 +342,11 @@ bool Save(const Profile& p) {
     WriteIni(ini, L"Profile", L"ImportedFromSteam", p.importedFromSteam ? L"1" : L"0");
     WriteIni(ini, L"Profile", L"LastUsed", std::to_wstring(p.lastUsed));
     WriteIni(ini, L"Favorites", L"List", JoinIds(p.favorites));
+    WriteIni(ini, L"Profile", L"OriginGame", p.originGame);
+    std::wstring games;
+    for (const GameUse& g : p.games) games += g.key + L"=" + g.name + L'\0';
+    games += L'\0';
+    WritePrivateProfileSectionW(L"Games", games.c_str(), ini.c_str());
     return GetFileAttributesW(ini.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -307,10 +399,57 @@ Profile MakeNew(const std::wstring& name, const std::vector<Profile>& existing) 
     p.name = name.substr(0, kMaxNameChars);
     p.stockAvatar = (int)(Random32() % kStockAvatarCount);
     p.lastUsed = Now();
+    p.originGame = GameKey();
+    p.games = { { p.originGame, DefaultGameName() } };
     return p;
 }
 
 void Touch(Profile& p) { p.lastUsed = Now(); }
+
+std::wstring GameKey() { return ExeKey(); }
+
+std::wstring DefaultGameName() {
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    const wchar_t* base = wcsrchr(path, L'\\');
+    std::wstring name = base ? base + 1 : path;
+    const size_t dot = name.find_last_of(L'.');
+    if (dot != std::wstring::npos) name.resize(dot);
+    return name;
+}
+
+bool UsedIn(const Profile& p, const std::wstring& gameKey) {
+    if (p.originGame.empty()) return true;   // from before games were tracked: every game
+    return std::any_of(p.games.begin(), p.games.end(), [&](const GameUse& g) { return g.key == gameKey; });
+}
+
+bool AddGame(Profile& p, const std::wstring& gameKey, const std::wstring& gameName, bool replaceName) {
+    const std::wstring name = gameName.empty() ? gameKey : gameName.substr(0, 64);
+    for (GameUse& g : p.games) {
+        if (g.key != gameKey) continue;
+        if (g.name == name || !replaceName) return false;
+        g.name = name;
+        return true;
+    }
+    p.games.push_back({ gameKey, name });
+    return true;
+}
+
+std::vector<Profile> ForGame(const std::vector<Profile>& all, const std::wstring& gameKey) {
+    std::vector<Profile> out;
+    for (const Profile& p : all) {
+        if (UsedIn(p, gameKey)) out.push_back(p);
+    }
+    return out;
+}
+
+std::vector<Profile> FromOtherGames(const std::vector<Profile>& all, const std::wstring& gameKey) {
+    std::vector<Profile> out;
+    for (const Profile& p : all) {
+        if (!UsedIn(p, gameKey)) out.push_back(p);
+    }
+    return out;
+}
 
 std::wstring LastProfileId() { return ReadIni(IndexPath(), L"General", L"LastProfile"); }
 

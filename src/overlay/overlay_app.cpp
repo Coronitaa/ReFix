@@ -59,7 +59,7 @@ void App::DrainPosts() {
 std::optional<Profile> App::RunDialog(DialogKind kind) {
     dialogDone_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     Post([this, kind] {
-        profiles_ = profiles::LoadAll();
+        ReloadProfiles();
         dialog_ = kind;
         dialogEditing_ = kind == DialogKind::FirstRun;
         if (dialogEditing_) BeginEditor(true);
@@ -93,7 +93,7 @@ void App::Begin(uint32_t appId, std::optional<Profile> active) {
     Post([this, appId, active] {
         appId_ = appId;
         active_ = active;
-        profiles_ = profiles::LoadAll();
+        ReloadProfiles();
         started_ = true;
     });
     if (!host::Start(this)) return;
@@ -151,6 +151,7 @@ void App::OpenOverlay(bool inviteOnly, uint64_t inviteLobby, const std::string& 
     if (!overlayOpen_) {
         focusOverlay_ = true;
         sound::Play(sound::Cue::Open);
+        ReloadProfiles();   // another ReFix game may have created or changed profiles meanwhile
     }
     overlayOpen_ = true;
     inviteOnly_ = inviteOnly;
@@ -186,6 +187,15 @@ void App::Refresh(const host::GameWindow& game) {
     if (now - lastRefresh_ < kRefreshMs) return;
     lastRefresh_ = now;
     if (!game.title.empty()) gameTitle_ = game.title;
+    // The window title names this game better than its exe ("Left 4 Dead" for left4dead.exe).
+    if (!gameNamed_ && active_ && !active_->guest && !gameTitle_.empty()) {
+        gameNamed_ = true;
+        Profile p = *active_;
+        if (profiles::AddGame(p, profiles::GameKey(), gameTitle_) && profiles::Save(p)) {
+            active_ = p;
+            ReloadProfiles();
+        }
+    }
     const UnrealSteamEmu::OverlayLobbyInfo lobby = UnrealSteamEmu::Overlay_LocalLobby();
     localLobby_ = lobby.lobbyId;
     localConnect_ = UnrealSteamEmu::Overlay_ConnectString();
@@ -413,7 +423,7 @@ bool App::DeleteProfile(const std::wstring& id) {
         return false;
     }
     saves::ForgetOwner(id);
-    profiles_ = profiles::LoadAll();
+    ReloadProfiles();
     ++profileVersion_;
     return true;
 }
@@ -424,6 +434,33 @@ void App::AcceptInvite(const net::Invite& inv) {
     p.lobbyId = inv.lobbyId;
     p.connect = inv.connect;
     Join(p);
+}
+
+void App::ReloadProfiles() {
+    allProfiles_ = profiles::LoadAll();
+    profiles_ = profiles::ForGame(allProfiles_, profiles::GameKey());
+}
+
+void App::ImportProfile(const std::wstring& id) {
+    auto it = std::find_if(allProfiles_.begin(), allProfiles_.end(), [&](const Profile& p) { return p.id == id; });
+    if (it == allProfiles_.end()) return;
+    Profile p = *it;
+    profiles::AddGame(p, profiles::GameKey(), gameTitle_.empty() ? profiles::DefaultGameName() : gameTitle_);
+    if (!profiles::Save(p)) {
+        sound::Play(sound::Cue::Denied);
+        ShowInfo(i18n::T("Could not import the profile", "No se pudo importar el perfil"),
+                 i18n::T("Its folder in %APPDATA%\\ReFix could not be written.", "No se pudo escribir su carpeta en %APPDATA%\\ReFix."));
+        return;
+    }
+    ReFixLog("[Overlay] Profile %s imported from another game", ToUtf8(p.id).c_str());
+    ReloadProfiles();
+    editor_.open = false;
+    if (dialog_ != DialogKind::None) {
+        dialogEditing_ = false;
+        if (profiles::TryLock(p.id)) FinishDialog(p);   // play with it right away
+    } else {
+        pendingSwitch_ = p.id;                          // restart into it, after the confirmation
+    }
 }
 
 ui::AvatarRef App::ProfileAvatar(const Profile& p) {

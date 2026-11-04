@@ -132,6 +132,7 @@ bool Allowed() {
 }
 
 // `otherInstance`: another window of this game is open, so the player of this one has to say who they are.
+// `all`: the profiles of this game.
 std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherInstance) {
     wchar_t forced[32] = {};
     if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", forced, 32) > 0) {
@@ -143,7 +144,7 @@ std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherIn
     }
     if (otherInstance) return std::nullopt;
     if (auto last = profiles::Load(profiles::LastProfileId())) {
-        if (profiles::TryLock(last->id)) return last;
+        if (profiles::UsedIn(*last, profiles::GameKey()) && profiles::TryLock(last->id)) return last;
     }
     for (const Profile& p : all) {   // most recently used first
         if (profiles::TryLock(p.id)) return p;
@@ -195,12 +196,14 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     }
     profiles::CleanupGuestFolders();
     std::vector<Profile> all = profiles::LoadAll();
+    const std::wstring game = profiles::GameKey();
+    const std::vector<Profile> mine = profiles::ForGame(all, game);
     const bool otherInstance = saves::OtherInstanceRunning();
-    std::optional<Profile> chosen = PickProfile(all, otherInstance);
+    std::optional<Profile> chosen = PickProfile(mine, otherInstance);
     if (!chosen) {
-        const DialogKind kind = all.empty() && !otherInstance ? DialogKind::FirstRun : DialogKind::Picker;
-        ReFixLog("[Overlay] %s (%zu profiles on this PC): showing the %s",
-                 otherInstance ? "Another instance of this game is running" : "No free profile", all.size(),
+        const DialogKind kind = mine.empty() && !otherInstance ? DialogKind::FirstRun : DialogKind::Picker;
+        ReFixLog("[Overlay] %s (%zu profiles in this game, %zu on this PC): showing the %s",
+                 otherInstance ? "Another instance of this game is running" : "No free profile", mine.size(), all.size(),
                  kind == DialogKind::FirstRun ? "first-run dialog" : "profile picker");
         chosen = App::Get().RunDialog(kind);
         all = profiles::LoadAll();
@@ -212,9 +215,10 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     Profile p = *chosen;
     if (!p.guest) {
         profiles::Touch(p);
+        profiles::AddGame(p, game, profiles::DefaultGameName(), false);
         profiles::Save(p);
         profiles::SetLastProfileId(p.id);
-        if (g_cfg.isolateSaves) saves::SwitchTo(p, all);
+        if (g_cfg.isolateSaves) saves::SwitchTo(p, profiles::ForGame(all, game));
     }
     {
         std::lock_guard<std::mutex> lock(g_mu);

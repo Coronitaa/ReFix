@@ -2,9 +2,9 @@
 #
 # With ReFix LAN profiles the game's known save folder (Unity LocalLow\<Company>\<Product>, Unreal
 # %LOCALAPPDATA%\<Project>\Saved\SaveGames) holds the saves of whichever profile played last; the others
-# are kept in %APPDATA%\ReFix LAN. Without ReFix the game only sees that folder, so before uninstalling it
+# are kept in %APPDATA%\ReFix. Without ReFix the game only sees that folder, so before uninstalling it
 # gets the saves it had before profiles: those of the profile created with "use the saves already on this
-# PC", or %APPDATA%\ReFix LAN\Saves\_pc. The saves that were in place go to their profile. Nothing is
+# PC", or %APPDATA%\ReFix\Saves\_pc. The saves that were in place go to their profile. Nothing is
 # deleted, and the profiles stay (every ReFix game of this PC shares them).
 #
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File restore_saves.ps1 -GameDir "<game folder>"
@@ -12,7 +12,11 @@
 param([Parameter(Mandatory = $true)][string]$GameDir)
 
 $ErrorActionPreference = "Stop"
-$root = Join-Path $env:APPDATA "ReFix LAN"
+# %APPDATA%\ReFix since 2.1; %APPDATA%\ReFix LAN when the game never started with 2.1 (not migrated yet).
+$root = Join-Path $env:APPDATA "ReFix"
+if (-not (Test-Path -LiteralPath (Join-Path $root "saves.ini")) -and (Test-Path -LiteralPath (Join-Path $env:APPDATA "ReFix LAN\saves.ini"))) {
+    $root = Join-Path $env:APPDATA "ReFix LAN"
+}
 $ownersIni = Join-Path $root "saves.ini"
 if (-not (Test-Path -LiteralPath $ownersIni)) { exit 0 }   # profiles never swapped saves on this PC
 

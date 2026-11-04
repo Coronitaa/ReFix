@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "ReFix_LAN_2.0_Release" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.1.0" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -70,7 +70,7 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.0 - LAN / Online
+ReFix 2.1.0 - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.
@@ -93,8 +93,8 @@ ReFix LAN
 - Debug logging is off ([Debug] EnableLog = false); turn it on only to report a problem.
 
 Uninstall_ReFix.bat restores the game's original files and gives the game this PC's own saves back.
-ReFix LAN profiles (and the saves each one keeps) stay in %APPDATA%\ReFix LAN: every ReFix game of
-the PC shares them.
+ReFix LAN profiles (and the saves each one keeps) stay in %APPDATA%\ReFix: every ReFix game of the PC
+can use them ("Import from another game" when creating a profile).
 
 Linux (Steam Play / Proton)
 - Run: bash AutoDeploy.sh

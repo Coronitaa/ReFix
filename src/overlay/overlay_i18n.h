@@ -1,5 +1,5 @@
 // Overlay languages: English (default) and Spanish. The choice is per PC, kept in
-// %APPDATA%\ReFix LAN\profiles.ini ([General] Language = en | es), and switched from the overlay.
+// %APPDATA%\ReFix\profiles.ini ([General] Language = en | es), and switched from the overlay.
 // Strings stay at their call sites as T("English", "Español") pairs: two languages do not need a catalogue.
 #pragma once
 #include <cwchar>

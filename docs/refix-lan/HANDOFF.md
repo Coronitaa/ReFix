@@ -376,3 +376,30 @@
   (Wine/Proton prefix, iconv for the UTF-16 inis) give the game this PC's own saves back before the DLLs are
   restored: the profile that kept the PC's saves (NativeSaves=1) or `Saves\_pc`; the saves in place go to their
   profile. Nothing deleted, profiles stay. Tested in sandboxes for both cases and on a real uninstall.
+
+## 2026-11-03 (16) - %APPDATA%\ReFix, profiles per game, "Import from another game", 2.1.0
+- Profile root renamed to `%APPDATA%\ReFix` (guest Cloud folders: `%TEMP%\ReFix`). `RootDir()` merges the old
+  `%APPDATA%\ReFix LAN` into it once per process (mutex `Local\ReFix_RootMigration`): missing entries are moved,
+  folders on both sides merged one level down, saves.ini owners combined (the new file wins), profiles.ini and
+  the WebView2 cache of the new folder kept; what is in use moves on a later start. `%APPDATA%\ReFix` already
+  existed on this PC (ReFix Online's EOS `user_profile.json`), so a plain rename was never possible.
+  Found while testing: this PC had a second set of profiles in `ReFix LAN` that the first version of the migration
+  left behind (Rayito, Lunita, Spanish, LastProfile=Lunita) next to the set the game was using (Valen, Mona China);
+  how the two sets came about is not known. That second set is what the 17:42 run of (13) saw, which explains its
+  first-run dialog. Both are merged now; the save owner (Valen) kept.
+- Profiles per game: profile.ini has `[Profile] OriginGame=<exe key>` and `[Games] <exe key>=<name>` (exe file name,
+  replaced by the window title once the overlay sees it). A game lists the profiles used in it; profiles from
+  before this (no OriginGame) are listed in every game, so nothing disappears. 10 profiles per game, 100 on the PC.
+  `PickProfile`, the picker, the first-run decision, the chip menu and the save swap only use this game's
+  profiles; unique ids/SteamIDs and the Steam import duplicate check use all of them (a Steam account already used
+  in another game: "import it from that game").
+- "Import from another game" (editor button when creating, and a "From another game" card in the picker): a grid
+  of every profile of the PC this game does not list yet, with picture, name and origin game ("R.E.P.O. +1" when
+  one more game used it). Choosing one adds this game to it (same profile: name, picture, SteamID), then plays with
+  it (dialog) or offers the restart (overlay). The folder-based importer of (13) is gone (`identity_import.*`,
+  its test and `Overlay_MachineSteamID`). Profiles are reloaded every time the overlay opens.
+- Checked in Lethal Company with three profiles written as other games would write them (R.E.P.O. +1, PEAK,
+  Overcooked! 2 +2, one custom picture): grid, import (Lethal Company added to its [Games]), switch confirmation,
+  listed in the chip menu afterwards. Test profiles removed afterwards.
+- Uninstallers look in `%APPDATA%\ReFix` (and `ReFix LAN` when it was never migrated); AutoDeploy title, README and
+  `make_release.ps1` default output: 2.1.0 (`release\ReFix_v2.1.0`).

@@ -101,7 +101,8 @@ restore_saves() {
 
     local pfx owners refix user native prof text label owner live out in i changed clash e
     for pfx in "${prefixes[@]}"; do
-        for owners in "$pfx"/drive_c/users/*/AppData/Roaming/"ReFix LAN"/saves.ini; do
+        # AppData/Roaming/ReFix since 2.1, ReFix LAN before (not migrated while the game never ran with 2.1)
+        for owners in "$pfx"/drive_c/users/*/AppData/Roaming/ReFix/saves.ini "$pfx"/drive_c/users/*/AppData/Roaming/"ReFix LAN"/saves.ini; do
             [ -f "$owners" ] || continue
             refix="$(dirname "$owners")"
             user="$(dirname "$(dirname "$(dirname "$refix")")")"
@@ -142,7 +143,7 @@ uninstall() {
     while IFS= read -r d; do restore_one "$d" EOSSDK_original.dll EOSSDK-Win64-Shipping.dll; done < <(dirs_with EOSSDK_original.dll)
     while IFS= read -r d; do restore_one "$d" winmm_o.dll winmm.dll; done < <(dirs_with winmm_o.dll)
     ok "Done. ReFix.ini and saves were left in place."
-    echo "    ReFix LAN profiles and their saves stay in the prefix's AppData/Roaming/ReFix LAN (shared by every game)."
+    echo "    ReFix LAN profiles and their saves stay in the prefix's AppData/Roaming/ReFix (shared by every game)."
 }
 
 # ---------------------------------------------------------------- deploy steps

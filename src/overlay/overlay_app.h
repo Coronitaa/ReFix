@@ -103,7 +103,8 @@ public:
     // Data for the screens.
     uint32_t appId_ = 0;
     std::optional<Profile> active_;
-    std::vector<Profile> profiles_;
+    std::vector<Profile> profiles_;      // the profiles of this game
+    std::vector<Profile> allProfiles_;   // every profile on the PC (unique SteamIDs, import from another game)
     std::vector<PlayerRow> rows_;
     std::map<uint64_t, ULONGLONG> invitedAt_;
     uint64_t localLobby_ = 0;
@@ -157,7 +158,9 @@ private:
     bool SaveEditor();
     void ImportImage();
     void ImportFromSteam();
-    void ImportFromReFixGame();
+    void ImportProfile(const std::wstring& id);   // a profile of another game, into this one
+    void DrawImportPopup();
+    void ReloadProfiles();
 
     std::mutex postMu_;
     std::vector<std::function<void()>> posts_;
@@ -177,7 +180,9 @@ private:
     bool webOpen_ = false;
     bool webOpenRequested_ = false;  // (re)open the modal popup on the next overlay frame
     bool webDrawn_ = false;
-    bool focusOverlay_ = false;      // give the overlay window the keyboard/controller focus next frame          // the modal was drawn this frame: the web view may show
+    bool focusOverlay_ = false;
+    bool importRequested_ = false;   // open "Import from another game" next frame
+    bool gameNamed_ = false;         // the window title was recorded as this game's name      // give the overlay window the keyboard/controller focus next frame          // the modal was drawn this frame: the web view may show
 };
 
 } // namespace refix::overlay

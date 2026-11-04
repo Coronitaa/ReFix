@@ -1,12 +1,12 @@
 // Per-profile save folders without hooks.
 // The game's known save folder on disk always belongs to one profile (its "owner", recorded in
-// %APPDATA%\ReFix LAN\saves.ini). When a different profile starts the game, the owner's files are moved
+// %APPDATA%\ReFix\saves.ini). When a different profile starts the game, the owner's files are moved
 // into its stash (Profiles\<id>\Saves\<label>) and the new profile's stash is moved back in, before the
 // game reads anything. Covered folders:
 //   Unreal: %LOCALAPPDATA%\<Project>\Saved\SaveGames      (<Project>\Binaries\Win64\<exe>)
 //   Unity:  %USERPROFILE%\AppData\LocalLow\<Company>\<Product>   (from <exe>_Data\app.info)
 // Data found there before any profile owned it goes to the profile marked nativeSaves, or to
-// %APPDATA%\ReFix LAN\Saves\_pc, so nothing is ever deleted.
+// %APPDATA%\ReFix\Saves\_pc, so nothing is ever deleted.
 #pragma once
 #include "profile_store.h"
 
