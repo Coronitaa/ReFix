@@ -114,6 +114,7 @@ void TextColored(ImU32 col, const char* text);
 // Child window drawn as a Card at screen `pos`; the content area is inset by `padding` (unscaled px).
 void BeginCard(const char* id, ImVec2 pos, ImVec2 size, float padding = 20.0f);
 void EndCard();
+bool BeginCenteredModal(const char* id, float width);
 // Small upper-case muted heading, with an optional count ("FAVORITOS Â· 2").
 void SectionLabel(const char* text, int count = -1);
 ImU32 Fade(ImU32 col, float alpha);

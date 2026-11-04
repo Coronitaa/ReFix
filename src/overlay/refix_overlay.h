@@ -15,6 +15,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <functional>
 
 namespace ReFixOverlay {
 
@@ -45,6 +46,7 @@ void ActivateOverlay(const char* dialog);
 void ActivateOverlayToUser(const char* dialog, uint64_t steamId);
 void ActivateWebPage(const char* url);
 void ActivateStore(uint32_t appId);
+void PromptPurchase(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete = nullptr);
 void ActivateInviteDialog(uint64_t lobbyId, const char* connect);
 // ISteamFriends::InviteUserToGame / ISteamMatchmaking::InviteUserToLobby.
 bool InviteUser(uint64_t steamId, uint64_t lobbyId, const char* connect);

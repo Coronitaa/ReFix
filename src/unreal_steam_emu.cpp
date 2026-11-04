@@ -71,7 +71,10 @@
 #include "lan_core/refix_lan_core.h"
 #include "steam_lobby_mapping.h"
 #include "steam_p2p_hook.h"
+#include "include/steam/isteamapps.h"
+#include "include/steam/isteamuser.h"
 #include "overlay/refix_overlay.h"
+#include "refix_mono.h"
 #include "generated/steam_emu_latest.h"
 
 class CCallbackMgr {
@@ -3583,7 +3586,10 @@ namespace UnrealSteamEmu {
         virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
             ReFixOverlay::ActivateWebPage(pchURL);
         }
-        virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override { ReFixOverlay::ActivateStore(nAppID); }
+        virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override {
+            ReFixLog("[UnrealSteam] ActivateGameOverlayToStore: nAppID=%u", (uint32_t)nAppID);
+            ReFixOverlay::PromptPurchase((uint32_t)nAppID, 0, "", "", false);
+        }
         virtual void SetPlayedWith(CSteamID steamIDUserPlayedWith) override {}
         virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override {
             ReFixOverlay::ActivateInviteDialog(steamIDLobby.ConvertToUint64(), nullptr);
@@ -5018,6 +5024,19 @@ namespace UnrealSteamEmu {
         }
         virtual bool BIsSubscribedApp(AppId_t appID) override { return true; }
         virtual bool BIsDlcInstalled(AppId_t appID) override {
+            if (appID == 948680) {
+                static int s_hasNsfw = -1;
+                if (s_hasNsfw == -1) {
+                    char path[MAX_PATH];
+                    GetModuleFileNameA(NULL, path, MAX_PATH);
+                    char* slash = strrchr(path, '\\');
+                    if (slash) *slash = '\0';
+                    strcat_s(path, sizeof(path), "\\CrushCrush_Data\\StreamingAssets\\Windows\\cassie\\cassie_nsfw_bdfb642e7c9baee4aa5eee02b2b18c88");
+                    s_hasNsfw = (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+                    ReFixLog("[UnrealSteam] NSFW DLC asset check: installed=%d", s_hasNsfw);
+                }
+                if (!s_hasNsfw) return false;
+            }
             if (g_bypassLicenseCheck) return true;
             return (g_unlockedDLCs.find(appID) != g_unlockedDLCs.end());
         }
@@ -7687,6 +7706,33 @@ namespace UnrealSteamEmu {
         }
     }
 
+    void UnlockDLC(uint32_t dlcId) {
+        if (dlcId == 0) return;
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            g_unlockedDLCs.insert(dlcId);
+        }
+        ReFixLog("[UnrealSteam] DLC %u unlocked locally", dlcId);
+        DlcInstalled_t dlc = {};
+        dlc.m_nAppID = dlcId;
+        PostCallback(DlcInstalled_t::k_iCallback, &dlc, sizeof(dlc));
+    }
+
+    bool IsDLCUnlocked(uint32_t dlcId) {
+        if (g_bypassLicenseCheck) return true;
+        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+        return g_unlockedDLCs.find(dlcId) != g_unlockedDLCs.end();
+    }
+
+    void AuthorizeMicroTxn(uint32_t appId, uint64_t orderId, bool bAuthorized) {
+        MicroTxnAuthorizationResponse_t resp = {};
+        resp.m_unAppID = appId ? appId : g_appID;
+        resp.m_ulOrderID = orderId;
+        resp.m_bAuthorized = bAuthorized ? 1 : 0;
+        ReFixLog("[UnrealSteam] MicroTxn auth: appId=%u, orderId=%llu, authorized=%d", resp.m_unAppID, (unsigned long long)orderId, (int)resp.m_bAuthorized);
+        PostCallback(MicroTxnAuthorizationResponse_t::k_iCallback, &resp, sizeof(resp));
+    }
+
     uint64_t Matchmaking_CreateLobby(int eLobbyType, int cMaxMembers) {
         return g_steamMatchmakingInstance.CreateLobby((ELobbyType)eLobbyType, cMaxMembers);
     }
@@ -8366,6 +8412,8 @@ namespace UnrealSteamEmu {
         ReFixLog("  Transport Mode: %s", g_transportMode.load() == TransportMode::Canonical ? "Canonical (ILanCore)" : "Legacy UDP Fallback");
         ReFixLog("  UDP Listen Port: %u | Language: '%s'", g_listenPort, g_language.c_str());
         ReFixLog("=================================================================");
+
+        ReFixMono_Init();
 
         return true;
     }
