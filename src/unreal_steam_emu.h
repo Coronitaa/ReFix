@@ -16,6 +16,8 @@ namespace UnrealSteamEmu {
     int InitInternal(const char* pszInternalCheckInterfaceVersions, char* pOutErrMsg);
     void Shutdown();
     bool IsInitialized();
+    void FlushUserStats();
+    bool RequestCurrentStats();
 
     // GameServer Lifecycle
     bool GameServer_Init(uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort, int eServerMode, const char* pchVersionString);

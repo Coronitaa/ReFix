@@ -137,6 +137,10 @@ bool HasHeadlessSwitch() {
 bool Allowed() {
     if (EnvIs(L"REFIX_NO_OVERLAY", L"1")) return false;
     if (!g_cfg.enabled) return false;
+    wchar_t forced[32] = {};
+    if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", forced, 32) > 0 || EnvIs(L"REFIX_FORCE_GUI", L"1")) {
+        return true;
+    }
     return IsGuiProcess() && !HasHeadlessSwitch();
 }
 

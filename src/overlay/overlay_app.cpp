@@ -419,6 +419,7 @@ void App::RestartWithProfile(const std::wstring& id) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     ReFixLog("[Overlay] Restarting with profile %s", ToUtf8(id).c_str());
+    UnrealSteamEmu::FlushUserStats();
     TerminateProcess(GetCurrentProcess(), 0);
 }
 

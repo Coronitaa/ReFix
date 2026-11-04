@@ -3487,7 +3487,7 @@ extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamUtils_GetImageRGBA(
 }
 
 extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamUserStats_RequestCurrentStats(void* self) {
-    return true;
+    return UnrealSteamEmu::RequestCurrentStats();
 }
 
 extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamRemoteStorage_FileWrite(void* self, const char* pchFile, const void* pvData, int32_t cubData) {
@@ -5688,6 +5688,7 @@ static void SafeBackendShutdown() {
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+    UnrealSteamEmu::FlushUserStats();
     SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);

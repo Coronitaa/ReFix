@@ -85,6 +85,56 @@ int main() {
     assert(statsRoot2.find(L"00000002\\Stats\\3527290") != std::wstring::npos);
     printf("  [PASS] StatsRoot is strictly isolated per profile ID and AppID\n");
 
+    // 5. Stats INI write & load roundtrip isolation
+    wchar_t tempDir[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempDir);
+    std::wstring p1Dir = std::wstring(tempDir) + L"ReFixTest_Profile1\\Stats\\3527290";
+    std::wstring p2Dir = std::wstring(tempDir) + L"ReFixTest_Profile2\\Stats\\3527290";
+    for (size_t i = 3; i <= p1Dir.size(); ++i) if (i == p1Dir.size() || p1Dir[i] == L'\\') CreateDirectoryW(p1Dir.substr(0, i).c_str(), nullptr);
+    for (size_t i = 3; i <= p2Dir.size(); ++i) if (i == p2Dir.size() || p2Dir[i] == L'\\') CreateDirectoryW(p2Dir.substr(0, i).c_str(), nullptr);
+
+    std::wstring f1 = p1Dir + L"\\stats.ini";
+    std::wstring f2 = p2Dir + L"\\stats.ini";
+
+    FILE* fp1 = nullptr;
+    assert(_wfopen_s(&fp1, f1.c_str(), L"w") == 0 && fp1 != nullptr);
+    fprintf(fp1, "[IntStats]\nOutfit=5\nHat=2\nSkin=1\n\n[Achievements]\nFirstSummit=1700000000\n");
+    fclose(fp1);
+
+    FILE* fp2 = nullptr;
+    assert(_wfopen_s(&fp2, f2.c_str(), L"w") == 0 && fp2 != nullptr);
+    fprintf(fp2, "[IntStats]\nOutfit=9\nHat=0\nSkin=3\n\n[Achievements]\nProClimber=1700000001\n");
+    fclose(fp2);
+
+    // Verify f1 contents
+    FILE* r1 = nullptr;
+    assert(_wfopen_s(&r1, f1.c_str(), L"r") == 0 && r1 != nullptr);
+    char buf[256];
+    bool foundOutfit5 = false;
+    while (fgets(buf, sizeof(buf), r1)) {
+        if (strstr(buf, "Outfit=5")) foundOutfit5 = true;
+        assert(strstr(buf, "Outfit=9") == nullptr);
+    }
+    fclose(r1);
+    assert(foundOutfit5);
+
+    // Verify f2 contents
+    FILE* r2 = nullptr;
+    assert(_wfopen_s(&r2, f2.c_str(), L"r") == 0 && r2 != nullptr);
+    bool foundOutfit9 = false;
+    while (fgets(buf, sizeof(buf), r2)) {
+        if (strstr(buf, "Outfit=9")) foundOutfit9 = true;
+        assert(strstr(buf, "Outfit=5") == nullptr);
+    }
+    fclose(r2);
+    assert(foundOutfit9);
+
+    DeleteFileW(f1.c_str());
+    DeleteFileW(f2.c_str());
+    RemoveDirectoryW(p1Dir.c_str());
+    RemoveDirectoryW(p2Dir.c_str());
+    printf("  [PASS] Stats INI roundtrip and profile separation confirmed\n");
+
     printf("[OK] All ReFix LAN profile isolation tests passed successfully!\n");
     return 0;
 }

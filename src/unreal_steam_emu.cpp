@@ -446,6 +446,16 @@ namespace UnrealSteamEmu {
             }
         }
         if (g_appID == 0) {
+            char envAppId[32] = { 0 };
+            if (GetEnvironmentVariableA("SteamAppId", envAppId, sizeof(envAppId)) > 0 && envAppId[0]) {
+                g_appID = (uint32_t)atoi(envAppId);
+                if (g_appID != 0) appIdSource = "env:SteamAppId";
+            } else if (GetEnvironmentVariableA("SteamGameId", envAppId, sizeof(envAppId)) > 0 && envAppId[0]) {
+                g_appID = (uint32_t)atoi(envAppId);
+                if (g_appID != 0) appIdSource = "env:SteamGameId";
+            }
+        }
+        if (g_appID == 0) {
             g_appID = 480;
             appIdSource = "fallback:default(480)";
         }
@@ -4666,13 +4676,16 @@ namespace UnrealSteamEmu {
             m_lastStatsPath = path;
             if (path.empty()) return;
 
-            std::ifstream file(path);
-            if (!file.is_open()) return;
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, path.c_str(), L"r") != 0 || !f) {
+                return;
+            }
 
             enum Section { None, IntStats, FloatStats, Achievements };
             Section sec = None;
-            std::string line;
-            while (std::getline(file, line)) {
+            char lineBuf[512];
+            while (fgets(lineBuf, sizeof(lineBuf), f)) {
+                std::string line = lineBuf;
                 while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ' || line.back() == '\t')) {
                     line.pop_back();
                 }
@@ -4711,6 +4724,7 @@ namespace UnrealSteamEmu {
                     }
                 }
             }
+            fclose(f);
             ReFixLog("[UserStats] Loaded stats from disk: %zu int, %zu float, %zu achievements from %ls",
                      m_intStats.size(), m_floatStats.size(), m_achievements.size(), path.c_str());
         }
@@ -4719,29 +4733,40 @@ namespace UnrealSteamEmu {
             const std::wstring path = StatsFilePath();
             if (path.empty()) return;
 
+            // Ensure parent directory exists
+            size_t slash = path.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) {
+                std::wstring dir = path.substr(0, slash);
+                for (size_t i = 3; i <= dir.size(); ++i) {
+                    if (i == dir.size() || dir[i] == L'\\') {
+                        CreateDirectoryW(dir.substr(0, i).c_str(), nullptr);
+                    }
+                }
+            }
+
             const std::wstring tmpPath = path + L".tmp";
-            std::ofstream file(tmpPath, std::ios::trunc);
-            if (!file.is_open()) {
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, tmpPath.c_str(), L"w") != 0 || !f) {
                 ReFixLog("[UserStats] Failed to open stats tmp file for writing: %ls", tmpPath.c_str());
                 return;
             }
 
-            file << "[IntStats]\n";
+            fprintf(f, "[IntStats]\n");
             for (const auto& pair : m_intStats) {
-                file << pair.first << "=" << pair.second << "\n";
+                fprintf(f, "%s=%d\n", pair.first.c_str(), pair.second);
             }
 
-            file << "\n[FloatStats]\n";
+            fprintf(f, "\n[FloatStats]\n");
             for (const auto& pair : m_floatStats) {
-                file << pair.first << "=" << pair.second << "\n";
+                fprintf(f, "%s=%f\n", pair.first.c_str(), pair.second);
             }
 
-            file << "\n[Achievements]\n";
+            fprintf(f, "\n[Achievements]\n");
             for (const auto& pair : m_achievements) {
-                file << pair.first << "=" << pair.second << "\n";
+                fprintf(f, "%s=%u\n", pair.first.c_str(), pair.second);
             }
 
-            file.close();
+            fclose(f);
 
             if (!MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
                 CopyFileW(tmpPath.c_str(), path.c_str(), FALSE);
@@ -4766,13 +4791,14 @@ namespace UnrealSteamEmu {
             }
         }
 
-        virtual bool RequestCurrentStats() { TraceStats("RequestCurrentStats", nullptr);
+        bool RequestCurrentStats() { TraceStats("RequestCurrentStats", nullptr);
             EnsureLoaded();
             UserStatsReceived_t resp = {};
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
             resp.m_steamIDUser = CSteamID(g_localSteamID);
             PostCallback(UserStatsReceived_t::k_iCallback, &resp, sizeof(resp));
+            PostCallResult(UserStatsReceived_t::k_iCallback, &resp, sizeof(resp));
             return true;
         }
 
@@ -4803,6 +4829,7 @@ namespace UnrealSteamEmu {
             if (m_intStats[pchName] != nData) {
                 m_intStats[pchName] = nData;
                 m_dirty = true;
+                SaveStatsToDiskInternal();
             }
             return true;
         }
@@ -4814,6 +4841,7 @@ namespace UnrealSteamEmu {
             if (m_floatStats[pchName] != fData) {
                 m_floatStats[pchName] = fData;
                 m_dirty = true;
+                SaveStatsToDiskInternal();
             }
             return true;
         }
@@ -4890,6 +4918,7 @@ namespace UnrealSteamEmu {
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
             PostCallback(UserStatsStored_t::k_iCallback, &resp, sizeof(resp));
+            PostCallResult(UserStatsStored_t::k_iCallback, &resp, sizeof(resp));
             return true;
         }
 
@@ -4918,6 +4947,7 @@ namespace UnrealSteamEmu {
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
             resp.m_steamIDUser = steamIDUser;
+            PostCallback(UserStatsReceived_t::k_iCallback, &resp, sizeof(resp));
             return PostCallResult(UserStatsReceived_t::k_iCallback, &resp, sizeof(resp));
         }
 
@@ -4968,6 +4998,12 @@ namespace UnrealSteamEmu {
         virtual bool GetAchievementProgressLimits(const char *pchName, float *pfMinProgress, float *pfMaxProgress) override { TraceStats("GetAchievementProgressLimits", pchName); if (pfMinProgress) *pfMinProgress = 0.0f; if (pfMaxProgress) *pfMaxProgress = 100.0f; return true; }
     };
     static CSteamUserStatsEmu g_steamUserStatsInstance;
+    void FlushUserStats() {
+        g_steamUserStatsInstance.Flush();
+    }
+    bool RequestCurrentStats() {
+        return g_steamUserStatsInstance.RequestCurrentStats();
+    }
 
     // --- ISteamApps ---
     class CSteamAppsEmu : public ISteamApps {
