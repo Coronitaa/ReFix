@@ -381,6 +381,7 @@ bool App::SaveEditor() {
             p.customAvatar = true;
             profiles::Save(p);
         }
+        ReFixOverlay::InvalidateAvatar(p.steamId);
         editor_.savedId = p.id;
         ReFixLog("[Overlay] Profile created: %s (%llu)", ToUtf8(p.id).c_str(), (unsigned long long)p.steamId);
     } else {
@@ -400,6 +401,7 @@ bool App::SaveEditor() {
         }
         active_ = p;
         ++profileVersion_;
+        ReFixOverlay::InvalidateAvatar(p.steamId);
         if (renamed) UnrealSteamEmu::Overlay_SetPersonaName(ToUtf8(name));
         editor_.savedId = p.id;
         lastRefresh_ = 0;

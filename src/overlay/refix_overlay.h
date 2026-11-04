@@ -47,6 +47,12 @@ void ActivateInviteDialog(uint64_t lobbyId, const char* connect);
 // ISteamFriends::InviteUserToGame / ISteamMatchmaking::InviteUserToLobby.
 bool InviteUser(uint64_t steamId, uint64_t lobbyId, const char* connect);
 
+// Steam Avatar & Image provider (ISteamFriends::Get*Avatar, ISteamUtils::GetImage*)
+int GetAvatarHandle(uint64_t steamId, int size);
+bool GetImageSize(int iImage, uint32_t* pnWidth, uint32_t* pnHeight);
+bool GetImageRGBA(int iImage, uint8_t* pubDest, int nDestBufferSize);
+void InvalidateAvatar(uint64_t steamId);
+
 } // namespace ReFixOverlay
 
 // Implemented by the emulator (unreal_steam_emu.cpp) for the overlay.

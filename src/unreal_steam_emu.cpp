@@ -3579,9 +3579,15 @@ namespace UnrealSteamEmu {
             ReFixOverlay::ActivateInviteDialog(steamIDLobby.ConvertToUint64(), nullptr);
         }
 
-        virtual int GetSmallFriendAvatar(CSteamID steamIDFriend) override { return 1; }
-        virtual int GetMediumFriendAvatar(CSteamID steamIDFriend) override { return 1; }
-        virtual int GetLargeFriendAvatar(CSteamID steamIDFriend) override { return 1; }
+        virtual int GetSmallFriendAvatar(CSteamID steamIDFriend) override {
+            return ReFixOverlay::GetAvatarHandle(steamIDFriend.ConvertToUint64(), 32);
+        }
+        virtual int GetMediumFriendAvatar(CSteamID steamIDFriend) override {
+            return ReFixOverlay::GetAvatarHandle(steamIDFriend.ConvertToUint64(), 64);
+        }
+        virtual int GetLargeFriendAvatar(CSteamID steamIDFriend) override {
+            return ReFixOverlay::GetAvatarHandle(steamIDFriend.ConvertToUint64(), 184);
+        }
 
         virtual bool RequestUserInformation(CSteamID steamIDUser, bool bRequireNameOnly) override { return false; }
         virtual SteamAPICall_t RequestClanOfficerList(CSteamID steamIDClan) override { return 0; }
@@ -3782,20 +3788,10 @@ namespace UnrealSteamEmu {
         virtual uint32 GetServerRealTime() override { return (uint32)::time(NULL); }
         virtual const char *GetIPCountry() override { return "US"; }
         virtual bool GetImageSize(int iImage, uint32 *pnWidth, uint32 *pnHeight) override {
-            if (iImage <= 0) return false;
-            if (pnWidth) *pnWidth = 32;
-            if (pnHeight) *pnHeight = 32;
-            return true;
+            return ReFixOverlay::GetImageSize(iImage, pnWidth, pnHeight);
         }
         virtual bool GetImageRGBA(int iImage, uint8 *pubDest, int nDestBufferSize) override {
-            if (iImage <= 0 || !pubDest || nDestBufferSize < 32 * 32 * 4) return false;
-            for (int i = 0; i < 32 * 32; i++) {
-                pubDest[i * 4 + 0] = 70;  // R
-                pubDest[i * 4 + 1] = 130; // G
-                pubDest[i * 4 + 2] = 220; // B
-                pubDest[i * 4 + 3] = 255; // A
-            }
-            return true;
+            return ReFixOverlay::GetImageRGBA(iImage, pubDest, nDestBufferSize);
         }
         virtual bool GetCSERIPPort(uint32 *unIP, uint16 *usPort) override { return false; }
         virtual uint8 GetCurrentBatteryPower() override { return 255; }

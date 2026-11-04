@@ -460,6 +460,7 @@ void App::ImportProfile(const std::wstring& id) {
         return;
     }
     ReFixLog("[Overlay] Profile %s imported from another game", ToUtf8(p.id).c_str());
+    ReFixOverlay::InvalidateAvatar(p.steamId);
     ReloadProfiles();
     editor_.open = false;
     if (dialog_ != DialogKind::None) {

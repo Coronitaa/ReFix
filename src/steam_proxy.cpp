@@ -3449,15 +3449,15 @@ extern "C" __declspec(dllexport) const char* __cdecl SteamAPI_ISteamFriends_GetF
 }
 
 extern "C" __declspec(dllexport) int __cdecl SteamAPI_ISteamFriends_GetSmallFriendAvatar(void* self, uint64_t steamIDFriend) {
-    return 1;
+    return ReFixOverlay::GetAvatarHandle(steamIDFriend, 32);
 }
 
 extern "C" __declspec(dllexport) int __cdecl SteamAPI_ISteamFriends_GetMediumFriendAvatar(void* self, uint64_t steamIDFriend) {
-    return 1;
+    return ReFixOverlay::GetAvatarHandle(steamIDFriend, 64);
 }
 
 extern "C" __declspec(dllexport) int __cdecl SteamAPI_ISteamFriends_GetLargeFriendAvatar(void* self, uint64_t steamIDFriend) {
-    return 1;
+    return ReFixOverlay::GetAvatarHandle(steamIDFriend, 184);
 }
 
 extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamFriends_SetRichPresence(void* self, const char* pchKey, const char* pchValue) {
@@ -3479,21 +3479,11 @@ extern "C" __declspec(dllexport) uint64_t __cdecl SteamAPI_ISteamUser_GetSteamID
 }
 
 extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamUtils_GetImageSize(void* self, int iImage, uint32_t* pnWidth, uint32_t* pnHeight) {
-    if (iImage <= 0) return false;
-    if (pnWidth) *pnWidth = 32;
-    if (pnHeight) *pnHeight = 32;
-    return true;
+    return ReFixOverlay::GetImageSize(iImage, pnWidth, pnHeight);
 }
 
 extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamUtils_GetImageRGBA(void* self, int iImage, uint8_t* pubDest, int nDestBufferSize) {
-    if (iImage <= 0 || !pubDest || nDestBufferSize < 32 * 32 * 4) return false;
-    for (int i = 0; i < 32 * 32; i++) {
-        pubDest[i * 4 + 0] = 70;  // R
-        pubDest[i * 4 + 1] = 130; // G
-        pubDest[i * 4 + 2] = 220; // B
-        pubDest[i * 4 + 3] = 255; // A
-    }
-    return true;
+    return ReFixOverlay::GetImageRGBA(iImage, pubDest, nDestBufferSize);
 }
 
 extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamUserStats_RequestCurrentStats(void* self) {

@@ -8,12 +8,19 @@
 #include "profile_store.h"
 #include "save_swap.h"
 #include "steam_overlay_block.h"
+#include "avatar_image.h"
+#include "presence_net.h"
 #include "../unreal_steam_emu.h"
 
 #include <windows.h>
 #include <atomic>
 #include <mutex>
 #include <optional>
+#include <map>
+#include <unordered_map>
+#include <vector>
+#include <cmath>
+#include <algorithm>
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -318,6 +325,286 @@ bool InviteUser(uint64_t steamId, uint64_t lobbyId, const char* connect) {
     if (!g_started || steamId == 0) return false;
     if (!lobbyId && !(connect && connect[0])) lobbyId = UnrealSteamEmu::GetActiveLobbyID();
     return net::SendInvite(steamId, lobbyId, connect ? connect : "");
+}
+
+struct CachedImage {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> rgba;
+};
+
+static std::mutex g_avatarMu;
+static std::unordered_map<int, CachedImage> g_avatarImages;
+static std::map<std::pair<uint64_t, int>, int> g_avatarHandles;
+static int g_nextAvatarHandle = 1;
+
+struct ComInitScope {
+    HRESULT hr;
+    ComInitScope() {
+        hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (hr == RPC_E_CHANGED_MODE) hr = S_FALSE;
+    }
+    ~ComInitScope() {
+        if (SUCCEEDED(hr) && hr != S_FALSE) CoUninitialize();
+    }
+};
+
+static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector<uint8_t>& outRgba) {
+    outRgba.resize((size_t)width * height * 4);
+    stockIdx = (stockIdx % 12 + 12) % 12;
+    struct Color { uint8_t r, g, b; };
+    static const Color kFrom[12] = {
+        { 255, 107, 107 }, {  79, 172, 254 }, { 247, 151,  30 }, { 246, 180,  80 },
+        { 102, 126, 234 }, {  40, 200, 110 }, { 250, 112, 154 }, {  48, 207, 208 },
+        { 161, 140, 209 }, { 255, 154,  68 }, { 220, 110, 250 }, {  11, 163,  96 },
+    };
+    static const Color kTo[12] = {
+        { 196,  69, 105 }, {   0, 200, 230 }, { 255, 210,   0 }, { 253, 120, 100 },
+        { 118,  75, 162 }, {  40, 210, 190 }, { 240, 190,  60 }, {  51,   8, 103 },
+        { 230, 150, 210 }, { 252,  96, 118 }, { 245,  87, 108 }, {  60, 186, 146 },
+    };
+    const Color c1 = kFrom[stockIdx];
+    const Color c2 = kTo[stockIdx];
+
+    const float cx = (width - 1) * 0.5f;
+    const float cy = (height - 1) * 0.5f;
+    const float headCy = cy - height * 0.12f;
+    const float headR = width * 0.20f;
+    const float shoulderCy = cy + height * 0.40f;
+    const float shoulderRx = width * 0.36f;
+    const float shoulderRy = height * 0.26f;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float t = (float)(x + y) / (float)((width - 1) + (height - 1));
+            float bgR = c1.r + t * (c2.r - c1.r);
+            float bgG = c1.g + t * (c2.g - c1.g);
+            float bgB = c1.b + t * (c2.b - c1.b);
+
+            float dx = (float)x - cx;
+            float dyHead = (float)y - headCy;
+            float distHead = std::sqrt(dx * dx + dyHead * dyHead);
+
+            float dyShoulder = (float)y - shoulderCy;
+            float normShoulder = (dx * dx) / (shoulderRx * shoulderRx) + (dyShoulder * dyShoulder) / (shoulderRy * shoulderRy);
+
+            float silAlpha = 0.0f;
+            if (distHead < headR + 1.0f) {
+                float a = std::clamp(headR + 0.75f - distHead, 0.0f, 1.0f);
+                if (a > silAlpha) silAlpha = a;
+            }
+            if (y >= (int)(cy - height * 0.02f) && normShoulder < 1.15f) {
+                float distNorm = std::sqrt(normShoulder);
+                float a = std::clamp((1.0f - distNorm) * shoulderRx + 0.5f, 0.0f, 1.0f);
+                if (a > silAlpha) silAlpha = a;
+            }
+
+            float silA = silAlpha * 0.88f;
+            uint8_t finalR = (uint8_t)(bgR * (1.0f - silA) + 255.0f * silA);
+            uint8_t finalG = (uint8_t)(bgG * (1.0f - silA) + 255.0f * silA);
+            uint8_t finalB = (uint8_t)(bgB * (1.0f - silA) + 255.0f * silA);
+
+            size_t idx = ((size_t)y * width + x) * 4;
+            outRgba[idx + 0] = finalR;
+            outRgba[idx + 1] = finalG;
+            outRgba[idx + 2] = finalB;
+            outRgba[idx + 3] = 255;
+        }
+    }
+}
+
+static bool ResolveAvatarRgba(uint64_t steamId, int size, std::vector<uint8_t>& outRgba) {
+    if (size <= 0) size = 64;
+    ComInitScope com;
+
+    Profile localProfile;
+    bool hasLocalProfile = false;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (g_active) {
+            localProfile = *g_active;
+            hasLocalProfile = true;
+        }
+    }
+
+    const uint64_t localSid = UnrealSteamEmu::GetLocalSteamID();
+    bool isLocal = (steamId == 0 || (hasLocalProfile && steamId == localProfile.steamId) || (localSid != 0 && steamId == localSid));
+
+    if (isLocal) {
+        if (hasLocalProfile) {
+            std::wstring path = profiles::AvatarPath(localProfile.id);
+            if (localProfile.customAvatar || GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                image::Rgba img;
+                if (image::LoadFile(path, img, size) && !img.pixels.empty()) {
+                    outRgba = std::move(img.pixels);
+                    return true;
+                }
+            }
+        }
+
+        char exePath[MAX_PATH] = {};
+        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+        std::string exeDir = exePath;
+        exeDir = exeDir.substr(0, exeDir.find_last_of("\\/") + 1);
+        std::string candPaths[] = {
+            exeDir + "steam_settings\\avatar.png",
+            exeDir + "steam_settings\\avatar.jpg",
+            exeDir + "avatar.png",
+            exeDir + "avatar.jpg"
+        };
+        for (const auto& cp : candPaths) {
+            if (GetFileAttributesA(cp.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                image::Rgba img;
+                if (image::LoadFile(FromUtf8(cp), img, size) && !img.pixels.empty()) {
+                    outRgba = std::move(img.pixels);
+                    return true;
+                }
+            }
+        }
+
+        int stock = hasLocalProfile ? localProfile.stockAvatar : (int)(steamId ? (steamId % 12) : 0);
+        GenerateStockAvatar(stock, size, size, outRgba);
+        return true;
+    }
+
+    std::vector<Profile> allProfiles = profiles::LoadAll();
+    for (const Profile& p : allProfiles) {
+        if (p.steamId == steamId) {
+            std::wstring path = profiles::AvatarPath(p.id);
+            if (p.customAvatar || GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                image::Rgba img;
+                if (image::LoadFile(path, img, size) && !img.pixels.empty()) {
+                    outRgba = std::move(img.pixels);
+                    return true;
+                }
+            }
+            GenerateStockAvatar(p.stockAvatar, size, size, outRgba);
+            return true;
+        }
+    }
+
+    std::vector<net::RemotePlayer> peers = net::Players();
+    for (const net::RemotePlayer& peer : peers) {
+        if (peer.steamId == steamId) {
+            if (peer.avatarKind == net::AvatarKind::Custom) {
+                std::vector<uint8_t> jpeg;
+                if (net::FetchAvatar(steamId, peer.avatarKey, jpeg)) {
+                    image::Rgba img;
+                    if (image::DecodeMemory(jpeg.data(), jpeg.size(), img, size) && !img.pixels.empty()) {
+                        outRgba = std::move(img.pixels);
+                        return true;
+                    }
+                }
+            }
+            GenerateStockAvatar((int)peer.avatarKey, size, size, outRgba);
+            return true;
+        }
+    }
+
+    GenerateStockAvatar((int)(steamId % 12), size, size, outRgba);
+    return true;
+}
+
+int GetAvatarHandle(uint64_t steamId, int size) {
+    if (size <= 0) size = 64;
+    std::lock_guard<std::mutex> lock(g_avatarMu);
+    auto key = std::make_pair(steamId, size);
+    auto it = g_avatarHandles.find(key);
+    if (it != g_avatarHandles.end()) {
+        return it->second;
+    }
+    int handle = g_nextAvatarHandle++;
+    g_avatarHandles[key] = handle;
+    CachedImage ci;
+    ci.width = size;
+    ci.height = size;
+    ResolveAvatarRgba(steamId, size, ci.rgba);
+    g_avatarImages[handle] = std::move(ci);
+
+    struct AvatarImageLoaded_t {
+        enum { k_iCallback = 334 };
+        uint64_t m_steamID;
+        int m_iImage;
+        int m_iWide;
+        int m_iTall;
+    };
+    AvatarImageLoaded_t cb{};
+    cb.m_steamID = steamId;
+    cb.m_iImage = handle;
+    cb.m_iWide = size;
+    cb.m_iTall = size;
+    UnrealSteamEmu::PostCallback(AvatarImageLoaded_t::k_iCallback, &cb, sizeof(cb));
+
+    return handle;
+}
+
+bool GetImageSize(int iImage, uint32_t* pnWidth, uint32_t* pnHeight) {
+    if (iImage <= 0) return false;
+    std::lock_guard<std::mutex> lock(g_avatarMu);
+    if (g_avatarImages.empty() && iImage == 1) {
+        CachedImage ci;
+        ci.width = 64;
+        ci.height = 64;
+        ResolveAvatarRgba(0, 64, ci.rgba);
+        g_avatarImages[1] = std::move(ci);
+        g_avatarHandles[{0, 64}] = 1;
+        if (g_nextAvatarHandle <= 1) g_nextAvatarHandle = 2;
+    }
+    auto it = g_avatarImages.find(iImage);
+    if (it == g_avatarImages.end()) return false;
+    if (pnWidth) *pnWidth = (uint32_t)it->second.width;
+    if (pnHeight) *pnHeight = (uint32_t)it->second.height;
+    return true;
+}
+
+bool GetImageRGBA(int iImage, uint8_t* pubDest, int nDestBufferSize) {
+    if (iImage <= 0 || !pubDest) return false;
+    std::lock_guard<std::mutex> lock(g_avatarMu);
+    if (g_avatarImages.empty() && iImage == 1) {
+        CachedImage ci;
+        ci.width = 64;
+        ci.height = 64;
+        ResolveAvatarRgba(0, 64, ci.rgba);
+        g_avatarImages[1] = std::move(ci);
+        g_avatarHandles[{0, 64}] = 1;
+        if (g_nextAvatarHandle <= 1) g_nextAvatarHandle = 2;
+    }
+    auto it = g_avatarImages.find(iImage);
+    if (it == g_avatarImages.end()) return false;
+    size_t needed = (size_t)it->second.width * it->second.height * 4;
+    if ((size_t)nDestBufferSize < needed) return false;
+    memcpy(pubDest, it->second.rgba.data(), needed);
+    return true;
+}
+
+void InvalidateAvatar(uint64_t steamId) {
+    std::lock_guard<std::mutex> lock(g_avatarMu);
+    for (int size : { 32, 64, 184 }) {
+        auto key = std::make_pair(steamId, size);
+        auto it = g_avatarHandles.find(key);
+        if (it != g_avatarHandles.end()) {
+            int handle = it->second;
+            CachedImage ci;
+            ci.width = size;
+            ci.height = size;
+            ResolveAvatarRgba(steamId, size, ci.rgba);
+            g_avatarImages[handle] = std::move(ci);
+
+            struct AvatarImageLoaded_t {
+                enum { k_iCallback = 334 };
+                uint64_t m_steamID;
+                int m_iImage;
+                int m_iWide;
+                int m_iTall;
+            };
+            AvatarImageLoaded_t cb{};
+            cb.m_steamID = steamId;
+            cb.m_iImage = handle;
+            cb.m_iWide = size;
+            cb.m_iTall = size;
+            UnrealSteamEmu::PostCallback(AvatarImageLoaded_t::k_iCallback, &cb, sizeof(cb));
+        }
+    }
 }
 
 } // namespace ReFixOverlay

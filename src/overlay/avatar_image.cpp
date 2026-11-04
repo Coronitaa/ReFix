@@ -204,7 +204,7 @@ bool LoadFile(const std::wstring& path, Rgba& out, int size) {
     return CopyRgba(src, out);
 }
 
-bool DecodeMemory(const uint8_t* data, size_t len, Rgba& out) {
+bool DecodeMemory(const uint8_t* data, size_t len, Rgba& out, int size) {
     IWICImagingFactory* f = Factory();
     if (!f || !data || len == 0) return false;
     Com<IWICStream> stream;
@@ -215,7 +215,7 @@ bool DecodeMemory(const uint8_t* data, size_t len, Rgba& out) {
     Com<IWICBitmapFrameDecode> frame;
     if (FAILED(decoder->GetFrame(0, &frame))) return false;
     Com<IWICBitmapSource> src;
-    if (!BuildSquare(frame, nullptr, 0, true, &src)) return false;
+    if (!BuildSquare(frame, nullptr, size, true, &src)) return false;
     return CopyRgba(src, out);
 }
 

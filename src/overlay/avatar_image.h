@@ -22,7 +22,7 @@ bool ImportAvatar(const std::wstring& source, const std::wstring& destPng, std::
 
 // Decodes a file / memory buffer into RGBA, scaled to `size` x `size` when size > 0.
 bool LoadFile(const std::wstring& path, Rgba& out, int size = 0);
-bool DecodeMemory(const uint8_t* data, size_t len, Rgba& out);
+bool DecodeMemory(const uint8_t* data, size_t len, Rgba& out, int size = 0);
 
 // Square JPEG of an image file, for the LAN avatar exchange.
 bool EncodeJpeg(const std::wstring& path, int size, std::vector<uint8_t>& out);

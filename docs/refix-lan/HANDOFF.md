@@ -427,3 +427,16 @@
   - In `src/overlay/refix_overlay.cpp` (`ResolveIdentity`), on the first run of a game without profiles (`mine.empty() && !otherInstance`), ReFix no longer halts `SteamAPI_Init` or disrupts fullscreen boot unless `FirstRunDialog = true` is explicitly configured. Instead, the game boots directly and smoothly with machine identity.
   - In `App::Frame` (`src/overlay/overlay_app.cpp`), once the game window reaches the foreground, a welcome toast is displayed ("ReFix LAN: Pulsa [Shift] [Tab] para abrir ReFix" / "Press [Shift] [Tab] to open ReFix"). The player can open the overlay at any time in-game to create or import their profile, with save data inheritance preserved.
 
+## 2026-11-04 (19) - Steam Avatar Provider (resolves solid blue square avatars in-game)
+- **Root cause of blue avatars**:
+  - `ISteamFriends::GetSmallFriendAvatar`, `GetMediumFriendAvatar`, and `GetLargeFriendAvatar` in both `src/unreal_steam_emu.cpp` and `src/steam_proxy.cpp` returned a hardcoded handle `1`.
+  - `ISteamUtils::GetImageSize` returned hardcoded `32x32`.
+  - `ISteamUtils::GetImageRGBA` filled all pixels with hardcoded `RGBA(70, 130, 220, 255)` (`#4682DC` Steel Blue), rendering a solid blue square for all players in games that query Steam avatars (e.g., PEAK, Lethal Company, Phasmophobia).
+- **Dynamic Avatar Provider & Image Cache**:
+  - Implemented `ReFixOverlay::GetAvatarHandle(steamId, size)`, `GetImageSize`, `GetImageRGBA`, and `InvalidateAvatar` in `src/overlay/refix_overlay.cpp`.
+  - **Custom avatars**: When a profile has a custom avatar (`avatar.png`), or when `steam_settings\avatar.png` exists, loads and scales the image via WIC (`image::LoadFile`), outputting genuine high-quality 32-bit RGBA pixels matching the requested size (Small 32x32, Medium 64x64, Large 184x184).
+  - **Stock avatars**: Algorithmically renders smooth anti-aliased avatars featuring the ReFix theme color gradient (from `kStock` palette) with a soft translucent white player silhouette. Each player gets a distinct theme color based on their profile's stock avatar index or deterministic SteamID.
+  - **Remote LAN peers**: Decodes remote JPEG avatars received over LAN presence (`net::FetchAvatar`) and scales them via WIC `image::DecodeMemory(data, len, out, size)`.
+  - **Cache invalidation**: Modifying or importing an avatar in the overlay calls `ReFixOverlay::InvalidateAvatar(steamId)` and broadcasts `AvatarImageLoaded_t` (callback 334) so the in-game UI updates in real time.
+
+
