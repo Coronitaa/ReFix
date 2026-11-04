@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.1.0" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.1.1" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -21,7 +21,7 @@ $required = @(
     "bin\lan\x86\steam_api.dll",
     "bin\online\steam_api64.dll", "bin\online\winmm.dll", "bin\online\EOSSDK-Win64-Shipping.dll",
     "bin\online\x86\steam_api.dll",
-    "bin\deploy_helper.ps1", "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "ReFix.ini", "LICENSE"
+    "bin\deploy_helper.ps1", "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "Uninstall_ReFix.sh", "ReFix.ini", "LICENSE"
 )
 $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $repo $_)) })
 if ($missing.Count -gt 0) {
@@ -40,7 +40,7 @@ function Copy-Into([string]$relative) {
 }
 
 # Entry points
-foreach ($f in "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "ReFix.ini", "LICENSE") { Copy-Into $f }
+foreach ($f in "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "Uninstall_ReFix.sh", "ReFix.ini", "LICENSE") { Copy-Into $f }
 
 # Deploy scripts and the small helpers they call
 Get-ChildItem -LiteralPath $bin -File | Where-Object {
@@ -70,7 +70,7 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.1.0 - LAN / Online
+ReFix 2.1.1 - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.
@@ -92,7 +92,7 @@ ReFix LAN
   Xbox / PS button of a controller), Steam's own overlay, or none. Overlay sounds: [Overlay] Sounds.
 - Debug logging is off ([Debug] EnableLog = false); turn it on only to report a problem.
 
-Uninstall_ReFix.bat restores the game's original files and gives the game this PC's own saves back.
+Uninstall_ReFix.bat (Windows) or Uninstall_ReFix.sh (Linux) restores the game's original files and gives the game this PC's own saves back.
 ReFix LAN profiles (and the saves each one keeps) stay in %APPDATA%\ReFix: every ReFix game of the PC
 can use them ("Import from another game" when creating a profile).
 
@@ -101,7 +101,7 @@ Linux (Steam Play / Proton)
   or:  bash AutoDeploy.sh "<game folder>" lan|online [appid]
 - ReFix Online: start the game from Steam. ReFix LAN: start the .exe with Proton/Wine
   or add it to Steam as a non-Steam game.
-- Undo: bash AutoDeploy.sh --uninstall "<game folder>"
+- Undo: bash Uninstall_ReFix.sh "<game folder>" (or bash AutoDeploy.sh --uninstall "<game folder>")
 "@
 Set-Content -LiteralPath (Join-Path $OutDir "README.txt") -Value $readme -Encoding UTF8
 

@@ -2,6 +2,8 @@
 build/
 deploy/
 pre_release/
+*.zip
+analysis/
 *.obj
 *.pdb
 *.map
@@ -47,6 +49,8 @@ src/fusion_shared/obj/
 
 # Release distribution builds
 release/
+*.zip
+analysis/
 build_x86_lan/
 
 bin/*_test_tmp/

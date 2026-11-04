@@ -140,11 +140,25 @@ restore_saves() {
 uninstall() {
     info "Restoring the game's original files in $GAME_DIR"
     restore_saves
-    while IFS= read -r d; do restore_one "$d" steam_api64_original.dll steam_api64.dll; rm -f "$d/steam_api64_valve.dll"; done < <(dirs_with steam_api64_original.dll)
-    while IFS= read -r d; do restore_one "$d" steam_api_original.dll steam_api.dll; rm -f "$d/steam_api_o.dll"; done < <(dirs_with steam_api_original.dll)
-    while IFS= read -r d; do restore_one "$d" EOSSDK_original.dll EOSSDK-Win64-Shipping.dll; done < <(dirs_with EOSSDK_original.dll)
+    while IFS= read -r d; do
+        restore_one "$d" steam_api64_original.dll steam_api64.dll
+        restore_one "$d" steam_api64_valve.dll steam_api64.dll
+        restore_one "$d" steam_api64_o.dll steam_api64.dll
+        rm -f "$d/steam_api64_valve.dll"
+    done < <({ dirs_with steam_api64_original.dll; dirs_with steam_api64_valve.dll; dirs_with steam_api64_o.dll; } | sort -u)
+    while IFS= read -r d; do
+        restore_one "$d" steam_api_original.dll steam_api.dll
+        restore_one "$d" steam_api_valve.dll steam_api.dll
+        restore_one "$d" steam_api_o.dll steam_api.dll
+        rm -f "$d/steam_api_o.dll"
+    done < <({ dirs_with steam_api_original.dll; dirs_with steam_api_valve.dll; dirs_with steam_api_o.dll; } | sort -u)
+    while IFS= read -r d; do
+        restore_one "$d" EOSSDK_original.dll EOSSDK-Win64-Shipping.dll
+        rm -f "$d/RedboneEOS.dll"
+    done < <({ dirs_with EOSSDK_original.dll; dirs_with RedboneEOS.dll; } | sort -u)
     while IFS= read -r d; do restore_one "$d" winmm_o.dll winmm.dll; done < <(dirs_with winmm_o.dll)
-    ok "Done. ReFix.ini and saves were left in place."
+    find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" \) -delete 2>/dev/null || true
+    ok "Done. ReFix files removed and backups restored."
     echo "    ReFix LAN profiles and their saves stay in the prefix's AppData/Roaming/ReFix (shared by every game)."
 }
 
@@ -313,6 +327,10 @@ if [ "${1:-}" = "--uninstall" ]; then UNINSTALL=1; shift; fi
 
 TARGET="${1:-}"
 [ -n "$TARGET" ] || TARGET="$(ask_game_dir)"
+if [ -z "$TARGET" ]; then
+    warn "No folder selected or operation cancelled."
+    exit 0
+fi
 TARGET="${TARGET%/}"
 [ -e "$TARGET" ] || die "Not found: $TARGET"
 if [ -f "$TARGET" ]; then

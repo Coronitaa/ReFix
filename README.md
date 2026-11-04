@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.1.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.1.0)
+[![Release](https://img.shields.io/badge/version-v2.1.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.1.1)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -15,7 +15,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 ## Install
 
-1. Download `ReFix_Release_v2.1.0.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
+1. Download `ReFix_Release_v2.1.1.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
    - `[1] ReFix Online via Steam` or `[2] ReFix LAN without Steam`
@@ -25,7 +25,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 Everyone who plays together needs the same ReFix version and the same mode.
 
-To undo everything, run `Uninstall_ReFix.bat` (or `bash AutoDeploy.sh --uninstall "<game folder>"`). It restores the game's original DLLs and gives the game this PC's own saves back. ReFix LAN profiles stay in `%APPDATA%\ReFix`.
+To undo everything, run `Uninstall_ReFix.bat` on Windows (or `bash Uninstall_ReFix.sh` on Linux). It restores the game's original DLLs and gives the game this PC's own saves back. ReFix LAN profiles stay in `%APPDATA%\ReFix`.
 
 To update ReFix in a game, run the new `AutoDeploy` on it again.
 
@@ -70,7 +70,7 @@ Press **Shift+Tab**, or the Xbox / PS button of a controller.
 bash AutoDeploy.sh                                        # asks for everything
 bash AutoDeploy.sh "/path/to/game" lan                    # ReFix LAN
 bash AutoDeploy.sh "/path/to/game" online 480 none        # game folder, mode, AppID, overlay
-bash AutoDeploy.sh --uninstall "/path/to/game"
+bash Uninstall_ReFix.sh "/path/to/game"                    # or bash AutoDeploy.sh --uninstall
 ```
 
 For ReFix Online, launch the game from Steam with Proton so the Steam client is running. The script has only been tested with bash on Windows so far. If it fails on your distro, open an issue with the output.

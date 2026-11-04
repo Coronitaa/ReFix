@@ -484,3 +484,19 @@
   - In save_swap.cpp (MoveOne and MoveEntries), updated to MOVEFILE_REPLACE_EXISTING and cleaned up destination collision targets with DeleteTree prior to moving, preventing stash collisions from failing profile save-swaps.
 - **Verification**: Built x64 and x86, passed 	est_lan_profiles.exe with new StatsRoot isolation tests, updated 
 elease\ReFix_v2.1.0, and deployed to D:\Games\PEAK\PEAK_Data\Plugins\x86_64\steam_api64.dll.
+
+
+## 2026-11-04 (23) - Save & stats persistence, Steamworks.NET callbacks, and 2.1.1 release
+- **Immediate stats persistence**:
+  - `SetStat`, `SetAchievement`, `ClearAchievement`, `ResetAllStats`, and `StoreStats` in `src/unreal_steam_emu.cpp` now persist immediately to `stats.ini` via atomic temporary files (`.tmp` -> replace), ensuring no data is lost on abrupt process termination.
+  - Added parent directory creation before writing `stats.ini`.
+  - Added explicit `FlushUserStats()` during profile restarts in `App::RestartWithProfile()` and library cleanup in `SteamAPI_Shutdown()`.
+- **Steamworks.NET callback broadcast**:
+  - Posted `UserStatsReceived_t` (callback 1101) and `UserStatsStored_t` (callback 1102) to the global callback dispatcher upon `RequestCurrentStats()` and `StoreStats()`, satisfying Unity Steamworks.NET event loops.
+- **Strict per-game profile isolation**:
+  - Fixed per-game profile directory resolution and AppID detection from environment variables (`SteamAppId`, `SteamGameId`) and parent directory traversal.
+  - Prevented foreign game profiles from silently taking ownership of active sessions in newly patched games.
+- **Linux uninstaller**:
+  - Added standalone `Uninstall_ReFix.sh` alongside `AutoDeploy.sh` for Proton/Wine environments.
+- **Release 2.1.1**:
+  - Packaged `release\ReFix_v2.1.1` and tagged `v2.1.1`.

@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal disabledelayedexpansion
-title ReFix LAN - Universal AutoDeploy Tool v2.1.0
+title ReFix LAN - Universal AutoDeploy Tool v2.1.1
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
