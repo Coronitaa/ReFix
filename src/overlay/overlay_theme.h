@@ -97,6 +97,10 @@ bool LinkButton(const char* label);
 bool IconButton(const char* id, const char* glyph, const char* tooltip, ImU32 tint, bool enabled = true,
                 float diameter = 0.0f);
 void Tooltip(const char* text);
+// Pass-through for "was it clicked": plays the select sound when it was.
+bool Clicked(bool clicked);
+// Invisible button that keyboard/controller navigation can reach.
+bool NavButton(const char* id, ImVec2 size);
 // Tooltips of the next items open above them (the browser page, a separate window, covers anything below).
 void SetTooltipsAbove(bool above);
 void GlyphCentered(ImDrawList* dl, ImFont* font, float size, ImVec2 center, ImU32 col, const char* glyph);

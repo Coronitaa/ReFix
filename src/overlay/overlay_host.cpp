@@ -80,7 +80,14 @@ bool PollHotkey() {
     return pressed && IsOurProcessWindow(GetForegroundWindow());
 }
 
+// Shift+Tab is the overlay's own hotkey: ImGui would take its Tab as "focus the previous field" and start
+// editing the search box as soon as the overlay opens.
+bool IsHotkeyTab(UINT msg, WPARAM wp) {
+    return (msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (IsHotkeyTab(msg, wp)) return 0;
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
     switch (msg) {
     case WM_MOUSEACTIVATE:
@@ -258,13 +265,16 @@ bool CanHostAsChild(const GameWindow& gw) {
     return why == nullptr;
 }
 
-// The game keeps the activation while the overlay is its child, so its raw mouse/keyboard input (camera,
-// movement) would keep running under the overlay. Raw input registrations belong to the process: take the
-// game's mouse and keyboard ones away while the overlay is open and give back exactly what it had.
+// The game keeps the activation while the overlay is its child, so its raw input (camera, movement,
+// controllers read as HID) would keep running under the overlay. Raw input registrations belong to the
+// process: take the game's away while the overlay is open and give back exactly what it had.
 std::vector<RAWINPUTDEVICE> g_suspendedRaw;
 
-bool IsMouseOrKeyboard(const RAWINPUTDEVICE& d) {
-    return d.usUsagePage == 0x01 && (d.usUsage == 0x02 || d.usUsage == 0x06);
+// Generic Desktop usages a game reads its player input from: mouse, joystick, gamepad, keyboard, multi-axis
+// controller (PlayStation pads and DirectInput devices arrive as joystick/gamepad raw input).
+bool IsPlayerInput(const RAWINPUTDEVICE& d) {
+    if (d.usUsagePage != 0x01) return false;
+    return d.usUsage == 0x02 || d.usUsage == 0x04 || d.usUsage == 0x05 || d.usUsage == 0x06 || d.usUsage == 0x08;
 }
 
 void SuspendGameRawInput() {
@@ -276,7 +286,7 @@ void SuspendGameRawInput() {
     if (GetRegisteredRawInputDevices(all.data(), &count, sizeof(RAWINPUTDEVICE)) == (UINT)-1) return;
     all.resize(count);
     for (const RAWINPUTDEVICE& d : all) {
-        if (!IsMouseOrKeyboard(d)) continue;
+        if (!IsPlayerInput(d)) continue;
         RAWINPUTDEVICE remove = d;
         remove.dwFlags = RIDEV_REMOVE;
         remove.hwndTarget = nullptr;
@@ -300,11 +310,17 @@ void BecomeChild(HWND game) {
     SetParent(g_hwnd, game);
     g_childOf = game;
     SuspendGameRawInput();
+    // XInput cannot be taken away from the game, and it never lost the activation. Tell it what Windows
+    // would tell it if another app came to the front (not WM_ACTIVATE, which makes fullscreen Unity games
+    // minimise): games stop reading controllers while in the background (Unreal by default, Unity's input
+    // background behaviour). Undone in BecomePopup.
+    PostMessageW(game, WM_ACTIVATEAPP, FALSE, (LPARAM)GetCurrentThreadId());
 }
 
 void BecomePopup() {
     if (!g_childOf) return;
     ResumeGameRawInput();
+    if (IsWindow(g_childOf)) PostMessageW(g_childOf, WM_ACTIVATEAPP, TRUE, (LPARAM)GetCurrentThreadId());
     ShowWindow(g_hwnd, SW_HIDE);
     SetParent(g_hwnd, nullptr);
     SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_POPUP);

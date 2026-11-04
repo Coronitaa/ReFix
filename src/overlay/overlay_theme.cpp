@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "overlay_theme.h"
+#include "overlay_sound.h"
 #include "../imgui/imgui_internal.h"
 
 #include <windows.h>
@@ -101,7 +102,7 @@ bool StyledButton(const char* label, ImVec2 size, bool enabled, ImU32 fill, ImU3
     ImGui::PopFont();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(5);
-    return clicked && enabled;
+    return Clicked(clicked && enabled);
 }
 
 } // namespace
@@ -215,7 +216,7 @@ bool LinkButton(const char* label) {
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(color::Muted));
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const ImVec2 size = ImGui::CalcTextSize(label);
-    const bool clicked = ImGui::InvisibleButton(label, size);
+    const bool clicked = NavButton(label, size);
     const bool hovered = ImGui::IsItemHovered();
     ImGui::GetWindowDrawList()->AddText(pos, hovered ? color::Text : color::Muted, label);
     if (hovered) {
@@ -223,10 +224,19 @@ bool LinkButton(const char* label) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     }
     ImGui::PopStyleColor();
-    return clicked;
+    return Clicked(clicked);
 }
 
 void SetTooltipsAbove(bool above) { g_tooltipsAbove = above; }
+
+// InvisibleButton is left out of keyboard/controller navigation unless asked (ImGui 1.91): every
+// clickable surface of the overlay goes through here so the D-pad reaches it.
+bool NavButton(const char* id, ImVec2 size) { return ImGui::InvisibleButton(id, size, ImGuiButtonFlags_EnableNav); }
+
+bool Clicked(bool clicked) {
+    if (clicked) sound::Play(sound::Cue::Select);
+    return clicked;
+}
 
 // Centres a single glyph on its drawn box. CalcTextSize uses the line height of the font the icons are
 // merged into, which put icons below and to the side of the centre.
@@ -261,7 +271,7 @@ bool IconButton(const char* id, const char* glyph, const char* tooltip, ImU32 ti
     const float d = diameter > 0 ? diameter : S(34);
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     ImGui::PushID(id);
-    const bool clicked = ImGui::InvisibleButton("##icon", ImVec2(d, d)) && enabled;
+    const bool clicked = NavButton("##icon", ImVec2(d, d)) && enabled;
     const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     const bool held = ImGui::IsItemActive();
     Tooltip(tooltip);
@@ -275,7 +285,7 @@ bool IconButton(const char* id, const char* glyph, const char* tooltip, ImU32 ti
         dl->AddCircle(c, d * 0.5f - 0.5f, IM_COL32(255, 255, 255, 18), 32, 1.0f);
     }
     GlyphCentered(dl, F().body, d * 0.48f, c, enabled ? tint : color::Faint, glyph);
-    return clicked;
+    return Clicked(clicked);
 }
 
 void Keycap(const char* text) {
@@ -332,7 +342,7 @@ void BeginCard(const char* id, ImVec2 pos, ImVec2 size, float padding) {
     Card(ImGui::GetWindowDrawList(), pos, ImVec2(pos.x + size.x, pos.y + size.y));
     const float pad = S(padding);
     ImGui::SetCursorScreenPos(ImVec2(pos.x + pad, pos.y + pad));
-    ImGui::BeginChild(id, ImVec2(size.x - pad * 2, size.y - pad * 2), ImGuiChildFlags_None,
+    ImGui::BeginChild(id, ImVec2(size.x - pad * 2, size.y - pad * 2), ImGuiChildFlags_NavFlattened,
                       ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 }
 

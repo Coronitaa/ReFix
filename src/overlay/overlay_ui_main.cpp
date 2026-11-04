@@ -70,13 +70,21 @@ void App::DrawOverlay(ImVec2 viewport) {
                                                             IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0));
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(viewport);
+    // Keyboard/controller navigation needs a focused window from the first frame (opened with the Guide
+    // button there was none, so the D-pad did nothing).
+    if (focusOverlay_) {
+        ImGui::SetNextWindowFocus();
+        focusOverlay_ = false;
+    }
     ImGui::Begin("##overlay", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     // ImGui closes a popup on Escape before this runs: only close the overlay if none was open last frame.
     // B / Circle on a controller goes back the same way.
-    if ((ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) && !popupOpenLastFrame_)
+    // Not while a field is being edited: there Escape / B only leaves the field.
+    if ((ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) && !popupOpenLastFrame_ &&
+        !ImGui::IsAnyItemActive())
         CloseOverlay();
 
     if (inviteOnly_) {
@@ -150,7 +158,7 @@ void App::DrawTopBar(ImVec2 viewport) {
     chipMin_ = ImVec2(x, cy - chipH * 0.5f);
     chipMax_ = ImVec2(x + chipW, cy + chipH * 0.5f);
     ImGui::SetCursorScreenPos(chipMin_);
-    if (ImGui::InvisibleButton("##chip", ImVec2(chipW, chipH))) ImGui::OpenPopup("##profilemenu");
+    if (ui::Clicked(ui::NavButton("##chip", ImVec2(chipW, chipH)))) ImGui::OpenPopup("##profilemenu");
     const bool hover = ImGui::IsItemHovered();
     if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     ui::Tooltip(!active_ ? i18n::T("Playing without a profile", "Jugando sin perfil")
@@ -215,7 +223,7 @@ void App::DrawCommunity(ImVec2 pos, float width) {
         const ImVec2 p1(p0.x + tileW, p0.y + ui::S(kTileHeight));
         ImGui::SetCursorScreenPos(p0);
         ImGui::PushID(i);
-        const bool clicked = ImGui::InvisibleButton("##tile", ImVec2(tileW, ui::S(kTileHeight)));
+        const bool clicked = ui::Clicked(ui::NavButton("##tile", ImVec2(tileW, ui::S(kTileHeight))));
         const bool hover = ImGui::IsItemHovered();
         ImGui::PopID();
         if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -240,7 +248,7 @@ void App::DrawCommunity(ImVec2 pos, float width) {
 void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
     if (pickerStyle) {
         ImGui::SetCursorScreenPos(pos);
-        ImGui::BeginChild("##pickerplayers", size, ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+        ImGui::BeginChild("##pickerplayers", size, ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     } else {
         ui::BeginCard("##players", pos, size);
         ImGui::PushFont(ui::F().heading);
@@ -268,7 +276,7 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
                                         ui::color::Faint, ui::icon::Search);
     ImGui::Dummy(ImVec2(0, ui::S(2)));
 
-    ImGui::BeginChild("##list", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImGui::BeginChild("##list", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     const float width = ImGui::GetContentRegionAvail().x;
     int shown = 0;
     auto section = [&](const char* label, auto&& pick) {

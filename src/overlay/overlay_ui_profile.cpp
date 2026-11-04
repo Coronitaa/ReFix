@@ -45,7 +45,7 @@ RowAction MenuRow(const char* id, const char* glyph, const ui::AvatarRef* avatar
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::PushID(id);
     if (deletable) ImGui::SetNextItemAllowOverlap();
-    const bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h)) && enabled;
+    const bool clicked = ui::Clicked(ui::NavButton("##row", ImVec2(w, h)) && enabled);
     const bool hover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_AllowWhenOverlappedByItem);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (hover && enabled) {
@@ -150,7 +150,7 @@ void App::DrawLanguageSwitch(ImVec2 rightEdgeCenter) {
         const bool active = i18n::Current() == segs[i].lang;
         ImGui::SetCursorScreenPos(a);
         ImGui::PushID(i);
-        if (ImGui::InvisibleButton("##lang", ImVec2(segW, h)) && !active) i18n::Set(segs[i].lang);
+        if (ui::Clicked(ui::NavButton("##lang", ImVec2(segW, h)) && !active)) i18n::Set(segs[i].lang);
         const bool hover = ImGui::IsItemHovered();
         ImGui::PopID();
         if (hover && !active) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -449,7 +449,7 @@ bool App::DrawEditorBody(bool firstRun) {
         const ImVec2 cc(g0.x + (i % kGridColumns + 0.5f) * cell, g0.y + (i / kGridColumns + 0.5f) * cell);
         ImGui::SetCursorScreenPos(ImVec2(cc.x - cell * 0.5f, cc.y - cell * 0.5f));
         ImGui::PushID(i);
-        if (ImGui::InvisibleButton("##stock", ImVec2(cell, cell))) {
+        if (ui::Clicked(ui::NavButton("##stock", ImVec2(cell, cell)))) {
             editor_.stock = i;
             editor_.custom = false;
         }
@@ -624,7 +624,7 @@ void App::DrawPicker() {
     ImGui::Dummy(ImVec2(0, ui::S(12)));
 
     const float footer = ui::S(56);
-    ImGui::BeginChild("##profiles", ImVec2(0, ImGui::GetContentRegionAvail().y - footer), ImGuiChildFlags_None,
+    ImGui::BeginChild("##profiles", ImVec2(0, ImGui::GetContentRegionAvail().y - footer), ImGuiChildFlags_NavFlattened,
                       ImGuiWindowFlags_NoBackground);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float gap = ui::S(12);
@@ -646,7 +646,7 @@ void App::DrawPicker() {
         ImGui::SetCursorScreenPos(p0);
         ImGui::PushID(i);
         ImGui::SetNextItemAllowOverlap();
-        const bool clicked = ImGui::InvisibleButton("##card", ImVec2(cardW, cardH)) && enabled;
+        const bool clicked = ui::Clicked(ui::NavButton("##card", ImVec2(cardW, cardH)) && enabled);
         const bool hover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem);
         if (hover && enabled) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         dl->AddRectFilled(p0, p1, hover && enabled ? ui::color::RowHover : ui::color::Row, ui::S(14));

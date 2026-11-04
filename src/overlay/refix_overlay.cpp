@@ -3,6 +3,7 @@
 #endif
 #include "refix_overlay.h"
 #include "overlay_app.h"
+#include "overlay_sound.h"
 #include "overlay_text.h"
 #include "profile_store.h"
 #include "save_swap.h"
@@ -27,6 +28,7 @@ struct Config {
     bool enabled = true;
     bool blockSteamOverlay = true;
     bool isolateSaves = true;
+    bool sounds = true;
 };
 
 Config g_cfg;
@@ -76,6 +78,8 @@ void LoadConfig(const std::string& iniPath) {
     g_cfg.enabled = read("Enabled", true);
     g_cfg.blockSteamOverlay = read("BlockSteamOverlay", true);
     g_cfg.isolateSaves = read("IsolateSaves", true);
+    g_cfg.sounds = read("Sounds", true);
+    sound::SetEnabled(g_cfg.sounds);
 }
 
 // Same search as the emulator's LoadConfig: next to the exe and up to four folders above.
@@ -164,7 +168,9 @@ namespace ReFixOverlay {
 void ArmEarly() {
     CaptureLaunchEnvironment();
     LoadConfig(FindIni());
-    if (EnvIs(L"REFIX_NO_OVERLAY", L"1") || !g_cfg.enabled || !g_cfg.blockSteamOverlay) return;
+    // Independent of the ReFix overlay: Enabled=false + BlockSteamOverlay=true means no overlay at all,
+    // Enabled=false + BlockSteamOverlay=false lets Steam's own overlay draw.
+    if (!g_cfg.blockSteamOverlay) return;
     ArmSteamOverlayBlock();
 }
 

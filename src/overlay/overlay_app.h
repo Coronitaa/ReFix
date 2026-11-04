@@ -176,7 +176,8 @@ private:
     std::wstring webUrl_;            // page of the browser modal
     bool webOpen_ = false;
     bool webOpenRequested_ = false;  // (re)open the modal popup on the next overlay frame
-    bool webDrawn_ = false;          // the modal was drawn this frame: the web view may show
+    bool webDrawn_ = false;
+    bool focusOverlay_ = false;      // give the overlay window the keyboard/controller focus next frame          // the modal was drawn this frame: the web view may show
 };
 
 } // namespace refix::overlay

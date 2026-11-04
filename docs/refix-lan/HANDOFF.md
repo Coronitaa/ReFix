@@ -347,3 +347,32 @@
 - 32-bit: the x86 DLL was run in Left 4 Dead (Source, D3D9): profile picked, overlay started, welcome toast
   window created, no D3D11/DirectComposition errors (Shift+Tab inside it not exercised). Import tables of the x64
   and x86 DLLs unchanged; hid/setupapi only in the delay-load table.
+
+## 2026-11-03 (15) - Controller navigation, game input under the overlay, sounds, deploy/uninstall
+- Controller (tested by the user: Guide opened the overlay, B closed it, but the D-pad did nothing and the game
+  kept moving): ImGui 1.91 keeps `InvisibleButton` out of keyboard/gamepad navigation unless it gets
+  `ImGuiButtonFlags_EnableNav`, and every tile, card, row and icon button of the overlay is one. They all go
+  through `ui::NavButton` now. Found with ImGui's own nav log (`ImGuiDebugLogFlags_EventNav`): the nav init
+  skipped the whole top bar and picked the search box. Also: child windows use `ImGuiChildFlags_NavFlattened`, the
+  overlay window gets the focus when it opens, the Tab of the Shift+Tab hotkey no longer reaches ImGui (it
+  started editing the search box), and Escape/B do not close the overlay while a field is being edited.
+  Checked in Lethal Company with the arrow keys + Enter (the same navigation the D-pad + A use).
+- Game input while the overlay is open: joystick/gamepad/multi-axis raw input (PlayStation pads, DirectInput)
+  is suspended with mouse and keyboard; XInput cannot be taken away without hooks, so the game is told it went to
+  the background with `WM_ACTIVATEAPP(FALSE)` (checked: Lethal Company does not minimise on it, unlike
+  `WM_ACTIVATE`) and `WM_ACTIVATEAPP(TRUE)` on close. Games that keep reading XInput in the background will still
+  see the pad; not verified with a pad here.
+- Sounds (`overlay_sound.cpp`): open, close, select, focus move (keyboard/controller only), invite, not
+  possible. Sine tones synthesised in memory, soft attack, mostly under -20 dBFS, on the overlay's own waveOut
+  stream (not PlaySound, which would cut a game's own PlaySound); winmm delay-loaded. `[Overlay] Sounds = false`
+  turns them off.
+- Overlay choice: AutoDeploy.bat / AutoDeploy.sh ask in LAN mode for ReFix overlay / Steam overlay / none
+  (`REFIX_OVERLAY_MODE` 1-3 or refix/steam/none for unattended deploys; 4th argument of AutoDeploy.sh;
+  `deploy_helper.ps1 -OverlayMode`): Enabled/BlockSteamOverlay true/true, false/false, false/true. The Steam
+  overlay block no longer depends on Enabled (it did, so "none" left Steam's overlay on).
+- Shipped ini: `VerboseArbitrationLog = false` (was true) in ReFix.ini and the deploy template; EnableLog and
+  EnableConsole were already false.
+- Uninstall: `bin/restore_saves.ps1` (Uninstall_ReFix.bat) and `restore_saves` in `AutoDeploy.sh --uninstall`
+  (Wine/Proton prefix, iconv for the UTF-16 inis) give the game this PC's own saves back before the DLLs are
+  restored: the profile that kept the PC's saves (NativeSaves=1) or `Saves\_pc`; the saves in place go to their
+  profile. Nothing deleted, profiles stay. Tested in sandboxes for both cases and on a real uninstall.

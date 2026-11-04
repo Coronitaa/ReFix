@@ -6,6 +6,8 @@
 #include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "overlay_web.h"
+#include "overlay_sound.h"
+#include "../imgui/imgui_internal.h"
 #include "save_swap.h"
 #include "refix_overlay.h"
 
@@ -146,6 +148,10 @@ void App::PostOverlayActivated(bool active) {
 
 void App::OpenOverlay(bool inviteOnly, uint64_t inviteLobby, const std::string& connect) {
     if (!started_) return;
+    if (!overlayOpen_) {
+        focusOverlay_ = true;
+        sound::Play(sound::Cue::Open);
+    }
     overlayOpen_ = true;
     inviteOnly_ = inviteOnly;
     inviteLobby_ = inviteLobby;
@@ -155,6 +161,7 @@ void App::OpenOverlay(bool inviteOnly, uint64_t inviteLobby, const std::string& 
 }
 
 void App::CloseOverlay() {
+    if (overlayOpen_) sound::Play(sound::Cue::Close);
     if (webOpen_) webOpenRequested_ = true;   // the page is still there when the overlay reopens
     overlayOpen_ = false;
     inviteOnly_ = false;
@@ -257,6 +264,7 @@ void App::PollInvites() {
         t.born = GetTickCount64();
         t.life = kInviteToastMs;
         toasts_.push_back(std::move(t));
+        sound::Play(sound::Cue::Notify);
         ReFixLog("[Overlay] Invite from %llu (lobby %llu)", (unsigned long long)inv.from, (unsigned long long)inv.lobbyId);
     }
 }
@@ -304,6 +312,9 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
     if (dialog_ != DialogKind::None) DrawDialog(viewport);
     else if (overlayOpen_) DrawOverlay(viewport);
     else DrawToasts(viewport, true);
+    // Keyboard/controller focus moved to another item this frame (never set by the mouse).
+    if (ImGui::GetCurrentContext()->NavJustMovedToId != 0 && (overlayOpen_ || dialog_ != DialogKind::None))
+        sound::Play(sound::Cue::Move);
 }
 
 void App::Join(const net::RemotePlayer& p) {
@@ -396,6 +407,7 @@ void App::RestartWithProfile(const std::wstring& id) {
 
 bool App::DeleteProfile(const std::wstring& id) {
     if ((active_ && active_->id == id) || !profiles::Remove(id)) {
+        sound::Play(sound::Cue::Denied);
         ShowInfo(i18n::T("Could not delete the profile", "No se pudo eliminar el perfil"),
                  i18n::T("It is in use in a game right now.", "Ahora mismo se está usando en un juego."));
         return false;
