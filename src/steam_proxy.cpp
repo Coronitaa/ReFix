@@ -39,6 +39,7 @@
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
 #include "overlay/refix_overlay.h"
+#include "refix_il2cpp.h"
 #endif
 
 static bool EnsureOriginal();
@@ -5140,6 +5141,7 @@ static void ReFixInitializePost(bool success) {
 #if REFIX_LAN_EDITION
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
+        ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
@@ -5505,6 +5507,9 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
         DispatchRelayCallbacks();
         DispatchPendingAuthCallbacks();
+#if REFIX_LAN_EDITION
+        ReFixIL2CPP::Update();
+#endif
     }
     if (s_runCallbacksLogged <= 3) {
         ReFixLog("SteamAPI_RunCallbacks: done");
@@ -5529,6 +5534,9 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
         UnrealSteamEmu::ManualDispatch_RunFrame(hSteamPipe);
     }
     DispatchPendingAuthCallbacks();
+#if REFIX_LAN_EDITION
+    ReFixIL2CPP::Update();
+#endif
 }
 
 static std::atomic<bool> s_lastManualCallbackWasSynthetic{ false };
@@ -5688,6 +5696,9 @@ static void SafeBackendShutdown() {
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+#if REFIX_LAN_EDITION
+    ReFixIL2CPP::Shutdown();
+#endif
     UnrealSteamEmu::FlushUserStats();
     SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);

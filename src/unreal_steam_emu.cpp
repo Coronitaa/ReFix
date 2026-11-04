@@ -3398,6 +3398,7 @@ namespace UnrealSteamEmu {
     class CSteamFriendsEmu : public ISteamFriends017 {
     private:
         std::map<std::string, std::string> m_richPresence;
+        std::map<uint64_t, std::map<std::string, std::string>> m_peerRichPresence;
         std::mutex m_richPresenceMu;
     public:
         virtual const char *GetPersonaName() override {
@@ -3613,21 +3614,220 @@ namespace UnrealSteamEmu {
 
         virtual uint32 GetUserRestrictions() override { return 0; }
 
-        virtual bool SetRichPresence(const char *pchKey, const char *pchValue) override {
-            if (!pchKey) return false;
-            std::lock_guard<std::mutex> lock(m_richPresenceMu);
-            if (pchValue && pchValue[0] != '\0') {
-                m_richPresence[pchKey] = pchValue;
-            } else {
-                m_richPresence.erase(pchKey);
+        static constexpr uint8_t kRichPresenceChannel = 247;
+        static constexpr uint32_t kRichPresenceMagic = 0x50535052; // "RPSP"
+        enum class RichPresenceOp : uint8_t {
+            SetKey = 1,
+            ClearAll = 2,
+            FullSync = 3,
+            RequestSync = 4
+        };
+
+        void BroadcastPresenceSetKey(const std::string& key, const std::string& val) {
+            if (g_transportMode.load() != TransportMode::Canonical) return;
+            auto& core = refix::lan::ILanCore::Get();
+            uint16_t kLen = (uint16_t)key.size();
+            uint16_t vLen = (uint16_t)val.size();
+            std::vector<uint8_t> wire(4 + 1 + 2 + kLen + 2 + vLen);
+            uint8_t* p = wire.data();
+            memcpy(p, &kRichPresenceMagic, 4); p += 4;
+            *p++ = (uint8_t)RichPresenceOp::SetKey;
+            memcpy(p, &kLen, 2); p += 2;
+            if (kLen) { memcpy(p, key.data(), kLen); p += kLen; }
+            memcpy(p, &vLen, 2); p += 2;
+            if (vLen) { memcpy(p, val.data(), vLen); p += vLen; }
+
+            const auto self = core.Identity().GetLocalPeerId();
+            for (const auto& peer : core.Peers().GetAllPeers()) {
+                if (peer.peerId == self) continue;
+                if (peer.endpoint.IsValid()) {
+                    core.Transport().SendReliable(peer.peerId, peer.endpoint, kRichPresenceChannel, wire.data(), wire.size());
+                }
             }
-            ReFixLog("[UnrealSteam] SetRichPresence: '%s' = '%s'", pchKey, pchValue ? pchValue : "");
+        }
+
+        void BroadcastPresenceClear() {
+            if (g_transportMode.load() != TransportMode::Canonical) return;
+            auto& core = refix::lan::ILanCore::Get();
+            std::vector<uint8_t> wire(5);
+            memcpy(wire.data(), &kRichPresenceMagic, 4);
+            wire[4] = (uint8_t)RichPresenceOp::ClearAll;
+
+            const auto self = core.Identity().GetLocalPeerId();
+            for (const auto& peer : core.Peers().GetAllPeers()) {
+                if (peer.peerId == self) continue;
+                if (peer.endpoint.IsValid()) {
+                    core.Transport().SendReliable(peer.peerId, peer.endpoint, kRichPresenceChannel, wire.data(), wire.size());
+                }
+            }
+        }
+
+        void SendPresenceFullSync(const refix::lan::PeerId& targetPeerId, const refix::lan::LanEndpoint& targetEndpoint) {
+            if (g_transportMode.load() != TransportMode::Canonical || !targetEndpoint.IsValid()) return;
+            auto& core = refix::lan::ILanCore::Get();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            std::vector<uint8_t> wire;
+            wire.resize(4 + 1 + 2);
+            memcpy(wire.data(), &kRichPresenceMagic, 4);
+            wire[4] = (uint8_t)RichPresenceOp::FullSync;
+            uint16_t count = (uint16_t)m_richPresence.size();
+            memcpy(wire.data() + 5, &count, 2);
+
+            for (const auto& kv : m_richPresence) {
+                uint16_t kLen = (uint16_t)kv.first.size();
+                uint16_t vLen = (uint16_t)kv.second.size();
+                size_t offset = wire.size();
+                wire.resize(offset + 2 + kLen + 2 + vLen);
+                uint8_t* p = wire.data() + offset;
+                memcpy(p, &kLen, 2); p += 2;
+                if (kLen) { memcpy(p, kv.first.data(), kLen); p += kLen; }
+                memcpy(p, &vLen, 2); p += 2;
+                if (vLen) { memcpy(p, kv.second.data(), vLen); p += vLen; }
+            }
+            core.Transport().SendReliable(targetPeerId, targetEndpoint, kRichPresenceChannel, wire.data(), wire.size());
+        }
+
+        void SendPresenceRequestSync(const refix::lan::PeerId& targetPeerId, const refix::lan::LanEndpoint& targetEndpoint) {
+            if (g_transportMode.load() != TransportMode::Canonical || !targetEndpoint.IsValid()) return;
+            auto& core = refix::lan::ILanCore::Get();
+            std::vector<uint8_t> wire(5);
+            memcpy(wire.data(), &kRichPresenceMagic, 4);
+            wire[4] = (uint8_t)RichPresenceOp::RequestSync;
+            core.Transport().SendReliable(targetPeerId, targetEndpoint, kRichPresenceChannel, wire.data(), wire.size());
+        }
+
+        void SendPresenceRequestSyncBySteamId(uint64_t targetSteamId) {
+            if (g_transportMode.load() != TransportMode::Canonical) return;
+            auto& core = refix::lan::ILanCore::Get();
+            auto pidOpt = core.Peers().FindBySteamId(targetSteamId);
+            if (!pidOpt) return;
+            auto pInfo = core.Peers().FindByPeerId(*pidOpt);
+            if (!pInfo || !pInfo->endpoint.IsValid()) return;
+            SendPresenceRequestSync(*pidOpt, pInfo->endpoint);
+        }
+
+        void HandleReceiveRichPresence(uint64_t senderSteamId, const uint8_t* data, size_t len) {
+            if (!data || len < 5 || senderSteamId == 0 || senderSteamId == g_localSteamID) return;
+            uint32_t magic = 0;
+            memcpy(&magic, data, 4);
+            if (magic != kRichPresenceMagic) return;
+            uint8_t op = data[4];
+            const uint8_t* p = data + 5;
+            size_t remaining = len - 5;
+
+            if (op == (uint8_t)RichPresenceOp::SetKey) {
+                if (remaining < 4) return;
+                uint16_t kLen = 0;
+                memcpy(&kLen, p, 2); p += 2; remaining -= 2;
+                if (remaining < kLen) return;
+                std::string key((const char*)p, kLen); p += kLen; remaining -= kLen;
+                if (remaining < 2) return;
+                uint16_t vLen = 0;
+                memcpy(&vLen, p, 2); p += 2; remaining -= 2;
+                if (remaining < vLen) return;
+                std::string val((const char*)p, vLen);
+
+                {
+                    std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                    if (!val.empty()) {
+                        m_peerRichPresence[senderSteamId][key] = val;
+                    } else {
+                        m_peerRichPresence[senderSteamId].erase(key);
+                    }
+                }
+                ReFixLog("[UnrealSteam] Peer %llu RichPresence: '%s' = '%s'", senderSteamId, key.c_str(), val.c_str());
+
+                FriendRichPresenceUpdate_t update = {};
+                update.m_steamIDFriend = CSteamID(senderSteamId);
+                update.m_nAppID = g_appID;
+                PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+            } else if (op == (uint8_t)RichPresenceOp::ClearAll) {
+                {
+                    std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                    m_peerRichPresence[senderSteamId].clear();
+                }
+                ReFixLog("[UnrealSteam] Peer %llu RichPresence: CLEARED", senderSteamId);
+
+                FriendRichPresenceUpdate_t update = {};
+                update.m_steamIDFriend = CSteamID(senderSteamId);
+                update.m_nAppID = g_appID;
+                PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+            } else if (op == (uint8_t)RichPresenceOp::FullSync) {
+                if (remaining < 2) return;
+                uint16_t count = 0;
+                memcpy(&count, p, 2); p += 2; remaining -= 2;
+                std::map<std::string, std::string> peerMap;
+                for (uint16_t i = 0; i < count; i++) {
+                    if (remaining < 2) break;
+                    uint16_t kLen = 0;
+                    memcpy(&kLen, p, 2); p += 2; remaining -= 2;
+                    if (remaining < kLen) break;
+                    std::string key((const char*)p, kLen); p += kLen; remaining -= kLen;
+                    if (remaining < 2) break;
+                    uint16_t vLen = 0;
+                    memcpy(&vLen, p, 2); p += 2; remaining -= 2;
+                    if (remaining < vLen) break;
+                    std::string val((const char*)p, vLen); p += vLen; remaining -= vLen;
+                    peerMap[key] = val;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                    m_peerRichPresence[senderSteamId] = std::move(peerMap);
+                }
+                ReFixLog("[UnrealSteam] Peer %llu RichPresence FullSync (%u entries)", senderSteamId, count);
+
+                FriendRichPresenceUpdate_t update = {};
+                update.m_steamIDFriend = CSteamID(senderSteamId);
+                update.m_nAppID = g_appID;
+                PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+            } else if (op == (uint8_t)RichPresenceOp::RequestSync) {
+                auto& core = refix::lan::ILanCore::Get();
+                auto pidOpt = core.Peers().FindBySteamId(senderSteamId);
+                if (pidOpt) {
+                    auto pInfo = core.Peers().FindByPeerId(*pidOpt);
+                    if (pInfo && pInfo->endpoint.IsValid()) {
+                        SendPresenceFullSync(*pidOpt, pInfo->endpoint);
+                    }
+                }
+            }
+        }
+
+        virtual bool SetRichPresence(const char *pchKey, const char *pchValue) override {
+            if (!pchKey || pchKey[0] == '\0') return false;
+            std::string key = pchKey;
+            std::string val = (pchValue ? pchValue : "");
+            {
+                std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                if (!val.empty()) {
+                    m_richPresence[key] = val;
+                } else {
+                    m_richPresence.erase(key);
+                }
+            }
+            ReFixLog("[UnrealSteam] SetRichPresence: '%s' = '%s'", key.c_str(), val.c_str());
+
+            BroadcastPresenceSetKey(key, val);
+
+            FriendRichPresenceUpdate_t update = {};
+            update.m_steamIDFriend = CSteamID(g_localSteamID);
+            update.m_nAppID = g_appID;
+            PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
             return true;
         }
 
         virtual void ClearRichPresence() override {
-            std::lock_guard<std::mutex> lock(m_richPresenceMu);
-            m_richPresence.clear();
+            {
+                std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                m_richPresence.clear();
+            }
+            ReFixLog("[UnrealSteam] ClearRichPresence called");
+
+            BroadcastPresenceClear();
+
+            FriendRichPresenceUpdate_t update = {};
+            update.m_steamIDFriend = CSteamID(g_localSteamID);
+            update.m_nAppID = g_appID;
+            PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
         }
 
         // Copy of a local rich presence value, safe from other threads (the overlay).
@@ -3638,30 +3838,85 @@ namespace UnrealSteamEmu {
         }
 
         virtual const char *GetFriendRichPresence(CSteamID steamIDFriend, const char *pchKey) override {
-            if (steamIDFriend.ConvertToUint64() == g_localSteamID) {
-                auto it = m_richPresence.find(pchKey ? pchKey : "");
-                if (it != m_richPresence.end()) return it->second.c_str();
+            if (!pchKey) return "";
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            if (sid == g_localSteamID) {
+                auto it = m_richPresence.find(pchKey);
+                if (it != m_richPresence.end()) {
+                    thread_local static std::string s_val;
+                    s_val = it->second;
+                    return s_val.c_str();
+                }
+            } else {
+                auto pIt = m_peerRichPresence.find(sid);
+                if (pIt != m_peerRichPresence.end()) {
+                    auto kIt = pIt->second.find(pchKey);
+                    if (kIt != pIt->second.end()) {
+                        thread_local static std::string s_val;
+                        s_val = kIt->second;
+                        return s_val.c_str();
+                    }
+                }
             }
             return "";
         }
 
         virtual int GetFriendRichPresenceKeyCount(CSteamID steamIDFriend) override {
-            if (steamIDFriend.ConvertToUint64() == g_localSteamID) {
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            if (sid == g_localSteamID) {
                 return (int)m_richPresence.size();
+            } else {
+                auto pIt = m_peerRichPresence.find(sid);
+                if (pIt != m_peerRichPresence.end()) return (int)pIt->second.size();
             }
             return 0;
         }
 
         virtual const char *GetFriendRichPresenceKeyByIndex(CSteamID steamIDFriend, int iKey) override {
-            if (steamIDFriend.ConvertToUint64() == g_localSteamID && iKey >= 0 && iKey < (int)m_richPresence.size()) {
-                auto it = m_richPresence.begin();
-                std::advance(it, iKey);
-                return it->first.c_str();
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            if (sid == g_localSteamID) {
+                if (iKey >= 0 && iKey < (int)m_richPresence.size()) {
+                    auto it = m_richPresence.begin();
+                    std::advance(it, iKey);
+                    thread_local static std::string s_key;
+                    s_key = it->first;
+                    return s_key.c_str();
+                }
+            } else {
+                auto pIt = m_peerRichPresence.find(sid);
+                if (pIt != m_peerRichPresence.end() && iKey >= 0 && iKey < (int)pIt->second.size()) {
+                    auto it = pIt->second.begin();
+                    std::advance(it, iKey);
+                    thread_local static std::string s_key;
+                    s_key = it->first;
+                    return s_key.c_str();
+                }
             }
             return "";
         }
 
-        virtual void RequestFriendRichPresence(CSteamID steamIDFriend) override {}
+        virtual void RequestFriendRichPresence(CSteamID steamIDFriend) override {
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            if (sid == 0 || sid == g_localSteamID) return;
+            SendPresenceRequestSyncBySteamId(sid);
+        }
+
+        std::vector<std::pair<uint64_t, std::string>> GetAllFriendsWithRichPresence(const char* pchKey) {
+            std::vector<std::pair<uint64_t, std::string>> results;
+            if (!pchKey || pchKey[0] == '\0') return results;
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            for (const auto& peerPair : m_peerRichPresence) {
+                if (peerPair.first == g_localSteamID) continue;
+                auto it = peerPair.second.find(pchKey);
+                if (it != peerPair.second.end() && !it->second.empty()) {
+                    results.emplace_back(peerPair.first, it->second);
+                }
+            }
+            return results;
+        }
 
         virtual bool InviteUserToGame(CSteamID steamIDFriend, const char *pchConnectString) override {
             ReFixLog("[UnrealSteam] InviteUserToGame: steamID=%llu, connect='%s'", steamIDFriend.ConvertToUint64(), pchConnectString ? pchConnectString : "");
@@ -7733,6 +7988,25 @@ namespace UnrealSteamEmu {
         PostCallback(MicroTxnAuthorizationResponse_t::k_iCallback, &resp, sizeof(resp));
     }
 
+    bool SetRichPresence(const char* pchKey, const char* pchValue) {
+        return g_steamFriendsInstance.SetRichPresence(pchKey, pchValue);
+    }
+    void ClearRichPresence() {
+        g_steamFriendsInstance.ClearRichPresence();
+    }
+    const char* GetFriendRichPresence(uint64_t steamIDFriend, const char* pchKey) {
+        return g_steamFriendsInstance.GetFriendRichPresence(CSteamID(steamIDFriend), pchKey);
+    }
+    int GetFriendRichPresenceKeyCount(uint64_t steamIDFriend) {
+        return g_steamFriendsInstance.GetFriendRichPresenceKeyCount(CSteamID(steamIDFriend));
+    }
+    const char* GetFriendRichPresenceKeyByIndex(uint64_t steamIDFriend, int iKey) {
+        return g_steamFriendsInstance.GetFriendRichPresenceKeyByIndex(CSteamID(steamIDFriend), iKey);
+    }
+    std::vector<std::pair<uint64_t, std::string>> GetAllFriendsWithRichPresence(const char* pchKey) {
+        return g_steamFriendsInstance.GetAllFriendsWithRichPresence(pchKey);
+    }
+
     uint64_t Matchmaking_CreateLobby(int eLobbyType, int cMaxMembers) {
         return g_steamMatchmakingInstance.CreateLobby((ELobbyType)eLobbyType, cMaxMembers);
     }
@@ -7962,6 +8236,9 @@ namespace UnrealSteamEmu {
                 SteamP2PHook::RegisterPeer(sid, pInfo->endpoint.ipv4, pInfo->endpoint.port);
                 ReFixLog("[UnrealSteam] LanCore PeerDiscovered: steamID=%llu (%s) at %s",
                          sid, pInfo->displayName.c_str(), pInfo->endpoint.ToString().c_str());
+
+                g_steamFriendsInstance.SendPresenceRequestSync(ev.peerId, pInfo->endpoint);
+                g_steamFriendsInstance.SendPresenceFullSync(ev.peerId, pInfo->endpoint);
 
                 // Check for persona name collision across LAN
                 if (_stricmp(pInfo->displayName.c_str(), g_personaName.c_str()) == 0 && g_localSteamID > sid) {
@@ -8347,6 +8624,10 @@ namespace UnrealSteamEmu {
                     }
                 }
                 ProcessRfxsPacket(senderSteamId, ev.payload.data(), ev.payload.size());
+                return;
+            }
+            if (ev.channel == CSteamFriendsEmu::kRichPresenceChannel || (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == CSteamFriendsEmu::kRichPresenceMagic)) {
+                g_steamFriendsInstance.HandleReceiveRichPresence(senderSteamId, ev.payload.data(), ev.payload.size());
                 return;
             }
             if (ReceiveLobbyChat(senderSteamId, ev.channel, ev.payload)) return;

@@ -64,9 +64,21 @@ uint64_t LocalSteamID() {
     return EnsureAttached() ? UnrealSteamEmu::GetLocalSteamID() : 0;
 }
 
-bool SetRichPresence(const char*, const std::string&) { return true; }
+bool SetRichPresence(const char* key, const std::string& value) {
+    if (!EnsureAttached()) return false;
+    return UnrealSteamEmu::SetRichPresence(key, value.c_str());
+}
 
-std::vector<FriendPresence> FriendsWithRichPresence(const char*) { return {}; }
+std::vector<FriendPresence> FriendsWithRichPresence(const char* key) {
+    std::vector<FriendPresence> result;
+    if (!EnsureAttached()) return result;
+    auto pairs = UnrealSteamEmu::GetAllFriendsWithRichPresence(key);
+    result.reserve(pairs.size());
+    for (const auto& p : pairs) {
+        result.push_back({ p.first, p.second });
+    }
+    return result;
+}
 
 std::vector<uint64_t> FriendSteamIDs() {
     std::vector<uint64_t> ids;
@@ -81,7 +93,11 @@ std::vector<uint64_t> FriendSteamIDs() {
 
 void ServiceMainThread() {}
 
-std::string FriendRichPresence(uint64_t, const char*) { return {}; }
+std::string FriendRichPresence(uint64_t steamID, const char* key) {
+    if (!EnsureAttached()) return {};
+    const char* val = UnrealSteamEmu::GetFriendRichPresence(steamID, key);
+    return val ? val : "";
+}
 
 uint64_t LobbyOwner(uint64_t lobbyId) {
     return lobbyId && EnsureAttached() ? UnrealSteamEmu::Matchmaking_GetLobbyOwner(lobbyId) : 0;

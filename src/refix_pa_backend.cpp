@@ -53,6 +53,13 @@ std::string Printable(const std::string& s) {
 
 Response Dispatch(const Request& req) {
     ReFixLog("[PA-Backend] %s %s%s body=%s", req.method.c_str(), req.host.c_str(), req.path.c_str(), Printable(req.body).c_str());
+    if (req.path.find("/query-banned-user") != std::string::npos || req.path.find("/query-banned") != std::string::npos) {
+        Response res;
+        res.status = 200;
+        res.body = "{\"banned\":false,\"reason\":\"\",\"expiresAt\":0}";
+        ReFixLog("[PA-Backend] Served local unbanned status for %s", req.path.c_str());
+        return res;
+    }
     ReFixPAServices::Result served = ReFixPAServices::HandleRequest(req.body);
     Response res;
     if (served.handled) {

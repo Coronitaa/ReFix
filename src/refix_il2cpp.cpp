@@ -1077,6 +1077,21 @@ static bool Hooked_P2PRoomUtils_IsP2PMode(void* method) {
     return true;
 }
 
+// Hooked PlayerReportingService - bypass ban check HTTP calls for PlaySide / generic games
+typedef bool (*fn_PlayerReporting_ShouldSkipReportingHttp_t)(void* settings, void* method);
+static fn_PlayerReporting_ShouldSkipReportingHttp_t g_orig_PlayerReporting_ShouldSkipReportingHttp = nullptr;
+static bool Hooked_PlayerReporting_ShouldSkipReportingHttp(void* settings, void* method) {
+    ReFixLog("[IL2CPP] PlayerReportingService.ShouldSkipReportingHttp intercepted -> returning true (bypassing ban check HTTP)");
+    return true;
+}
+
+typedef bool (*fn_PlayerReporting_CanUseReportingApi_t)(void* method);
+static fn_PlayerReporting_CanUseReportingApi_t g_orig_PlayerReporting_CanUseReportingApi = nullptr;
+static bool Hooked_PlayerReporting_CanUseReportingApi(void* method) {
+    ReFixLog("[IL2CPP] PlayerReportingService.CanUseReportingApi intercepted -> returning false");
+    return false;
+}
+
 // Hooked SelectServerPaneUi.OnApplyButtonClick
 // When user clicks Confirmar/Apply, DO NOT call official AWS connection. Route straight to P2P!
 static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
@@ -1228,6 +1243,28 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
 
     // 1. Immediately activate native P2P mode at startup
     ActivateP2PModeInternal();
+
+    // Hook PlayerReportingService for PlaySide / generic ban check bypass
+    void* klassReporting = FindClassAcrossImages("PlaySide.Platform", "PlayerReportingService");
+    if (!klassReporting) klassReporting = FindClassAcrossImages("", "PlayerReportingService");
+    if (klassReporting) {
+        void* methodShouldSkip = g_pfn_class_get_method_from_name(klassReporting, "ShouldSkipReportingHttp", 1);
+        if (methodShouldSkip) {
+            void* pCode = ResolveRealCodePointer(*(void**)methodShouldSkip);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_PlayerReporting_ShouldSkipReportingHttp, (void**)&g_orig_PlayerReporting_ShouldSkipReportingHttp) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked PlayerReportingService.ShouldSkipReportingHttp at %p", pCode);
+            }
+        }
+        void* methodCanUse = g_pfn_class_get_method_from_name(klassReporting, "CanUseReportingApi", 0);
+        if (methodCanUse) {
+            void* pCode = ResolveRealCodePointer(*(void**)methodCanUse);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_PlayerReporting_CanUseReportingApi, (void**)&g_orig_PlayerReporting_CanUseReportingApi) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked PlayerReportingService.CanUseReportingApi at %p", pCode);
+            }
+        }
+    }
 
     // 2. Hook P2PRoomUtils.IsP2PMode (param_count = 0)
     void* klassUtils = FindClassAcrossImages("Recreate.Scripts.Network.P2PRoom", "P2PRoomUtils");

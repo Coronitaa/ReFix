@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <utility>
 
 class CCallbackBase;
 
@@ -201,6 +203,14 @@ namespace UnrealSteamEmu {
     void UnlockDLC(uint32_t dlcId);
     bool IsDLCUnlocked(uint32_t dlcId);
     void AuthorizeMicroTxn(uint32_t appId, uint64_t orderId, bool bAuthorized);
+
+    // Rich Presence helpers
+    bool SetRichPresence(const char* pchKey, const char* pchValue);
+    void ClearRichPresence();
+    const char* GetFriendRichPresence(uint64_t steamIDFriend, const char* pchKey);
+    int GetFriendRichPresenceKeyCount(uint64_t steamIDFriend);
+    const char* GetFriendRichPresenceKeyByIndex(uint64_t steamIDFriend, int iKey);
+    std::vector<std::pair<uint64_t, std::string>> GetAllFriendsWithRichPresence(const char* pchKey);
 
     // Network isolation runtime verification
     uint64_t GetBlockedEgressCount();
