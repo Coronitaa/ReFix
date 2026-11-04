@@ -469,3 +469,18 @@
   - `CreateFontW` now prioritizes `Segoe Fluent Icons` (Windows 11 modern icon font matching the ReFix overlay) over legacy `Segoe MDL2 Assets`.
   - Added horizontal compensation for legacy Windows 10 `Segoe MDL2 Assets` where glyph `0xED56` was drawn facing left, ensuring the pizza slice consistently points right across all Windows versions.
 - **Verification**: Compiled x64 and x86 targets, verified unit test suite `test_lan_profiles.exe`, refreshed `release\ReFix_v2.1.0`, and deployed the new `steam_api64.dll` to `D:\Games\PEAK`.
+
+## 2026-11-04 (22) - Per-profile SteamUserStats persistence & safe save swap
+- **Problem**: When restarting games like PEAK where persistent progression (summited peaks, max ascent unlocked, badges, achievements) is tracked via SteamUserStats (SetStat, GetStat, SetAchievement, StoreStats), all progress reset to 0 because stats were kept in RAM only. Additionally, concurrent process checks during profile restart could misidentify terminating parent processes.
+- **SteamUserStats disk persistence**:
+  - Implemented per-profile stats storage under %APPDATA%\ReFix\Profiles\<id>\Stats\<appId>\stats.ini (and %TEMP%\ReFix\Guest-<pid>\Stats\<appId>\stats.ini for guests; %APPDATA%\ReFix\Saves\_pc\Stats\<appId>\stats.ini for machine identity without profile).
+  - Added StatsRoot and GuestStatsRoot in src/overlay/profile_store.cpp and ReFixOverlay::StatsFolder(appId) in src/overlay/refix_overlay.cpp.
+  - In CSteamUserStatsEmu (src/unreal_steam_emu.cpp), implemented EnsureLoaded(), LoadStatsFromDiskInternal(), and SaveStatsToDiskInternal():
+    - Reads and persists [IntStats], [FloatStats], and [Achievements] (with unlock timestamp).
+    - Persists immediately on SetAchievement, ClearAchievement, ResetAllStats, and on StoreStats().
+    - Automatically flushes dirty stats on UnrealSteamEmu::Shutdown() and destructor.
+- **Safe save swap & process restart**:
+  - In src/overlay/save_swap.cpp (OtherInstanceRunning), read REFIX_RESTART_PID to explicitly ignore the dying restart parent and verify GetExitCodeProcess == STILL_ACTIVE before flagging another instance.
+  - In save_swap.cpp (MoveOne and MoveEntries), updated to MOVEFILE_REPLACE_EXISTING and cleaned up destination collision targets with DeleteTree prior to moving, preventing stash collisions from failing profile save-swaps.
+- **Verification**: Built x64 and x86, passed 	est_lan_profiles.exe with new StatsRoot isolation tests, updated 
+elease\ReFix_v2.1.0, and deployed to D:\Games\PEAK\PEAK_Data\Plugins\x86_64\steam_api64.dll.

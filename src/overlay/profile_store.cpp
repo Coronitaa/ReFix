@@ -284,6 +284,9 @@ std::wstring DataRoot(const std::wstring& id) { return ProfileDir(id) + L"\\Data
 std::wstring CloudRoot(const std::wstring& id, uint32_t appId) {
     return ProfileDir(id) + L"\\Cloud\\" + std::to_wstring(appId);
 }
+std::wstring StatsRoot(const std::wstring& id, uint32_t appId) {
+    return ProfileDir(id) + L"\\Stats\\" + std::to_wstring(appId);
+}
 
 std::optional<Profile> Load(const std::wstring& id) {
     if (!IsValidId(id)) return std::nullopt;
@@ -384,6 +387,9 @@ Profile MakeGuest(const std::wstring& name, const std::vector<Profile>& existing
 
 std::wstring GuestCloudRoot(uint32_t appId) {
     return GuestRoot() + L"\\Guest-" + std::to_wstring(GetCurrentProcessId()) + L"\\Cloud\\" + std::to_wstring(appId);
+}
+std::wstring GuestStatsRoot(uint32_t appId) {
+    return GuestRoot() + L"\\Guest-" + std::to_wstring(GetCurrentProcessId()) + L"\\Stats\\" + std::to_wstring(appId);
 }
 
 void CleanupGuestFolders() {

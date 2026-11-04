@@ -77,6 +77,14 @@ int main() {
     assert(LastProfileId(L"brand_new_game_exe") == L"");
     printf("  [PASS] LastProfileId is isolated per game and empty for new games\n");
 
+    // 4. Stats folder paths isolation
+    std::wstring statsRoot1 = StatsRoot(L"00000001", 3527290);
+    std::wstring statsRoot2 = StatsRoot(L"00000002", 3527290);
+    assert(statsRoot1 != statsRoot2);
+    assert(statsRoot1.find(L"00000001\\Stats\\3527290") != std::wstring::npos);
+    assert(statsRoot2.find(L"00000002\\Stats\\3527290") != std::wstring::npos);
+    printf("  [PASS] StatsRoot is strictly isolated per profile ID and AppID\n");
+
     printf("[OK] All ReFix LAN profile isolation tests passed successfully!\n");
     return 0;
 }

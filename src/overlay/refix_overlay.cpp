@@ -266,6 +266,21 @@ std::wstring CloudFolder(uint32_t appId) {
     return g_cloudFolder;
 }
 
+std::wstring StatsFolder(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    std::wstring folder;
+    if (g_active) {
+        folder = g_active->guest ? profiles::GuestStatsRoot(appId) : profiles::StatsRoot(g_active->id, appId);
+    } else {
+        folder = profiles::RootDir() + L"\\Saves\\_pc\\Stats\\" + std::to_wstring(appId);
+    }
+    for (size_t i = 3; i <= folder.size(); ++i) {
+        if (i == folder.size() || folder[i] == L'\\')
+            CreateDirectoryW(folder.substr(0, i).c_str(), nullptr);
+    }
+    return folder;
+}
+
 void Start() {
     if (g_started.exchange(true)) return;
     LoadConfig(FindIni());

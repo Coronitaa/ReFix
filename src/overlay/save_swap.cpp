@@ -91,8 +91,14 @@ void DeleteTree(const std::wstring& path) {
 
 // Rename when both sides are on one volume; copy + delete otherwise.
 bool MoveOne(const std::wstring& from, const std::wstring& to) {
-    if (MoveFileExW(from.c_str(), to.c_str(), 0)) return true;
-    if (GetLastError() != ERROR_NOT_SAME_DEVICE) return false;
+    if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+    if (GetLastError() != ERROR_NOT_SAME_DEVICE) {
+        if (CopyTree(from, to)) {
+            DeleteTree(from);
+            return true;
+        }
+        return false;
+    }
     if (!CopyTree(from, to)) {
         DeleteTree(to);
         return false;
@@ -101,8 +107,7 @@ bool MoveOne(const std::wstring& from, const std::wstring& to) {
     return true;
 }
 
-// Moves every entry of `from` (except `keep`) into `to`. All or nothing: refuses when a name already
-// exists in `to`, and moves back what it moved when an entry is locked.
+// Moves every entry of `from` (except `keep`) into `to`.
 bool MoveEntries(const std::wstring& from, const std::wstring& to, const std::vector<std::wstring>& keep) {
     std::vector<std::wstring> names;
     for (const std::wstring& e : Entries(from)) {
@@ -111,9 +116,9 @@ bool MoveEntries(const std::wstring& from, const std::wstring& to, const std::ve
     if (names.empty()) return true;
     EnsureDir(to);
     for (const std::wstring& e : names) {
-        if (GetFileAttributesW((to + L"\\" + e).c_str()) != INVALID_FILE_ATTRIBUTES) {
-            ReFixLog("[Saves] '%s' already exists in the destination; nothing moved", ToUtf8(to + L"\\" + e).c_str());
-            return false;
+        std::wstring dst = to + L"\\" + e;
+        if (GetFileAttributesW(dst.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            DeleteTree(dst);
         }
     }
     std::vector<std::wstring> moved;
@@ -220,13 +225,31 @@ bool DetectUnity(Location& out) {
 } // namespace
 
 bool OtherInstanceRunning() {
+    wchar_t restartPidBuf[16] = {};
+    DWORD restartPid = 0;
+    if (GetEnvironmentVariableW(L"REFIX_RESTART_PID", restartPidBuf, 16) > 0) {
+        restartPid = wcstoul(restartPidBuf, nullptr, 10);
+    }
+
     const std::wstring self = Leaf(ExePath());
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;
     PROCESSENTRY32W pe = { sizeof(pe) };
     bool found = false;
     for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe)) {
-        found = pe.th32ProcessID != GetCurrentProcessId() && _wcsicmp(pe.szExeFile, self.c_str()) == 0;
+        if (pe.th32ProcessID == GetCurrentProcessId() || pe.th32ProcessID == restartPid) continue;
+        if (_wcsicmp(pe.szExeFile, self.c_str()) == 0) {
+            HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (proc) {
+                DWORD code = 0;
+                if (GetExitCodeProcess(proc, &code) && code == STILL_ACTIVE) {
+                    found = true;
+                }
+                CloseHandle(proc);
+            } else if (GetLastError() == ERROR_ACCESS_DENIED) {
+                found = true;
+            }
+        }
     }
     CloseHandle(snap);
     return found;
