@@ -75,8 +75,8 @@ bool AddGame(Profile& p, const std::wstring& gameKey, const std::wstring& gameNa
 std::vector<Profile> ForGame(const std::vector<Profile>& all, const std::wstring& gameKey);
 std::vector<Profile> FromOtherGames(const std::vector<Profile>& all, const std::wstring& gameKey);
 
-std::wstring LastProfileId();
-void SetLastProfileId(const std::wstring& id);
+std::wstring LastProfileId(const std::wstring& gameKey = GameKey());
+void SetLastProfileId(const std::wstring& id, const std::wstring& gameKey = GameKey());
 
 // Locks are per game executable: two instances of one game never share a profile, while the same
 // profile can still be used by two different games at once.

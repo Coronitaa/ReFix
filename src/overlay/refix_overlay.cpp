@@ -143,7 +143,7 @@ std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherIn
         }
     }
     if (otherInstance) return std::nullopt;
-    if (auto last = profiles::Load(profiles::LastProfileId())) {
+    if (auto last = profiles::Load(profiles::LastProfileId(profiles::GameKey()))) {
         if (profiles::UsedIn(*last, profiles::GameKey()) && profiles::TryLock(last->id)) return last;
     }
     for (const Profile& p : all) {   // most recently used first
@@ -217,7 +217,7 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
         profiles::Touch(p);
         profiles::AddGame(p, game, profiles::DefaultGameName(), false);
         profiles::Save(p);
-        profiles::SetLastProfileId(p.id);
+        profiles::SetLastProfileId(p.id, game);
         if (g_cfg.isolateSaves) saves::SwitchTo(p, profiles::ForGame(all, game));
     }
     {

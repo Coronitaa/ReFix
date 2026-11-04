@@ -23,6 +23,12 @@ struct Location {
 
 std::vector<Location> DetectLocations();
 
+// Checks if pre-existing original PC saves are available for this game.
+bool HasOriginalSaves();
+
+// Initializes `profileId`'s stash with a copy of the game's original pre-ReFix saves.
+bool InheritOriginalSaves(const std::wstring& profileId);
+
 // Makes `active` the owner of every detected location. Skipped (and logged) while another process of the
 // same executable is running, since its files would be moved from under it.
 void SwitchTo(const Profile& active, const std::vector<Profile>& all);

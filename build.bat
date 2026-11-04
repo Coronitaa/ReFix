@@ -151,3 +151,8 @@ echo [*] Building test_gamepad.exe (controller reports and overlay toggle)...
 cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\ tests\test_gamepad.cpp src\overlay\overlay_gamepad.cpp /Febin\test_gamepad.exe hid.lib setupapi.lib
 if %ERRORLEVEL% neq 0 ( echo [!] Error building test_gamepad.exe & exit /b 1 )
 echo [OK] test_gamepad.exe built and placed in bin\
+
+echo [*] Building test_lan_profiles.exe (LAN profiles per-game isolation and savedata tester)...
+cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Isrc /Fobuild\ tests\test_lan_profiles.cpp src\overlay\profile_store.cpp src\overlay\overlay_i18n.cpp /Febin\test_lan_profiles.exe ole32.lib shell32.lib advapi32.lib user32.lib
+if %ERRORLEVEL% neq 0 ( echo [!] Error building test_lan_profiles.exe & exit /b 1 )
+echo [OK] test_lan_profiles.exe built and placed in bin\

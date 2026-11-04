@@ -68,6 +68,17 @@ bool CopyTree(const std::wstring& from, const std::wstring& to) {
     return true;
 }
 
+bool CopyTreeWithKeep(const std::wstring& from, const std::wstring& to, const std::vector<std::wstring>& keep) {
+    if (!IsDir(from)) return CopyFileW(from.c_str(), to.c_str(), TRUE) != 0;
+    EnsureDir(to);
+    for (const std::wstring& e : Entries(from)) {
+        if (!Kept(e, keep)) {
+            if (!CopyTree(from + L"\\" + e, to + L"\\" + e)) return false;
+        }
+    }
+    return true;
+}
+
 void DeleteTree(const std::wstring& path) {
     if (IsDir(path)) {
         for (const std::wstring& e : Entries(path)) DeleteTree(path + L"\\" + e);
@@ -243,20 +254,38 @@ bool HasEntries(const std::wstring& dir, const std::vector<std::wstring>& keep) 
 
 void SwitchOne(const Location& loc, const Profile& active, const std::vector<Profile>& all) {
     std::wstring owner = ReadOwner(loc.label);
+    const std::wstring pcStash = StashDir(kPcOwner, loc.label);
+
     if (owner.empty()) {
-        if (!HasEntries(loc.live, loc.keepLive)) {
+        const bool liveHasData = HasEntries(loc.live, loc.keepLive);
+        if (liveHasData && !HasEntries(pcStash, {})) {
+            CopyTreeWithKeep(loc.live, pcStash, loc.keepLive);
+            ReFixLog("[Saves] %s: backed up pristine pre-ReFix saves to _pc", ToUtf8(loc.label).c_str());
+        }
+
+        if (!liveHasData) {
             WriteOwner(loc.label, active.id);
             return;
         }
-        // Saves from before profiles: they belong to the profile that kept the PC's saves, if any.
-        owner = kPcOwner;
-        for (const Profile& p : all) {
-            if (p.nativeSaves) owner = p.id;
+
+        if (active.nativeSaves) {
+            WriteOwner(loc.label, active.id);
+            ReFixLog("[Saves] %s: active profile %s started with original saves", ToUtf8(loc.label).c_str(), ToUtf8(active.id).c_str());
+            return;
         }
-        if (active.nativeSaves) owner = active.id;
+
+        owner = kPcOwner;
         WriteOwner(loc.label, owner);
-        ReFixLog("[Saves] %s: existing saves assigned to %s", ToUtf8(loc.label).c_str(), ToUtf8(owner).c_str());
+        if (!MoveEntries(loc.live, pcStash, loc.keepLive)) {
+            for (const std::wstring& e : Entries(loc.live)) {
+                if (!Kept(e, loc.keepLive)) DeleteTree(loc.live + L"\\" + e);
+            }
+        }
+        WriteOwner(loc.label, active.id);
+        ReFixLog("[Saves] %s: pre-ReFix saves preserved in _pc, active %s starts clean", ToUtf8(loc.label).c_str(), ToUtf8(active.id).c_str());
+        return;
     }
+
     if (owner == active.id) return;
 
     const std::wstring out = StashDir(owner, loc.label);
@@ -287,6 +316,62 @@ std::vector<Location> DetectLocations() {
     loc = Location{};
     if (DetectUnity(loc)) out.push_back(loc);
     return out;
+}
+
+bool HasOriginalSaves() {
+    const std::vector<Location> locations = DetectLocations();
+    if (locations.empty()) return false;
+    for (const Location& loc : locations) {
+        const std::wstring pcStash = StashDir(kPcOwner, loc.label);
+        if (HasEntries(pcStash, {})) return true;
+        const std::wstring owner = ReadOwner(loc.label);
+        if (owner.empty() && HasEntries(loc.live, loc.keepLive)) return true;
+        if (!owner.empty() && owner != kPcOwner) {
+            const std::wstring ownerStash = StashDir(owner, loc.label);
+            if (HasEntries(ownerStash, {})) {
+                if (auto p = profiles::Load(owner)) {
+                    if (p->nativeSaves) return true;
+                }
+            } else if (HasEntries(loc.live, loc.keepLive)) {
+                if (auto p = profiles::Load(owner)) {
+                    if (p->nativeSaves) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool InheritOriginalSaves(const std::wstring& profileId) {
+    const std::vector<Location> locations = DetectLocations();
+    if (locations.empty() || profileId.empty()) return false;
+    bool anyInherited = false;
+    for (const Location& loc : locations) {
+        const std::wstring pcStash = StashDir(kPcOwner, loc.label);
+        if (!HasEntries(pcStash, {})) {
+            const std::wstring owner = ReadOwner(loc.label);
+            if (owner.empty() && HasEntries(loc.live, loc.keepLive)) {
+                CopyTreeWithKeep(loc.live, pcStash, loc.keepLive);
+            } else if (!owner.empty() && owner != kPcOwner) {
+                const std::wstring ownerStash = StashDir(owner, loc.label);
+                if (HasEntries(ownerStash, {})) {
+                    CopyTree(ownerStash, pcStash);
+                } else if (HasEntries(loc.live, loc.keepLive)) {
+                    CopyTreeWithKeep(loc.live, pcStash, loc.keepLive);
+                }
+            }
+        }
+        if (HasEntries(pcStash, {})) {
+            const std::wstring profileStash = StashDir(profileId, loc.label);
+            EnsureDir(profileStash);
+            if (CopyTree(pcStash, profileStash)) {
+                anyInherited = true;
+                ReFixLog("[Saves] Profile %s inherited original saves for %s",
+                         ToUtf8(profileId).c_str(), ToUtf8(loc.label).c_str());
+            }
+        }
+    }
+    return anyInherited;
 }
 
 void SwitchTo(const Profile& active, const std::vector<Profile>& all) {

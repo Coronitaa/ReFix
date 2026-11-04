@@ -312,6 +312,9 @@ std::optional<Profile> Load(const std::wstring& id) {
         if (g.key == p.originGame) p.games.insert(p.games.begin(), g);
         else p.games.push_back(g);
     }
+    if (p.originGame.empty() && !p.games.empty()) {
+        p.originGame = p.games.front().key;
+    }
     return p;
 }
 
@@ -355,7 +358,19 @@ bool Remove(const std::wstring& id) {
     // The definition goes first: a half-deleted folder never shows up as a profile again.
     if (!DeleteFileW(IniPath(id).c_str())) return false;
     DeleteTree(ProfileDir(id));
-    if (LastProfileId() == id) SetLastProfileId(L"");
+    if (ReadIni(IndexPath(), L"General", L"LastProfile") == id) {
+        WriteIni(IndexPath(), L"General", L"LastProfile", L"");
+    }
+    std::vector<wchar_t> sec(16384, L'\0');
+    const DWORD n = GetPrivateProfileSectionW(L"LastProfile", sec.data(), (DWORD)sec.size(), IndexPath().c_str());
+    for (const wchar_t* e = sec.data(); e < sec.data() + n && *e; e += wcslen(e) + 1) {
+        const wchar_t* eq = wcschr(e, L'=');
+        if (!eq || eq == e) continue;
+        if (wcscmp(eq + 1, id.c_str()) == 0) {
+            std::wstring key(e, eq);
+            WriteIni(IndexPath(), L"LastProfile", key.c_str(), L"");
+        }
+    }
     ReFixLog("[Profiles] Profile %s deleted", ToUtf8(id).c_str());
     return true;
 }
@@ -419,7 +434,8 @@ std::wstring DefaultGameName() {
 }
 
 bool UsedIn(const Profile& p, const std::wstring& gameKey) {
-    if (p.originGame.empty()) return true;   // from before games were tracked: every game
+    if (gameKey.empty()) return false;
+    if (!p.originGame.empty() && p.originGame == gameKey) return true;
     return std::any_of(p.games.begin(), p.games.end(), [&](const GameUse& g) { return g.key == gameKey; });
 }
 
@@ -451,11 +467,27 @@ std::vector<Profile> FromOtherGames(const std::vector<Profile>& all, const std::
     return out;
 }
 
-std::wstring LastProfileId() { return ReadIni(IndexPath(), L"General", L"LastProfile"); }
+std::wstring LastProfileId(const std::wstring& gameKey) {
+    if (!gameKey.empty()) {
+        std::wstring id = ReadIni(IndexPath(), L"LastProfile", gameKey.c_str());
+        if (!id.empty()) return id;
+    }
+    std::wstring general = ReadIni(IndexPath(), L"General", L"LastProfile");
+    if (!general.empty() && !gameKey.empty()) {
+        if (auto p = Load(general)) {
+            if (UsedIn(*p, gameKey)) return general;
+        }
+        return L"";
+    }
+    return general;
+}
 
-void SetLastProfileId(const std::wstring& id) {
+void SetLastProfileId(const std::wstring& id, const std::wstring& gameKey) {
     EnsureDir(RootDir());
     EnsureUnicodeIni(IndexPath());
+    if (!gameKey.empty()) {
+        WriteIni(IndexPath(), L"LastProfile", gameKey.c_str(), id);
+    }
     WriteIni(IndexPath(), L"General", L"LastProfile", id);
 }
 

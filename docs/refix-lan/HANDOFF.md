@@ -403,3 +403,13 @@
   listed in the chip menu afterwards. Test profiles removed afterwards.
 - Uninstallers look in `%APPDATA%\ReFix` (and `ReFix LAN` when it was never migrated); AutoDeploy title, README and
   `make_release.ps1` default output: 2.1.0 (`release\ReFix_v2.1.0`).
+
+## 2026-11-04 (17) - Profile per-game strict isolation and multi-profile savedata inheritance
+- **Strict per-game profile isolation**: `UsedIn(p, gameKey)` now strictly requires `gameKey` to be present in `p.games` (or `p.originGame == gameKey`). Removed the legacy `if (p.originGame.empty()) return true;` fallback that caused profiles with an empty originGame to bleed into every new game's active profile list. Legacy profiles or profiles from other games now exclusively appear in "Import from another game" (`FromOtherGames`).
+- **Per-game LastProfile**: `LastProfileId(gameKey)` and `SetLastProfileId(id, gameKey)` now read and write per-game entries under `[LastProfile] <gameKey>=<id>` in `profiles.ini` (while maintaining `[General] LastProfile` as fallback only if used in that game). Brand new games have no last profile recorded, `ForGame` is empty, and `PickProfile` returns empty, correctly routing to the FirstRun dialog instead of auto-logging into a foreign profile.
+- **Pristine original savedata preservation & multi-profile inheritance**:
+  - `save_swap.cpp` now creates a pristine snapshot of pre-ReFix saves in `Saves\_pc\<label>` upon first encounter before any gameplay modifications occur.
+  - `HasOriginalSaves()` and `InheritOriginalSaves(profileId)` allow any profile (during FirstRun, picker, or newly created from the overlay) to inherit the original saves by copying `Saves\_pc\<label>` into `Profiles\<id>\Saves\<label>`.
+  - Multiple profiles can each inherit the original save independently; each plays with its own isolated copy without mutating `_pc` or other profiles.
+  - Uninstaller helper (`restore_saves.ps1` and `AutoDeploy.sh`) prioritizes the pristine `Saves\_pc\<label>` snapshot when restoring saves, guaranteeing original savedata is never corrupted.
+- **Unit testing**: `tests/test_lan_profiles.cpp` compiled into `bin/test_lan_profiles.exe` via `build.bat`, verifying profile scoping, `ForGame`/`FromOtherGames` filtering, and per-game `LastProfileId` isolation.

@@ -106,14 +106,16 @@ restore_saves() {
             [ -f "$owners" ] || continue
             refix="$(dirname "$owners")"
             user="$(dirname "$(dirname "$(dirname "$refix")")")"
-            native=_pc
-            for prof in "$refix"/Profiles/*/profile.ini; do
-                [ -f "$prof" ] && u16 "$prof" | grep -q '^NativeSaves=1' && native="$(basename "$(dirname "$prof")")"
-            done
             text="$(u16 "$owners")"
             changed=0
             for i in "${!labels[@]}"; do
                 label="${labels[$i]}"
+                native=_pc
+                if [ ! -d "$refix/Saves/_pc/$label" ] || [ -z "$(ls -A "$refix/Saves/_pc/$label" 2>/dev/null)" ]; then
+                    for prof in "$refix"/Profiles/*/profile.ini; do
+                        [ -f "$prof" ] && u16 "$prof" | grep -q '^NativeSaves=1' && native="$(basename "$(dirname "$prof")")"
+                    done
+                fi
                 owner="$(printf '%s\n' "$text" | awk -v k="$label" 'index($0, k "=") == 1 { print substr($0, length(k) + 2) }')"
                 [ -n "$owner" ] && [ "$owner" != "$native" ] || continue
                 live="$user/${lives[$i]}"

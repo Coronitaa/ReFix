@@ -9,6 +9,7 @@
 #include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "refix_overlay.h"
+#include "save_swap.h"
 
 #include <shobjidl.h>
 #include <algorithm>
@@ -342,8 +343,8 @@ void App::BeginEditor(bool creating) {
         if (editor_.custom) editor_.imagePath = profiles::AvatarPath(active_->id);
     } else {
         editor_.stock = (int)(GetTickCount64() % (ULONGLONG)ui::StockCount());
-        editor_.offerNative = profiles_.empty();
-        editor_.native = editor_.offerNative;
+        editor_.offerNative = saves::HasOriginalSaves();
+        editor_.native = editor_.offerNative && profiles_.empty();
     }
 }
 
@@ -372,6 +373,9 @@ bool App::SaveEditor() {
         if (!profiles::Save(p)) {
             editor_.error = T("Could not save the profile in %APPDATA%\\ReFix.", "No se pudo guardar el perfil en %APPDATA%\\ReFix.");
             return false;
+        }
+        if (p.nativeSaves) {
+            saves::InheritOriginalSaves(p.id);
         }
         if (customFromFile && CopyFileW(editor_.imagePath.c_str(), profiles::AvatarPath(p.id).c_str(), FALSE)) {
             p.customAvatar = true;
