@@ -459,3 +459,13 @@
   - Renders the circular badge with anti-aliasing, linear color gradient (`kFrom[stockIdx]` to `kTo[stockIdx]`), blended with 92% opacity white glyph.
   - Adds the subtle accent glow ring and frames the badge on the dark ReFix panel background (`RGB(26, 31, 40)`), matching the exact look of avatars in the ReFix overlay.
 - **Verification**: Built and verified across x64 and x86 targets, updated `release\ReFix_v2.1.0`, and deployed directly to `D:\Games\PEAK`.
+
+## 2026-11-04 (21) - Square stock avatar format and glyph orientation fix
+- **User feedback**: The circular badge with dark background was unwanted by the user ("hacer que no tenga el circulo en la imagen... que se mantenga el fondo de la stock image pero en cuadrado en vez de circular") and the pizza glyph was inverted (facing left).
+- **Square gradient background**:
+  - Completely removed the circular badge mask, the dark panel framing (`RGB(26, 31, 40)`), and the glow ring.
+  - The stock theme gradient (`kFrom[stockIdx]` to `kTo[stockIdx]`) now fills the entire square texture across all requested avatar resolutions (32x32, 64x64, 184x184), preserving the original stock avatar aesthetic.
+- **Orientation & Font prioritization**:
+  - `CreateFontW` now prioritizes `Segoe Fluent Icons` (Windows 11 modern icon font matching the ReFix overlay) over legacy `Segoe MDL2 Assets`.
+  - Added horizontal compensation for legacy Windows 10 `Segoe MDL2 Assets` where glyph `0xED56` was drawn facing left, ensuring the pizza slice consistently points right across all Windows versions.
+- **Verification**: Compiled x64 and x86 targets, verified unit test suite `test_lan_profiles.exe`, refreshed `release\ReFix_v2.1.0`, and deployed the new `steam_api64.dll` to `D:\Games\PEAK`.

@@ -376,8 +376,6 @@ static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector
 
     const float cx = (width - 1) * 0.5f;
     const float cy = (height - 1) * 0.5f;
-    const float rBadge = (width - 1) * 0.40f;
-    const float rGlow  = (width - 1) * 0.455f;
 
     std::vector<uint8_t> glyphMask((size_t)width * height, 0);
     int offsetX = 0, offsetY = 0;
@@ -396,18 +394,20 @@ static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector
         HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
         if (hbm && bits) {
             HGDIOBJ oldBm = SelectObject(hdc, hbm);
-            int fontSize = (int)std::round(rBadge * 1.08f);
+            int fontSize = (int)std::round(width * 0.52f);
             if (fontSize < 10) fontSize = 10;
 
+            bool isMdl2 = false;
             HFONT hFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                       ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                      L"Segoe MDL2 Assets");
+                                      L"Segoe Fluent Icons");
             if (!hFont) {
                 hFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                     ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                    L"Segoe Fluent Icons");
+                                    L"Segoe MDL2 Assets");
+                isMdl2 = true;
             }
 
             HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
@@ -420,12 +420,27 @@ static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector
             GdiFlush();
 
             const uint8_t* raw = reinterpret_cast<const uint8_t*>(bits);
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    glyphMask[y * width + x] = raw[(y * width + x) * 4];
+                }
+            }
+
+            // On Windows 10 Segoe MDL2 Assets, the pizza glyph (0xED56) was drawn facing left.
+            // Flip it horizontally so it consistently faces right as in Segoe Fluent Icons / overlay.
+            if (isMdl2 && stockIdx == 9) {
+                for (int y = 0; y < height; ++y) {
+                    for (int x = 0; x < width / 2; ++x) {
+                        std::swap(glyphMask[y * width + x], glyphMask[y * width + (width - 1 - x)]);
+                    }
+                }
+            }
+
             int minX = width, maxX = -1;
             int minY = height, maxY = -1;
             for (int y = 0; y < height; ++y) {
                 for (int x = 0; x < width; ++x) {
-                    uint8_t v = raw[(y * width + x) * 4];
-                    glyphMask[y * width + x] = v;
+                    uint8_t v = glyphMask[y * width + x];
                     if (v > 15) {
                         if (x < minX) minX = x;
                         if (x > maxX) maxX = x;
@@ -450,15 +465,8 @@ static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector
         DeleteDC(hdc);
     }
 
-    const float bgR = 26.0f, bgG = 31.0f, bgB = 40.0f;
-    const float glowR = 28.0f, glowG = 52.0f, glowB = 55.0f;
-
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            float dx = (float)x - cx;
-            float dy = (float)y - cy;
-            float dist = std::sqrt(dx * dx + dy * dy);
-
             int srcX = x - offsetX;
             int srcY = y - offsetY;
             uint8_t maskVal = 0;
@@ -472,33 +480,12 @@ static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector
             float gg = c1.g + t * (c2.g - c1.g);
             float gb = c1.b + t * (c2.b - c1.b);
 
-            float badgeR = gr * (1.0f - glyphA) + 255.0f * glyphA;
-            badgeR = std::min(badgeR, 255.0f);
-            float badgeG = gg * (1.0f - glyphA) + 255.0f * glyphA;
-            badgeG = std::min(badgeG, 255.0f);
-            float badgeB = gb * (1.0f - glyphA) + 255.0f * glyphA;
-            badgeB = std::min(badgeB, 255.0f);
-
-            float finalR = bgR, finalG = bgG, finalB = bgB;
-            if (dist <= rBadge - 0.5f) {
-                finalR = badgeR;
-                finalG = badgeG;
-                finalB = badgeB;
-            } else if (dist <= rBadge + 0.5f) {
-                float tEdge = std::clamp(rBadge + 0.5f - dist, 0.0f, 1.0f);
-                finalR = badgeR * tEdge + glowR * (1.0f - tEdge);
-                finalG = badgeG * tEdge + glowG * (1.0f - tEdge);
-                finalB = badgeB * tEdge + glowB * (1.0f - tEdge);
-            } else if (dist <= rGlow - 0.5f) {
-                finalR = glowR;
-                finalG = glowG;
-                finalB = glowB;
-            } else if (dist <= rGlow + 0.5f) {
-                float tEdge = std::clamp(rGlow + 0.5f - dist, 0.0f, 1.0f);
-                finalR = glowR * tEdge + bgR * (1.0f - tEdge);
-                finalG = glowG * tEdge + bgG * (1.0f - tEdge);
-                finalB = glowB * tEdge + bgB * (1.0f - tEdge);
-            }
+            float finalR = gr * (1.0f - glyphA) + 255.0f * glyphA;
+            finalR = std::min(finalR, 255.0f);
+            float finalG = gg * (1.0f - glyphA) + 255.0f * glyphA;
+            finalG = std::min(finalG, 255.0f);
+            float finalB = gb * (1.0f - glyphA) + 255.0f * glyphA;
+            finalB = std::min(finalB, 255.0f);
 
             size_t idx = ((size_t)y * width + x) * 4;
             outRgba[idx + 0] = (uint8_t)std::clamp((int)std::round(finalR), 0, 255);
