@@ -439,4 +439,23 @@
   - **Remote LAN peers**: Decodes remote JPEG avatars received over LAN presence (`net::FetchAvatar`) and scales them via WIC `image::DecodeMemory(data, len, out, size)`.
   - **Cache invalidation**: Modifying or importing an avatar in the overlay calls `ReFixOverlay::InvalidateAvatar(steamId)` and broadcasts `AvatarImageLoaded_t` (callback 334) so the in-game UI updates in real time.
 
-
+## 2026-11-04 (20) - Exact stock avatar glyph rasterization (matches ReFix overlay badges)
+- **Problem**: Stock avatars previously rendered a generic head/shoulder silhouette with gradient background. In games like PEAK, players with stock avatars (e.g., 'Pisita' with stock index 9 / pizza icon) did not display the actual avatar badge chosen in ReFix.
+- **Glyph rasterization via Win32 GDI DIB sections**:
+  - `GenerateStockAvatar` in `src/overlay/refix_overlay.cpp` now renders the exact glyph for each stock avatar index (0..11) from Windows icon fonts (`Segoe MDL2 Assets` / `Segoe Fluent Icons`) using a 32-bit memory DIB section:
+    - 0: Game controller (`0xE7FC`)
+    - 1: Robot (`0xE99A`)
+    - 2: Bolt (`0xE945`)
+    - 3: Sun (`0xE706`)
+    - 4: Moon (`0xE708`)
+    - 5: World (`0xE909`)
+    - 6: Puzzle (`0xEA86`)
+    - 7: Smile (`0xE76E`)
+    - 8: Music note (`0xE8D6`)
+    - 9: Pizza slice (`0xED56`)
+    - 10: Heart (`0xEB51`)
+    - 11: Thumbs up (`0xE8E1`)
+  - Automatically measures the glyph's alpha mask bounding box to mathematically center the icon inside the circular badge (compensating for font baseline offsets).
+  - Renders the circular badge with anti-aliasing, linear color gradient (`kFrom[stockIdx]` to `kTo[stockIdx]`), blended with 92% opacity white glyph.
+  - Adds the subtle accent glow ring and frames the badge on the dark ReFix panel background (`RGB(26, 31, 40)`), matching the exact look of avatars in the ReFix overlay.
+- **Verification**: Built and verified across x64 and x86 targets, updated `release\ReFix_v2.1.0`, and deployed directly to `D:\Games\PEAK`.

@@ -350,8 +350,10 @@ struct ComInitScope {
 };
 
 static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector<uint8_t>& outRgba) {
+    if (width <= 0 || height <= 0) return;
     outRgba.resize((size_t)width * height * 4);
     stockIdx = (stockIdx % 12 + 12) % 12;
+
     struct Color { uint8_t r, g, b; };
     static const Color kFrom[12] = {
         { 255, 107, 107 }, {  79, 172, 254 }, { 247, 151,  30 }, { 246, 180,  80 },
@@ -363,51 +365,145 @@ static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector
         { 118,  75, 162 }, {  40, 210, 190 }, { 240, 190,  60 }, {  51,   8, 103 },
         { 230, 150, 210 }, { 252,  96, 118 }, { 245,  87, 108 }, {  60, 186, 146 },
     };
+    static const wchar_t kGlyphs[12] = {
+        0xE7FC, 0xE99A, 0xE945, 0xE706, 0xE708, 0xE909,
+        0xEA86, 0xE76E, 0xE8D6, 0xED56, 0xEB51, 0xE8E1
+    };
+
     const Color c1 = kFrom[stockIdx];
     const Color c2 = kTo[stockIdx];
+    const wchar_t glyphChar = kGlyphs[stockIdx];
 
     const float cx = (width - 1) * 0.5f;
     const float cy = (height - 1) * 0.5f;
-    const float headCy = cy - height * 0.12f;
-    const float headR = width * 0.20f;
-    const float shoulderCy = cy + height * 0.40f;
-    const float shoulderRx = width * 0.36f;
-    const float shoulderRy = height * 0.26f;
+    const float rBadge = (width - 1) * 0.40f;
+    const float rGlow  = (width - 1) * 0.455f;
+
+    std::vector<uint8_t> glyphMask((size_t)width * height, 0);
+    int offsetX = 0, offsetY = 0;
+
+    HDC hdc = CreateCompatibleDC(nullptr);
+    if (hdc) {
+        BITMAPINFO bmi = {};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (hbm && bits) {
+            HGDIOBJ oldBm = SelectObject(hdc, hbm);
+            int fontSize = (int)std::round(rBadge * 1.08f);
+            if (fontSize < 10) fontSize = 10;
+
+            HFONT hFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                      L"Segoe MDL2 Assets");
+            if (!hFont) {
+                hFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                    L"Segoe Fluent Icons");
+            }
+
+            HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
+            memset(bits, 0, (size_t)width * height * 4);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(255, 255, 255));
+
+            RECT rc = { 0, 0, width, height };
+            DrawTextW(hdc, &glyphChar, 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            GdiFlush();
+
+            const uint8_t* raw = reinterpret_cast<const uint8_t*>(bits);
+            int minX = width, maxX = -1;
+            int minY = height, maxY = -1;
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    uint8_t v = raw[(y * width + x) * 4];
+                    glyphMask[y * width + x] = v;
+                    if (v > 15) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+
+            if (maxX >= minX && maxY >= minY) {
+                float curCx = (minX + maxX) * 0.5f;
+                float curCy = (minY + maxY) * 0.5f;
+                offsetX = (int)std::round(cx - curCx);
+                offsetY = (int)std::round(cy - curCy);
+            }
+
+            if (oldFont) SelectObject(hdc, oldFont);
+            if (hFont) DeleteObject(hFont);
+            SelectObject(hdc, oldBm);
+            DeleteObject(hbm);
+        }
+        DeleteDC(hdc);
+    }
+
+    const float bgR = 26.0f, bgG = 31.0f, bgB = 40.0f;
+    const float glowR = 28.0f, glowG = 52.0f, glowB = 55.0f;
 
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            float t = (float)(x + y) / (float)((width - 1) + (height - 1));
-            float bgR = c1.r + t * (c2.r - c1.r);
-            float bgG = c1.g + t * (c2.g - c1.g);
-            float bgB = c1.b + t * (c2.b - c1.b);
-
             float dx = (float)x - cx;
-            float dyHead = (float)y - headCy;
-            float distHead = std::sqrt(dx * dx + dyHead * dyHead);
+            float dy = (float)y - cy;
+            float dist = std::sqrt(dx * dx + dy * dy);
 
-            float dyShoulder = (float)y - shoulderCy;
-            float normShoulder = (dx * dx) / (shoulderRx * shoulderRx) + (dyShoulder * dyShoulder) / (shoulderRy * shoulderRy);
-
-            float silAlpha = 0.0f;
-            if (distHead < headR + 1.0f) {
-                float a = std::clamp(headR + 0.75f - distHead, 0.0f, 1.0f);
-                if (a > silAlpha) silAlpha = a;
+            int srcX = x - offsetX;
+            int srcY = y - offsetY;
+            uint8_t maskVal = 0;
+            if (srcX >= 0 && srcX < width && srcY >= 0 && srcY < height) {
+                maskVal = glyphMask[srcY * width + srcX];
             }
-            if (y >= (int)(cy - height * 0.02f) && normShoulder < 1.15f) {
-                float distNorm = std::sqrt(normShoulder);
-                float a = std::clamp((1.0f - distNorm) * shoulderRx + 0.5f, 0.0f, 1.0f);
-                if (a > silAlpha) silAlpha = a;
-            }
+            float glyphA = ((float)maskVal / 255.0f) * 0.92f;
 
-            float silA = silAlpha * 0.88f;
-            uint8_t finalR = (uint8_t)(bgR * (1.0f - silA) + 255.0f * silA);
-            uint8_t finalG = (uint8_t)(bgG * (1.0f - silA) + 255.0f * silA);
-            uint8_t finalB = (uint8_t)(bgB * (1.0f - silA) + 255.0f * silA);
+            float t = (float)(x + y) / (float)((width - 1) + (height - 1));
+            float gr = c1.r + t * (c2.r - c1.r);
+            float gg = c1.g + t * (c2.g - c1.g);
+            float gb = c1.b + t * (c2.b - c1.b);
+
+            float badgeR = gr * (1.0f - glyphA) + 255.0f * glyphA;
+            badgeR = std::min(badgeR, 255.0f);
+            float badgeG = gg * (1.0f - glyphA) + 255.0f * glyphA;
+            badgeG = std::min(badgeG, 255.0f);
+            float badgeB = gb * (1.0f - glyphA) + 255.0f * glyphA;
+            badgeB = std::min(badgeB, 255.0f);
+
+            float finalR = bgR, finalG = bgG, finalB = bgB;
+            if (dist <= rBadge - 0.5f) {
+                finalR = badgeR;
+                finalG = badgeG;
+                finalB = badgeB;
+            } else if (dist <= rBadge + 0.5f) {
+                float tEdge = std::clamp(rBadge + 0.5f - dist, 0.0f, 1.0f);
+                finalR = badgeR * tEdge + glowR * (1.0f - tEdge);
+                finalG = badgeG * tEdge + glowG * (1.0f - tEdge);
+                finalB = badgeB * tEdge + glowB * (1.0f - tEdge);
+            } else if (dist <= rGlow - 0.5f) {
+                finalR = glowR;
+                finalG = glowG;
+                finalB = glowB;
+            } else if (dist <= rGlow + 0.5f) {
+                float tEdge = std::clamp(rGlow + 0.5f - dist, 0.0f, 1.0f);
+                finalR = glowR * tEdge + bgR * (1.0f - tEdge);
+                finalG = glowG * tEdge + bgG * (1.0f - tEdge);
+                finalB = glowB * tEdge + bgB * (1.0f - tEdge);
+            }
 
             size_t idx = ((size_t)y * width + x) * 4;
-            outRgba[idx + 0] = finalR;
-            outRgba[idx + 1] = finalG;
-            outRgba[idx + 2] = finalB;
+            outRgba[idx + 0] = (uint8_t)std::clamp((int)std::round(finalR), 0, 255);
+            outRgba[idx + 1] = (uint8_t)std::clamp((int)std::round(finalG), 0, 255);
+            outRgba[idx + 2] = (uint8_t)std::clamp((int)std::round(finalB), 0, 255);
             outRgba[idx + 3] = 255;
         }
     }
