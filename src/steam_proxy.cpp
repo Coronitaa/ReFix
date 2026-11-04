@@ -2416,6 +2416,20 @@ static bool Hooked_ISteamFriends_SetRichPresence(void* self, const char* pchKey,
     return true;
 }
 
+// Native games that compare GetAppID() against their own AppID and abort
+// multiplayer on mismatch. Returning RealAppId only changes what the game sees:
+// the Steam client session (lobbies, SDR relay, P2P) still runs under MaskAppId,
+// because that identity is fixed at SteamAPI_Init via steam_appid.txt/SteamAppId.
+//   5306540 - Groundwork Simulator (Rust/Bevy): "Steam initialized for the wrong application"
+static const uint32_t kNativeRealAppIdGames[] = { 5306540 };
+
+static bool IsNativeRealAppIdGame() {
+    for (uint32_t appId : kNativeRealAppIdGames) {
+        if (g_config.realAppIdNum == appId) return true;
+    }
+    return false;
+}
+
 static bool DetectHeathenAsset() {
     if (g_config.realAppIdNum == 4001890 || g_config.realAppIdNum == 3070070) return true;
     std::string exeDir = GetExeDir();
@@ -2444,7 +2458,8 @@ static uint32_t GetResolvedAppID() {
             // lobby/server browser queries match the active Steam session.
             // Exception: Heathen Steamworks Foundation (How to Fish, TCG Card Shop Simulator)
             // strictly asserts GetAppID() == RealAppId and throws NullReferenceException otherwise.
-            if (DetectHeathenAsset() && g_config.realAppIdNum != 0) {
+            // Same for native games listed in kNativeRealAppIdGames.
+            if ((DetectHeathenAsset() || IsNativeRealAppIdGame()) && g_config.realAppIdNum != 0) {
                 targetApp = g_config.realAppIdNum;
             } else {
                 targetApp = (g_config.maskAppIdNum != 0) ? g_config.maskAppIdNum : 480;
