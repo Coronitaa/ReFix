@@ -413,3 +413,17 @@
   - Multiple profiles can each inherit the original save independently; each plays with its own isolated copy without mutating `_pc` or other profiles.
   - Uninstaller helper (`restore_saves.ps1` and `AutoDeploy.sh`) prioritizes the pristine `Saves\_pc\<label>` snapshot when restoring saves, guaranteeing original savedata is never corrupted.
 - **Unit testing**: `tests/test_lan_profiles.cpp` compiled into `bin/test_lan_profiles.exe` via `build.bat`, verifying profile scoping, `ForGame`/`FromOtherGames` filtering, and per-game `LastProfileId` isolation.
+
+## 2026-11-04 (18) - Fix explorer.exe hang and fullscreen minimization on game startup
+- **Explorer.exe freeze resolution**:
+  - In `App::RunDialog` (`src/overlay/overlay_app.cpp`), replaced the thread-freezing `DisableProcessWindowsGhosting()` and `WaitForSingleObject(dialogDone_, INFINITE)` with a proper non-blocking message pump using `MsgWaitForMultipleObjectsEx` and a `PeekMessageW` / `TranslateMessage` / `DispatchMessageW` loop.
+  - Previously, Windows Shell (`explorer.exe`) sent synchronous messages to the game window upon focus changes / minimization; because the game thread was blocked without message processing and process ghosting was permanently disabled, Windows Shell deadlocked and froze completely. With active message pumping, the window remains responsive to OS/DWM messages, preventing explorer.exe freezes.
+- **Child window hosting for dialogs & minimization fix**:
+  - In `src/overlay/overlay_host.cpp`, enabled child-window embedding for `Mode::Dialog` (`(m == Mode::Overlay || m == Mode::Dialog) && CanHostAsChild(gw)`). When the game window exists, the dialog is hosted directly as a child of the game window (`BecomeChild`), centered within the game's client area, rather than as an independent top-level application window.
+  - Replaced `WS_EX_APPWINDOW` on dialogs with `WS_EX_TOOLWINDOW` so showing a dialog does not create a separate taskbar button or trigger an OS application switch that forces fullscreen Unity/Unreal games to minimize via `WM_ACTIVATE(WA_INACTIVE)`.
+  - Added `FreeMouseForOverlay()` and cursor unclip during `Mode::Dialog` so dialog controls remain accessible even if the game captured or hid the hardware cursor.
+- **Non-blocking first-run boot**:
+  - Added `[Overlay] FirstRunDialog = false` (default false) to `ReFix.ini`, `AutoDeploy.sh`, and `bin/deploy_helper.ps1`.
+  - In `src/overlay/refix_overlay.cpp` (`ResolveIdentity`), on the first run of a game without profiles (`mine.empty() && !otherInstance`), ReFix no longer halts `SteamAPI_Init` or disrupts fullscreen boot unless `FirstRunDialog = true` is explicitly configured. Instead, the game boots directly and smoothly with machine identity.
+  - In `App::Frame` (`src/overlay/overlay_app.cpp`), once the game window reaches the foreground, a welcome toast is displayed ("ReFix LAN: Pulsa [Shift] [Tab] para abrir ReFix" / "Press [Shift] [Tab] to open ReFix"). The player can open the overlay at any time in-game to create or import their profile, with save data inheritance preserved.
+

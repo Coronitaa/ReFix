@@ -283,6 +283,7 @@ BlockSteamOverlay = $OV_BLOCK
 Sounds = true
 ; Each profile keeps its own Steam Cloud files and the game's known save folder (Unreal SaveGames, Unity LocalLow).
 IsolateSaves = true
+FirstRunDialog = false
 
 [EOS]
 Mode = $eos

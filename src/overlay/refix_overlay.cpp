@@ -29,6 +29,7 @@ struct Config {
     bool blockSteamOverlay = true;
     bool isolateSaves = true;
     bool sounds = true;
+    bool firstRunDialog = false;
 };
 
 Config g_cfg;
@@ -79,6 +80,7 @@ void LoadConfig(const std::string& iniPath) {
     g_cfg.blockSteamOverlay = read("BlockSteamOverlay", true);
     g_cfg.isolateSaves = read("IsolateSaves", true);
     g_cfg.sounds = read("Sounds", true);
+    g_cfg.firstRunDialog = read("FirstRunDialog", false);
     sound::SetEnabled(g_cfg.sounds);
 }
 
@@ -201,12 +203,24 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     const bool otherInstance = saves::OtherInstanceRunning();
     std::optional<Profile> chosen = PickProfile(mine, otherInstance);
     if (!chosen) {
-        const DialogKind kind = mine.empty() && !otherInstance ? DialogKind::FirstRun : DialogKind::Picker;
-        ReFixLog("[Overlay] %s (%zu profiles in this game, %zu on this PC): showing the %s",
-                 otherInstance ? "Another instance of this game is running" : "No free profile", mine.size(), all.size(),
-                 kind == DialogKind::FirstRun ? "first-run dialog" : "profile picker");
-        chosen = App::Get().RunDialog(kind);
-        all = profiles::LoadAll();
+        if (otherInstance) {
+            ReFixLog("[Overlay] Another instance is running; showing profile picker");
+            chosen = App::Get().RunDialog(DialogKind::Picker);
+            all = profiles::LoadAll();
+        } else if (mine.empty()) {
+            if (g_cfg.firstRunDialog) {
+                ReFixLog("[Overlay] First run with FirstRunDialog=true; showing first-run dialog");
+                chosen = App::Get().RunDialog(DialogKind::FirstRun);
+                all = profiles::LoadAll();
+            } else {
+                ReFixLog("[Overlay] First run for this game: booting directly with machine identity (Shift+Tab to configure profile)");
+                return false;
+            }
+        } else {
+            ReFixLog("[Overlay] No free profile; showing profile picker");
+            chosen = App::Get().RunDialog(DialogKind::Picker);
+            all = profiles::LoadAll();
+        }
     }
     if (!chosen) {
         ReFixLog("[Overlay] Playing without a profile (machine identity)");

@@ -70,12 +70,21 @@ std::optional<Profile> App::RunDialog(DialogKind kind) {
         return std::nullopt;
     }
     host::Wake();
-    // The game thread stays blocked here until a profile is chosen. After 5 s Windows takes its window for
-    // a hung one and puts a "ghost" copy in its place, which cannot show DirectX content: the game vanished
-    // behind the dialog. Without ghosting its last frame stays on screen under the dialog. Only games that
-    // show the profile dialog get this call (it lasts for the process).
-    DisableProcessWindowsGhosting();
-    WaitForSingleObject(dialogDone_, INFINITE);
+    while (true) {
+        DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &dialogDone_, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (waitRes == WAIT_OBJECT_0) {
+            break;
+        }
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
     CloseHandle(dialogDone_);
     dialogDone_ = nullptr;
     return dialogResult_;
@@ -300,13 +309,11 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
         PollInvites();
         if (!welcomed_ && game.hwnd && game.foreground) {
             welcomed_ = true;
-            if (!profiles_.empty() || active_) {
-                Toast t;
-                t.kind = Toast::Kind::Welcome;
-                t.born = now;
-                t.life = kWelcomeMs;
-                toasts_.push_back(std::move(t));
-            }
+            Toast t;
+            t.kind = Toast::Kind::Welcome;
+            t.born = now;
+            t.life = kWelcomeMs;
+            toasts_.push_back(std::move(t));
         }
     }
     for (Toast& t : toasts_) {

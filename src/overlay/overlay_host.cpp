@@ -329,7 +329,7 @@ void BecomePopup() {
 
 void SetStyles(Mode m) {
     LONG_PTR ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST;
-    ex |= (m == Mode::Dialog) ? WS_EX_APPWINDOW : (WS_EX_TOOLWINDOW | (m == Mode::Toast ? WS_EX_NOACTIVATE : 0));
+    ex |= (m == Mode::Toast ? (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) : WS_EX_TOOLWINDOW);
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
 }
 
@@ -346,8 +346,14 @@ RECT TargetRect(Mode m, const GameWindow& gw) {
         r.top = r.bottom - (LONG)sz.y;
         return r;
     }
-    // Dialog (or overlay without a game window): centred on the game's or the primary monitor.
     const ImVec2 sz = m == Mode::Dialog ? g_client->DialogSize() : ImVec2(1280, 720);
+    if (m == Mode::Dialog && g_childOf) {
+        const LONG w = gw.client.right - gw.client.left;
+        const LONG h = gw.client.bottom - gw.client.top;
+        const LONG cx = w / 2, cy = h / 2;
+        return { cx - (LONG)sz.x / 2, cy - (LONG)sz.y / 2, cx + (LONG)sz.x / 2, cy + (LONG)sz.y / 2 };
+    }
+    // Centred on the game's or the primary monitor.
     HMONITOR mon = MonitorFromWindow(gw.hwnd ? gw.hwnd : GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfoW(mon, &mi);
@@ -371,7 +377,7 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             if (gw.minimized) ShowWindowAsync(gw.hwnd, SW_RESTORE);
             SetForegroundWindow(gw.hwnd);
         }
-        if (m == Mode::Overlay && CanHostAsChild(gw)) {
+        if ((m == Mode::Overlay || m == Mode::Dialog) && CanHostAsChild(gw)) {
             BecomeChild(gw.hwnd);
         } else if (m == Mode::Hidden) {
             ShowWindow(g_hwnd, SW_HIDE);
@@ -380,6 +386,8 @@ void ApplyMode(Mode m, const GameWindow& gw) {
         }
         if (giveBack && !g_childOf && GetForegroundWindow() != gw.hwnd) SetForegroundWindow(gw.hwnd);
         g_client->OnModeChanged(from, m);
+    } else if (!g_childOf && (m == Mode::Overlay || m == Mode::Dialog) && CanHostAsChild(gw)) {
+        BecomeChild(gw.hwnd);
     }
     if (m == Mode::Hidden) return;
     const RECT r = TargetRect(m, gw);
@@ -400,7 +408,7 @@ void ApplyMode(Mode m, const GameWindow& gw) {
         }
     } else if ((m == Mode::Overlay || m == Mode::Dialog) && GetForegroundWindow() != g_hwnd) {
         SetForegroundWindow(g_hwnd);
-        if (m == Mode::Overlay) ClipCursor(nullptr);
+        ClipCursor(nullptr);
     }
 }
 
@@ -454,7 +462,7 @@ void FeedGamepad(const pad::State& s) {
 
 void Render(const GameWindow& gw, const pad::State& padState) {
     FeedGamepad(padState);
-    if (g_mode == Mode::Overlay) FreeMouseForOverlay();
+    if (g_mode == Mode::Overlay || g_mode == Mode::Dialog) FreeMouseForOverlay();
     else ImGui::GetIO().MouseDrawCursor = false;
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -545,7 +553,7 @@ DWORD WINAPI HostThread(LPVOID) {
         }
         if (g_wantHotkeyHook && PollHotkey()) g_hotkeyPending = true;
         const ULONGLONG now = GetTickCount64();
-        if (now - lastScan >= kGameScanMs || g_mode == Mode::Overlay || g_mode == Mode::Toast) {
+        if (now - lastScan >= kGameScanMs || g_mode == Mode::Overlay || g_mode == Mode::Toast || g_mode == Mode::Dialog) {
             ScanGameWindow();
             lastScan = now;
         }

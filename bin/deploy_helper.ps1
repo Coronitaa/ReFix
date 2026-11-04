@@ -457,6 +457,8 @@ BlockSteamOverlay = $(if ($OverlayMode -eq "steam") { "false" } else { "true" })
 Sounds = true
 ; Each profile keeps its own Steam Cloud files and the game's known save folder (Unreal SaveGames, Unity LocalLow).
 IsolateSaves = true
+; FirstRunDialog: false = el juego inicia directamente sin interrupciones a pantalla completa
+FirstRunDialog = false
 
 [Matchmaking]
 EnableLobbyFilter = false
