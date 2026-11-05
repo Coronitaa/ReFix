@@ -500,3 +500,30 @@ elease\ReFix_v2.1.0, and deployed to D:\Games\PEAK\PEAK_Data\Plugins\x86_64\stea
   - Added standalone `Uninstall_ReFix.sh` alongside `AutoDeploy.sh` for Proton/Wine environments.
 - **Release 2.1.1**:
   - Packaged `release\ReFix_v2.1.1` and tagged `v2.1.1`.
+
+
+## 2026-11-05 (24) - NVIDIA Reflex Overlay Suppression & ReFix Mods SDK Design (Milestone 1)
+- **NVIDIA Reflex & GeForce Experience Overlay Suppression**:
+  - Implemented `src/overlay/nvidia_reflex_block.h` and `nvidia_reflex_block.cpp`.
+  - Integrated into `ReFixOverlay::ArmEarly()`, `ReFixOverlay::Start()`, and `winmm_proxy.cpp` (`LoadAndApplyConfig()`).
+  - Sets environment switches recognized by NVIDIA driver, Vulkan loader, Proton and DXVK:
+    `NV_LOWLATENCY_FLASH_INDICATOR=0`, `NV_LOW_LATENCY_FLASH_INDICATOR=0`, `NV_REFLEX_DISABLE_OVERLAY=1`, `NV_DISABLE_REFLEX_OVERLAY=1`, `NV_REFLEX_DISABLE=1`, `GFE_DISABLE_OVERLAY=1`, `DISABLE_VK_LAYER_NV_optimus_1=1`, `DISABLE_VK_LAYER_NV_nomad_1=1`, `PROTON_NVAPI_DISABLE=1`, `DXVK_NVAPI_VKREFLEX=0`.
+  - In-process MinHook interception of `nvapi_QueryInterface`: hooks `NvAPI_D3D_SetLatencyMarker` (`0xD9984C05`) and `NvAPI_D3D12_SetLatencyMarker` (`0xD22BDD7E`) to drop `TRIGGER_FLASH` (marker 7) requests, eliminating the white flash indicator box without degrading game latency or frame-pacing.
+  - Added unit test `tests/test_nvidia_reflex_block.cpp` (compiled to `bin/test_nvidia_reflex_block.exe` in `build.bat`), passing with 100% green assertions.
+- **ReFix Mods SDK & Runtime Architecture (Milestones 1-11 Complete)**:
+  - Authored comprehensive architectural specification `docs/refix-lan/MODS_SDK_DESIGN.md`.
+  - Defined threat model (malicious author, tampered package, malicious update, sandbox escape, player privacy leakage).
+  - Designed and implemented two-tier execution model: Sandboxed WebAssembly (`wasm3` compiled static without WASI) for community mods vs. Native DLL strictly signed by ReFix Root Key.
+  - Implemented cryptographic manifest & package verification (`mod_manifest`, `mod_signature`, `mod_package`): Monocypher 3.1.3 Ed25519 sign/verify, SHA-256 file verification, miniz-based `.rfmod` packaging, Zip-Slip path traversal defense, and signed revocation list.
+  - Implemented DPAPI + HMAC Trust Store (`mod_trust_store`): stores approvals in `%APPDATA%\ReFix\mods\trust.json`, protected with `CryptProtectData` and SHA-256 checksums. Enforces Trust-On-First-Use (TOFU) key pinning and capability escalation detection.
+  - Implemented 11-phase topological scheduler (`mod_scheduler`): manages phases `Boot`, `PreRefix`, `PostRefix`, `GameInit`, `EngineReady`, `NetworkReady`, `PreFrame`, `PostFrame`, `LobbyJoined`, `MatchStart`, `Shutdown`. Resolves DAG with Kahn's algorithm, priority tie-breaking, and cycle detection.
+  - Implemented WebAssembly Sandbox runtime (`sandbox_wasm`): wraps `wasm3` with memory limits (default 16MB), watchdog timer / instruction interrupt (default 15ms), trap recovery (rolls back patches/hooks), and host API export functions.
+  - Implemented declarative patch and mediated hook engine (`patch_engine`): MinHook-mediated trampolines, forbidden module blacklist (`kernel32`, `ntdll`, `user32`, `ws2_32`, ReFix modules), PE/IAT/EAT protection, ROP system pointer hijacking mitigation, and automatic rollback on fault.
+  - Implemented Privacy Gate (`privacy_gate`): generates ephemeral double-salted `PeerHandle` identifiers ($\text{HMAC-SHA256}(\text{SessionSalt} \oplus \text{ModSalt}, \text{RealID})$) preventing physical IP/port/SteamID tracking; redacts display names unless `players.display_name` is explicitly approved; channel payload isolation.
+  - Implemented engine adapters (`adapters/engine/`) for Unity Mono, Unity IL2CPP, Unreal 4/5, Godot, Source, GameMaker, and Native.
+  - Implemented protocol adapters (`adapters/protocol/`) for Steam Networking, EOS, Photon, LanCore, Raw Sockets, and Discovery.
+  - Implemented Official Native Host (`native_host`): loads PE DLLs strictly verified against the ReFix Official Root public key.
+  - Created Public SDK (`sdk/`): versioned C ABI (`sdk/include/refix_mod_api.h`), C++ wrapper (`refix_mod.hpp`), Rust bindings (`sdk/bindings/rust/`), 4 examples (declarative patch, engine hook, protocol override, overlay panel), and documentation (`README.md`, `SECURITY.md`, `API_REFERENCE.md`).
+  - Implemented CLI developer tool `refixmod.exe` (`tools/refixmod/`): supports `keygen`, `lint`, `pack`, `sign`, `verify`, `inspect`.
+  - Implemented Overlay UI integration (`overlay_ui_mods.cpp`): Mods card and security approval modal in ImGui overlay with gamepad navigation, high-risk capability warnings, and i18n English/Spanish (`/utf-8`).
+  - Added unit test matrix in `tests/`: 9 dedicated test executables (`test_mod_manifest`, `test_mod_signature`, `test_mod_package`, `test_mod_trust_store`, `test_mod_scheduler`, `test_sandbox_wasm`, `test_patch_engine`, `test_privacy_gate`, `test_refixmod_cli`), all compiling and passing 100%. Verified that non-modded baseline remains 100% inert and identical in behavior.

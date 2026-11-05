@@ -39,6 +39,7 @@
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
 #include "overlay/refix_overlay.h"
+#include "mods/mod_host.h"
 #endif
 
 static bool EnsureOriginal();
@@ -1914,6 +1915,28 @@ static void LoadConfig() {
     g_enableLogAllowed = g_config.enableLog;
     g_config.enableConsole = ReadBool("Debug", "EnableConsole", false);
     g_config.enableServerBrowser = ReadBool("Debug", "EnableServerBrowser", true);
+
+    // [Mods]
+    char modsEnabledStr[64] = "true";
+    ReadString("Mods", "Enabled", "true", modsEnabledStr, sizeof(modsEnabledStr));
+    bool modsEnabled = (_stricmp(modsEnabledStr, "true") == 0 || strcmp(modsEnabledStr, "1") == 0);
+
+    char modsDevModeStr[64] = "false";
+    ReadString("Mods", "DevMode", "false", modsDevModeStr, sizeof(modsDevModeStr));
+    bool modsDevMode = (_stricmp(modsDevModeStr, "true") == 0 || strcmp(modsDevModeStr, "1") == 0);
+
+    char modsDirBuf[MAX_PATH] = "";
+    ReadString("Mods", "ModsDirectory", "", modsDirBuf, sizeof(modsDirBuf));
+
+    if (modsEnabled) {
+        std::string modsDir = modsDirBuf[0] != '\0' ? modsDirBuf : (GetExeDir() + "refix_mods");
+        refix::mods::ModHost::GetInstance().Initialize(modsDir, modsDevMode);
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::Boot);
+        refix::mods::ModHost::GetInstance().DiscoverAndLoad();
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PreRefix);
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PostRefix);
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::EngineReady);
+    }
 }
 
 void ReFixLog(const char* fmt, ...) {
@@ -7133,6 +7156,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
             SteamP2PHook::Uninstall();
+#if REFIX_LAN_EDITION
+            refix::mods::ModHost::GetInstance().Shutdown();
+#endif
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary
             // during DLL_PROCESS_DETACH. Calling COM/FreeLibrary in DllMain violates loader lock
             // and causes crashes on process exit. OS cleans up process memory safely.

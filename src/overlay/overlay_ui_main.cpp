@@ -1,4 +1,4 @@
-﻿// Overlay screens: the Shift+Tab overlay (top bar, community, players), the game's invite picker and the
+// Overlay screens: the Shift+Tab overlay (top bar, community, players), the game's invite picker and the
 // notifications. Profile screens are in overlay_ui_profile.cpp.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cstdio>
+
+#include "overlay_ui_mods.h"
 
 namespace refix::overlay {
 namespace {
@@ -100,20 +102,9 @@ void App::DrawOverlay(ImVec2 viewport) {
             DrawCommunity(ImVec2(m, leftY), leftW);
             leftY += ui::S(56 + 2 * kTileHeight + 10 + 40) + ui::S(20);
         }
-        // Achievements: extension point, not emulated yet.
-        const float achH = ui::S(104);
+        const float achH = ui::S(115);
         if (leftY + achH <= top + height) {
-            ui::BeginCard("##achievements", ImVec2(m, leftY), ImVec2(leftW, achH));
-            ImGui::PushFont(ui::F().heading);
-            ui::TextColored(ui::color::Star, ui::icon::Trophy);
-            ImGui::SameLine();
-            ImGui::TextUnformatted(i18n::T("Achievements", "Logros"));
-            ImGui::PopFont();
-            ImGui::PushFont(ui::F().caption);
-            ui::TextColored(ui::color::Muted, i18n::T("Coming soon: this game's achievements will show up here.",
-                                                      "Próximamente: aquí verás los logros de este juego."));
-            ImGui::PopFont();
-            ui::EndCard();
+            DrawModsCard(ImVec2(m, leftY), leftW, achH);
         }
         const float px = m + leftW + ui::S(20);
         DrawPlayers(ImVec2(px, top), ImVec2(viewport.x - px - m, height), false);

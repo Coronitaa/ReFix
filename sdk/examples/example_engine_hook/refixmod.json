@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "com.refix.example.enginehook",
+  "name": "Example Engine Hook Mod",
+  "version": "1.0.0",
+  "author": "ReFix Community",
+  "entrypoint": "main.wasm",
+  "execution_tier": "sandboxed",
+  "phase": "EngineReady",
+  "priority": 10,
+  "target_games": [
+    { "app_id": 480, "exe_name": "Game.exe", "engine": "unreal" }
+  ],
+  "capabilities": [
+    "log",
+    "hooks.game"
+  ]
+}

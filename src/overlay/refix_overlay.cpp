@@ -8,6 +8,7 @@
 #include "profile_store.h"
 #include "save_swap.h"
 #include "steam_overlay_block.h"
+#include "nvidia_reflex_block.h"
 #include "avatar_image.h"
 #include "presence_net.h"
 #include "../unreal_steam_emu.h"
@@ -37,6 +38,7 @@ struct Config {
     bool isolateSaves = true;
     bool sounds = true;
     bool firstRunDialog = false;
+    bool blockNvidiaReflex = true;
 };
 
 Config g_cfg;
@@ -88,6 +90,7 @@ void LoadConfig(const std::string& iniPath) {
     g_cfg.isolateSaves = read("IsolateSaves", true);
     g_cfg.sounds = read("Sounds", true);
     g_cfg.firstRunDialog = read("FirstRunDialog", false);
+    g_cfg.blockNvidiaReflex = read("BlockNvidiaReflex", true);
     sound::SetEnabled(g_cfg.sounds);
 }
 
@@ -184,8 +187,8 @@ void ArmEarly() {
     LoadConfig(FindIni());
     // Independent of the ReFix overlay: Enabled=false + BlockSteamOverlay=true means no overlay at all,
     // Enabled=false + BlockSteamOverlay=false lets Steam's own overlay draw.
-    if (!g_cfg.blockSteamOverlay) return;
-    ArmSteamOverlayBlock();
+    if (g_cfg.blockSteamOverlay) ArmSteamOverlayBlock();
+    if (g_cfg.blockNvidiaReflex) ArmNvidiaReflexBlock();
 }
 
 void WaitForRestartParent() {
@@ -288,6 +291,7 @@ std::wstring StatsFolder(uint32_t appId) {
 void Start() {
     if (g_started.exchange(true)) return;
     LoadConfig(FindIni());
+    if (g_cfg.blockNvidiaReflex) ArmNvidiaReflexBlock();
     if (!Allowed()) return;
     std::optional<Profile> active;
     {

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "com.refix.example.protocoloverride",
+  "name": "Example Protocol Override Mod",
+  "version": "1.0.0",
+  "author": "ReFix Community",
+  "entrypoint": "main.wasm",
+  "execution_tier": "sandboxed",
+  "phase": "NetworkReady",
+  "priority": 0,
+  "target_games": [
+    { "app_id": 480, "exe_name": "Game.exe", "engine": "native" }
+  ],
+  "capabilities": [
+    "log",
+    "net.inspect_channel",
+    "net.override_channel"
+  ]
+}
