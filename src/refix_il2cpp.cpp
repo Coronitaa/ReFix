@@ -8,6 +8,7 @@
 #include "overlay/overlay_text.h"
 #include "overlay/save_swap.h"
 #include "overlay/refix_overlay.h"
+#include "unreal_steam_emu.h"
 #include <cstdio>
 #include <atomic>
 #include <string>
@@ -1172,6 +1173,62 @@ static bool Hooked_PlayerReporting_CanUseReportingApi(void* method) {
 
 // Hooked SelectServerPaneUi.OnApplyButtonClick
 // When user clicks Confirmar/Apply, DO NOT call official AWS connection. Route straight to P2P!
+
+typedef void* (*fn_NetworkRunner_StartGame_t)(void* self, void* args, void* method);
+static fn_NetworkRunner_StartGame_t g_orig_NetworkRunner_StartGame = nullptr;
+
+static void* Hooked_NetworkRunner_StartGame(void* self, void* args, void* method) {
+    if (args) {
+        int32_t* pGameMode = reinterpret_cast<int32_t*>(args);
+        int32_t originalMode = *pGameMode;
+
+        if (ReadIniBool("Fusion", "ForceHost", false)) {
+            bool isLobbyOwner = true;
+            uint64_t activeLobby = UnrealSteamEmu::GetActiveLobbyID();
+            if (activeLobby != 0) {
+                uint64_t owner = UnrealSteamEmu::Matchmaking_GetLobbyOwner(activeLobby);
+                uint64_t selfId = UnrealSteamEmu::GetLocalSteamID();
+                isLobbyOwner = (owner == 0 || owner == selfId);
+            }
+            if (isLobbyOwner) {
+                *pGameMode = 4; // Host
+                ReFixLog("[Fusion IL2CPP] Overriding StartGameArgs.GameMode from %d to Host (4)", originalMode);
+            } else {
+                *pGameMode = 5; // Client
+                ReFixLog("[Fusion IL2CPP] Overriding StartGameArgs.GameMode from %d to Client (5)", originalMode);
+            }
+        } else {
+            ReFixLog("[Fusion IL2CPP] NetworkRunner.StartGame invoked with GameMode %d", originalMode);
+        }
+    }
+    return g_orig_NetworkRunner_StartGame ? g_orig_NetworkRunner_StartGame(self, args, method) : nullptr;
+}
+
+typedef void (*fn_AuthenticationValues_set_AuthType_t)(void* self, uint8_t value, void* method);
+static fn_AuthenticationValues_set_AuthType_t g_orig_AuthenticationValues_set_AuthType = nullptr;
+
+static void Hooked_AuthenticationValues_set_AuthType(void* self, uint8_t value, void* method) {
+    if (ReadIniBool("Photon", "ForceAnonymous", true)) {
+        value = 255; // CustomAuthenticationType.None
+    }
+    if (g_orig_AuthenticationValues_set_AuthType) {
+        g_orig_AuthenticationValues_set_AuthType(self, value, method);
+    }
+}
+
+typedef void (*fn_ApplyAuthenticationTicketParameters_t)(void* self, void* arg1, void* arg2, void* method);
+static fn_ApplyAuthenticationTicketParameters_t g_orig_ApplyAuthenticationTicketParameters = nullptr;
+
+static void Hooked_ApplyAuthenticationTicketParameters(void* self, void* arg1, void* arg2, void* method) {
+    if (ReadIniBool("Photon", "BypassTicket", true)) {
+        ReFixLog("[Photon IL2CPP] Bypassing ApplyAuthenticationTicketParameters for anonymous LAN handshake");
+        return;
+    }
+    if (g_orig_ApplyAuthenticationTicketParameters) {
+        g_orig_ApplyAuthenticationTicketParameters(self, arg1, arg2, method);
+    }
+}
+
 static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
     if (self) g_pSelectServerPaneUiInstance.store(self);
     ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnApplyButtonClick (Confirm) clicked! <<<");
@@ -1388,6 +1445,47 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
             if (pCode && MH_CreateHook(pCode, (void*)Hooked_PlayerReporting_CanUseReportingApi, (void**)&g_orig_PlayerReporting_CanUseReportingApi) == MH_OK) {
                 MH_EnableHook(pCode);
                 ReFixLog("[IL2CPP] Hooked PlayerReportingService.CanUseReportingApi at %p", pCode);
+            }
+        }
+    }
+
+    // Hook Fusion NetworkRunner.StartGame for optional generic HostMode forcing
+    void* klassRunner = FindClassAcrossImages("Fusion", "NetworkRunner");
+    if (klassRunner) {
+        void* mStartGame = g_pfn_class_get_method_from_name(klassRunner, "StartGame", 1);
+        if (mStartGame) {
+            void* pCode = ResolveRealCodePointer(*(void**)mStartGame);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_NetworkRunner_StartGame, (void**)&g_orig_NetworkRunner_StartGame) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked Fusion.NetworkRunner.StartGame at %p", pCode);
+            }
+        }
+    }
+
+    // Hook Photon / Fusion AuthenticationValues.set_AuthType for anonymous auth
+    void* klassAuth = FindClassAcrossImages("Photon.Realtime", "AuthenticationValues");
+    if (!klassAuth) klassAuth = FindClassAcrossImages("Fusion.Photon.Realtime", "AuthenticationValues");
+    if (klassAuth) {
+        void* mSetAuth = g_pfn_class_get_method_from_name(klassAuth, "set_AuthType", 1);
+        if (mSetAuth) {
+            void* pCode = ResolveRealCodePointer(*(void**)mSetAuth);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_AuthenticationValues_set_AuthType, (void**)&g_orig_AuthenticationValues_set_AuthType) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked AuthenticationValues.set_AuthType at %p", pCode);
+            }
+        }
+    }
+
+    // Hook ApplyAuthenticationTicketParameters if present in game assembly
+    void* klassNetService = FindClassAcrossImages("FS.Network", "NetworkService");
+    if (klassNetService) {
+        void* mApplyTicket = g_pfn_class_get_method_from_name(klassNetService, "ApplyAuthenticationTicketParameters", 2);
+        if (!mApplyTicket) mApplyTicket = g_pfn_class_get_method_from_name(klassNetService, "ApplyAuthenticationTicketParameters", 1);
+        if (mApplyTicket) {
+            void* pCode = ResolveRealCodePointer(*(void**)mApplyTicket);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_ApplyAuthenticationTicketParameters, (void**)&g_orig_ApplyAuthenticationTicketParameters) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked NetworkService.ApplyAuthenticationTicketParameters at %p", pCode);
             }
         }
     }

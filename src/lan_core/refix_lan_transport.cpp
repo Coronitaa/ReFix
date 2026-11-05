@@ -747,7 +747,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             if (SeqGt(seq, state.expectedSequenceIn)) {
                 // Out-of-order packet: buffer in outOfOrderInbound and send immediate advisory SACK
                 uint32_t seqDiff = seq - state.expectedSequenceIn;
-                if (seqDiff < 64 && state.outOfOrderInbound.size() < 64) {
+                if (seqDiff < REFIX_MAX_OUT_OF_ORDER_INBOUND && state.outOfOrderInbound.size() < REFIX_MAX_OUT_OF_ORDER_INBOUND) {
                     InboundPacket pkt;
                     pkt.senderPeerId = senderPeer;
                     pkt.senderEndpoint = fromEp;
@@ -823,7 +823,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
                 }
             } else {
                 // Fragmented in-order candidate
-                if (state.outOfOrderInbound.size() < 64) {
+                if (state.outOfOrderInbound.size() < REFIX_MAX_OUT_OF_ORDER_INBOUND) {
                     InboundPacket pkt;
                     pkt.senderPeerId = senderPeer;
                     pkt.senderEndpoint = fromEp;
@@ -1242,7 +1242,7 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
                         it->isSacked = false;
                     }
                     it->retries++;
-                    if (it->retries > 20) {
+                    if (it->retries > 40) {
                         timedOutPeers.emplace_back(peerId, it->target);
                         state.unackedOutbound.clear();
                         state.timedOut = true;
