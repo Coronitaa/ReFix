@@ -527,3 +527,13 @@ elease\ReFix_v2.1.0, and deployed to D:\Games\PEAK\PEAK_Data\Plugins\x86_64\stea
   - Implemented CLI developer tool `refixmod.exe` (`tools/refixmod/`): supports `keygen`, `lint`, `pack`, `sign`, `verify`, `inspect`.
   - Implemented Overlay UI integration (`overlay_ui_mods.cpp`): Mods card and security approval modal in ImGui overlay with gamepad navigation, high-risk capability warnings, and i18n English/Spanish (`/utf-8`).
   - Added unit test matrix in `tests/`: 9 dedicated test executables (`test_mod_manifest`, `test_mod_signature`, `test_mod_package`, `test_mod_trust_store`, `test_mod_scheduler`, `test_sandbox_wasm`, `test_patch_engine`, `test_privacy_gate`, `test_refixmod_cli`), all compiling and passing 100%. Verified that non-modded baseline remains 100% inert and identical in behavior.
+  - Comprehensive documentation generated:
+    - `sdk/docs/README.md`: Complete developer guide, prerequisites, toolchain, build workflows (C/C++ and Rust to WASM), DevMode testing, and publishing.
+    - `sdk/docs/API_REFERENCE.md`: Complete C ABI specification, data structures, host imports, mod exports, lifecycle phases, capabilities, and error codes.
+    - `sdk/docs/SECURITY.md`: Mathematical formalization of Privacy Gate double-salt HMACs, 2-tier execution, WASM sandboxing, anti-ROP protections, and DPAPI trust store.
+    - `sdk/docs/TUTORIAL.md`: Step-by-step developer tutorial covering byte patches, mediated engine hooks, protocol overrides, and custom ImGui overlay panels.
+    - `sdk/docs/ENGINE_ADAPTERS.md`: Architecture guide for Unity Mono, Unity IL2CPP, Unreal 4/5, Godot, Source 1/2, GameMaker, and Native runtimes in x64/x86.
+    - `sdk/docs/PROTOCOL_ADAPTERS.md`: Network protocol override and packet inspection guide for Steamworks, EOS, Photon PUN/Fusion, LanCore, Raw Sockets, and Discovery.
+    - `sdk/docs/CLI_REFERENCE.md`: Complete reference manual and exit codes for `refixmod.exe` (`keygen`, `lint`, `pack`, `sign`, `verify`, `inspect`).
+    - `docs/refix-lan/NVIDIA_REFLEX_SUPPRESSION.md`: Systems engineering documentation on NVIDIA Reflex overlay interference, environment variable suppression, API interception, and verification.
+    - `docs/refix-lan/MODS_ARCHITECTURE_SPEC.md`: Subsystem internals, DAG topological scheduler (Kahn's algorithm), Loader Lock avoidance, MinHook mediation, SEH fault handling, and DPAPI persistence.
