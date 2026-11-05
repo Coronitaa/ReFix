@@ -309,10 +309,12 @@ void Initialize() {
     std::string exeName(exeBuf);
     bool isPartyAnimals = exeName.find("PartyAnimals") != std::string::npos ||
                           (ReFixIL2CPPScene::FindClassByName("", "UriHelper") != nullptr);
-    const char* defaultEnabled = isPartyAnimals ? "true" : "false";
+    const char* defaultEnabled = isPartyAnimals ? "auto" : "false";
     GetPrivateProfileStringA("P2P", "LocalBackend", defaultEnabled, enabled, sizeof(enabled), IniPath().c_str());
-    GetPrivateProfileStringA("P2P", "LocalBackendHost", "partyanimalsgame.com", filter, sizeof(filter), IniPath().c_str());
-    if (_stricmp(enabled, "true") != 0 && strcmp(enabled, "1") != 0) {
+    GetPrivateProfileStringA("P2P", "LocalBackendHost", isPartyAnimals ? "partyanimalsgame.com" : "", filter, sizeof(filter), IniPath().c_str());
+    if (filter[0] == '\0' && isPartyAnimals) strcpy_s(filter, "partyanimalsgame.com");
+    bool isEnabled = (_stricmp(enabled, "auto") == 0) ? isPartyAnimals : (_stricmp(enabled, "true") == 0 || strcmp(enabled, "1") == 0);
+    if (!isEnabled) {
         ReFixLog("[PA-Backend] LocalBackend disabled in ReFix.ini");
         return;
     }
