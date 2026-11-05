@@ -1,4 +1,4 @@
-﻿// Overlay screens: the Shift+Tab overlay (top bar, community, players), the game's invite picker and the
+// Overlay screens: the Shift+Tab overlay (top bar, community, players), the game's invite picker and the
 // notifications. Profile screens are in overlay_ui_profile.cpp.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -141,15 +141,19 @@ void App::DrawTopBar(ImVec2 viewport) {
     const ui::Fonts& f = ui::F();
 
     // Left: game title.
+    const ImVec2 barMin(m, m);
+    const ImVec2 barMax(viewport.x - m, m + h);
+    dl->AddRectFilled(barMin, barMax, ui::color::Panel, ui::S(12));
+    dl->AddRect(barMin, barMax, ui::color::Border, ui::S(12));
     const std::string title = gameTitle_.empty() ? i18n::T("Game", "Juego") : ToUtf8(gameTitle_);
     const float cy = m + h * 0.5f;
-    dl->AddCircleFilled(ImVec2(m + ui::S(20), cy), ui::S(20), ui::Fade(ui::color::Accent, 0.16f), 32);
+    dl->AddCircleFilled(ImVec2(m + ui::S(26), cy), ui::S(18), ui::Fade(ui::color::Accent, 0.16f), 32);
     const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Game);
-    TextAt(dl, f.heading, ImVec2(m + ui::S(20) - gs.x * 0.5f, cy - gs.y * 0.5f), ui::color::Accent, ui::icon::Game);
-    const float titleX = m + ui::S(52);
+    TextAt(dl, f.heading, ImVec2(m + ui::S(26) - gs.x * 0.5f, cy - gs.y * 0.5f), ui::color::Accent, ui::icon::Game);
+    const float titleX = m + ui::S(56);
 
     // Right, from the edge inwards: close, profile chip, clock.
-    float x = viewport.x - m - ui::S(kIconButton);
+    float x = viewport.x - m - ui::S(kIconButton) - ui::S(10);
     ImGui::SetCursorScreenPos(ImVec2(x, cy - ui::S(kIconButton) * 0.5f));
     if (ui::IconButton("close", ui::icon::Close, i18n::T("Close (Shift+Tab)", "Cerrar (Shift+Tab)"), ui::color::Text)) CloseOverlay();
 

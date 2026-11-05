@@ -60,7 +60,7 @@ Response Dispatch(const Request& req) {
         ReFixLog("[PA-Backend] Served local unbanned status for %s", req.path.c_str());
         return res;
     }
-    ReFixPAServices::Result served = ReFixPAServices::HandleRequest(req.body);
+    ReFixPAServices::Result served = ReFixPAServices::HandleRequest(req.body, req.path);
     Response res;
     if (served.handled) {
         res.status = 200;
@@ -69,7 +69,8 @@ Response Dispatch(const Request& req) {
     }
     // Not served locally: drop the connection so the game sees the same network failure as the unreachable
     // cloud. Any HTTP 503 would instead start MaintenanceManager's "scheduled maintenance" screen.
-    res.status = 0;
+    res.status = 200;
+    res.body = "{\"code\":0,\"httpStatus\":200,\"result\":{\"ok\":true},\"message\":\"\"}";
     return res;
 }
 
@@ -124,9 +125,9 @@ DWORD WINAPI ConnectionThread(LPVOID param) {
         size_t sp2 = requestLine.find(' ', sp1 + 1);
         req.method = requestLine.substr(0, sp1);
         std::string target = requestLine.substr(sp1 + 1, sp2 - sp1 - 1); // "/<host>/<path>"
-        size_t slash = target.find('/', 1);
-        req.host = target.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);
-        req.path = slash == std::string::npos ? "/" : target.substr(slash);
+        size_t slash = target.find('/', 1); size_t dot = target.find('.', 1);
+        bool hasHost = (dot != std::string::npos && (slash == std::string::npos || dot < slash)); req.host = hasHost ? target.substr(1, slash == std::string::npos ? std::string::npos : slash - 1) : "127.0.0.1";
+        req.path = hasHost ? (slash == std::string::npos ? "/" : target.substr(slash)) : (target.empty() ? "/" : target);
 
         size_t length = ContentLength(req.headers);
         req.body = data.substr(headerEnd + 4);
@@ -228,8 +229,8 @@ void* Hooked_NewUri(void* str, void* method) {
 }
 
 bool HookNewUri() {
-    void* klass = ReFixIL2CPPScene::FindClassByName("", "UriHelper");
-    void* code = klass ? ReFixIL2CPPScene::GetMethodCode(klass, "NewUri", 1) : nullptr;
+    void* klass = ReFixIL2CPPScene::FindClassByName("", "UriHelper"); if (!klass) klass = ReFixIL2CPPScene::FindClassByName("Recreate.Scripts.Network.Utilities", "UriHelper"); if (!klass) klass = ReFixIL2CPPScene::FindClassByName("Recreate.Scripts.Network", "UriHelperForAot");
+    void* code = klass ? ReFixIL2CPPScene::GetMethodCode(klass, "NewUri", 1) : nullptr; if (klass && !code) code = ReFixIL2CPPScene::GetMethodCode(klass, "newUri", 1); if (klass && !code) code = ReFixIL2CPPScene::GetMethodCode(klass, "newUriString", 1);
     if (!code) return false;
     return MH_CreateHook(code, (void*)&Hooked_NewUri, (void**)&g_origNewUri) == MH_OK && MH_EnableHook(code) == MH_OK;
 }
@@ -241,7 +242,13 @@ void Initialize() {
     char enabled[16] = { 0 };
     char filter[128] = { 0 };
     // Opt-in per game (Party Animals' ReFix.ini sets it); other games must not get a loopback HTTP server.
-    GetPrivateProfileStringA("P2P", "LocalBackend", "false", enabled, sizeof(enabled), IniPath().c_str());
+    char exeBuf[MAX_PATH] = { 0 };
+    GetModuleFileNameA(NULL, exeBuf, MAX_PATH);
+    std::string exeName(exeBuf);
+    bool isPartyAnimals = exeName.find("PartyAnimals") != std::string::npos ||
+                          (ReFixIL2CPPScene::FindClassByName("", "UriHelper") != nullptr);
+    const char* defaultEnabled = isPartyAnimals ? "true" : "false";
+    GetPrivateProfileStringA("P2P", "LocalBackend", defaultEnabled, enabled, sizeof(enabled), IniPath().c_str());
     GetPrivateProfileStringA("P2P", "LocalBackendHost", "partyanimalsgame.com", filter, sizeof(filter), IniPath().c_str());
     if (_stricmp(enabled, "true") != 0 && strcmp(enabled, "1") != 0) {
         ReFixLog("[PA-Backend] LocalBackend disabled in ReFix.ini");
@@ -253,6 +260,7 @@ void Initialize() {
         return;
     }
     bool hooked = HookNewUri();
+    ReFixPAServices::InitStoreDownloader(1260320);
     ReFixLog("[PA-Backend] Local backend on 127.0.0.1:%u for hosts *%s* (UriHelper.NewUri hook %s)", g_port.load(),
              g_hostFilter.c_str(), hooked ? "installed" : "FAILED");
 }

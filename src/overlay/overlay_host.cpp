@@ -99,6 +99,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DEVICECHANGE:
         pad::DeviceChanged();
         break;
+    case WM_SETCURSOR:
+        if (g_mode == Mode::Overlay || g_mode == Mode::Dialog) {
+            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+            return TRUE;
+        }
+        break;
+    case WM_ERASEBKGND:
+        return 1;
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_KEYMENU) return 0;
         break;
@@ -169,7 +177,13 @@ void ResizeSurface(UINT w, UINT h) {
     g_width = w;
     g_height = h;
     if (FAILED(hr)) g_deviceLost = true;   // recreated before the next frame
-    else CreateRenderTarget();
+    else {
+        CreateRenderTarget();
+        if (g_rtv && g_ctx) {
+            const float clear[4] = { 0, 0, 0, 0 };
+            g_ctx->ClearRenderTargetView(g_rtv, clear);
+        }
+    }
 }
 
 BOOL CALLBACK FindGameWindow(HWND w, LPARAM lp) {
@@ -392,14 +406,16 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     if (m == Mode::Hidden) return;
     const RECT r = TargetRect(m, gw);
     static RECT placed{};
+    ResizeSurface((UINT)(r.right - r.left), (UINT)(r.bottom - r.top));
     static Mode placedMode = Mode::Hidden;
+
     if (!EqualRect(&r, &placed) || placedMode != m || !IsWindowVisible(g_hwnd)) {
         const UINT flags = SWP_FRAMECHANGED | (m == Mode::Toast ? SWP_NOACTIVATE : 0) | SWP_SHOWWINDOW;
         SetWindowPos(g_hwnd, g_childOf ? HWND_TOP : HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
         placed = r;
         placedMode = m;
     }
-    ResizeSurface((UINT)(r.right - r.left), (UINT)(r.bottom - r.top));
+
     if (g_childOf) {
         // The parent and this thread share an input queue now, so SetFocus works across threads.
         if (GetFocus() != g_hwnd) {
@@ -419,9 +435,11 @@ void FreeMouseForOverlay() {
     screen.right = screen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
     screen.bottom = screen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
     if (GetClipCursor(&clip) && !EqualRect(&clip, &screen)) ClipCursor(nullptr);
-    CURSORINFO ci{ sizeof(ci) };
-    const bool osCursorShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
-    ImGui::GetIO().MouseDrawCursor = !osCursorShown;
+
+
+    while (ShowCursor(TRUE) < 0);
+    SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+    ImGui::GetIO().MouseDrawCursor = false;
 }
 
 // Controller state into ImGui's gamepad keys (navigation: A/Cross activates, B/Circle goes back).
@@ -473,7 +491,7 @@ void Render(const GameWindow& gw, const pad::State& padState) {
     g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    const HRESULT hr = g_swap->Present(1, 0);
+    const HRESULT hr = g_swap->Present(0, 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) g_deviceLost = true;
 }
 
@@ -511,8 +529,8 @@ bool InitThread() {
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
     g_hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kClassName, L"ReFix LAN",
-                             WS_POPUP, 0, 0, 64, 64, nullptr, nullptr, wc.hInstance, nullptr);
-    if (!g_hwnd || !CreateDeviceAndSurface(64, 64)) return false;
+                             WS_POPUP, 0, 0, std::max(64, GetSystemMetrics(SM_CXSCREEN)), std::max(64, GetSystemMetrics(SM_CYSCREEN)), nullptr, nullptr, wc.hInstance, nullptr);
+    if (!g_hwnd || !CreateDeviceAndSurface((UINT)std::max(64, GetSystemMetrics(SM_CXSCREEN)), (UINT)std::max(64, GetSystemMetrics(SM_CYSCREEN)))) return false;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -591,6 +609,7 @@ DWORD WINAPI HostThread(LPVOID) {
             return 0;
         }
         Render(gw, padState);
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 2, QS_ALLINPUT);
     }
 }
 
