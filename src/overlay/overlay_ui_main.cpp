@@ -6,6 +6,10 @@
 #include "overlay_app.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
+#include "../unreal_steam_emu.h"
+#include "../refix_mono.h"
+
+extern void ReFixLog(const char* fmt, ...);
 
 #include <algorithm>
 #include <cstdio>
@@ -114,6 +118,7 @@ void App::DrawOverlay(ImVec2 viewport) {
     DrawSwitchConfirm();
     DrawDeleteConfirm();
     DrawEditorModal();
+    DrawPurchaseModal(viewport);
     if (!inviteOnly_) DrawWebModal(viewport);
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
@@ -127,15 +132,19 @@ void App::DrawTopBar(ImVec2 viewport) {
     const ui::Fonts& f = ui::F();
 
     // Left: game title.
+    const ImVec2 barMin(m, m);
+    const ImVec2 barMax(viewport.x - m, m + h);
+    dl->AddRectFilled(barMin, barMax, ui::color::Panel, ui::S(12));
+    dl->AddRect(barMin, barMax, ui::color::Border, ui::S(12));
     const std::string title = gameTitle_.empty() ? i18n::T("Game", "Juego") : ToUtf8(gameTitle_);
     const float cy = m + h * 0.5f;
-    dl->AddCircleFilled(ImVec2(m + ui::S(20), cy), ui::S(20), ui::Fade(ui::color::Accent, 0.16f), 32);
+    dl->AddCircleFilled(ImVec2(m + ui::S(26), cy), ui::S(18), ui::Fade(ui::color::Accent, 0.16f), 32);
     const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Game);
-    TextAt(dl, f.heading, ImVec2(m + ui::S(20) - gs.x * 0.5f, cy - gs.y * 0.5f), ui::color::Accent, ui::icon::Game);
-    const float titleX = m + ui::S(52);
+    TextAt(dl, f.heading, ImVec2(m + ui::S(26) - gs.x * 0.5f, cy - gs.y * 0.5f), ui::color::Accent, ui::icon::Game);
+    const float titleX = m + ui::S(56);
 
     // Right, from the edge inwards: close, profile chip, clock.
-    float x = viewport.x - m - ui::S(kIconButton);
+    float x = viewport.x - m - ui::S(kIconButton) - ui::S(10);
     ImGui::SetCursorScreenPos(ImVec2(x, cy - ui::S(kIconButton) * 0.5f));
     if (ui::IconButton("close", ui::icon::Close, i18n::T("Close (Shift+Tab)", "Cerrar (Shift+Tab)"), ui::color::Text)) CloseOverlay();
 
@@ -518,6 +527,108 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
         ImGui::PopID();
     }
     ImGui::End();
+}
+
+void App::OpenPurchasePrompt(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete) {
+    pendingPurchase_.active = true;
+    pendingPurchase_.appId = appId ? appId : appId_;
+    pendingPurchase_.orderId = orderId;
+    pendingPurchase_.itemName = itemName;
+    pendingPurchase_.itemDesc = itemDesc;
+    pendingPurchase_.isMicroTxn = isMicroTxn;
+    pendingPurchase_.onComplete = onComplete;
+    OpenOverlay(false);
+}
+
+void App::DrawPurchaseModal(ImVec2 viewport) {
+    if (!pendingPurchase_.active) return;
+    if (!ui::BeginCenteredModal("##purchasemodal", 480)) return;
+
+    ImGui::PushFont(ui::F().heading);
+    ui::TextColored(ui::color::Accent, ui::icon::Store);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(i18n::T("Do you want to purchase this item?", "¿Deseas adquirir este artículo?"));
+    ImGui::PopFont();
+
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+
+    std::string displayName = pendingPurchase_.itemName;
+    if (displayName.empty()) {
+        if (!pendingPurchase_.isMicroTxn && pendingPurchase_.appId != 0) {
+            if (pendingPurchase_.appId == 3630990) displayName = "Kaiju Girls Bundle (Liz, Mortha, Sephia)";
+            else if (pendingPurchase_.appId == 4820740) displayName = "Lumi Bundle";
+            else if (pendingPurchase_.appId == 3950240) displayName = "Fuzzy PES Bundle (Ginger Wasabi)";
+            else if (pendingPurchase_.appId == 948680) displayName = "Crush Crush Moist (18+ NSFW DLC)";
+            else if (pendingPurchase_.appId == 1336600) displayName = "Mallory Character Bundle";
+            else if (pendingPurchase_.appId == 782250) displayName = "Lotus Character Bundle";
+            else if (pendingPurchase_.appId == 2279440) displayName = "Lydia Character Bundle";
+            else displayName = i18n::T("DLC Package (AppID: ", "Paquete DLC (AppID: ") + std::to_string(pendingPurchase_.appId) + ")";
+        } else {
+            displayName = i18n::T("In-game Item", "Artículo del juego");
+        }
+    }
+
+    ImGui::PushFont(ui::F().strong);
+    ui::TextColored(ui::color::Text, displayName.c_str());
+    ImGui::PopFont();
+
+    if (!pendingPurchase_.itemDesc.empty() && pendingPurchase_.itemDesc != displayName) {
+        ImGui::PushFont(ui::F().caption);
+        ui::TextColored(ui::color::Muted, pendingPurchase_.itemDesc.c_str());
+        ImGui::PopFont();
+    }
+
+    ImGui::Dummy(ImVec2(0, ui::S(16)));
+
+    const float w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 bs((w - ui::S(10)) * 0.5f, ui::S(42));
+
+    if (ui::PrimaryButton(i18n::T("Purchase", "Adquirir"), bs)) {
+        ImGui::CloseCurrentPopup();
+        ExecutePurchase(true);
+    }
+    ImGui::SameLine(0, ui::S(10));
+    if (ui::SecondaryButton(i18n::T("Cancel", "Cancelar"), bs)) {
+        ImGui::CloseCurrentPopup();
+        ExecutePurchase(false);
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+        ImGui::CloseCurrentPopup();
+        ExecutePurchase(false);
+    }
+
+    ImGui::EndPopup();
+}
+
+void App::ExecutePurchase(bool authorized) {
+    if (!pendingPurchase_.active) return;
+    const auto p = pendingPurchase_;
+    pendingPurchase_.active = false;
+
+    if (authorized) {
+        ReFixLog("[Overlay] Purchase confirmed: appId=%u, orderId=%llu, microTxn=%d", p.appId, (unsigned long long)p.orderId, (int)p.isMicroTxn);
+        if (p.onComplete) {
+            p.onComplete(true);
+        }
+        if (p.isMicroTxn) {
+            UnrealSteamEmu::AuthorizeMicroTxn(p.appId, p.orderId, true);
+        } else {
+            UnrealSteamEmu::UnlockDLC(p.appId);
+            ReFixMono_UnlockDLC(p.appId);
+        }
+        ShowInfo(i18n::T("Item Acquired", "Artículo adquirido"),
+                 i18n::T("The purchase has been validated locally.", "La compra se ha validado localmente."));
+    } else {
+        ReFixLog("[Overlay] Purchase cancelled: appId=%u, orderId=%llu", p.appId, (unsigned long long)p.orderId);
+        if (p.onComplete) {
+            p.onComplete(false);
+        }
+        if (p.isMicroTxn) {
+            UnrealSteamEmu::AuthorizeMicroTxn(p.appId, p.orderId, false);
+        }
+    }
+    CloseOverlay();
 }
 
 } // namespace refix::overlay

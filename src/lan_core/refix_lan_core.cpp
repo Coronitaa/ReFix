@@ -1349,7 +1349,7 @@ public:
 
     void OnPeerTimeout(const PeerId& peerId, const LanEndpoint& endpoint) override {
         m_transport.ResetPeerState(peerId);
-        m_peers.UnregisterPeer(peerId);
+
         LanEvent ev;
         ev.type = LanEvent::Type::PeerLost;
         ev.peerId = peerId;

@@ -273,6 +273,11 @@ std::wstring CloudFolder(uint32_t appId) {
     return g_cloudFolder;
 }
 
+std::wstring ActiveProfileId() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_active ? g_active->id : std::wstring();
+}
+
 std::wstring StatsFolder(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_mu);
     std::wstring folder;
@@ -333,8 +338,15 @@ void ActivateWebPage(const char* url) {
 
 void ActivateStore(uint32_t appId) {
     if (!IsEnabled() || appId == 0) return;
-    const std::wstring u = L"https://store.steampowered.com/app/" + std::to_wstring(appId) + L"/";
-    App::Get().Post([u] { App::Get().OpenWeb(u); });
+    PromptPurchase(appId, 0, "", "", false);
+}
+
+void PromptPurchase(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete) {
+    if (!IsEnabled()) return;
+    ReFixLog("[Overlay] PromptPurchase requested: appId=%u, orderId=%llu, item='%s'", appId, (unsigned long long)orderId, itemName.c_str());
+    App::Get().Post([appId, orderId, itemName, itemDesc, isMicroTxn, onComplete] {
+        App::Get().OpenPurchasePrompt(appId, orderId, itemName, itemDesc, isMicroTxn, onComplete);
+    });
 }
 
 void ActivateInviteDialog(uint64_t lobbyId, const char* connect) {

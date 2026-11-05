@@ -3,6 +3,7 @@
 #endif
 #include "save_swap.h"
 #include "overlay_text.h"
+#include "refix_overlay.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -56,7 +57,32 @@ std::vector<std::wstring> Entries(const std::wstring& dir) {
 }
 
 bool Kept(const std::wstring& name, const std::vector<std::wstring>& keep) {
-    return std::any_of(keep.begin(), keep.end(), [&](const std::wstring& k) { return _wcsicmp(k.c_str(), name.c_str()) == 0; });
+    return std::any_of(keep.begin(), keep.end(), [&](const std::wstring& k) {
+        if (k.find(L'*') != std::wstring::npos || k.find(L'?') != std::wstring::npos) {
+            auto WildcardMatch = [](auto& self, const wchar_t* pat, const wchar_t* str) -> bool {
+                while (*pat) {
+                    if (*pat == L'*') {
+                        pat++;
+                        if (!*pat) return true;
+                        while (*str) {
+                            if (self(self, pat, str)) return true;
+                            str++;
+                        }
+                        return false;
+                    } else if (*pat == L'?' || towlower(*pat) == towlower(*str)) {
+                        if (!*str) return false;
+                        pat++;
+                        str++;
+                    } else {
+                        return false;
+                    }
+                }
+                return *str == L'\0';
+            };
+            return WildcardMatch(WildcardMatch, k.c_str(), name.c_str());
+        }
+        return _wcsicmp(k.c_str(), name.c_str()) == 0;
+    });
 }
 
 bool CopyTree(const std::wstring& from, const std::wstring& to) {
@@ -124,7 +150,17 @@ bool MoveEntries(const std::wstring& from, const std::wstring& to, const std::ve
     std::vector<std::wstring> moved;
     for (const std::wstring& e : names) {
         if (!MoveOne(from + L"\\" + e, to + L"\\" + e)) {
-            ReFixLog("[Saves] Could not move '%s' (error %lu); rolling back", ToUtf8(from + L"\\" + e).c_str(), GetLastError());
+            DWORD err = GetLastError();
+            std::wstring lower = e;
+            for (auto& c : lower) c = towlower(c);
+            bool isLockOrLog = lower.find(L"lock") != std::wstring::npos || lower.find(L"log") != std::wstring::npos ||
+                               lower.find(L"tmp") != std::wstring::npos || lower.find(L"sentry") != std::wstring::npos ||
+                               lower.find(L"cache") != std::wstring::npos;
+            if (isLockOrLog) {
+                ReFixLog("[Saves] Skipping runtime/diagnostic file '%s' (error %lu)", ToUtf8(from + L"\\" + e).c_str(), err);
+                continue;
+            }
+            ReFixLog("[Saves] Could not move '%s' (error %lu); rolling back", ToUtf8(from + L"\\" + e).c_str(), err);
             for (const std::wstring& m : moved) MoveOne(to + L"\\" + m, from + L"\\" + m);
             return false;
         }
@@ -218,7 +254,7 @@ bool DetectUnity(Location& out) {
     out.label = L"Unity_" + Sanitize(wc) + L"_" + Sanitize(wp);
     out.live = low + L"\\" + wc + L"\\" + wp;
     // Unity has its log open from the first frame; its analytics cache is not a save.
-    out.keepLive = { L"Player.log", L"Player-prev.log", L"output_log.txt", L"Unity" };
+    out.keepLive = { L"Player.log", L"Player-prev.log", L"output_log.txt", L"Unity", L"sentry-unity.lock", L"*.lock", L"*.log", L"*.tmp", L"Sentry", L"SentryNative", L"eventcache" };
     return true;
 }
 
@@ -319,8 +355,8 @@ void SwitchOne(const Location& loc, const Profile& active, const std::vector<Pro
         return;
     }
     EnsureDir(loc.live);
-    if (!MoveEntries(in, loc.live, {})) {
-        MoveEntries(out, loc.live, {});
+    if (!MoveEntries(in, loc.live, loc.keepLive)) {
+        MoveEntries(out, loc.live, loc.keepLive);
         ReFixLog("[Saves] %s: could not restore the saves of %s; previous saves put back", ToUtf8(loc.label).c_str(),
                  ToUtf8(active.id).c_str());
         return;
@@ -405,6 +441,49 @@ void SwitchTo(const Profile& active, const std::vector<Profile>& all) {
         return;
     }
     for (const Location& loc : locations) SwitchOne(loc, active, all);
+}
+
+std::wstring GetActiveSaveDir(const std::wstring& label) {
+    std::wstring targetLabel = label;
+    std::wstring livePath;
+    std::vector<std::wstring> keepList;
+
+    const std::vector<Location> locations = DetectLocations();
+    for (const auto& loc : locations) {
+        if (targetLabel.empty() || _wcsicmp(loc.label.c_str(), targetLabel.c_str()) == 0) {
+            targetLabel = loc.label;
+            livePath = loc.live;
+            keepList = loc.keepLive;
+            break;
+        }
+    }
+
+    if (targetLabel.empty()) return L"";
+
+    std::wstring activeId = ReFixOverlay::ActiveProfileId();
+    if (activeId.empty()) {
+        wchar_t envId[64] = {};
+        if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", envId, 64) > 0) activeId = envId;
+    }
+    if (activeId.empty()) activeId = profiles::LastProfileId();
+    if (activeId.empty()) activeId = kPcOwner;
+
+    std::wstring stash = StashDir(activeId, targetLabel);
+    EnsureDir(stash);
+
+    bool allowNative = false;
+    if (activeId == kPcOwner) {
+        allowNative = true;
+    } else if (auto p = profiles::Load(activeId)) {
+        allowNative = p->nativeSaves;
+    }
+
+    if (allowNative && !HasEntries(stash, {}) && !livePath.empty() && HasEntries(livePath, keepList)) {
+        CopyTreeWithKeep(livePath, stash, keepList);
+        ReFixLog("[Saves] Seeded isolated saves for profile %s from %s", ToUtf8(activeId).c_str(), ToUtf8(livePath).c_str());
+    }
+
+    return stash;
 }
 
 } // namespace refix::overlay::saves

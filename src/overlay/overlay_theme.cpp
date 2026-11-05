@@ -373,4 +373,16 @@ std::string Ellipsize(const std::string& text, float maxWidth) {
     return s + dots;
 }
 
+bool BeginCenteredModal(const char* id, float width) {
+    if (!ImGui::IsPopupOpen(id)) ImGui::OpenPopup(id);
+    const ImVec2 vp = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(S(width), vp.x - S(24)), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24), S(22)));
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar();
+    return open;
+}
+
 } // namespace refix::overlay::ui

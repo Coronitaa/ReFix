@@ -12,7 +12,8 @@ namespace ReFixPAServices {
     };
 
     // body: the raw request JSON ({"Query": "...", ...}). Thread-safe.
-    Result HandleRequest(const std::string& body);
+    Result HandleRequest(const std::string& body, const std::string& path = "");
+    void InitStoreDownloader(uint32_t appId = 1260320);
 
     // Display name the player chose earlier (empty if never changed). Thread-safe.
     std::string StoredDisplayName();

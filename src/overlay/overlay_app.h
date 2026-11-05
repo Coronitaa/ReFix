@@ -122,6 +122,20 @@ public:
     ImVec2 chipMin_{}, chipMax_{};
     bool popupOpenLastFrame_ = false;   // profile chip in the top bar (anchors its menu)
 
+    struct PendingPurchase {
+        bool active = false;
+        uint32_t appId = 0;
+        uint64_t orderId = 0;
+        std::string itemName;
+        std::string itemDesc;
+        bool isMicroTxn = false;
+        std::function<void(bool)> onComplete;
+    };
+    PendingPurchase pendingPurchase_;
+    void OpenPurchasePrompt(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete = nullptr);
+    void DrawPurchaseModal(ImVec2 viewport);
+    void ExecutePurchase(bool authorized);
+
     ui::AvatarRef ProfileAvatar(const Profile& p);
     ui::AvatarRef PlayerAvatar(const net::RemotePlayer& p);
     ui::AvatarRef EditorAvatar();

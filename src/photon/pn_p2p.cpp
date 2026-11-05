@@ -32,7 +32,7 @@ namespace {
 const uint16_t kNameServerPorts[] = { 5058, 27000 };
 const uint16_t kMasterPorts[] = { 5055, 27001 };
 const uint16_t kGamePorts[] = { 5056, 27002 };
-constexpr const char* kDefaultHostSuffixes = "photonengine.io;photonengine.com;exitgames.com";
+constexpr const char* kDefaultHostSuffixes = "photonengine.io;photonengine.com;exitgames.com;partyanimalsgame.com;partyanimals.cn";
 constexpr const char* kPresenceKey = "refix_photon_room";
 constexpr const char* kP2PBackend = "ReFixCloud";     // canonical ecosystem token: local Photon emulator over Steam P2P
 constexpr const char* kP2PBackendLegacy = "ReFixP2P"; // back-compat alias for configs written before the rename
@@ -67,6 +67,7 @@ struct Connection {
 struct Forwarder {
     std::vector<SOCKET> sockets;               // one per kGamePorts entry
     std::map<uint16_t, SOCKET> clientSocket;   // local client port -> socket it talks to
+    std::map<uint16_t, sockaddr_in> clientAddr; // local client port -> actual client sockaddr_in
     std::string address; // "127.80.x.y:port" handed to the client
 };
 
@@ -697,15 +698,19 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
         c.enet->OnDatagram(data + 3, size - 3, GetTickCount());
     } else if (data[0] == kToClient) {
         SOCKET s = INVALID_SOCKET;
+        sockaddr_in client = Loopback(g_listenIp, port);
         {
             std::lock_guard<std::mutex> lock(g_discoveryMutex);
             auto it = g_forwarders.find(from);
             if (it == g_forwarders.end() || it->second.sockets.empty()) return;
             auto cs = it->second.clientSocket.find(port);
             s = cs != it->second.clientSocket.end() ? cs->second : it->second.sockets[0];
+            auto ca = it->second.clientAddr.find(port);
+            if (ca != it->second.clientAddr.end()) {
+                client = ca->second;
+            }
         }
         if (s != INVALID_SOCKET) {
-            sockaddr_in client = Loopback(INADDR_LOOPBACK, port);
             sendto(s, (const char*)data + 3, (int)size - 3, 0, (const sockaddr*)&client, sizeof(client));
         }
     }
@@ -741,6 +746,7 @@ void Pump() {
             uint64_t peer = host;
             Drain(s, buf, [&, peer, s](const sockaddr_in& from, int n) {
                 f.clientSocket[ntohs(from.sin_port)] = s;
+                f.clientAddr[ntohs(from.sin_port)] = from;
                 SendSteam(peer, kToHost, ntohs(from.sin_port), buf, (size_t)n);
             });
         }

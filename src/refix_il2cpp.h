@@ -2,6 +2,16 @@
 #include <windows.h>
 #include <cstdint>
 
+#if !defined(_WIN64)
+namespace ReFixIL2CPP {
+    inline void Initialize() {}
+    inline void Shutdown() {}
+    inline void Update() {}
+    inline bool IsAvailable() { return false; }
+    inline bool ActivateP2PMode() { return false; }
+    inline bool TransitionToMainMenu() { return false; }
+}
+#else
 namespace ReFixIL2CPP {
     // Initializes the generic IL2CPP bridge and game-specific hooks if GameAssembly.dll is present
     void Initialize();
@@ -21,3 +31,4 @@ namespace ReFixIL2CPP {
     // Transitions the game UI to the main menu / NemoLand hall scene
     bool TransitionToMainMenu();
 }
+#endif

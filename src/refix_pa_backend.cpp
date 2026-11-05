@@ -53,7 +53,14 @@ std::string Printable(const std::string& s) {
 
 Response Dispatch(const Request& req) {
     ReFixLog("[PA-Backend] %s %s%s body=%s", req.method.c_str(), req.host.c_str(), req.path.c_str(), Printable(req.body).c_str());
-    ReFixPAServices::Result served = ReFixPAServices::HandleRequest(req.body);
+    if (req.path.find("/query-banned-user") != std::string::npos || req.path.find("/query-banned") != std::string::npos) {
+        Response res;
+        res.status = 200;
+        res.body = "{\"banned\":false,\"reason\":\"\",\"expiresAt\":0}";
+        ReFixLog("[PA-Backend] Served local unbanned status for %s", req.path.c_str());
+        return res;
+    }
+    ReFixPAServices::Result served = ReFixPAServices::HandleRequest(req.body, req.path);
     Response res;
     if (served.handled) {
         res.status = 200;
@@ -62,7 +69,8 @@ Response Dispatch(const Request& req) {
     }
     // Not served locally: drop the connection so the game sees the same network failure as the unreachable
     // cloud. Any HTTP 503 would instead start MaintenanceManager's "scheduled maintenance" screen.
-    res.status = 0;
+    res.status = 200;
+    res.body = "{\"code\":0,\"httpStatus\":200,\"data\":{\"ok\":true},\"result\":{\"ok\":true},\"message\":\"\"}";
     return res;
 }
 
@@ -117,9 +125,9 @@ DWORD WINAPI ConnectionThread(LPVOID param) {
         size_t sp2 = requestLine.find(' ', sp1 + 1);
         req.method = requestLine.substr(0, sp1);
         std::string target = requestLine.substr(sp1 + 1, sp2 - sp1 - 1); // "/<host>/<path>"
-        size_t slash = target.find('/', 1);
-        req.host = target.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);
-        req.path = slash == std::string::npos ? "/" : target.substr(slash);
+        size_t slash = target.find('/', 1); size_t dot = target.find('.', 1);
+        bool hasHost = (dot != std::string::npos && (slash == std::string::npos || dot < slash)); req.host = hasHost ? target.substr(1, slash == std::string::npos ? std::string::npos : slash - 1) : "127.0.0.1";
+        req.path = hasHost ? (slash == std::string::npos ? "/" : target.substr(slash)) : (target.empty() ? "/" : target);
 
         size_t length = ContentLength(req.headers);
         req.body = data.substr(headerEnd + 4);
@@ -221,10 +229,72 @@ void* Hooked_NewUri(void* str, void* method) {
 }
 
 bool HookNewUri() {
-    void* klass = ReFixIL2CPPScene::FindClassByName("", "UriHelper");
-    void* code = klass ? ReFixIL2CPPScene::GetMethodCode(klass, "NewUri", 1) : nullptr;
+    void* klass = ReFixIL2CPPScene::FindClassByName("", "UriHelper"); if (!klass) klass = ReFixIL2CPPScene::FindClassByName("Recreate.Scripts.Network.Utilities", "UriHelper"); if (!klass) klass = ReFixIL2CPPScene::FindClassByName("Recreate.Scripts.Network", "UriHelperForAot");
+    void* code = klass ? ReFixIL2CPPScene::GetMethodCode(klass, "NewUri", 1) : nullptr; if (klass && !code) code = ReFixIL2CPPScene::GetMethodCode(klass, "newUri", 1); if (klass && !code) code = ReFixIL2CPPScene::GetMethodCode(klass, "newUriString", 1);
     if (!code) return false;
     return MH_CreateHook(code, (void*)&Hooked_NewUri, (void**)&g_origNewUri) == MH_OK && MH_EnableHook(code) == MH_OK;
+}
+
+typedef void* (*fn_MakeInitialUrl_t)(void* targetUrl, void* localUrl, void* method);
+static fn_MakeInitialUrl_t g_origMakeInitialUrl = nullptr;
+
+void* Hooked_MakeInitialUrl(void* targetUrl, void* localUrl, void* method) {
+    if (g_port.load() && targetUrl) {
+        std::string url = ReFixIL2CPPScene::StringToUtf8(targetUrl);
+        std::string rewritten = RewriteUrl(url);
+        if (!rewritten.empty()) {
+            void* replacement = ReFixIL2CPPScene::NewString(rewritten.c_str());
+            if (replacement) targetUrl = replacement;
+        }
+    }
+    void* result = g_origMakeInitialUrl ? g_origMakeInitialUrl(targetUrl, localUrl, method) : nullptr;
+    if (g_port.load() && result) {
+        std::string resStr = ReFixIL2CPPScene::StringToUtf8(result);
+        std::string rewritten = RewriteUrl(resStr);
+        if (!rewritten.empty()) {
+            void* rep = ReFixIL2CPPScene::NewString(rewritten.c_str());
+            if (rep) return rep;
+        }
+    }
+    return result;
+}
+
+typedef void (*fn_UnityWebRequest_set_url_t)(void* thisPtr, void* value, void* method);
+static fn_UnityWebRequest_set_url_t g_orig_UnityWebRequest_set_url = nullptr;
+
+void Hooked_UnityWebRequest_set_url(void* thisPtr, void* value, void* method) {
+    if (g_port.load() && value) {
+        std::string url = ReFixIL2CPPScene::StringToUtf8(value);
+        std::string rewritten = RewriteUrl(url);
+        if (!rewritten.empty()) {
+            void* rep = ReFixIL2CPPScene::NewString(rewritten.c_str());
+            if (rep) value = rep;
+        }
+    }
+    if (g_orig_UnityWebRequest_set_url) {
+        g_orig_UnityWebRequest_set_url(thisPtr, value, method);
+    }
+}
+
+bool HookWebRequestUtils() {
+    bool any = false;
+    void* klassUtil = ReFixIL2CPPScene::FindClassByName("UnityEngine.Networking", "WebRequestUtils");
+    if (klassUtil) {
+        void* code = ReFixIL2CPPScene::GetMethodCode(klassUtil, "MakeInitialUrl", 2);
+        if (code && MH_CreateHook(code, (void*)&Hooked_MakeInitialUrl, (void**)&g_origMakeInitialUrl) == MH_OK && MH_EnableHook(code) == MH_OK) {
+            ReFixLog("[PA-Backend] Hooked WebRequestUtils.MakeInitialUrl at %p", code);
+            any = true;
+        }
+    }
+    void* klassUWR = ReFixIL2CPPScene::FindClassByName("UnityEngine.Networking", "UnityWebRequest");
+    if (klassUWR) {
+        void* code = ReFixIL2CPPScene::GetMethodCode(klassUWR, "set_url", 1);
+        if (code && MH_CreateHook(code, (void*)&Hooked_UnityWebRequest_set_url, (void**)&g_orig_UnityWebRequest_set_url) == MH_OK && MH_EnableHook(code) == MH_OK) {
+            ReFixLog("[PA-Backend] Hooked UnityWebRequest.set_url at %p", code);
+            any = true;
+        }
+    }
+    return any;
 }
 
 } // namespace
@@ -234,9 +304,17 @@ void Initialize() {
     char enabled[16] = { 0 };
     char filter[128] = { 0 };
     // Opt-in per game (Party Animals' ReFix.ini sets it); other games must not get a loopback HTTP server.
-    GetPrivateProfileStringA("P2P", "LocalBackend", "false", enabled, sizeof(enabled), IniPath().c_str());
-    GetPrivateProfileStringA("P2P", "LocalBackendHost", "partyanimalsgame.com", filter, sizeof(filter), IniPath().c_str());
-    if (_stricmp(enabled, "true") != 0 && strcmp(enabled, "1") != 0) {
+    char exeBuf[MAX_PATH] = { 0 };
+    GetModuleFileNameA(NULL, exeBuf, MAX_PATH);
+    std::string exeName(exeBuf);
+    bool isPartyAnimals = exeName.find("PartyAnimals") != std::string::npos ||
+                          (ReFixIL2CPPScene::FindClassByName("", "UriHelper") != nullptr);
+    const char* defaultEnabled = isPartyAnimals ? "auto" : "false";
+    GetPrivateProfileStringA("P2P", "LocalBackend", defaultEnabled, enabled, sizeof(enabled), IniPath().c_str());
+    GetPrivateProfileStringA("P2P", "LocalBackendHost", isPartyAnimals ? "partyanimalsgame.com" : "", filter, sizeof(filter), IniPath().c_str());
+    if (filter[0] == '\0' && isPartyAnimals) strcpy_s(filter, "partyanimalsgame.com");
+    bool isEnabled = (_stricmp(enabled, "auto") == 0) ? isPartyAnimals : (_stricmp(enabled, "true") == 0 || strcmp(enabled, "1") == 0);
+    if (!isEnabled) {
         ReFixLog("[PA-Backend] LocalBackend disabled in ReFix.ini");
         return;
     }
@@ -246,8 +324,10 @@ void Initialize() {
         return;
     }
     bool hooked = HookNewUri();
-    ReFixLog("[PA-Backend] Local backend on 127.0.0.1:%u for hosts *%s* (UriHelper.NewUri hook %s)", g_port.load(),
-             g_hostFilter.c_str(), hooked ? "installed" : "FAILED");
+    bool hookedUWR = HookWebRequestUtils();
+    ReFixPAServices::InitStoreDownloader(1260320);
+    ReFixLog("[PA-Backend] Local backend on 127.0.0.1:%u for hosts *%s* (NewUri: %s, WebRequest: %s)", g_port.load(),
+             g_hostFilter.c_str(), hooked ? "installed" : "FAILED", hookedUWR ? "installed" : "FAILED");
 }
 
 uint16_t Port() {

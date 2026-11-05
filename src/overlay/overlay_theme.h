@@ -1,4 +1,4 @@
-﻿// Look of the ReFix LAN overlay: fonts, colours, icons and the small widgets every screen shares.
+// Look of the ReFix LAN overlay: fonts, colours, icons and the small widgets every screen shares.
 #pragma once
 #include "../imgui/imgui.h"
 #include <cstdint>
@@ -45,7 +45,7 @@ constexpr const char* OpenExternal = "\xEE\xA2\xA7"; // E8A7 open in new window
 } // namespace icon
 
 namespace color {
-constexpr ImU32 Backdrop = IM_COL32(6, 9, 14, 196);
+constexpr ImU32 Backdrop = IM_COL32(6, 9, 14, 235);
 constexpr ImU32 BackdropSolid = IM_COL32(8, 11, 16, 250);
 constexpr ImU32 Panel = IM_COL32(18, 22, 29, 242);
 constexpr ImU32 PanelRaised = IM_COL32(26, 31, 40, 255);
@@ -114,6 +114,7 @@ void TextColored(ImU32 col, const char* text);
 // Child window drawn as a Card at screen `pos`; the content area is inset by `padding` (unscaled px).
 void BeginCard(const char* id, ImVec2 pos, ImVec2 size, float padding = 20.0f);
 void EndCard();
+bool BeginCenteredModal(const char* id, float width);
 // Small upper-case muted heading, with an optional count ("FAVORITOS Â· 2").
 void SectionLabel(const char* text, int count = -1);
 ImU32 Fade(ImU32 col, float alpha);

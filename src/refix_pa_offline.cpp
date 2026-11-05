@@ -47,6 +47,7 @@ std::string IniPath() {
 }
 
 int32_t ParseMode(const char* v) {
+    if (_stricmp(v, "auto") == 0) return kModeP2P;
     if (_stricmp(v, "lan") == 0) return kModeLan;
     if (_stricmp(v, "p2p") == 0) return kModeP2P;
     if (_stricmp(v, "unknown") == 0) return kModeUnknown;

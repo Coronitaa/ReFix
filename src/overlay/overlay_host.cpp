@@ -99,6 +99,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DEVICECHANGE:
         pad::DeviceChanged();
         break;
+    case WM_SETCURSOR:
+        if (g_mode == Mode::Overlay || g_mode == Mode::Dialog) {
+            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+            return TRUE;
+        }
+        break;
+    case WM_ERASEBKGND:
+        return 1;
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_KEYMENU) return 0;
         break;
@@ -157,6 +165,11 @@ bool CreateDeviceAndSurface(UINT w, UINT h) {
     g_width = w;
     g_height = h;
     CreateRenderTarget();
+    if (g_rtv && g_ctx) {
+        const float clear[4] = { 0, 0, 0, 0 };
+        g_ctx->ClearRenderTargetView(g_rtv, clear);
+        g_swap->Present(0, 0);
+    }
     return true;
 }
 
@@ -169,7 +182,14 @@ void ResizeSurface(UINT w, UINT h) {
     g_width = w;
     g_height = h;
     if (FAILED(hr)) g_deviceLost = true;   // recreated before the next frame
-    else CreateRenderTarget();
+    else {
+        CreateRenderTarget();
+        if (g_rtv && g_ctx) {
+            const float clear[4] = { 0, 0, 0, 0 };
+            g_ctx->ClearRenderTargetView(g_rtv, clear);
+            g_swap->Present(0, 0);
+        }
+    }
 }
 
 BOOL CALLBACK FindGameWindow(HWND w, LPARAM lp) {
@@ -253,16 +273,9 @@ float ScaleFor(const GameWindow* gw) {
 HWND g_childOf = nullptr;
 
 bool CanHostAsChild(const GameWindow& gw) {
-    const char* why = nullptr;
-    if (!gw.hwnd || !IsWindow(gw.hwnd)) why = "no game window";
-    else if (gw.minimized || IsIconic(gw.hwnd)) why = "game window minimised";
-    else {
-        QUERY_USER_NOTIFICATION_STATE state{};
-        if (SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN)
-            why = "the game is in exclusive Direct3D fullscreen";
-    }
-    if (why) ReFixLog("[Overlay] Shift+Tab overlay as a popup window: %s", why);
-    return why == nullptr;
+    // Top-level topmost popup avoids DirectComposition visual tree invalidation,
+    // coordinate mismatch with window borders, and cross-thread mouse input latency.
+    return false;
 }
 
 // The game keeps the activation while the overlay is its child, so its raw input (camera, movement,
@@ -305,7 +318,7 @@ void ResumeGameRawInput() {
 void BecomeChild(HWND game) {
     if (g_childOf == game) return;
     // SetParent's documentation: set WS_CHILD before parenting a former top-level window.
-    SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_CHILD | WS_CLIPSIBLINGS);
+    SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_CHILD);
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOPARENTNOTIFY);
     SetParent(g_hwnd, game);
     g_childOf = game;
@@ -392,14 +405,18 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     if (m == Mode::Hidden) return;
     const RECT r = TargetRect(m, gw);
     static RECT placed{};
+    ResizeSurface((UINT)(r.right - r.left), (UINT)(r.bottom - r.top));
     static Mode placedMode = Mode::Hidden;
-    if (!EqualRect(&r, &placed) || placedMode != m || !IsWindowVisible(g_hwnd)) {
+    static HWND placedChildOf = nullptr;
+
+    if (!EqualRect(&r, &placed) || placedMode != m || placedChildOf != g_childOf || !IsWindowVisible(g_hwnd)) {
         const UINT flags = SWP_FRAMECHANGED | (m == Mode::Toast ? SWP_NOACTIVATE : 0) | SWP_SHOWWINDOW;
         SetWindowPos(g_hwnd, g_childOf ? HWND_TOP : HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
         placed = r;
         placedMode = m;
+        placedChildOf = g_childOf;
     }
-    ResizeSurface((UINT)(r.right - r.left), (UINT)(r.bottom - r.top));
+
     if (g_childOf) {
         // The parent and this thread share an input queue now, so SetFocus works across threads.
         if (GetFocus() != g_hwnd) {
@@ -415,13 +432,18 @@ void ApplyMode(Mode m, const GameWindow& gw) {
 // Games that capture the mouse (cursor locked to the window centre, hidden) would leave the overlay without
 // a usable pointer: free the clip each frame and let ImGui draw its own cursor while the OS one is hidden.
 void FreeMouseForOverlay() {
-    RECT clip{}, screen{ GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0 };
-    screen.right = screen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    screen.bottom = screen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if (GetClipCursor(&clip) && !EqualRect(&clip, &screen)) ClipCursor(nullptr);
-    CURSORINFO ci{ sizeof(ci) };
-    const bool osCursorShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
-    ImGui::GetIO().MouseDrawCursor = !osCursorShown;
+    static DWORD s_lastFree = 0;
+    DWORD now = GetTickCount();
+    if (now - s_lastFree > 100) {
+        s_lastFree = now;
+        RECT clip{}, screen{ GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0 };
+        screen.right = screen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        screen.bottom = screen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (GetClipCursor(&clip) && !EqualRect(&clip, &screen)) ClipCursor(nullptr);
+    }
+    while (ShowCursor(TRUE) < 0);
+    SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+    ImGui::GetIO().MouseDrawCursor = false;
 }
 
 // Controller state into ImGui's gamepad keys (navigation: A/Cross activates, B/Circle goes back).
@@ -511,8 +533,8 @@ bool InitThread() {
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
     g_hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kClassName, L"ReFix LAN",
-                             WS_POPUP, 0, 0, 64, 64, nullptr, nullptr, wc.hInstance, nullptr);
-    if (!g_hwnd || !CreateDeviceAndSurface(64, 64)) return false;
+                             WS_POPUP, 0, 0, std::max(64, GetSystemMetrics(SM_CXSCREEN)), std::max(64, GetSystemMetrics(SM_CYSCREEN)), nullptr, nullptr, wc.hInstance, nullptr);
+    if (!g_hwnd || !CreateDeviceAndSurface((UINT)std::max(64, GetSystemMetrics(SM_CXSCREEN)), (UINT)std::max(64, GetSystemMetrics(SM_CYSCREEN)))) return false;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -553,7 +575,7 @@ DWORD WINAPI HostThread(LPVOID) {
         }
         if (g_wantHotkeyHook && PollHotkey()) g_hotkeyPending = true;
         const ULONGLONG now = GetTickCount64();
-        if (now - lastScan >= kGameScanMs || g_mode == Mode::Overlay || g_mode == Mode::Toast || g_mode == Mode::Dialog) {
+        if (now - lastScan >= kGameScanMs) {
             ScanGameWindow();
             lastScan = now;
         }
@@ -591,6 +613,7 @@ DWORD WINAPI HostThread(LPVOID) {
             return 0;
         }
         Render(gw, padState);
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 2, QS_ALLINPUT);
     }
 }
 
