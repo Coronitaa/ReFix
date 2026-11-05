@@ -270,6 +270,11 @@ std::wstring CloudFolder(uint32_t appId) {
     return g_cloudFolder;
 }
 
+std::wstring ActiveProfileId() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_active ? g_active->id : std::wstring();
+}
+
 std::wstring StatsFolder(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_mu);
     std::wstring folder;

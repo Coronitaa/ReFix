@@ -4851,37 +4851,132 @@ namespace UnrealSteamEmu {
 
     // --- ISteamMatchmakingServers ---
     class CSteamMatchmakingServersEmu : public ISteamMatchmakingServers {
+    private:
+        struct ServerQuery {
+            HServerListRequest handle = 0;
+            AppId_t appId = 0;
+            ISteamMatchmakingServerListResponse* response = nullptr;
+            std::vector<gameserveritem_t> servers;
+        };
+        std::map<HServerListRequest, ServerQuery> m_queries;
+        std::recursive_mutex m_queryMutex;
+        uint64_t m_nextHandle = 100;
+
+        HServerListRequest StartServerListQuery(AppId_t iApp, ISteamMatchmakingServerListResponse* pResponse) {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            HServerListRequest hReq = (HServerListRequest)(++m_nextHandle);
+            ServerQuery q;
+            q.handle = hReq;
+            q.appId = iApp ? iApp : g_appID;
+            q.response = pResponse;
+
+            // 1. Collect from ILanCore known lobbies
+            try {
+                auto lobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                for (const auto& lob : lobbies) {
+                    gameserveritem_t s;
+                    s.m_nAppID = q.appId;
+                    s.m_NetAdr.Init(0x7F000001, 27016, 27015);
+                    std::string sName = lob.lobbyId;
+                    auto itOwner = lob.attributes.find("__steam_owner");
+                    if (itOwner != lob.attributes.end() && !itOwner->second.asString.empty()) {
+                        uint64_t ownerId = strtoull(itOwner->second.asString.c_str(), nullptr, 10);
+                        if (ownerId) s.m_steamID = CSteamID(ownerId);
+                    }
+                    auto itName = lob.attributes.find("name");
+                    if (itName != lob.attributes.end() && !itName->second.asString.empty()) {
+                        sName = itName->second.asString;
+                    }
+                    s.SetName(sName.c_str());
+                    s.m_nPlayers = (int)lob.members.size();
+                    s.m_nMaxPlayers = (int)lob.maxMembers;
+                    s.m_nPing = 15;
+                    s.m_bHadSuccessfulResponse = true;
+                    s.m_bDoNotRefresh = false;
+                    q.servers.push_back(s);
+                }
+            } catch (...) {}
+
+            // 2. Collect from friends rich presence (Party Animals / generic LAN rooms)
+            int friendCount = g_steamFriendsInstance.GetFriendCount(k_EFriendFlagImmediate);
+            for (int i = 0; i < friendCount; i++) {
+                CSteamID fid = g_steamFriendsInstance.GetFriendByIndex(i, k_EFriendFlagImmediate);
+                const char* val = g_steamFriendsInstance.GetFriendRichPresence(fid, "refix_pa_room");
+                if (val && *val) {
+                    bool found = false;
+                    for (const auto& existing : q.servers) {
+                        if (existing.m_steamID == fid) { found = true; break; }
+                    }
+                    if (!found) {
+                        gameserveritem_t s;
+                        s.m_nAppID = q.appId;
+                        s.m_NetAdr.Init(0x7F000001, 27016, 27015);
+                        s.m_steamID = fid;
+                        s.SetName(val);
+                        s.m_nPlayers = 1;
+                        s.m_nMaxPlayers = 8;
+                        s.m_nPing = 20;
+                        s.m_bHadSuccessfulResponse = true;
+                        s.m_bDoNotRefresh = false;
+                        q.servers.push_back(s);
+                    }
+                }
+            }
+
+            m_queries[hReq] = q;
+
+            if (pResponse) {
+                for (size_t i = 0; i < q.servers.size(); i++) {
+                    pResponse->ServerResponded(hReq, (int)i);
+                }
+                pResponse->RefreshComplete(hReq, EMatchMakingServerResponse::eServerResponded);
+            }
+
+            ReFixLog("[UnrealSteam] MatchmakingServers query %p completed: %zu server(s) reported", (void*)hReq, q.servers.size());
+            return hReq;
+        }
+
     public:
         virtual HServerListRequest RequestInternetServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)1, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)1;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestLANServerList(AppId_t iApp, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)2, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)2;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestFriendsServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)3, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)3;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestFavoritesServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)4, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)4;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestHistoryServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)5, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)5;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestSpectatorServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)6, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)6;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
-        virtual void ReleaseRequest(HServerListRequest hServerListRequest) override {}
-        virtual gameserveritem_t *GetServerDetails(HServerListRequest hRequest, int iServer) override { return nullptr; }
-        virtual void CancelQuery(HServerListRequest hRequest) override {}
+        virtual void ReleaseRequest(HServerListRequest hServerListRequest) override {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            m_queries.erase(hServerListRequest);
+        }
+        virtual gameserveritem_t *GetServerDetails(HServerListRequest hRequest, int iServer) override {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            auto it = m_queries.find(hRequest);
+            if (it != m_queries.end() && iServer >= 0 && iServer < (int)it->second.servers.size()) {
+                return &it->second.servers[iServer];
+            }
+            return nullptr;
+        }
+        virtual void CancelQuery(HServerListRequest hRequest) override {
+            ReleaseRequest(hRequest);
+        }
         virtual void RefreshQuery(HServerListRequest hRequest) override {}
         virtual bool IsRefreshing(HServerListRequest hRequest) override { return false; }
-        virtual int GetServerCount(HServerListRequest hRequest) override { return 0; }
+        virtual int GetServerCount(HServerListRequest hRequest) override {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            auto it = m_queries.find(hRequest);
+            return (it != m_queries.end()) ? (int)it->second.servers.size() : 0;
+        }
         virtual void RefreshServer(HServerListRequest hRequest, int iServer) override {}
         virtual HServerQuery PingServer(uint32 unIP, uint16 usPort, ISteamMatchmakingPingResponse *pRequestServersResponse) override { return 1; }
         virtual HServerQuery PlayerDetails(uint32 unIP, uint16 usPort, ISteamMatchmakingPlayersResponse *pRequestServersResponse) override { return 1; }

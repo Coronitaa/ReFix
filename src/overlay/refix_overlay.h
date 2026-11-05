@@ -38,6 +38,7 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out);
 std::wstring CloudFolder(uint32_t appId);
 // Folder for the active profile's emulated Steam UserStats (stats.ini).
 std::wstring StatsFolder(uint32_t appId);
+std::wstring ActiveProfileId();
 
 void Start();
 bool IsEnabled();          // ISteamUtils::IsOverlayEnabled

@@ -1,3 +1,5 @@
+#include "overlay/refix_overlay.h"
+#include <ctime>
 #include "refix_pa_services.h"
 #include "refix_pa_gql.h"
 #include "refix_pa_rooms.h"
@@ -74,13 +76,13 @@ std::string LoadCachedStoreCatalog() {
 
 std::string StoreResponse(const std::string& operation) {
     std::string cached = LoadCachedStoreCatalog();
-    if (!cached.empty() && cached.find("\"code\":") != std::string::npos) {
+    if (!cached.empty() && cached.find("\"goods\"") != std::string::npos) {
         ReFixLog("[PA-Services] Serving cached store catalog (%zu bytes) for %s", cached.size(), operation.c_str());
         return ReFixPAGql::Success(operation.empty() ? "store" : operation, cached);
     }
-    ReFixLog("[PA-Services] Serving fallback store catalog for %s", operation.c_str());
+    ReFixLog("[PA-Services] Serving valid fallback store catalog for %s", operation.c_str());
     return ReFixPAGql::Success(operation.empty() ? "store" : operation,
-        "{\"code\":0,\"ok\":true,\"refreshTime\":0,\"categories\":[],\"goods\":[],\"items\":[],\"packages\":[],\"recommend\":[]}");
+        "{\"code\":0,\"ok\":true,\"refreshTime\":2147483647,\"categories\":[{\"id\":\"featured\",\"name\":\"Featured\"}],\"goods\":[],\"items\":[],\"packages\":[],\"recommend\":[]}");
 }
 
 std::string TeamResponse(const std::string& operation, const std::string& query) {
@@ -156,6 +158,84 @@ Result HandleRequest(const std::string& body, const std::string& path) {
     for (char& c : lowerOp) c = (char)tolower((unsigned char)c);
     std::string lowerPath = path;
     for (char& c : lowerPath) c = (char)tolower((unsigned char)c);
+
+    if (operation == "createNemoBuckTxn" || query.find("createNemoBuckTxn") != std::string::npos) {
+        ReFixOverlay::PromptPurchase(1260320, 1, "Nemo Bucks", "Nemo Bucks Pack", true);
+        uint64_t nowSec = (uint64_t)time(nullptr);
+        std::string txnData = "{\"orderId\":\"refix_order_1260320_" + std::to_string(nowSec) + "\""
+                              ",\"finance\":{\"currency\":\"USD\",\"nemoBuck\":999999,\"kartCoin\":999999,\"miniGameCoin\":999999,\"timestamp\":" + std::to_string(nowSec) + "}}";
+        r.handled = true;
+        r.body = ReFixPAGql::Success(operation.empty() ? "createNemoBuckTxn" : operation, txnData);
+        ReFixLog("[PA-Services] Served createNemoBuckTxn order and credited Nemo Bucks");
+        return r;
+    }
+
+    if (operation == "getAvoidList" || query.find("getAvoidList") != std::string::npos) {
+        r.handled = true;
+        r.body = ReFixPAGql::Success("getAvoidList", "{\"avoidList\":[],\"nextRefreshTime\":2147483647}");
+        ReFixLog("[PA-Services] Served getAvoidList (nextRefreshTime=max)");
+        return r;
+    }
+
+    if (operation == "getAnniv3Info" || query.find("getAnniv3Info") != std::string::npos) {
+        uint64_t steamId = ReFixSteamFlat::LocalSteamID();
+        uint64_t nowSec = (uint64_t)time(nullptr);
+        std::string annivData = "{\"accountId\":\"fake_" + std::to_string(steamId) + "\""
+                                ",\"anniv3ClaimRewardRecord\":[]"
+                                ",\"anniv3PersonalContribution\":100"
+                                ",\"anniv3PersonalContributionDelta\":0"
+                                ",\"anniv3GlobalContribution\":1000000"
+                                ",\"timestamp\":" + std::to_string(nowSec) + "}";
+        r.handled = true;
+        r.body = ReFixPAGql::Success("getAnniv3Info", annivData);
+        ReFixLog("[PA-Services] Served getAnniv3Info");
+        return r;
+    }
+
+    if (operation == "claimAnniv3Reward" || query.find("claimAnniv3Reward") != std::string::npos) {
+        uint64_t steamId = ReFixSteamFlat::LocalSteamID();
+        uint64_t nowSec = (uint64_t)time(nullptr);
+        std::string claimData = "{\"claimRes\":{\"getReward\":true,\"newItems\":[],\"newItemQty\":[]"
+                                ",\"finance\":{\"currency\":\"USD\",\"nemoBuck\":999999,\"kartCoin\":999999,\"miniGameCoin\":999999,\"timestamp\":" + std::to_string(nowSec) + "}"
+                                ",\"actInfo\":{\"accountId\":\"fake_" + std::to_string(steamId) + "\""
+                                ",\"anniv3ClaimRewardRecord\":[]"
+                                ",\"anniv3PersonalContribution\":100"
+                                ",\"anniv3PersonalContributionDelta\":0"
+                                ",\"anniv3GlobalContribution\":1000000"
+                                ",\"timestamp\":" + std::to_string(nowSec) + "}}}";
+        r.handled = true;
+        r.body = ReFixPAGql::Success("claimAnniv3Reward", claimData);
+        ReFixLog("[PA-Services] Served claimAnniv3Reward");
+        return r;
+    }
+
+    if (operation == "accountKartInventory" || query.find("accountKartInventory") != std::string::npos) {
+        r.handled = true;
+        r.body = ReFixPAGql::Success("accountKartInventory", "[]");
+        ReFixLog("[PA-Services] Served accountKartInventory empty array");
+        return r;
+    }
+
+    if (operation == "accountKartLevelInfo" || query.find("accountKartLevelInfo") != std::string::npos) {
+        r.handled = true;
+        r.body = ReFixPAGql::Success("accountKartLevelInfo", "[]");
+        ReFixLog("[PA-Services] Served accountKartLevelInfo empty array");
+        return r;
+    }
+
+    if (operation == "recordShutdown" || query.find("recordShutdown") != std::string::npos) {
+        r.handled = true;
+        r.body = ReFixPAGql::Success("recordShutdown", "{\"totalTime\":3600}");
+        ReFixLog("[PA-Services] Served recordShutdown");
+        return r;
+    }
+
+    if (operation == "getMessage" || query.find("getMessage") != std::string::npos) {
+        r.handled = true;
+        r.body = ReFixPAGql::Success("getMessage", "{\"messages\":[]}");
+        ReFixLog("[PA-Services] Served getMessage empty list");
+        return r;
+    }
 
     if (lowerPath.find("store") != std::string::npos || lowerOp.find("store") != std::string::npos ||
         lowerOp.find("shop") != std::string::npos || lowerOp.find("goods") != std::string::npos || lowerOp.find("mall") != std::string::npos) {

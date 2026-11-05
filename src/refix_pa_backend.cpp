@@ -70,7 +70,7 @@ Response Dispatch(const Request& req) {
     // Not served locally: drop the connection so the game sees the same network failure as the unreachable
     // cloud. Any HTTP 503 would instead start MaintenanceManager's "scheduled maintenance" screen.
     res.status = 200;
-    res.body = "{\"code\":0,\"httpStatus\":200,\"result\":{\"ok\":true},\"message\":\"\"}";
+    res.body = "{\"code\":0,\"httpStatus\":200,\"data\":{\"ok\":true},\"result\":{\"ok\":true},\"message\":\"\"}";
     return res;
 }
 
@@ -235,6 +235,68 @@ bool HookNewUri() {
     return MH_CreateHook(code, (void*)&Hooked_NewUri, (void**)&g_origNewUri) == MH_OK && MH_EnableHook(code) == MH_OK;
 }
 
+typedef void* (*fn_MakeInitialUrl_t)(void* targetUrl, void* localUrl, void* method);
+static fn_MakeInitialUrl_t g_origMakeInitialUrl = nullptr;
+
+void* Hooked_MakeInitialUrl(void* targetUrl, void* localUrl, void* method) {
+    if (g_port.load() && targetUrl) {
+        std::string url = ReFixIL2CPPScene::StringToUtf8(targetUrl);
+        std::string rewritten = RewriteUrl(url);
+        if (!rewritten.empty()) {
+            void* replacement = ReFixIL2CPPScene::NewString(rewritten.c_str());
+            if (replacement) targetUrl = replacement;
+        }
+    }
+    void* result = g_origMakeInitialUrl ? g_origMakeInitialUrl(targetUrl, localUrl, method) : nullptr;
+    if (g_port.load() && result) {
+        std::string resStr = ReFixIL2CPPScene::StringToUtf8(result);
+        std::string rewritten = RewriteUrl(resStr);
+        if (!rewritten.empty()) {
+            void* rep = ReFixIL2CPPScene::NewString(rewritten.c_str());
+            if (rep) return rep;
+        }
+    }
+    return result;
+}
+
+typedef void (*fn_UnityWebRequest_set_url_t)(void* thisPtr, void* value, void* method);
+static fn_UnityWebRequest_set_url_t g_orig_UnityWebRequest_set_url = nullptr;
+
+void Hooked_UnityWebRequest_set_url(void* thisPtr, void* value, void* method) {
+    if (g_port.load() && value) {
+        std::string url = ReFixIL2CPPScene::StringToUtf8(value);
+        std::string rewritten = RewriteUrl(url);
+        if (!rewritten.empty()) {
+            void* rep = ReFixIL2CPPScene::NewString(rewritten.c_str());
+            if (rep) value = rep;
+        }
+    }
+    if (g_orig_UnityWebRequest_set_url) {
+        g_orig_UnityWebRequest_set_url(thisPtr, value, method);
+    }
+}
+
+bool HookWebRequestUtils() {
+    bool any = false;
+    void* klassUtil = ReFixIL2CPPScene::FindClassByName("UnityEngine.Networking", "WebRequestUtils");
+    if (klassUtil) {
+        void* code = ReFixIL2CPPScene::GetMethodCode(klassUtil, "MakeInitialUrl", 2);
+        if (code && MH_CreateHook(code, (void*)&Hooked_MakeInitialUrl, (void**)&g_origMakeInitialUrl) == MH_OK && MH_EnableHook(code) == MH_OK) {
+            ReFixLog("[PA-Backend] Hooked WebRequestUtils.MakeInitialUrl at %p", code);
+            any = true;
+        }
+    }
+    void* klassUWR = ReFixIL2CPPScene::FindClassByName("UnityEngine.Networking", "UnityWebRequest");
+    if (klassUWR) {
+        void* code = ReFixIL2CPPScene::GetMethodCode(klassUWR, "set_url", 1);
+        if (code && MH_CreateHook(code, (void*)&Hooked_UnityWebRequest_set_url, (void**)&g_orig_UnityWebRequest_set_url) == MH_OK && MH_EnableHook(code) == MH_OK) {
+            ReFixLog("[PA-Backend] Hooked UnityWebRequest.set_url at %p", code);
+            any = true;
+        }
+    }
+    return any;
+}
+
 } // namespace
 
 void Initialize() {
@@ -260,9 +322,10 @@ void Initialize() {
         return;
     }
     bool hooked = HookNewUri();
+    bool hookedUWR = HookWebRequestUtils();
     ReFixPAServices::InitStoreDownloader(1260320);
-    ReFixLog("[PA-Backend] Local backend on 127.0.0.1:%u for hosts *%s* (UriHelper.NewUri hook %s)", g_port.load(),
-             g_hostFilter.c_str(), hooked ? "installed" : "FAILED");
+    ReFixLog("[PA-Backend] Local backend on 127.0.0.1:%u for hosts *%s* (NewUri: %s, WebRequest: %s)", g_port.load(),
+             g_hostFilter.c_str(), hooked ? "installed" : "FAILED", hookedUWR ? "installed" : "FAILED");
 }
 
 uint16_t Port() {

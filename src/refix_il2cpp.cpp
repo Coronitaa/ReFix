@@ -5,6 +5,9 @@
 #include "refix_pa_backend.h"
 #include "refix_pa_relay.h"
 #include "minhook/MinHook.h"
+#include "overlay/overlay_text.h"
+#include "overlay/save_swap.h"
+#include "overlay/refix_overlay.h"
 #include <cstdio>
 #include <atomic>
 #include <string>
@@ -105,6 +108,81 @@ static fn_P2PRoomUtils_IsP2PMode_t g_orig_P2PRoomUtils_IsP2PMode = nullptr;
 
 typedef void (*fn_WallBreaker_Awake_t)(void* self, void* method);
 static fn_WallBreaker_Awake_t g_orig_WallBreaker_Awake = nullptr;
+
+typedef void* (*fn_Application_get_persistentDataPath_t)(void* method);
+static fn_Application_get_persistentDataPath_t g_orig_Application_get_persistentDataPath = nullptr;
+
+typedef void (*fn_Application_get_persistentDataPath_Injected_t)(void** outString);
+static fn_Application_get_persistentDataPath_Injected_t g_orig_Application_get_persistentDataPath_Injected = nullptr;
+
+typedef void* (*fn_Application_get_persistentDataPath_icall_t)();
+static fn_Application_get_persistentDataPath_icall_t g_orig_Application_get_persistentDataPath_icall = nullptr;
+
+static std::string s_lastProfileId;
+static std::string s_isolatedDataPath;
+static std::mutex s_isolatedDataPathMutex;
+
+static std::string GetIsolatedPathUtf8() {
+    std::lock_guard<std::mutex> lock(s_isolatedDataPathMutex);
+    std::wstring currentProfile = ReFixOverlay::ActiveProfileId();
+    std::string curId = refix::overlay::ToUtf8(currentProfile);
+    if (!s_isolatedDataPath.empty() && curId == s_lastProfileId) {
+        return s_isolatedDataPath;
+    }
+    s_lastProfileId = curId;
+    std::wstring wpath = refix::overlay::saves::GetActiveSaveDir();
+    if (!wpath.empty()) {
+        s_isolatedDataPath = refix::overlay::ToUtf8(wpath);
+        ReFixLog("[IL2CPP] Redirecting Application.persistentDataPath for profile '%s' -> %s", curId.c_str(), s_isolatedDataPath.c_str());
+    }
+    return s_isolatedDataPath;
+}
+
+typedef void* (*fn_GenericLocalStorageSystem_GetPathForSave_t)(void* self, void* saveName, void* method);
+static fn_GenericLocalStorageSystem_GetPathForSave_t g_orig_GetPathForSave = nullptr;
+
+static void* Hooked_GenericLocalStorageSystem_GetPathForSave(void* self, void* saveName, void* method) {
+    std::string iso = GetIsolatedPathUtf8();
+    if (!iso.empty() && saveName && g_pfn_string_new) {
+        std::string steamDir = iso + "\\Steam";
+        std::wstring wSteam = refix::overlay::FromUtf8(steamDir);
+        CreateDirectoryW(wSteam.c_str(), nullptr);
+        std::string name = ReFixIL2CPPScene::StringToUtf8(saveName);
+        std::string fullPath = steamDir + "\\" + name;
+        if (fullPath.size() < 5 || fullPath.substr(fullPath.size() - 5) != ".data") {
+            fullPath += ".data";
+        }
+        return g_pfn_string_new(fullPath.c_str());
+    }
+    return g_orig_GetPathForSave ? g_orig_GetPathForSave(self, saveName, method) : nullptr;
+}
+
+static void* Hooked_Application_get_persistentDataPath(void* method) {
+    std::string path = GetIsolatedPathUtf8();
+    if (!path.empty() && g_pfn_string_new) {
+        return g_pfn_string_new(path.c_str());
+    }
+    return g_orig_Application_get_persistentDataPath ? g_orig_Application_get_persistentDataPath(method) : nullptr;
+}
+
+static void Hooked_Application_get_persistentDataPath_Injected(void** outString) {
+    std::string path = GetIsolatedPathUtf8();
+    if (!path.empty() && g_pfn_string_new && outString) {
+        *outString = g_pfn_string_new(path.c_str());
+        return;
+    }
+    if (g_orig_Application_get_persistentDataPath_Injected) {
+        g_orig_Application_get_persistentDataPath_Injected(outString);
+    }
+}
+
+static void* Hooked_Application_get_persistentDataPath_icall() {
+    std::string path = GetIsolatedPathUtf8();
+    if (!path.empty() && g_pfn_string_new) {
+        return g_pfn_string_new(path.c_str());
+    }
+    return g_orig_Application_get_persistentDataPath_icall ? g_orig_Application_get_persistentDataPath_icall() : nullptr;
+}
 
 // Same register layout works for static (method) and instance (self, method) getters on x64.
 typedef bool (*fn_Bridge_GetBool_t)(void* selfOrMethod, void* method);
@@ -1243,6 +1321,54 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
 
     // 1. Immediately activate native P2P mode at startup
     ActivateP2PModeInternal();
+
+    // Hook UnityEngine.Application.get_persistentDataPath for save data isolation
+    void* klassApp = FindClassAcrossImages("UnityEngine", "Application");
+    if (klassApp) {
+        void* methodPDP = g_pfn_class_get_method_from_name(klassApp, "get_persistentDataPath", 0);
+        if (methodPDP) {
+            void* pCode = ResolveRealCodePointer(*(void**)methodPDP);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_Application_get_persistentDataPath, (void**)&g_orig_Application_get_persistentDataPath) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked UnityEngine.Application.get_persistentDataPath at %p", pCode);
+            }
+        }
+    }
+
+    typedef void* (*fn_il2cpp_resolve_icall)(const char* name);
+    auto pfn_resolve_icall = (fn_il2cpp_resolve_icall)GetProcAddress(hGA, "il2cpp_resolve_icall");
+    if (pfn_resolve_icall) {
+        void* pIcallInjected = pfn_resolve_icall("UnityEngine.Application::get_persistentDataPath_Injected");
+        if (pIcallInjected) {
+            void* pReal = ResolveRealCodePointer(pIcallInjected);
+            if (pReal && MH_CreateHook(pReal, (void*)Hooked_Application_get_persistentDataPath_Injected, (void**)&g_orig_Application_get_persistentDataPath_Injected) == MH_OK) {
+                MH_EnableHook(pReal);
+                ReFixLog("[IL2CPP] Hooked icall get_persistentDataPath_Injected at %p", pReal);
+            }
+        }
+        void* pIcall = pfn_resolve_icall("UnityEngine.Application::get_persistentDataPath");
+        if (pIcall) {
+            void* pReal = ResolveRealCodePointer(pIcall);
+            if (pReal && MH_CreateHook(pReal, (void*)Hooked_Application_get_persistentDataPath_icall, (void**)&g_orig_Application_get_persistentDataPath_icall) == MH_OK) {
+                MH_EnableHook(pReal);
+                ReFixLog("[IL2CPP] Hooked icall get_persistentDataPath at %p", pReal);
+            }
+        }
+    }
+
+    // Hook GenericLocalStorageSystem for Dumb Ways to Build save isolation
+    void* klassGenSave = FindClassAcrossImages("Unity.PlatformToolkit", "GenericLocalStorageSystem");
+    if (!klassGenSave) klassGenSave = FindClassAcrossImages("", "GenericLocalStorageSystem");
+    if (klassGenSave) {
+        void* mGetPath = g_pfn_class_get_method_from_name(klassGenSave, "GetPathForSave", 1);
+        if (mGetPath) {
+            void* pCode = ResolveRealCodePointer(*(void**)mGetPath);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_GenericLocalStorageSystem_GetPathForSave, (void**)&g_orig_GetPathForSave) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked GenericLocalStorageSystem.GetPathForSave at %p", pCode);
+            }
+        }
+    }
 
     // Hook PlayerReportingService for PlaySide / generic ban check bypass
     void* klassReporting = FindClassAcrossImages("PlaySide.Platform", "PlayerReportingService");

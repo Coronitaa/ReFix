@@ -108,7 +108,10 @@ std::string ScalarArg(const std::string& query, const char* name) {
 }
 
 std::string Success(const std::string& operation, const std::string& dataJson) {
-    return "{\"code\":0,\"httpStatus\":200,\"result\":{\"" + operation + "\":" + dataJson + "},\"message\":\"\"}";
+    if (operation.empty()) {
+        return "{\"code\":0,\"httpStatus\":200,\"data\":" + dataJson + ",\"result\":" + dataJson + ",\"message\":\"\"}";
+    }
+    return "{\"code\":0,\"httpStatus\":200,\"data\":{\"" + operation + "\":" + dataJson + "},\"result\":{\"" + operation + "\":" + dataJson + "},\"message\":\"\"}";
 }
 
 } // namespace ReFixPAGql

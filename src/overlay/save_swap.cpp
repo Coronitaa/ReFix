@@ -3,6 +3,7 @@
 #endif
 #include "save_swap.h"
 #include "overlay_text.h"
+#include "refix_overlay.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -440,6 +441,49 @@ void SwitchTo(const Profile& active, const std::vector<Profile>& all) {
         return;
     }
     for (const Location& loc : locations) SwitchOne(loc, active, all);
+}
+
+std::wstring GetActiveSaveDir(const std::wstring& label) {
+    std::wstring targetLabel = label;
+    std::wstring livePath;
+    std::vector<std::wstring> keepList;
+
+    const std::vector<Location> locations = DetectLocations();
+    for (const auto& loc : locations) {
+        if (targetLabel.empty() || _wcsicmp(loc.label.c_str(), targetLabel.c_str()) == 0) {
+            targetLabel = loc.label;
+            livePath = loc.live;
+            keepList = loc.keepLive;
+            break;
+        }
+    }
+
+    if (targetLabel.empty()) return L"";
+
+    std::wstring activeId = ReFixOverlay::ActiveProfileId();
+    if (activeId.empty()) {
+        wchar_t envId[64] = {};
+        if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", envId, 64) > 0) activeId = envId;
+    }
+    if (activeId.empty()) activeId = profiles::LastProfileId();
+    if (activeId.empty()) activeId = kPcOwner;
+
+    std::wstring stash = StashDir(activeId, targetLabel);
+    EnsureDir(stash);
+
+    bool allowNative = false;
+    if (activeId == kPcOwner) {
+        allowNative = true;
+    } else if (auto p = profiles::Load(activeId)) {
+        allowNative = p->nativeSaves;
+    }
+
+    if (allowNative && !HasEntries(stash, {}) && !livePath.empty() && HasEntries(livePath, keepList)) {
+        CopyTreeWithKeep(livePath, stash, keepList);
+        ReFixLog("[Saves] Seeded isolated saves for profile %s from %s", ToUtf8(activeId).c_str(), ToUtf8(livePath).c_str());
+    }
+
+    return stash;
 }
 
 } // namespace refix::overlay::saves
