@@ -512,6 +512,22 @@ public:
         return false;
     }
 
+    bool SetMaxMembers(std::string_view lobbyId, uint32_t maxMembers) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it != m_lobbies.end()) {
+            it->second.maxMembers = maxMembers;
+            it->second.revision++;
+            LanEvent ev;
+            ev.type = LanEvent::Type::LobbyUpdated;
+            ev.lobbyId = std::string(lobbyId);
+            m_callbacks.PostEvent(ev);
+            BroadcastLobbyState(it->second);
+            return true;
+        }
+        return false;
+    }
+
     bool AddRemoteMember(std::string_view lobbyId, const PeerId& memberPid, const std::string& name, const LanEndpoint& ep) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_lobbies.find(std::string(lobbyId));
@@ -1201,13 +1217,8 @@ public:
             }
 
             if (lobOpt->AvailableSlots() == 0) {
-                ByteWriter resp;
-                resp.WriteString(Scope());
-                resp.WritePeerId(m_identity.GetLocalPeerId());
-                resp.WriteString(lobbyId);
-                resp.WriteU8(1); // Full
-                m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
-                return;
+                // Auto-expand lobby slots on LAN so players are never rejected with 'Session Full'
+                m_lobby.SetMaxMembers(lobbyId, (uint32_t)(lobOpt->members.size() + 5));
             }
 
             // Accept and register client peer

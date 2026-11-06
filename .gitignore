@@ -36,6 +36,7 @@ Desktop.ini
 *.pfx
 *.p12
 *.key
+*.priv
 *.cer
 *.crt
 sign_dlls.ps1

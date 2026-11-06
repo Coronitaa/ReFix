@@ -74,6 +74,7 @@
 #include "include/steam/isteamapps.h"
 #include "include/steam/isteamuser.h"
 #include "overlay/refix_overlay.h"
+#include "overlay/presence_net.h"
 #include "refix_mono.h"
 #include "generated/steam_emu_latest.h"
 
@@ -2272,6 +2273,11 @@ namespace UnrealSteamEmu {
 
                         if (hdr->msgType == 1 && pLen > 0) { // Ping with persona name
                             peer.personaName.assign((char*)payload, pLen);
+                            // Notify game that LAN friend is online with persona name
+                            PersonaStateChange_t change = {};
+                            change.m_ulSteamID = hdr->senderID;
+                            change.m_nChangeFlags = k_EPersonaChangeName | k_EPersonaChangeStatus | k_EPersonaChangeRelationshipChanged;
+                            PostCallback(PersonaStateChange_t::k_iCallback, &change, sizeof(change));
                         } else if (hdr->msgType == 2 && pLen > 0) { // Lobby Announcement
                             std::string meta((char*)payload, pLen);
                             std::stringstream ss(meta);
@@ -3355,7 +3361,15 @@ namespace UnrealSteamEmu {
 
         // Slot 14 in ISteamUser021: BeginAuthSession!
         virtual EBeginAuthSessionResult BeginAuthSession(const void *pAuthTicket, int cbAuthTicket, CSteamID steamID) override {
-            return g_steamUserInstance.BeginAuthSession(pAuthTicket, cbAuthTicket, steamID);
+            ValidateAuthTicketResponse_t resp = {};
+            resp.m_SteamID = steamID;
+            resp.m_eAuthSessionResponse = k_EAuthSessionResponseOK;
+            resp.m_OwnerSteamID = steamID;
+            PostGameServerCallback(ValidateAuthTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
+            PostCallback(ValidateAuthTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
+
+            ReFixLog("[UnrealSteam] GameServer BeginAuthSession: Accepted session for SteamID %llu", steamID.ConvertToUint64());
+            return k_EBeginAuthSessionResultOK;
         }
 
         // Slot 15 in ISteamUser021: EndAuthSession!
@@ -3545,13 +3559,38 @@ namespace UnrealSteamEmu {
         virtual bool GetFriendGamePlayed(CSteamID steamIDFriend, FriendGameInfo_t *pFriendGameInfo) override {
             if (!pFriendGameInfo) return false;
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_peers.find(steamIDFriend.ConvertToUint64());
+            uint64_t friendSid = steamIDFriend.ConvertToUint64();
+            auto it = g_peers.find(friendSid);
             if (it != g_peers.end() && it->second.port != 0) {
                 pFriendGameInfo->m_gameID = CGameID(g_appID);
                 pFriendGameInfo->m_unGameIP = it->second.ip;
                 pFriendGameInfo->m_usGamePort = it->second.port;
                 pFriendGameInfo->m_usQueryPort = it->second.port;
-                pFriendGameInfo->m_steamIDLobby = CSteamID(g_activeLobbyID.load());
+
+                uint64_t friendLobbyId = 0;
+                for (const auto& rp : ::refix::overlay::net::Players()) {
+                    if (rp.steamId == friendSid && rp.lobbyId != 0) {
+                        friendLobbyId = rp.lobbyId;
+                        break;
+                    }
+                }
+                if (friendLobbyId == 0) {
+                    auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                    for (const auto& l : allLobbies) {
+                        auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(l.ownerPeerId);
+                        if ((pInfo && pInfo->externalId.numericId == friendSid) || l.ownerPeerId.low == friendSid || l.ownerPeerId.high == friendSid) {
+                            uint64_t sId = refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId);
+                            if (sId == 0) sId = refix::steam::ComputeLobbySteamID(l.lobbyId);
+                            friendLobbyId = sId;
+                            break;
+                        }
+                    }
+                }
+                if (friendLobbyId == 0 && friendSid == g_localSteamID) {
+                    friendLobbyId = g_activeLobbyID.load();
+                }
+
+                pFriendGameInfo->m_steamIDLobby = CSteamID(friendLobbyId);
                 return true;
             }
             return false;
@@ -3580,16 +3619,36 @@ namespace UnrealSteamEmu {
         virtual bool IsUserInSource(CSteamID steamIDUser, CSteamID steamIDSource) override { return false; }
 
         virtual void SetInGameVoiceSpeaking(CSteamID steamIDUser, bool bSpeaking) override {}
-        virtual void ActivateGameOverlay(const char *pchDialog) override { ReFixOverlay::ActivateOverlay(pchDialog); }
+        virtual void ActivateGameOverlay(const char *pchDialog) override {
+            if (pchDialog && (_stricmp(pchDialog, "community") == 0 || _stricmp(pchDialog, "market") == 0)) {
+                ReFixOverlay::OpenMarketGiveMenu();
+            } else {
+                ReFixOverlay::ActivateOverlay(pchDialog);
+            }
+        }
         virtual void ActivateGameOverlayToUser(const char *pchDialog, CSteamID steamID) override {
             ReFixOverlay::ActivateOverlayToUser(pchDialog, steamID.ConvertToUint64());
         }
         virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
-            ReFixOverlay::ActivateWebPage(pchURL);
+            if (pchURL && (strstr(pchURL, "market") || strstr(pchURL, "community"))) {
+                ReFixOverlay::OpenMarketGiveMenu();
+            } else {
+                ReFixOverlay::ActivateWebPage(pchURL);
+            }
         }
         virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override {
             ReFixLog("[UnrealSteam] ActivateGameOverlayToStore: nAppID=%u", (uint32_t)nAppID);
-            ReFixOverlay::PromptPurchase((uint32_t)nAppID, 0, "", "", false);
+            if (nAppID == 730) {
+                ReFixOverlay::PromptPurchase(730, 10001, "CS:GO Prime Status Upgrade",
+                    "Mejora tu cuenta a Estado Prime. Emparejamiento exclusivo, obtención de cajas semanales y medallas de servicio.",
+                    false, [](bool approved) {
+                        if (approved) {
+                            ReFixLog("[Overlay] Prime Status Upgrade approved by player!");
+                        }
+                    });
+            } else {
+                ReFixOverlay::PromptPurchase((uint32_t)nAppID, 0, "", "", false);
+            }
         }
         virtual void SetPlayedWith(CSteamID steamIDUserPlayedWith) override {}
         virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override {
@@ -4226,8 +4285,9 @@ namespace UnrealSteamEmu {
         }
 
         virtual SteamAPICall_t CreateLobby(ELobbyType eLobbyType, int cMaxMembers) override {
+            uint32_t initialSlots = (cMaxMembers > 1) ? (uint32_t)cMaxMembers : 10;
             std::string coreLobbyId = refix::lan::ILanCore::Get().Lobby().CreateLobby(
-                cMaxMembers, refix::lan::LobbyPermissionLevel::PublicAdvertised);
+                initialSlots, refix::lan::LobbyPermissionLevel::PublicAdvertised);
             if (coreLobbyId.empty()) {
                 LobbyCreated_t crResp = {};
                 crResp.m_eResult = k_EResultFail;
@@ -4310,6 +4370,13 @@ namespace UnrealSteamEmu {
             cbResp.m_bLocked = false;
             cbResp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseSuccess;
             PostCallback(LobbyEnter_t::k_iCallback, &cbResp, sizeof(cbResp));
+
+            LobbyChatUpdate_t cu = {};
+            cu.m_ulSteamIDLobby = lID;
+            cu.m_ulSteamIDUserChanged = g_localSteamID;
+            cu.m_ulSteamIDMakingChange = g_localSteamID;
+            cu.m_rgfChatMemberStateChange = 0x0001; // k_EChatMemberStateChangeEntered
+            PostCallback(LobbyChatUpdate_t::k_iCallback, &cu, sizeof(cu));
 
             ReFixLog("[UnrealSteam] CreateLobby: Created Lobby %llu (coreId='%s', max=%d, owner=%llu, hCall=%llu)",
                      lID, coreLobbyId.c_str(), cMaxMembers, g_localSteamID, hCall);
@@ -4764,7 +4831,18 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool SetLobbyMemberLimit(CSteamID steamIDLobby, int cMaxMembers) override {
-            g_lobbies[steamIDLobby.ConvertToUint64()].maxMembers = cMaxMembers;
+            uint64_t lID = steamIDLobby.ConvertToUint64();
+            int effectiveLimit = (cMaxMembers >= 10) ? cMaxMembers : 10;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                g_lobbies[lID].maxMembers = effectiveLimit;
+            }
+            std::string coreId = GetCoreLobbyId(lID);
+            if (!coreId.empty()) {
+                refix::lan::ILanCore::Get().Lobby().SetMaxMembers(coreId, (uint32_t)effectiveLimit);
+            }
+            ReFixLog("[UnrealSteam] SetLobbyMemberLimit: Lobby %llu (coreId='%s') maxMembers set to %d (requested %d)",
+                     lID, coreId.c_str(), effectiveLimit, cMaxMembers);
             return true;
         }
 
@@ -4926,10 +5004,18 @@ namespace UnrealSteamEmu {
             m_queries[hReq] = q;
 
             if (pResponse) {
-                for (size_t i = 0; i < q.servers.size(); i++) {
-                    pResponse->ServerResponded(hReq, (int)i);
-                }
-                pResponse->RefreshComplete(hReq, EMatchMakingServerResponse::eServerResponded);
+                std::thread([this, hReq, pResponse]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+                    auto it = m_queries.find(hReq);
+                    if (it == m_queries.end() || it->second.response != pResponse) return;
+                    for (size_t i = 0; i < it->second.servers.size(); i++) {
+                        pResponse->ServerResponded(hReq, (int)i);
+                    }
+                    pResponse->RefreshComplete(hReq, it->second.servers.empty() ?
+                        EMatchMakingServerResponse::eNoServersListedOnMasterServer :
+                        EMatchMakingServerResponse::eServerResponded);
+                }).detach();
             }
 
             ReFixLog("[UnrealSteam] MatchmakingServers query %p completed: %zu server(s) reported", (void*)hReq, q.servers.size());
@@ -6708,26 +6794,203 @@ namespace UnrealSteamEmu {
     };
     static CSteamRemoteStorageEmu g_steamRemoteStorageInstance;
 
-    // --- ISteamUGC ---
+    // --- ISteamUGC (Generic Workshop & Local Content Provider) ---
+    struct LocalUGCItem {
+        PublishedFileId_t id = 0;
+        std::string title;
+        std::string description;
+        std::string folder;
+        std::string previewFile;
+        uint64_t fileSize = 0;
+        uint32_t timestamp = 0;
+    };
+
     class CSteamUGCEmu : public ISteamUGC {
+    private:
+        std::mutex m_ugcMutex;
+        std::map<PublishedFileId_t, LocalUGCItem> m_items;
+        std::map<UGCQueryHandle_t, std::vector<PublishedFileId_t>> m_queries;
+        UGCQueryHandle_t m_nextQuery = 1;
+        bool m_scanned = false;
+
+        void EnsureScanned() {
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            if (m_scanned) return;
+            m_scanned = true;
+
+            wchar_t exePath[MAX_PATH] = {};
+            GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+            std::wstring baseDir = exePath;
+            size_t slash = baseDir.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) baseDir = baseDir.substr(0, slash);
+
+            std::vector<std::wstring> scanPaths = {
+                baseDir + L"\\maps\\workshop",
+                baseDir + L"\\..\\csgo\\maps\\workshop",
+                baseDir + L"\\csgo\\maps\\workshop",
+                baseDir + L"\\workshop\\content\\" + std::to_wstring(g_appID),
+                baseDir + L"\\..\\workshop\\content\\" + std::to_wstring(g_appID)
+            };
+
+            for (const auto& sp : scanPaths) {
+                WIN32_FIND_DATAW fd;
+                HANDLE hFind = FindFirstFileW((sp + L"\\*").c_str(), &fd);
+                if (hFind == INVALID_HANDLE_VALUE) continue;
+                do {
+                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                    PublishedFileId_t fileId = _wcstoui64(fd.cFileName, nullptr, 10);
+                    if (fileId == 0) continue;
+
+                    LocalUGCItem item;
+                    item.id = fileId;
+                    std::wstring itemDir = sp + L"\\" + fd.cFileName;
+                    char utf8Dir[MAX_PATH * 2] = {};
+                    WideCharToMultiByte(CP_UTF8, 0, itemDir.c_str(), -1, utf8Dir, sizeof(utf8Dir), nullptr, nullptr);
+                    item.folder = utf8Dir;
+
+                    // Search for .bsp or file inside
+                    WIN32_FIND_DATAW fInner;
+                    HANDLE hInner = FindFirstFileW((itemDir + L"\\*").c_str(), &fInner);
+                    if (hInner != INVALID_HANDLE_VALUE) {
+                        do {
+                            std::wstring fn = fInner.cFileName;
+                            if (fn.size() > 4 && fn.substr(fn.size() - 4) == L".bsp") {
+                                char utf8Title[MAX_PATH] = {}; WideCharToMultiByte(CP_UTF8, 0, fn.substr(0, fn.size() - 4).c_str(), -1, utf8Title, sizeof(utf8Title), nullptr, nullptr); item.title = utf8Title;
+                                item.fileSize = ((uint64_t)fInner.nFileSizeHigh << 32) | fInner.nFileSizeLow;
+                                item.timestamp = fInner.ftLastWriteTime.dwLowDateTime;
+                            } else if (fn.find(L"thumb") != std::wstring::npos && fn.find(L".jpg") != std::wstring::npos) {
+                                std::wstring pvw = itemDir + L"\\" + fn;
+                                char utf8Pvw[MAX_PATH * 2] = {};
+                                WideCharToMultiByte(CP_UTF8, 0, pvw.c_str(), -1, utf8Pvw, sizeof(utf8Pvw), nullptr, nullptr);
+                                item.previewFile = utf8Pvw;
+                            }
+                        } while (FindNextFileW(hInner, &fInner));
+                        FindClose(hInner);
+                    }
+                    if (item.title.empty()) {
+                        char idBuf[64];
+                        sprintf_s(idBuf, "%llu", (unsigned long long)fileId);
+                        item.title = std::string("Workshop Item ") + idBuf;
+                    }
+                    item.description = item.title;
+                    m_items[fileId] = item;
+                } while (FindNextFileW(hFind, &fd));
+                FindClose(hFind);
+            }
+
+            // For CS:GO, sync subscribed_file_ids.txt so engine knows local workshop items
+            if (g_appID == 730 && !m_items.empty()) {
+                std::vector<std::wstring> subFiles = {
+                    baseDir + L"\\..\\csgo\\subscribed_file_ids.txt",
+                    baseDir + L"\\csgo\\subscribed_file_ids.txt"
+                };
+                for (const auto& sf : subFiles) {
+                    std::ofstream ofs(sf, std::ios::binary | std::ios::trunc);
+                    if (ofs.is_open()) {
+                        for (const auto& [id, itm] : m_items) {
+                            ofs << id << "\n";
+                        }
+                    }
+                }
+            }
+            ReFixLog("[UnrealSteam] CSteamUGCEmu: Scanned %zu local workshop items", m_items.size());
+        }
+
     public:
-        virtual UGCQueryHandle_t CreateQueryUserUGCRequest(AccountID_t unAccountID, EUserUGCList eListType, EUGCMatchingUGCType eMatchingUGCType, EUserUGCListSortOrder eSortOrder, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override { return 1; }
-        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override { return 1; }
-        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, const char *pchCursor) override { return 1; }
-        virtual UGCQueryHandle_t CreateQueryUGCDetailsRequest(PublishedFileId_t *pvecPublishedFileID, uint32 unNumPublishedFileIDs) override { return 1; }
+        virtual UGCQueryHandle_t CreateQueryUserUGCRequest(AccountID_t unAccountID, EUserUGCList eListType, EUGCMatchingUGCType eMatchingUGCType, EUserUGCListSortOrder eSortOrder, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            for (const auto& [id, itm] : m_items) q.push_back(id);
+            return h;
+        }
+        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            for (const auto& [id, itm] : m_items) q.push_back(id);
+            return h;
+        }
+        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, const char *pchCursor) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            for (const auto& [id, itm] : m_items) q.push_back(id);
+            return h;
+        }
+        virtual UGCQueryHandle_t CreateQueryUGCDetailsRequest(PublishedFileId_t *pvecPublishedFileID, uint32 unNumPublishedFileIDs) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            if (pvecPublishedFileID) {
+                for (uint32 i = 0; i < unNumPublishedFileIDs; ++i) q.push_back(pvecPublishedFileID[i]);
+            }
+            return h;
+        }
         virtual SteamAPICall_t SendQueryUGCRequest(UGCQueryHandle_t handle) override {
+            EnsureScanned();
             SteamUGCQueryCompleted_t resp = {};
             resp.m_handle = handle;
             resp.m_eResult = k_EResultOK;
-            resp.m_unNumResultsReturned = 0;
-            resp.m_unTotalMatchingResults = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_ugcMutex);
+                auto it = m_queries.find(handle);
+                if (it != m_queries.end()) {
+                    resp.m_unNumResultsReturned = (uint32)it->second.size();
+                    resp.m_unTotalMatchingResults = resp.m_unNumResultsReturned;
+                }
+            }
             return PostCallResult(SteamUGCQueryCompleted_t::k_iCallback, &resp, sizeof(resp));
         }
-        virtual bool GetQueryUGCResult(UGCQueryHandle_t handle, uint32 index, SteamUGCDetails_t *pDetails) override { return false; }
+        virtual bool GetQueryUGCResult(UGCQueryHandle_t handle, uint32 index, SteamUGCDetails_t *pDetails) override {
+            if (!pDetails) return false;
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            auto itQ = m_queries.find(handle);
+            if (itQ == m_queries.end() || index >= itQ->second.size()) return false;
+            PublishedFileId_t fileId = itQ->second[index];
+            auto itItem = m_items.find(fileId);
+            if (itItem == m_items.end()) return false;
+
+            const auto& itm = itItem->second;
+            memset(pDetails, 0, sizeof(*pDetails));
+            pDetails->m_nPublishedFileId = itm.id;
+            pDetails->m_eResult = k_EResultOK;
+            pDetails->m_eFileType = k_EWorkshopFileTypeCommunity;
+            pDetails->m_nCreatorAppID = g_appID;
+            pDetails->m_nConsumerAppID = g_appID;
+            strncpy_s(pDetails->m_rgchTitle, itm.title.c_str(), _TRUNCATE);
+            strncpy_s(pDetails->m_rgchDescription, itm.description.c_str(), _TRUNCATE);
+            pDetails->m_ulSteamIDOwner = g_localSteamID;
+            pDetails->m_rtimeCreated = itm.timestamp;
+            pDetails->m_rtimeUpdated = itm.timestamp;
+            pDetails->m_eVisibility = k_ERemoteStoragePublishedFileVisibilityPublic;
+            pDetails->m_bAcceptedForUse = true;
+            strncpy_s(pDetails->m_rgchTags, "map", _TRUNCATE);
+            pDetails->m_nFileSize = (int32)std::min<uint64_t>(itm.fileSize, 0x7FFFFFFF);
+            pDetails->m_unVotesUp = 100;
+            pDetails->m_flScore = 5.0f;
+            return true;
+        }
         virtual uint32 GetQueryUGCNumTags(UGCQueryHandle_t handle, uint32 index) override { return 0; }
         virtual bool GetQueryUGCTag(UGCQueryHandle_t handle, uint32 index, uint32 indexTag, char* pchValue, uint32 cchValueSize) override { return false; }
         virtual bool GetQueryUGCTagDisplayName(UGCQueryHandle_t handle, uint32 index, uint32 indexTag, char* pchValue, uint32 cchValueSize) override { return false; }
-        virtual bool GetQueryUGCPreviewURL(UGCQueryHandle_t handle, uint32 index, char *pchURL, uint32 cchURLSize) override { return false; }
+        virtual bool GetQueryUGCPreviewURL(UGCQueryHandle_t handle, uint32 index, char *pchURL, uint32 cchURLSize) override {
+            if (!pchURL || cchURLSize == 0) return false;
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            auto itQ = m_queries.find(handle);
+            if (itQ == m_queries.end() || index >= itQ->second.size()) return false;
+            auto itItem = m_items.find(itQ->second[index]);
+            if (itItem == m_items.end() || itItem->second.previewFile.empty()) return false;
+            strncpy_s(pchURL, cchURLSize, itItem->second.previewFile.c_str(), _TRUNCATE);
+            return true;
+        }
         virtual bool GetQueryUGCMetadata(UGCQueryHandle_t handle, uint32 index, char *pchMetadata, uint32 cchMetadatasize) override { return false; }
         virtual bool GetQueryUGCChildren(UGCQueryHandle_t handle, uint32 index, PublishedFileId_t* pvecPublishedFileID, uint32 cMaxEntries) override { return false; }
         virtual bool GetQueryUGCStatistic(UGCQueryHandle_t handle, uint32 index, EItemStatistic eStatType, uint64 *pStatValue) override { return false; }
@@ -6794,10 +7057,42 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t RemoveItemFromFavorites(AppId_t nAppId, PublishedFileId_t nPublishedFileId) override { return 0; }
         virtual SteamAPICall_t SubscribeItem(PublishedFileId_t nPublishedFileId) override { return 0; }
         virtual SteamAPICall_t UnsubscribeItem(PublishedFileId_t nPublishedFileId) override { return 0; }
-        virtual uint32 GetNumSubscribedItems(bool bIncludeLocallyDisabled = false) override { return 0; }
-        virtual uint32 GetSubscribedItems(PublishedFileId_t *pvecPublishedFileID, uint32 cMaxEntries, bool bIncludeLocallyDisabled = false) override { return 0; }
-        virtual uint32 GetItemState(PublishedFileId_t nPublishedFileId) override { return k_EItemStateNone; }
-        virtual bool GetItemInstallInfo(PublishedFileId_t nPublishedFileId, uint64 *punSizeOnDisk, char *pchFolder, uint32 cchFolderBufferSize, uint32 *punTimeStamp) override { return false; }
+        virtual uint32 GetNumSubscribedItems(bool bIncludeLocallyDisabled = false) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            return (uint32)m_items.size();
+        }
+        virtual uint32 GetSubscribedItems(PublishedFileId_t *pvecPublishedFileID, uint32 cMaxEntries, bool bIncludeLocallyDisabled = false) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            uint32 copied = 0;
+            for (const auto& [id, itm] : m_items) {
+                if (copied >= cMaxEntries) break;
+                if (pvecPublishedFileID) pvecPublishedFileID[copied] = id;
+                copied++;
+            }
+            return copied;
+        }
+        virtual uint32 GetItemState(PublishedFileId_t nPublishedFileId) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            if (m_items.find(nPublishedFileId) != m_items.end()) {
+                return 1 | 4; // k_EItemStateSubscribed | k_EItemStateInstalled
+            }
+            return k_EItemStateNone;
+        }
+        virtual bool GetItemInstallInfo(PublishedFileId_t nPublishedFileId, uint64 *punSizeOnDisk, char *pchFolder, uint32 cchFolderBufferSize, uint32 *punTimeStamp) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            auto it = m_items.find(nPublishedFileId);
+            if (it == m_items.end()) return false;
+            if (punSizeOnDisk) *punSizeOnDisk = it->second.fileSize;
+            if (punTimeStamp) *punTimeStamp = it->second.timestamp;
+            if (pchFolder && cchFolderBufferSize > 0) {
+                strncpy_s(pchFolder, cchFolderBufferSize, it->second.folder.c_str(), _TRUNCATE);
+            }
+            return true;
+        }
         virtual bool GetItemDownloadInfo(PublishedFileId_t nPublishedFileId, uint64 *punBytesDownloaded, uint64 *punBytesTotal) override { return false; }
         virtual bool DownloadItem(PublishedFileId_t nPublishedFileId, bool bHighPriority) override { return false; }
         virtual bool BInitWorkshopForGameServer(DepotId_t unWorkshopDepotID, const char *pszFolder) override { return true; }
@@ -7462,6 +7757,35 @@ namespace UnrealSteamEmu {
     };
     static CSteamUnifiedMessagesEmu g_steamUnifiedMessagesInstance;
 
+    // --- ISteamGameStats001 (Source 1 / CS:GO SteamAPIContext requirement) ---
+    class CSteamGameStatsEmu {
+    public:
+        virtual uint64_t GetNewSession(int8_t, uint64_t, int32_t, uint32_t) { return 0; }
+        virtual int32_t EndSession(uint64_t, uint32_t, uint32_t) { return 1; }
+        virtual int32_t AddStringStat(uint64_t, uint32_t, const char*) { return 1; }
+        virtual int32_t AddIntStat(uint64_t, uint32_t, int32_t) { return 1; }
+        virtual int32_t UpdateSession(uint64_t) { return 1; }
+        virtual int32_t SetGameID(uint64_t, uint64_t) { return 1; }
+        virtual int32_t GetStatList(uint8_t*, uint32_t, uint32_t*) { return 0; }
+        virtual int32_t GetSessionDetails(uint64_t, uint8_t*, uint32_t, uint32_t*) { return 0; }
+        virtual int32_t SendStats(uint64_t) { return 1; }
+        virtual int32_t DropSession(uint64_t) { return 1; }
+        virtual bool ServerSupportsGameStats(uint32_t, uint8_t*, uint32_t) { return false; }
+        virtual int32_t StatInfo_GetStatName(uint32_t, char*, uint32_t) { return 0; }
+        virtual int32_t StatInfo_GetStatType(uint32_t, uint32_t*) { return 0; }
+        virtual uint32_t StatInfo_GetNumStats() { return 0; }
+        virtual uint64_t GetCurrentSessionID() { return 0; }
+        virtual int32_t StopGameStats() { return 1; }
+        virtual int32_t ResumeGameStats() { return 1; }
+        virtual int32_t InflictDeath(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, float, float, float, float, float, float, float, float, float, float) { return 1; }
+        virtual int32_t InflictDamage(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, float, float, float, float, float, float, float, float, float, float) { return 1; }
+        virtual int32_t CommitData(uint32_t) { return 1; }
+        virtual int32_t AddStringStatByRowID(uint64_t, uint32_t, uint32_t, const char*) { return 1; }
+        virtual int32_t AddIntStatByRowID(uint64_t, uint32_t, uint32_t, int32_t) { return 1; }
+    };
+    static CSteamGameStatsEmu g_steamGameStatsInstance;
+
+
     // --- ISteamParentalSettings ---
     class CSteamParentalSettingsEmu : public ISteamParentalSettings {
     public:
@@ -7838,6 +8162,8 @@ namespace UnrealSteamEmu {
             return ReFixGC::Get(false);
         if (strstr(pchVersion, "STEAMUNIFIEDMESSAGES") || strstr(pchVersion, "SteamUnifiedMessages"))
             return &g_steamUnifiedMessagesInstance;
+        if (strstr(pchVersion, "SteamGameStats") || strstr(pchVersion, "STEAMGAMESTATS"))
+            return &g_steamGameStatsInstance;
 
         ReFixLog("[UnrealSteam] Warning: Unrecognized interface '%s'", pchVersion);
         return nullptr;
@@ -8242,6 +8568,153 @@ namespace UnrealSteamEmu {
         return g_steamNetworkingInstance.CloseP2PSessionWithUser(CSteamID(steamIDRemote));
     }
 
+
+    static void PatchEngineSecurityChecks() {
+        std::thread([]() {
+            bool enginePatched = false;
+            bool clientPatched = false;
+
+            for (int attempt = 0; attempt < 120; ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                if (!enginePatched) {
+                    HMODULE hEngine = GetModuleHandleW(L"engine.dll");
+                    if (hEngine) {
+                        PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hEngine;
+                        if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((uint8_t*)hEngine + dos->e_lfanew);
+                            if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                                uint8_t* base = (uint8_t*)hEngine;
+                                size_t size = nt->OptionalHeader.SizeOfImage;
+
+                                const char targetStr[] = "-insecure";
+                                uint8_t* pInsecureStr = nullptr;
+                                for (size_t i = 0; i + sizeof(targetStr) < size; ++i) {
+                                    if (memcmp(base + i, targetStr, sizeof(targetStr)) == 0) {
+                                        pInsecureStr = base + i;
+                                        break;
+                                    }
+                                }
+
+                                const char toolsStr[] = "-tools";
+                                uint8_t* pToolsStr = nullptr;
+                                for (size_t i = 0; i + sizeof(toolsStr) < size; ++i) {
+                                    if (memcmp(base + i, toolsStr, sizeof(toolsStr)) == 0) {
+                                        pToolsStr = base + i;
+                                        break;
+                                    }
+                                }
+
+                                if (pInsecureStr && pToolsStr) {
+                                    uint8_t pushInsec[5] = { 0x68 };
+                                    memcpy(pushInsec + 1, &pInsecureStr, 4);
+
+                                    uint8_t pushTools[5] = { 0x68 };
+                                    memcpy(pushTools + 1, &pToolsStr, 4);
+
+                                    for (size_t i = 0; i + 64 < size; ++i) {
+                                        if (memcmp(base + i, pushInsec, 5) == 0) {
+                                            bool match = false;
+                                            for (size_t j = i + 5; j < i + 40 && j + 5 < size; ++j) {
+                                                if (memcmp(base + j, pushTools, 5) == 0) {
+                                                    match = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (match) {
+                                                uint8_t* pFunc = base + i - 9;
+                                                DWORD oldProt;
+                                                if (VirtualProtect(pFunc, 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                                    pFunc[0] = 0xB0; // mov al, 1
+                                                    pFunc[1] = 0x01;
+                                                    pFunc[2] = 0xC3; // ret
+                                                    VirtualProtect(pFunc, 8, oldProt, &oldProt);
+                                                    ReFixLog("[SourceEngine] Successfully patched engine.dll! IsClientSecure patched at %p", pFunc);
+                                                }
+
+                                                for (size_t k = i; k < i + 70 && k + 6 < size; ++k) {
+                                                    if (base[k] == 0x8A && base[k + 1] == 0x05) {
+                                                        uint8_t** ppFlag = (uint8_t**)(base + k + 2);
+                                                        uint8_t* pFlag = *ppFlag;
+                                                        if (pFlag && VirtualProtect(pFlag, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                                            *pFlag = 1;
+                                                            VirtualProtect(pFlag, 1, oldProt, &oldProt);
+                                                            ReFixLog("[SourceEngine] Initialized engine secure flag at %p to 1", pFlag);
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                                enginePatched = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!clientPatched) {
+                    HMODULE hClient = GetModuleHandleW(L"client_panorama.dll");
+                    if (hClient) {
+                        PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hClient;
+                        if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((uint8_t*)hClient + dos->e_lfanew);
+                            if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                                uint8_t* base = (uint8_t*)hClient;
+                                size_t size = nt->OptionalHeader.SizeOfImage;
+
+                                const uint8_t pat[] = { 0x8A, 0x41, 0x68, 0xC3 }; // mov al, [ecx + 0x68]; ret
+                                for (size_t i = 0; i + 32 < size; ++i) {
+                                    if (memcmp(base + i, pat, 4) == 0) {
+                                        if (base[i + 4] == 0xCC && base[i + 16] == 0xA1) {
+                                            DWORD oldProt;
+                                            if (VirtualProtect(base + i, 32, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                                base[i + 0] = 0xB0; // mov al, 1
+                                                base[i + 1] = 0x01;
+                                                base[i + 2] = 0xC3; // ret
+
+                                                base[i + 16] = 0xB0; // mov al, 1
+                                                base[i + 17] = 0x01;
+                                                base[i + 18] = 0xC3; // ret
+
+                                                VirtualProtect(base + i, 32, oldProt, &oldProt);
+                                                ReFixLog("[SourceEngine] Successfully patched client_panorama.dll! IsInventoryValid and IsConnectedToGC forced to true at %p", base + i);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                const uint8_t licPat[] = { 0x53, 0xE8, 0xCA, 0xF0, 0xFF, 0xFF, 0x8B, 0xD8, 0xF6, 0xC3, 0x02 };
+                                for (size_t i = 0; i + 16 < size; ++i) {
+                                    if (memcmp(base + i, licPat, sizeof(licPat)) == 0) {
+                                        DWORD oldProt;
+                                        if (VirtualProtect(base + i, 16, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                            base[i + 0] = 0x53; // push ebx
+                                            base[i + 1] = 0xE9; // jmp +0x99 (to mov eax, [purchased_str]; pop ebx; ret)
+                                            base[i + 2] = 0x99;
+                                            base[i + 3] = 0x00;
+                                            base[i + 4] = 0x00;
+                                            base[i + 5] = 0x00;
+                                            VirtualProtect(base + i, 16, oldProt, &oldProt);
+                                            ReFixLog("[SourceEngine] Successfully patched client_panorama.dll! GetLicenseType forced to 'purchased' at %p", base + i);
+                                            clientPatched = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (enginePatched && clientPatched) break;
+            }
+        }).detach();
+    }
+
     bool Initialize() {
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -8480,6 +8953,66 @@ namespace UnrealSteamEmu {
             dataUpd.m_ulSteamIDMember = steamLobbyId;
             dataUpd.m_bSuccess = 1;
             PostCallback(LobbyDataUpdate_t::k_iCallback, &dataUpd, sizeof(dataUpd));
+        });
+
+                core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyUpdated, [](const refix::lan::LanEvent& ev) {
+            uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            if (steamLobbyId == 0) return;
+
+            auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(ev.lobbyId);
+            if (!rec) return;
+
+            uint32_t prevGsIp = 0;
+            uint16_t prevGsPort = 0;
+            uint64_t prevGsId = 0;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(steamLobbyId);
+                if (it != g_lobbies.end()) {
+                    prevGsIp = it->second.gameServerIP;
+                    prevGsPort = it->second.gameServerPort;
+                    prevGsId = it->second.gameServerSteamID;
+                    for (const auto& [k, v] : rec->attributes) {
+                        it->second.data[k] = v.asString;
+                    }
+                    auto itIp = rec->attributes.find("__gs_ip");
+                    if (itIp != rec->attributes.end() && !itIp->second.asString.empty()) {
+                        it->second.gameServerIP = (uint32_t)_strtoui64(itIp->second.asString.c_str(), nullptr, 10);
+                    }
+                    auto itPort = rec->attributes.find("__gs_port");
+                    if (itPort != rec->attributes.end() && !itPort->second.asString.empty()) {
+                        it->second.gameServerPort = (uint16_t)std::strtoul(itPort->second.asString.c_str(), nullptr, 10);
+                    }
+                    auto itId = rec->attributes.find("__gs_id");
+                    if (itId != rec->attributes.end() && !itId->second.asString.empty()) {
+                        it->second.gameServerSteamID = _strtoui64(itId->second.asString.c_str(), nullptr, 10);
+                    }
+                }
+            }
+
+            LobbyDataUpdate_t dataUpd = {};
+            dataUpd.m_ulSteamIDLobby = steamLobbyId;
+            dataUpd.m_ulSteamIDMember = steamLobbyId;
+            dataUpd.m_bSuccess = 1;
+            PostCallback(LobbyDataUpdate_t::k_iCallback, &dataUpd, sizeof(dataUpd));
+
+            // Check if game server endpoint changed or was announced
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(steamLobbyId);
+                if (it != g_lobbies.end() && (it->second.gameServerPort != 0 || it->second.gameServerSteamID != 0)) {
+                    if (it->second.gameServerIP != prevGsIp || it->second.gameServerPort != prevGsPort || it->second.gameServerSteamID != prevGsId) {
+                        LobbyGameCreated_t lgc = {};
+                        lgc.m_ulSteamIDLobby = steamLobbyId;
+                        lgc.m_ulSteamIDGameServer = it->second.gameServerSteamID;
+                        lgc.m_unIP = it->second.gameServerIP;
+                        lgc.m_usPort = it->second.gameServerPort;
+                        PostCallback(LobbyGameCreated_t::k_iCallback, &lgc, sizeof(lgc));
+                        ReFixLog("[UnrealSteam] LanCore LobbyUpdated: GameServer connected! IP=%u port=%u serverSteamID=%llu",
+                                 lgc.m_unIP, lgc.m_usPort, lgc.m_ulSteamIDGameServer);
+                    }
+                }
+            }
         });
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::MemberJoined, [](const refix::lan::LanEvent& ev) {
@@ -8763,6 +9296,7 @@ namespace UnrealSteamEmu {
 
         if (g_transportMode.load() == TransportMode::Canonical) StartLanPump();
         g_contextCounter.fetch_add(1);
+        PatchEngineSecurityChecks();
 
         // Queue SteamServersConnected_t on startup (outside state lock)
         SteamServersConnected_t conn = {};

@@ -39,7 +39,7 @@
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
 #include "overlay/refix_overlay.h"
-#if defined(_M_X64) || defined(__x86_64__)
+#if REFIX_LAN_EDITION
 #include "mods/mod_host.h"
 #endif
 #include "refix_il2cpp.h"
@@ -1931,7 +1931,7 @@ static void LoadConfig() {
     char modsDirBuf[MAX_PATH] = "";
     ReadString("Mods", "ModsDirectory", "", modsDirBuf, sizeof(modsDirBuf));
 
-#if defined(_M_X64) || defined(__x86_64__)
+#if REFIX_LAN_EDITION
     if (modsEnabled) {
         std::string modsDir = modsDirBuf[0] != '\0' ? modsDirBuf : (GetExeDir() + "refix_mods");
         refix::mods::ModHost::GetInstance().Initialize(modsDir, modsDevMode);
@@ -7171,7 +7171,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
             SteamP2PHook::Uninstall();
-#if REFIX_LAN_EDITION && (defined(_M_X64) || defined(__x86_64__))
+#if REFIX_LAN_EDITION
             refix::mods::ModHost::GetInstance().Shutdown();
 #endif
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary

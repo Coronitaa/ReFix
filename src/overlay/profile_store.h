@@ -52,6 +52,7 @@ std::wstring AvatarPath(const std::wstring& id);
 std::wstring DataRoot(const std::wstring& id);   // redirected user folders (isolated saves)
 std::wstring CloudRoot(const std::wstring& id, uint32_t appId); // emulated Steam Cloud files
 std::wstring StatsRoot(const std::wstring& id, uint32_t appId); // emulated Steam UserStats / achievements
+std::wstring InventoryRoot(const std::wstring& id, uint32_t appId); // emulated Steam Inventory
 
 std::vector<Profile> LoadAll();                  // most recently used first
 std::optional<Profile> Load(const std::wstring& id);
@@ -64,6 +65,7 @@ Profile MakeNew(const std::wstring& name, const std::vector<Profile>& existing);
 Profile MakeGuest(const std::wstring& name, const std::vector<Profile>& existing);
 std::wstring GuestCloudRoot(uint32_t appId);
 std::wstring GuestStatsRoot(uint32_t appId);
+std::wstring GuestInventoryRoot(uint32_t appId);
 void CleanupGuestFolders();                      // removes the temporary folders of guests no longer running
 void Touch(Profile& p);                          // lastUsed = now
 

@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "refix_overlay.h"
+#include "overlay_ui_mods.h"
 #include "overlay_app.h"
 #include "overlay_sound.h"
 #include "overlay_text.h"
@@ -293,6 +294,21 @@ std::wstring StatsFolder(uint32_t appId) {
     return folder;
 }
 
+std::wstring InventoryFolder(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    std::wstring folder;
+    if (g_active) {
+        folder = g_active->guest ? profiles::GuestInventoryRoot(appId) : profiles::InventoryRoot(g_active->id, appId);
+    } else {
+        folder = profiles::RootDir() + L"\\Saves\\_pc\\Inventory\\" + std::to_wstring(appId);
+    }
+    for (size_t i = 3; i <= folder.size(); ++i) {
+        if (i == folder.size() || folder[i] == L'\\')
+            CreateDirectoryW(folder.substr(0, i).c_str(), nullptr);
+    }
+    return folder;
+}
+
 void Start() {
     if (g_started.exchange(true)) return;
     LoadConfig(FindIni());
@@ -318,6 +334,10 @@ void ActivateOverlay(const char* dialog) {
         App::Get().Post([lobby] { App::Get().OpenOverlay(true, lobby); });
         return;
     }
+    if (_stricmp(d.c_str(), "Community") == 0 || _stricmp(d.c_str(), "Market") == 0) {
+        OpenMarketGiveMenu();
+        return;
+    }
     App::Get().Post([] { App::Get().OpenOverlay(); });
 }
 
@@ -332,8 +352,28 @@ void ActivateOverlayToUser(const char* dialog, uint64_t steamId) {
 
 void ActivateWebPage(const char* url) {
     if (!IsEnabled() || !url) return;
+    if (strstr(url, "market") || strstr(url, "community")) {
+        OpenMarketGiveMenu();
+        return;
+    }
     const std::wstring u = FromUtf8(url);
     App::Get().Post([u] { App::Get().OpenWeb(u); });
+}
+
+void OpenMarketGiveMenu() {
+    if (!IsEnabled()) return;
+    App::Get().Post([] {
+        App::Get().OpenOverlay();
+        refix::overlay::OpenMarketGiveMenu();
+    });
+}
+
+void OpenMatchmakerModal() {
+    if (!IsEnabled()) return;
+    App::Get().Post([] {
+        App::Get().OpenOverlay();
+        refix::overlay::OpenHostMatchModal();
+    });
 }
 
 void ActivateStore(uint32_t appId) {
