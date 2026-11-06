@@ -202,8 +202,6 @@ void DrawModsCard(ImVec2 pos, float width, float height) {
     ui::EndCard();
 
     DrawModsApprovalModal();
-    DrawMarketGiveModal();
-    DrawHostMatchModal();
 }
 
 void DrawModsApprovalModal() {
@@ -271,225 +269,250 @@ void DrawModsApprovalModal() {
 void DrawMarketGiveModal() {
     if (!s_showMarketGiveModal) return;
 
-    ImGui::SetNextWindowSize(ImVec2(ui::S(680), ui::S(520)), ImGuiCond_Appearing);
-    if (ImGui::Begin("Mercado ReFix / Give Menu CS:GO##modal", &s_showMarketGiveModal,
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
-        
-        ImGui::PushFont(ui::F().title);
-        ui::TextColored(ui::color::Accent, ui::icon::Store);
-        ImGui::SameLine();
-        ImGui::TextUnformatted(i18n::T("ReFix Market & Inventory Give Menu", "Mercado ReFix y Give Menu de Inventario"));
-        ImGui::PopFont();
-        ImGui::Separator();
+    if (!ui::BeginCenteredModal("##marketgivemodal", 700)) return;
 
-        if (ImGui::BeginTabBar("##market_tabs")) {
-            // TAB 1: WEAPON CASES
-            if (ImGui::BeginTabItem(i18n::T("Weapon Cases (36)", "Cajas de Armas (36)"))) {
-                ImGui::BeginChild("##cases_list", ImVec2(0, ui::S(360)), true);
-                for (size_t i = 0; i < sizeof(kCasesMarket) / sizeof(kCasesMarket[0]); ++i) {
-                    ImGui::PushID((int)i);
-                    ImGui::Text("%s", kCasesMarket[i].name);
-                    ImGui::SameLine(ui::S(380));
-                    if (ui::Clicked(ui::NavButton("+1##case", ImVec2(ui::S(60), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 1, 4, 0);
-                        App::Get().ShowInfo("Caja Añadida", std::string("Se ha añadido 1x ") + kCasesMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::NavButton("+5##case", ImVec2(ui::S(60), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 5, 4, 0);
-                        App::Get().ShowInfo("Cajas Añadidas", std::string("Se han añadido 5x ") + kCasesMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::PrimaryButton("+10##case", ImVec2(ui::S(65), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 10, 4, 0);
-                        App::Get().ShowInfo("Cajas Añadidas", std::string("Se han añadido 10x ") + kCasesMarket[i].name);
-                    }
-                    ImGui::Separator();
-                    ImGui::PopID();
+    ImGui::PushFont(ui::F().heading);
+    ui::TextColored(ui::color::Accent, ui::icon::Store);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(i18n::T("Community Market & Give Menu", "Mercado ReFix y Give Menu de Inventario"));
+    ImGui::PopFont();
+
+    ImGui::PushFont(ui::F().caption);
+    ui::TextColored(ui::color::Muted, i18n::T("Add weapon cases, keys, and skins directly to your local profile inventory.",
+                                              "Añade cajas de armas, llaves y skins directamente al inventario de tu perfil local."));
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+    if (ImGui::BeginTabBar("##market_tabs")) {
+        // TAB 1: WEAPON CASES
+        if (ImGui::BeginTabItem(i18n::T("Weapon Cases (36)", "Cajas de Armas (36)"))) {
+            ImGui::BeginChild("##cases_list", ImVec2(0, ui::S(320)), false);
+            for (size_t i = 0; i < sizeof(kCasesMarket) / sizeof(kCasesMarket[0]); ++i) {
+                ImGui::PushID((int)i);
+                ImGui::Text("%s", kCasesMarket[i].name);
+                ImGui::SameLine(ui::S(400));
+                if (ui::Clicked(ui::NavButton("+1##case", ImVec2(ui::S(60), ui::S(22))))) {
+                    CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 1, 4, 0);
+                    App::Get().ShowInfo("Caja Añadida", std::string("Se ha añadido 1x ") + kCasesMarket[i].name);
                 }
-                ImGui::EndChild();
-                ImGui::EndTabItem();
-            }
-
-            // TAB 2: KEYS
-            if (ImGui::BeginTabItem(i18n::T("Case Keys", "Llaves de Cajas"))) {
-                ImGui::BeginChild("##keys_list", ImVec2(0, ui::S(360)), true);
-                for (size_t i = 0; i < sizeof(kKeysMarket) / sizeof(kKeysMarket[0]); ++i) {
-                    ImGui::PushID((int)i + 1000);
-                    ImGui::Text("%s", kKeysMarket[i].name);
-                    ImGui::SameLine(ui::S(380));
-                    if (ui::Clicked(ui::NavButton("+5##key", ImVec2(ui::S(60), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 5, 4, 0);
-                        App::Get().ShowInfo("Llaves Añadidas", std::string("Se han añadido 5x ") + kKeysMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::NavButton("+10##key", ImVec2(ui::S(60), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 10, 4, 0);
-                        App::Get().ShowInfo("Llaves Añadidas", std::string("Se han añadido 10x ") + kKeysMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::PrimaryButton("+20##key", ImVec2(ui::S(65), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 20, 4, 0);
-                        App::Get().ShowInfo("Llaves Añadidas", std::string("Se han añadido 20x ") + kKeysMarket[i].name);
-                    }
-                    ImGui::Separator();
-                    ImGui::PopID();
+                ImGui::SameLine();
+                if (ui::Clicked(ui::NavButton("+5##case", ImVec2(ui::S(60), ui::S(22))))) {
+                    CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 5, 4, 0);
+                    App::Get().ShowInfo("Cajas Añadidas", std::string("Se han añadido 5x ") + kCasesMarket[i].name);
                 }
-                ImGui::EndChild();
-                ImGui::EndTabItem();
-            }
-
-            // TAB 3: SKINS & KNIVES
-            if (ImGui::BeginTabItem(i18n::T("Skins & Knives", "Skins y Cuchillos"))) {
-                ImGui::BeginChild("##skins_list", ImVec2(0, ui::S(360)), true);
-                for (size_t i = 0; i < sizeof(kSkinsMarket) / sizeof(kSkinsMarket[0]); ++i) {
-                    ImGui::PushID((int)i + 2000);
-                    ImGui::Text("%s", kSkinsMarket[i].name);
-                    ImGui::SameLine();
-                    char catBuf[64];
-                    snprintf(catBuf, sizeof(catBuf), "[%s]", kSkinsMarket[i].category);
-                    ui::TextColored(ui::color::Accent, catBuf);
-                    ImGui::SameLine(ui::S(480));
-                    if (ui::Clicked(ui::PrimaryButton(i18n::T("Add to Inventory", "Añadir al Inventario"), ImVec2(ui::S(160), ui::S(24))))) {
-                        CSGO_GrantItemToLocal(kSkinsMarket[i].defIndex, 1, kSkinsMarket[i].quality, kSkinsMarket[i].rarity);
-                        App::Get().ShowInfo("Item Añadido", std::string("Se ha otorgado ") + kSkinsMarket[i].name);
-                    }
-                    ImGui::Separator();
-                    ImGui::PopID();
+                ImGui::SameLine();
+                if (ui::Clicked(ui::PrimaryButton("+20##case", ImVec2(ui::S(65), ui::S(22))))) {
+                    CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 20, 4, 0);
+                    App::Get().ShowInfo("Cajas Añadidas", std::string("Se han añadido 20x ") + kCasesMarket[i].name);
                 }
-                ImGui::EndChild();
-                ImGui::EndTabItem();
+                ImGui::Separator();
+                ImGui::PopID();
             }
-
-            // TAB 4: PRIME STATUS
-            if (ImGui::BeginTabItem(i18n::T("Prime Status Upgrade", "Estado Prime Oficial"))) {
-                ImGui::Dummy(ImVec2(0, ui::S(10)));
-                ImGui::PushFont(ui::F().strong);
-                ui::TextColored(ui::color::Online, i18n::T("CS:GO Prime Status Upgrade", "Mejora de Estado Prime Oficial"));
-                ImGui::PopFont();
-                ImGui::TextWrapped(i18n::T("Prime Status matches you with other Prime Status players, grants access to Prime-exclusive souvenir items, item drops, and weapon cases.",
-                                         "El estado Prime te empareja con otros jugadores Prime, otorga acceso a cajas de armas exclusivas, drops semanales e insignias de servicio."));
-                ImGui::Dummy(ImVec2(0, ui::S(16)));
-
-                if (ui::Clicked(ui::PrimaryButton(i18n::T("Activate Prime Status (Free via ReFix)", "Activar Estado Prime (Gratis vía ReFix)"), ImVec2(ui::S(320), ui::S(36))))) {
-                    ::ReFixOverlay::PromptPurchase(730, 10001, "CS:GO Prime Status Upgrade",
-                        "Activación de Estado Prime para el perfil actual.", false, [](bool ok) {
-                            if (ok) {
-                                App::Get().ShowInfo("Prime Activado", "El Estado Prime ha sido habilitado con éxito para este perfil.");
-                            }
-                        });
-                }
-                ImGui::EndTabItem();
-            }
-
-            ImGui::EndTabBar();
+            ImGui::EndChild();
+            ImGui::EndTabItem();
         }
 
-        ImGui::Dummy(ImVec2(0, ui::S(8)));
-        if (ui::Clicked(ui::NavButton(i18n::T("Close", "Cerrar"), ImVec2(ui::S(120), ui::S(28))))) {
-            s_showMarketGiveModal = false;
+        // TAB 2: CASE KEYS
+        if (ImGui::BeginTabItem(i18n::T("Case Keys (36)", "Llaves de Cajas (36)"))) {
+            ImGui::BeginChild("##keys_list", ImVec2(0, ui::S(320)), false);
+            for (size_t i = 0; i < sizeof(kKeysMarket) / sizeof(kKeysMarket[0]); ++i) {
+                ImGui::PushID((int)i + 1000);
+                ImGui::Text("%s", kKeysMarket[i].name);
+                ImGui::SameLine(ui::S(400));
+                if (ui::Clicked(ui::NavButton("+1##key", ImVec2(ui::S(60), ui::S(22))))) {
+                    CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 1, 4, 0);
+                    App::Get().ShowInfo("Llave Añadida", std::string("Se ha añadido 1x ") + kKeysMarket[i].name);
+                }
+                ImGui::SameLine();
+                if (ui::Clicked(ui::NavButton("+5##key", ImVec2(ui::S(60), ui::S(22))))) {
+                    CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 5, 4, 0);
+                    App::Get().ShowInfo("Llaves Añadidas", std::string("Se han añadido 5x ") + kKeysMarket[i].name);
+                }
+                ImGui::SameLine();
+                if (ui::Clicked(ui::PrimaryButton("+20##key", ImVec2(ui::S(65), ui::S(22))))) {
+                    CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 20, 4, 0);
+                    App::Get().ShowInfo("Llaves Añadidas", std::string("Se han añadido 20x ") + kKeysMarket[i].name);
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
         }
 
-        ImGui::End();
+        // TAB 3: SKINS & KNIVES
+        if (ImGui::BeginTabItem(i18n::T("Skins & Knives", "Skins y Cuchillos"))) {
+            ImGui::BeginChild("##skins_list", ImVec2(0, ui::S(320)), false);
+            for (size_t i = 0; i < sizeof(kSkinsMarket) / sizeof(kSkinsMarket[0]); ++i) {
+                ImGui::PushID((int)i + 2000);
+                ImGui::Text("%s", kSkinsMarket[i].name);
+                ImGui::SameLine();
+                char catBuf[64];
+                snprintf(catBuf, sizeof(catBuf), "[%s]", kSkinsMarket[i].category);
+                ui::TextColored(ui::color::Accent, catBuf);
+                ImGui::SameLine(ui::S(450));
+                if (ui::Clicked(ui::PrimaryButton(i18n::T("Add to Inventory", "Añadir al Inventario"), ImVec2(ui::S(160), ui::S(24))))) {
+                    CSGO_GrantItemToLocal(kSkinsMarket[i].defIndex, 1, kSkinsMarket[i].quality, kSkinsMarket[i].rarity);
+                    App::Get().ShowInfo("Item Añadido", std::string("Se ha otorgado ") + kSkinsMarket[i].name);
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
+        // TAB 4: PRIME STATUS
+        if (ImGui::BeginTabItem(i18n::T("Prime Status Upgrade", "Estado Prime Oficial"))) {
+            ImGui::Dummy(ImVec2(0, ui::S(10)));
+            ImGui::PushFont(ui::F().strong);
+            ui::TextColored(ui::color::Online, i18n::T("CS:GO Prime Status Upgrade", "Mejora de Estado Prime Oficial"));
+            ImGui::PopFont();
+            ImGui::TextWrapped(i18n::T("Prime Status matches you with other Prime Status players, grants access to Prime-exclusive souvenir items, item drops, and weapon cases.",
+                                     "El estado Prime te empareja con otros jugadores Prime, otorga acceso a cajas de armas exclusivas, drops semanales e insignias de servicio."));
+            ImGui::Dummy(ImVec2(0, ui::S(16)));
+
+            if (ui::Clicked(ui::PrimaryButton(i18n::T("Activate Prime Status (Free via ReFix)", "Activar Estado Prime (Gratis vía ReFix)"), ImVec2(ui::S(320), ui::S(36))))) {
+                ::ReFixOverlay::PromptPurchase(730, 10001, "CS:GO Prime Status Upgrade",
+                    "Activación de Estado Prime para el perfil actual.", false, [](bool ok) {
+                        if (ok) {
+                            App::Get().ShowInfo("Prime Activado", "El Estado Prime ha sido habilitado con éxito para este perfil.");
+                        }
+                    });
+            }
+            ImGui::EndTabItem();
+        }
+
+        ImGui::EndTabBar();
     }
+
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+    if (ui::Clicked(ui::NavButton(i18n::T("Close", "Cerrar"), ImVec2(ui::S(120), ui::S(28))))) {
+        ImGui::CloseCurrentPopup();
+        s_showMarketGiveModal = false;
+    }
+
+    ImGui::EndPopup();
 }
 
 void DrawHostMatchModal() {
     if (!s_showHostMatchModal) return;
 
-    ImGui::SetNextWindowSize(ImVec2(ui::S(600), ui::S(480)), ImGuiCond_Appearing);
-    if (ImGui::Begin("Crear Servidor / Partida LAN Personalizada##modal", &s_showHostMatchModal,
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
-        
-        ImGui::PushFont(ui::F().title);
-        ui::TextColored(ui::color::Accent, ui::icon::Game);
-        ImGui::SameLine();
-        ImGui::TextUnformatted(i18n::T("Custom LAN Match Host (P2P)", "Crear Partida Personalizada LAN (P2P)"));
-        ImGui::PopFont();
-        ImGui::Separator();
+    if (!ui::BeginCenteredModal("##hostmatchmodal", 560)) return;
 
-        ImGui::Text(i18n::T("Select Map:", "Seleccionar Mapa:"));
-        if (ImGui::BeginCombo("##host_map", kOfficialMaps[s_selectedMapIdx])) {
-            for (size_t i = 0; i < kNumOfficialMaps; ++i) {
-                bool isSelected = (s_selectedMapIdx == (int)i);
-                if (ImGui::Selectable(kOfficialMaps[i], isSelected)) s_selectedMapIdx = (int)i;
-                if (isSelected) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
+    ImGui::PushFont(ui::F().heading);
+    ui::TextColored(ui::color::Accent, ui::icon::Game);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(i18n::T("Host Custom LAN Match (P2P)", "Crear Partida Personalizada LAN (P2P)"));
+    ImGui::PopFont();
+
+    ImGui::PushFont(ui::F().caption);
+    ui::TextColored(ui::color::Muted, i18n::T("Configure game mode, map and server parameters for local P2P play.",
+                                              "Configura mapa, modo y parámetros para jugar en red local P2P."));
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+    ImGui::PushFont(ui::F().strong);
+    ImGui::TextUnformatted(i18n::T("Select Map:", "Seleccionar Mapa:"));
+    ImGui::PopFont();
+    if (ImGui::BeginCombo("##host_map_combo", kOfficialMaps[s_selectedMapIdx])) {
+        for (size_t i = 0; i < kNumOfficialMaps; ++i) {
+            bool isSelected = (s_selectedMapIdx == (int)i);
+            if (ImGui::Selectable(kOfficialMaps[i], isSelected)) s_selectedMapIdx = (int)i;
+            if (isSelected) ImGui::SetItemDefaultFocus();
         }
-
-        ImGui::Text(i18n::T("Game Mode:", "Modo de Juego:"));
-        if (ImGui::BeginCombo("##host_mode", kGameModes[s_selectedModeIdx])) {
-            for (int i = 0; i < 5; ++i) {
-                bool isSelected = (s_selectedModeIdx == i);
-                if (ImGui::Selectable(kGameModes[i], isSelected)) s_selectedModeIdx = i;
-                if (isSelected) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-
-        ImGui::Separator();
-        ImGui::PushFont(ui::F().strong);
-        ImGui::TextUnformatted(i18n::T("Custom Match Settings:", "Configuración de Partida Personalizada:"));
-        ImGui::PopFont();
-
-        ImGui::Checkbox(i18n::T("Enable Bots (5v5 with AI)", "Habilitar Bots (5v5 con IA)"), &s_cfgBots);
-        ImGui::Checkbox(i18n::T("Fast MR12 Rounds (24 rounds)", "Rondas Rápidas MR12 (24 rondas)"), &s_cfgFastRounds);
-        ImGui::Checkbox(i18n::T("Competitive $16,000 Start Money", "Dinero Inicial $16,000"), &s_cfgCompMoney);
-        ImGui::Checkbox(i18n::T("Skip Warmup (Immediate Start)", "Sin Warmup (Inicio Inmediato)"), &s_cfgNoWarmup);
-        ImGui::Checkbox(i18n::T("Buy Anywhere Anytime", "Comprar en Cualquier Lugar"), &s_cfgBuyAnywhere);
-
-        ImGui::Dummy(ImVec2(0, ui::S(8)));
-        if (ui::Clicked(ui::PrimaryButton(i18n::T("START LAN SERVER / HOST MATCH", "INICIAR SERVIDOR LAN / HOSTAR PARTIDA"), ImVec2(ui::S(400), ui::S(38))))) {
-            int gType = 0, gMode = 1;
-            if (s_selectedModeIdx == 0) { gType = 0; gMode = 1; }      // Competitive
-            else if (s_selectedModeIdx == 1) { gType = 0; gMode = 0; } // Casual
-            else if (s_selectedModeIdx == 2) { gType = 1; gMode = 2; } // Deathmatch
-            else if (s_selectedModeIdx == 3) { gType = 0; gMode = 2; } // Wingman
-            else if (s_selectedModeIdx == 4) { gType = 1; gMode = 0; } // Arms Race
-
-            char cmdBuf[512];
-            snprintf(cmdBuf, sizeof(cmdBuf),
-                "game_type %d; game_mode %d; sv_lan 1; sv_cheats 0; mp_autoteambalance 0; "
-                "%s; %s; %s; %s; %s; map %s",
-                gType, gMode,
-                s_cfgBots ? "bot_quota 10; bot_difficulty 2" : "bot_kick",
-                s_cfgFastRounds ? "mp_maxrounds 24" : "mp_maxrounds 30",
-                s_cfgCompMoney ? "mp_startmoney 16000; mp_maxmoney 16000" : "mp_startmoney 800",
-                s_cfgNoWarmup ? "mp_warmup_end 1" : "mp_warmup_pausetimer 0",
-                s_cfgBuyAnywhere ? "mp_buy_anywhere 1" : "mp_buy_anywhere 0",
-                kOfficialMaps[s_selectedMapIdx]);
-
-            ExecuteEngineCmd(cmdBuf);
-            s_showHostMatchModal = false;
-
-            uint64_t actLobby = UnrealSteamEmu::GetActiveLobbyID();
-            if (actLobby) {
-                UnrealSteamEmu::Matchmaking_SetLobbyGameServer(actLobby, 0x0100007F, 27015, UnrealSteamEmu::GetLocalSteamID());
-            }
-            App::Get().ShowInfo("Servidor LAN Iniciado", "Partida hosteada y transmitida en LAN.");
-        }
-
-        ImGui::Separator();
-        ImGui::PushFont(ui::F().strong);
-        ImGui::TextUnformatted(i18n::T("Direct Connect to LAN Peer:", "Conexión Directa a Servidor LAN:"));
-        ImGui::PopFont();
-        ImGui::InputText("##direct_ip", s_directConnectIp, sizeof(s_directConnectIp));
-        ImGui::SameLine();
-        if (ui::Clicked(ui::NavButton(i18n::T("Connect##btn", "Conectar##btn"), ImVec2(ui::S(120), ui::S(26))))) {
-            char connCmd[128];
-            snprintf(connCmd, sizeof(connCmd), "connect %s", s_directConnectIp);
-            ExecuteEngineCmd(connCmd);
-            s_showHostMatchModal = false;
-        }
-
-        ImGui::Dummy(ImVec2(0, ui::S(6)));
-        if (ui::Clicked(ui::NavButton(i18n::T("Close", "Cerrar"), ImVec2(ui::S(100), ui::S(26))))) {
-            s_showHostMatchModal = false;
-        }
-
-        ImGui::End();
+        ImGui::EndCombo();
     }
+
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    ImGui::PushFont(ui::F().strong);
+    ImGui::TextUnformatted(i18n::T("Game Mode:", "Modo de Juego:"));
+    ImGui::PopFont();
+    if (ImGui::BeginCombo("##host_mode_combo", kGameModes[s_selectedModeIdx])) {
+        for (int i = 0; i < 5; ++i) {
+            bool isSelected = (s_selectedModeIdx == i);
+            if (ImGui::Selectable(kGameModes[i], isSelected)) s_selectedModeIdx = i;
+            if (isSelected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+    ImGui::PushFont(ui::F().strong);
+    ImGui::TextUnformatted(i18n::T("Custom Match Settings:", "Configuración de Partida Personalizada:"));
+    ImGui::PopFont();
+
+    ImGui::Checkbox(i18n::T("Enable Bots (5v5 with AI)##cfg", "Habilitar Bots (5v5 con IA)##cfg"), &s_cfgBots);
+    ImGui::Checkbox(i18n::T("Fast MR12 Rounds (24 rounds)##cfg", "Rondas Rápidas MR12 (24 rondas)##cfg"), &s_cfgFastRounds);
+    ImGui::Checkbox(i18n::T("Competitive $16,000 Start Money##cfg", "Dinero Inicial $16,000##cfg"), &s_cfgCompMoney);
+    ImGui::Checkbox(i18n::T("Skip Warmup (Immediate Start)##cfg", "Sin Warmup (Inicio Inmediato)##cfg"), &s_cfgNoWarmup);
+    ImGui::Checkbox(i18n::T("Buy Anywhere Anytime##cfg", "Comprar en Cualquier Lugar##cfg"), &s_cfgBuyAnywhere);
+
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+    const float contentW = ImGui::GetContentRegionAvail().x;
+    if (ui::Clicked(ui::PrimaryButton(i18n::T("START LAN SERVER / HOST MATCH", "INICIAR SERVIDOR LAN / HOSTAR PARTIDA"), ImVec2(contentW, ui::S(38))))) {
+        int gType = 0, gMode = 1;
+        if (s_selectedModeIdx == 0) { gType = 0; gMode = 1; }      // Competitive
+        else if (s_selectedModeIdx == 1) { gType = 0; gMode = 0; } // Casual
+        else if (s_selectedModeIdx == 2) { gType = 1; gMode = 2; } // Deathmatch
+        else if (s_selectedModeIdx == 3) { gType = 0; gMode = 2; } // Wingman
+        else if (s_selectedModeIdx == 4) { gType = 1; gMode = 0; } // Arms Race
+
+        char cmdBuf[512];
+        snprintf(cmdBuf, sizeof(cmdBuf),
+            "game_type %d; game_mode %d; sv_lan 1; sv_cheats 0; mp_autoteambalance 0; "
+            "%s; %s; %s; %s; %s; map %s",
+            gType, gMode,
+            s_cfgBots ? "bot_quota 10; bot_difficulty 2" : "bot_kick",
+            s_cfgFastRounds ? "mp_maxrounds 24" : "mp_maxrounds 30",
+            s_cfgCompMoney ? "mp_startmoney 16000; mp_maxmoney 16000" : "mp_startmoney 800",
+            s_cfgNoWarmup ? "mp_warmup_end 1" : "mp_warmup_pausetimer 0",
+            s_cfgBuyAnywhere ? "mp_buy_anywhere 1" : "mp_buy_anywhere 0",
+            kOfficialMaps[s_selectedMapIdx]);
+
+        ExecuteEngineCmd(cmdBuf);
+        ImGui::CloseCurrentPopup();
+        s_showHostMatchModal = false;
+
+        uint64_t actLobby = UnrealSteamEmu::GetActiveLobbyID();
+        if (actLobby) {
+            UnrealSteamEmu::Matchmaking_SetLobbyGameServer(actLobby, 0x0100007F, 27015, UnrealSteamEmu::GetLocalSteamID());
+        }
+        App::Get().ShowInfo("Servidor LAN Iniciado", "Partida hosteada y transmitida en LAN.");
+    }
+
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+    ImGui::PushFont(ui::F().strong);
+    ImGui::TextUnformatted(i18n::T("Direct Connect to LAN Peer:", "Conexión Directa a Servidor LAN:"));
+    ImGui::PopFont();
+    ImGui::SetNextItemWidth(contentW - ui::S(130));
+    ImGui::InputText("##direct_ip_input", s_directConnectIp, sizeof(s_directConnectIp));
+    ImGui::SameLine();
+    if (ui::Clicked(ui::NavButton(i18n::T("Connect##btn", "Conectar##btn"), ImVec2(ui::S(120), ui::S(26))))) {
+        char connCmd[128];
+        snprintf(connCmd, sizeof(connCmd), "connect %s", s_directConnectIp);
+        ExecuteEngineCmd(connCmd);
+        ImGui::CloseCurrentPopup();
+        s_showHostMatchModal = false;
+    }
+
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+    if (ui::Clicked(ui::NavButton(i18n::T("Close", "Cerrar"), ImVec2(ui::S(120), ui::S(28))))) {
+        ImGui::CloseCurrentPopup();
+        s_showHostMatchModal = false;
+    }
+
+    ImGui::EndPopup();
 }
 
 } // namespace refix::overlay

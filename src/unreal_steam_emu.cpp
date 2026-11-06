@@ -3457,42 +3457,37 @@ namespace UnrealSteamEmu {
             return true;
         }
 
-        virtual int GetFriendCount(int iFriendFlags) override {
-            if (!CountsLanPeers(iFriendFlags)) return 0;
+        static std::vector<uint64_t> GetCurrentFriendList() {
+            std::set<uint64_t> uniqueSids;
             if (g_transportMode.load() == TransportMode::Canonical) {
                 auto peers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
-                int count = 0;
-                for (const auto& p : peers) {
-                    uint64_t sid = p.externalId.numericId;
-                    if (sid == 0) sid = p.peerId.low;
-                    if (sid != 0 && sid != g_localSteamID) count++;
-                }
-                return count;
-            }
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            return (int)g_peers.size();
-        }
-
-        virtual CSteamID GetFriendByIndex(int iFriend, int iFriendFlags) override {
-            if (!CountsLanPeers(iFriendFlags)) return CSteamID();
-            if (g_transportMode.load() == TransportMode::Canonical) {
-                auto peers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
-                int idx = 0;
                 for (const auto& p : peers) {
                     uint64_t sid = p.externalId.numericId;
                     if (sid == 0) sid = p.peerId.low;
                     if (sid != 0 && sid != g_localSteamID) {
-                        if (idx == iFriend) return CSteamID(sid);
-                        idx++;
+                        uniqueSids.insert(sid);
                     }
                 }
-                return CSteamID();
             }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            if (iFriend >= 0 && iFriend < (int)g_peers.size()) {
-                auto it = g_peers.begin();
-                std::advance(it, iFriend);
-                return CSteamID(it->first);
+            for (const auto& kv : g_peers) {
+                if (kv.first != 0 && kv.first != g_localSteamID) {
+                    uniqueSids.insert(kv.first);
+                }
+            }
+            return std::vector<uint64_t>(uniqueSids.begin(), uniqueSids.end());
+        }
+
+        virtual int GetFriendCount(int iFriendFlags) override {
+            if (!CountsLanPeers(iFriendFlags)) return 0;
+            return (int)GetCurrentFriendList().size();
+        }
+
+        virtual CSteamID GetFriendByIndex(int iFriend, int iFriendFlags) override {
+            if (!CountsLanPeers(iFriendFlags)) return CSteamID();
+            auto list = GetCurrentFriendList();
+            if (iFriend >= 0 && iFriend < (int)list.size()) {
+                return CSteamID(list[iFriend]);
             }
             return CSteamID();
         }
@@ -3645,7 +3640,7 @@ namespace UnrealSteamEmu {
         }
 
         virtual const char *GetFriendPersonaNameHistory(CSteamID steamIDFriend, int iPersonaName) override { return ""; }
-        virtual int GetFriendSteamLevel(CSteamID steamIDFriend) override { return 10; }
+        virtual int GetFriendSteamLevel(CSteamID steamIDFriend) override { return 40; }
         virtual const char *GetPlayerNickname(CSteamID steamIDPlayer) override { return nullptr; }
 
         virtual int GetFriendsGroupCount() override { return 0; }

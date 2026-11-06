@@ -410,6 +410,38 @@ class CGameCoordinatorLan : public ISteamGameCoordinator {
 public:
     explicit CGameCoordinatorLan(bool gameServer) : m_gameServer(gameServer) {}
 
+    static std::vector<uint8_t> BuildMatchmakingClientHello(uint32_t accountId) {
+        std::vector<uint8_t> ranking;
+        PutVarintField(ranking, 1, accountId);
+        PutVarintField(ranking, 2, 18);  // Global Elite (rank 18)
+        PutVarintField(ranking, 3, 150); // 150 Competitive wins
+        PutVarintField(ranking, 6, 6);   // 5v5 Competitive rank type
+
+        std::vector<uint8_t> commendation;
+        PutVarintField(commendation, 1, 100);
+        PutVarintField(commendation, 2, 100);
+        PutVarintField(commendation, 4, 100);
+
+        std::vector<uint8_t> medals;
+        PutVarintField(medals, 1, 1024); // 5 Year Veteran Coin
+        PutVarintField(medals, 2, 1024);
+        PutVarintField(medals, 7, 1024);
+        PutVarintField(medals, 8, 1024); // featured display item
+
+        std::vector<uint8_t> resp;
+        PutVarintField(resp, 1, accountId);
+// Omit penalty fields so CS:GO never triggers ban expired dialog
+        // vac_banned is 0 (omitted)
+        PutBytesField(resp, 7, ranking);
+        PutBytesField(resp, 8, commendation);
+        PutBytesField(resp, 9, medals);
+        PutVarintField(resp, 17, 40);   // player_level = 40 (General de rango 40)
+        PutVarintField(resp, 18, 3500); // player_cur_xp = 3500
+        PutVarintField(resp, 19, 1);    // player_xp_bonus_flags = 1
+        PutBytesField(resp, 20, ranking);
+        return resp;
+    }
+
     EGCResults SendMessage_(uint32 unMsgType, const void* pubData, uint32 cubData) override {
         const uint32_t msg = unMsgType & ~kProtoFlag;
         const bool proto = (unMsgType & kProtoFlag) != 0;
@@ -430,8 +462,14 @@ public:
 
         if (!m_gameServer && msg == kMsgClientHello) {
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
+            uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(version, UnrealSteamEmu::GetLocalSteamID()));
             Reply(kMsgClientConnectionStatus, ReFixGC::BuildConnectionStatus());
+
+            // Immediately send MatchmakingGC2ClientHello (9110) on client logon so Panorama populates rank & profile!
+            Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
+
+
         } else if (m_gameServer && msg == kMsgServerHello) {
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
             if (version == 0) version = 13884;
@@ -441,33 +479,8 @@ public:
             Reply(kMsgServerWelcome, welcome);
             Reply(kMsgServerConnectionStatus, ReFixGC::BuildConnectionStatus());
         } else if (msg == kMsgGCCStrike15_v2_MatchmakingClient2GCHello) {
-            // Reply with MatchmakingGC2ClientHello populated with Rank, Commendations, and VAC-clear status
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
-            std::vector<uint8_t> ranking;
-            PutVarintField(ranking, 1, accountId);
-            PutVarintField(ranking, 2, 18); // Global Elite
-            PutVarintField(ranking, 3, 150); // 150 wins
-            PutVarintField(ranking, 6, 6);   // 5v5 Competitive
-
-            std::vector<uint8_t> commendation;
-            PutVarintField(commendation, 1, 100);
-            PutVarintField(commendation, 2, 100);
-            PutVarintField(commendation, 4, 100);
-
-            std::vector<uint8_t> medals;
-            PutVarintField(medals, 1, 1024); // 5 Year Veteran Coin
-            PutVarintField(medals, 2, 1024); // featured display item
-
-            std::vector<uint8_t> resp;
-            PutVarintField(resp, 1, accountId);
-            PutVarintField(resp, 6, 0); // vac_banned = 0
-            PutBytesField(resp, 7, ranking);
-            PutBytesField(resp, 8, commendation);
-            PutBytesField(resp, 9, medals);
-            PutVarintField(resp, 17, 40);   // player_level = 40 (General de rango 40)
-            PutVarintField(resp, 18, 3500); // player_cur_xp = 3500
-            PutVarintField(resp, 19, 1);    // player_xp_bonus_flags = 1
-            Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, resp);
+            Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
         } else if (msg == kMsgGCCStrike15_v2_MatchmakingStart) {
             ReFixLog("[GC] kMsgGCCStrike15_v2_MatchmakingStart: Stopping queue cleanly and opening ReFix Host Match Menu");
             // Reply with 9104 (MatchmakingGC2ClientUpdate): matchmaking = 0 (stops queue cleanly with no error modal)
@@ -487,6 +500,49 @@ public:
             std::vector<uint8_t> rankResp;
             PutBytesField(rankResp, 1, ranking);
             Reply(9194, rankResp);
+        } else if (msg == 9158) { // AccountPrivacySettings
+            std::vector<uint8_t> s1;
+            PutVarintField(s1, 1, 1);
+            PutVarintField(s1, 2, 1);
+            std::vector<uint8_t> s2;
+            PutVarintField(s2, 1, 2);
+            PutVarintField(s2, 2, 1);
+            std::vector<uint8_t> privacyResp;
+            PutBytesField(privacyResp, 1, s1);
+            PutBytesField(privacyResp, 1, s2);
+            Reply(9158, privacyResp);
+        } else if (msg == 9127) { // ClientRequestPlayersProfile
+            uint32_t reqId = 1;
+            uint32_t targetAccountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+            if (proto && body) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0, val = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (w == 0) {
+                        if (!GetVarint(p, end, val)) break;
+                        if (f == 1) reqId = (uint32_t)val;
+                        else if (f == 2) targetAccountId = (uint32_t)val;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
+                    }
+                }
+            }
+            std::vector<uint8_t> profile = BuildMatchmakingClientHello(targetAccountId);
+            std::vector<uint8_t> playersProfileResp;
+            PutVarintField(playersProfileResp, 1, reqId);
+            PutBytesField(playersProfileResp, 2, profile);
+            Reply(9128, playersProfileResp);
+        } else if (msg == 9197) { // ClientPartyJoinRelay
+            std::vector<uint8_t> relayResp;
+            PutVarintField(relayResp, 1, 0);
+            Reply(9198, relayResp);
         } else if (msg == kMsgGCUnlockCrate) {
             // Unlock container (CS:GO sends non-proto 34-byte struct or proto)
             uint64_t crateId = 0, keyId = 0;

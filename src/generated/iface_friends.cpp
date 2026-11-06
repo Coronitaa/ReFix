@@ -171,8 +171,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
 };
 static ReFixAdapter_ISteamFriends005 g_ReFixAdapter_ISteamFriends005;
@@ -201,8 +201,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
 };
@@ -231,8 +231,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
     virtual int GetSmallFriendAvatar(CSteamID a0) override { return (UnrealSteamEmu::LatestFriends()->GetSmallFriendAvatar(a0)); }
@@ -265,8 +265,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
     virtual int GetSmallFriendAvatar(CSteamID a0) override { return (UnrealSteamEmu::LatestFriends()->GetSmallFriendAvatar(a0)); }
@@ -304,8 +304,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
     virtual int GetSmallFriendAvatar(CSteamID a0) override { return (UnrealSteamEmu::LatestFriends()->GetSmallFriendAvatar(a0)); }
@@ -355,8 +355,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
     virtual int GetSmallFriendAvatar(CSteamID a0) override { return (UnrealSteamEmu::LatestFriends()->GetSmallFriendAvatar(a0)); }
@@ -419,8 +419,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
     virtual int GetSmallFriendAvatar(CSteamID a0) override { return (UnrealSteamEmu::LatestFriends()->GetSmallFriendAvatar(a0)); }
@@ -487,8 +487,8 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
-    virtual void ActivateGameOverlayToStore(AppId_t a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
+    virtual void ActivateGameOverlayToStore(AppId_t a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, k_EOverlayToStoreFlag_None); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
     virtual int GetSmallFriendAvatar(CSteamID a0) override { return (UnrealSteamEmu::LatestFriends()->GetSmallFriendAvatar(a0)); }
@@ -555,7 +555,7 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
     virtual void ActivateGameOverlayToStore(AppId_t a0, EOverlayToStoreFlag a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, a1); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
@@ -624,7 +624,7 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
     virtual void ActivateGameOverlayToStore(AppId_t a0, EOverlayToStoreFlag a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, a1); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
@@ -699,7 +699,7 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
     virtual void ActivateGameOverlayToStore(AppId_t a0, EOverlayToStoreFlag a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, a1); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
@@ -776,7 +776,7 @@ public:
     virtual void SetInGameVoiceSpeaking(CSteamID a0, bool a1) override { UnrealSteamEmu::LatestFriends()->SetInGameVoiceSpeaking(a0, a1); }
     virtual void ActivateGameOverlay(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlay(a0); }
     virtual void ActivateGameOverlayToUser(const char * a0, CSteamID a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToUser(a0, a1); }
-    virtual void ActivateGameOverlayToWebPage(const char * a0) override {  }
+    virtual void ActivateGameOverlayToWebPage(const char * a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToWebPage(a0); }
     virtual void ActivateGameOverlayToStore(AppId_t a0, EOverlayToStoreFlag a1) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayToStore(a0, a1); }
     virtual void SetPlayedWith(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->SetPlayedWith(a0); }
     virtual void ActivateGameOverlayInviteDialog(CSteamID a0) override { UnrealSteamEmu::LatestFriends()->ActivateGameOverlayInviteDialog(a0); }
