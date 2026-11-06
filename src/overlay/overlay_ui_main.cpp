@@ -120,7 +120,7 @@ void App::DrawOverlay(ImVec2 viewport) {
     DrawEditorModal();
     DrawPurchaseModal(viewport);
     DrawMarketGiveModal();
-    DrawHostMatchModal();
+    DrawMatchmakingToastWidget();
     if (!inviteOnly_) DrawWebModal(viewport);
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
@@ -186,9 +186,20 @@ void App::DrawTopBar(ImVec2 viewport) {
     x -= ui::S(96);
 
     ImGui::PushFont(f.title);
-    const std::string shown = ui::Ellipsize(title, std::max(ui::S(80), x - ui::S(24) - titleX));
+    const std::string shown = ui::Ellipsize(title, (std::max)(ui::S(80), x - ui::S(24) - titleX));
     ImGui::PopFont();
     TextAt(dl, f.title, ImVec2(titleX, cy - f.title->FontSize * 0.55f), ui::color::Text, shown);
+
+    if (appId_ == 730) {
+        float titleW = f.title->CalcTextSizeA(f.title->FontSize, FLT_MAX, 0, shown.c_str()).x;
+        float btnX = titleX + titleW + ui::S(24);
+        if (btnX + ui::S(180) < x - ui::S(20)) {
+            ImGui::SetCursorScreenPos(ImVec2(btnX, cy - ui::S(16)));
+            if (ui::Clicked(ui::PrimaryButton(i18n::T("Mercado & Skins", "Mercado & Skins"), ImVec2(ui::S(160), ui::S(32))))) {
+                refix::overlay::OpenMarketGiveMenu();
+            }
+        }
+    }
 }
 
 void App::DrawCommunity(ImVec2 pos, float width) {
@@ -237,9 +248,13 @@ void App::DrawCommunity(ImVec2 pos, float width) {
         ImGui::PopFont();
         TextAt(dl, ui::F().caption, ImVec2(p0.x + ui::S(12), p1.y - ui::S(26)), ui::color::Text, label);
         if (clicked) {
-            wchar_t url[160];
-            swprintf_s(url, kLinks[i].format, appId_);
-            OpenWeb(url);
+            if (appId_ == 730 && (i == 0 || i == 1)) {
+                refix::overlay::OpenMarketGiveMenu();
+            } else {
+                wchar_t url[160];
+                swprintf_s(url, kLinks[i].format, appId_);
+                OpenWeb(url);
+            }
         }
     }
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 2 * ui::S(kTileHeight) + gap));

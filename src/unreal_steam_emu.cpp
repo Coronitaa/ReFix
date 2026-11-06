@@ -7824,30 +7824,23 @@ namespace UnrealSteamEmu {
     static CSteamUnifiedMessagesEmu g_steamUnifiedMessagesInstance;
 
     // --- ISteamGameStats001 (Source 1 / CS:GO SteamAPIContext requirement) ---
-    class CSteamGameStatsEmu {
+    class CSteamGameStatsEmu : public ISteamGameStats {
     public:
-        virtual uint64_t GetNewSession(int8_t, uint64_t, int32_t, uint32_t) { return 0; }
-        virtual int32_t EndSession(uint64_t, uint32_t, uint32_t) { return 1; }
-        virtual int32_t AddStringStat(uint64_t, uint32_t, const char*) { return 1; }
-        virtual int32_t AddIntStat(uint64_t, uint32_t, int32_t) { return 1; }
-        virtual int32_t UpdateSession(uint64_t) { return 1; }
-        virtual int32_t SetGameID(uint64_t, uint64_t) { return 1; }
-        virtual int32_t GetStatList(uint8_t*, uint32_t, uint32_t*) { return 0; }
-        virtual int32_t GetSessionDetails(uint64_t, uint8_t*, uint32_t, uint32_t*) { return 0; }
-        virtual int32_t SendStats(uint64_t) { return 1; }
-        virtual int32_t DropSession(uint64_t) { return 1; }
-        virtual bool ServerSupportsGameStats(uint32_t, uint8_t*, uint32_t) { return false; }
-        virtual int32_t StatInfo_GetStatName(uint32_t, char*, uint32_t) { return 0; }
-        virtual int32_t StatInfo_GetStatType(uint32_t, uint32_t*) { return 0; }
-        virtual uint32_t StatInfo_GetNumStats() { return 0; }
-        virtual uint64_t GetCurrentSessionID() { return 0; }
-        virtual int32_t StopGameStats() { return 1; }
-        virtual int32_t ResumeGameStats() { return 1; }
-        virtual int32_t InflictDeath(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, float, float, float, float, float, float, float, float, float, float) { return 1; }
-        virtual int32_t InflictDamage(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, float, float, float, float, float, float, float, float, float, float) { return 1; }
-        virtual int32_t CommitData(uint32_t) { return 1; }
-        virtual int32_t AddStringStatByRowID(uint64_t, uint32_t, uint32_t, const char*) { return 1; }
-        virtual int32_t AddIntStatByRowID(uint64_t, uint32_t, uint32_t, int32_t) { return 1; }
+        virtual SteamAPICall_t GetNewSession(int8 nAccountType, uint64 ulAccountID, int32 nAppID, RTime32 rtTimeStarted) override { return 0; }
+        virtual SteamAPICall_t EndSession(uint64 ulSessionID, RTime32 rtTimeEnded, int nReasonCode) override { return 0; }
+        virtual EResult AddSessionAttributeInt(uint64 ulSessionID, const char* pstrName, int32 nData) override { return k_EResultOK; }
+        virtual EResult AddSessionAttributeString(uint64 ulSessionID, const char* pstrName, const char *pstrData) override { return k_EResultOK; }
+        virtual EResult AddSessionAttributeFloat(uint64 ulSessionID, const char* pstrName, float fData) override { return k_EResultOK; }
+
+        virtual EResult AddNewRow(uint64 *pulRowID, uint64 ulSessionID, const char *pstrTableName) override { if (pulRowID) *pulRowID = 1; return k_EResultOK; }
+        virtual EResult CommitRow(uint64 ulRowID) override { return k_EResultOK; }
+        virtual EResult CommitOutstandingRows(uint64 ulSessionID) override { return k_EResultOK; }
+        virtual EResult AddRowAttributeInt(uint64 ulRowID, const char *pstrName, int32 nData) override { return k_EResultOK; }
+        virtual EResult AddRowAtributeString(uint64 ulRowID, const char *pstrName, const char *pstrData) override { return k_EResultOK; }
+        virtual EResult AddRowAttributeFloat(uint64 ulRowID, const char *pstrName, float fData) override { return k_EResultOK; }
+
+        virtual EResult AddSessionAttributeInt64(uint64 ulSessionID, const char *pstrName, int64 llData) override { return k_EResultOK; }
+        virtual EResult AddRowAttributeInt64(uint64 ulRowID, const char *pstrName, int64 llData) override { return k_EResultOK; }
     };
     static CSteamGameStatsEmu g_steamGameStatsInstance;
 
@@ -8653,8 +8646,9 @@ namespace UnrealSteamEmu {
                             if (nt->Signature == IMAGE_NT_SIGNATURE) {
                                 size_t size = nt->OptionalHeader.SizeOfImage;
                                 for (size_t i = 0; i + 32 < size; ++i) {
-                                    if (base[i] == 0x56 && base[i+1] == 0x8b && base[i+7] == 0xff && base[i+8] == 0xd6) {
-                                        if (memcmp(base + i + 17, "\xff\x52\x2c\x85\xc0", 5) == 0) {
+                                    if (base[i] == 0x56 && base[i+1] == 0x8b && base[i+7] == 0xff && base[i+8] == 0xd6 && base[i+9] == 0x68) {
+                                        const char* pArg = *(const char**)(base + i + 10);
+                                        if (pArg && !IsBadReadPtr(pArg, 9) && strcmp(pArg, "-insecure") == 0) {
                                             DWORD oldProt;
                                             if (VirtualProtect(base + i, 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
                                                 base[i] = 0xB0;     // mov al, 1
@@ -8684,82 +8678,7 @@ namespace UnrealSteamEmu {
                     }
                 }
 
-                if (!clientPatched) {
-                    HMODULE hClient = GetModuleHandleW(L"client_panorama.dll");
-                    if (hClient) {
-                        uint8_t* base = (uint8_t*)hClient;
-                        PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hClient;
-                        if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
-                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
-                            if (nt->Signature == IMAGE_NT_SIGNATURE) {
-                                size_t size = nt->OptionalHeader.SizeOfImage;
-
-                                // 1. Patch OnClientInsecureBlocked dialog suppression
-                                const uint8_t insecBlockedSig[] = {
-                                    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x81, 0xec, 0x1c, 0x03, 0x00, 0x00, 0x53, 0x8b, 0x5d, 0x08
-                                };
-                                for (size_t i = 0; i + sizeof(insecBlockedSig) < size; ++i) {
-                                    if (memcmp(base + i, insecBlockedSig, sizeof(insecBlockedSig)) == 0) {
-                                        DWORD oldProt;
-                                        if (VirtualProtect(base + i, 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                                            base[i] = 0xC2;     // ret 4
-                                            base[i + 1] = 0x04;
-                                            base[i + 2] = 0x00;
-                                            VirtualProtect(base + i, 8, oldProt, &oldProt);
-                                            ReFixLog("[SourceEngine] Successfully patched OnClientInsecureBlocked at %p with ret 4", base + i);
-                                        }
-                                        break;
-                                    }
-                                }
-
-                                // 2. Patch IsInventoryValid and IsConnectedToGC
-                                const uint8_t pat[] = { 0x8A, 0x41, 0x68, 0xC3 }; // mov al, [ecx + 0x68]; ret
-                                for (size_t i = 0; i + 32 < size; ++i) {
-                                    if (memcmp(base + i, pat, 4) == 0) {
-                                        if (base[i + 4] == 0xCC && base[i + 16] == 0xA1) {
-                                            DWORD oldProt;
-                                            if (VirtualProtect(base + i, 32, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                                                base[i + 0] = 0xB0; // mov al, 1
-                                                base[i + 1] = 0x01;
-                                                base[i + 2] = 0xC3; // ret
-
-                                                base[i + 16] = 0xB0; // mov al, 1
-                                                base[i + 17] = 0x01;
-                                                base[i + 18] = 0xC3; // ret
-
-                                                VirtualProtect(base + i, 32, oldProt, &oldProt);
-                                                ReFixLog("[SourceEngine] Successfully patched client_panorama.dll! IsInventoryValid and IsConnectedToGC forced to true at %p", base + i);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // 3. Patch GetLicenseType
-                                const uint8_t licPat[] = { 0x53, 0xE8, 0xCA, 0xF0, 0xFF, 0xFF, 0x8B, 0xD8, 0xF6, 0xC3, 0x02 };
-                                for (size_t i = 0; i + 16 < size; ++i) {
-                                    if (memcmp(base + i, licPat, sizeof(licPat)) == 0) {
-                                        DWORD oldProt;
-                                        if (VirtualProtect(base + i, 16, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                                            base[i + 0] = 0x53; // push ebx
-                                            base[i + 1] = 0xE9; // jmp +0x99 (to mov eax, [purchased_str]; pop ebx; ret)
-                                            base[i + 2] = 0x99;
-                                            base[i + 3] = 0x00;
-                                            base[i + 4] = 0x00;
-                                            base[i + 5] = 0x00;
-                                            VirtualProtect(base + i, 16, oldProt, &oldProt);
-                                            ReFixLog("[SourceEngine] Successfully patched client_panorama.dll! GetLicenseType forced to 'purchased' at %p", base + i);
-                                            clientPatched = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (enginePatched && clientPatched) break;
+                if (enginePatched) break;
             }
         }).detach();
     }

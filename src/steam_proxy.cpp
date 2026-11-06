@@ -3597,6 +3597,114 @@ static DWORD WINAPI ConsoleHotkeyThread(LPVOID) {
     return 0;
 }
 
+// =============================================================================
+// CS:GO Panorama UI Hook (Fixes mainmenu.js ItemInfo reference error & enables Right Sidebar)
+// =============================================================================
+typedef void* (__thiscall *FnPanoramaRunScript)(void* pThis, void* pPanel, const char* pchScript, const char* pchPath, int nLine, int nParam5, int bParam6, int bParam7);
+static FnPanoramaRunScript g_orig_PanoramaRunScript = nullptr;
+
+static std::string s_injectedBundle;
+static bool s_injectedBundleChecked = false;
+
+static const std::string& GetInjectedBundle() {
+    if (!s_injectedBundleChecked) {
+        s_injectedBundleChecked = true;
+        FILE* f = fopen("csgo\\refix_injected_mainmenu.js", "rb");
+        if (!f) f = fopen("csgo/refix_injected_mainmenu.js", "rb");
+        if (!f) {
+            char gamePath[MAX_PATH] = {0};
+            GetModuleFileNameA(NULL, gamePath, MAX_PATH);
+            char* slash = strrchr(gamePath, '\\');
+            if (slash) {
+                *(slash + 1) = '\0';
+                std::string p = std::string(gamePath) + "csgo\\refix_injected_mainmenu.js";
+                f = fopen(p.c_str(), "rb");
+            }
+        }
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz > 0) {
+                s_injectedBundle.resize(sz);
+                fread(&s_injectedBundle[0], 1, sz, f);
+                s_injectedBundle += "\n;\n";
+            }
+            fclose(f);
+            ReFixLog("[PanoramaHook] Loaded refix_injected_mainmenu.js (%zu bytes)", s_injectedBundle.size());
+        } else {
+            ReFixLog("[PanoramaHook] Warning: Could not locate refix_injected_mainmenu.js, using fallback stubs");
+            s_injectedBundle = "var CharacterAnims=CharacterAnims||{PlayAnimsOnPanel:function(){}};\n"
+                               "var ItemInfo=ItemInfo||{GetOrUpdateVanityCharacterSettings:function(){return{activity:'',arrModifiers:[]};}};\n"
+                               "var LicenseUtil=LicenseUtil||{GetCurrentLicense:function(){return 'purchased';}};\n";
+        }
+    }
+    return s_injectedBundle;
+}
+
+static void* __fastcall Hooked_PanoramaRunScript(void* pThis, void* /*edx*/, void* pPanel, const char* pchScript, const char* pchPath, int nLine, int nParam5, int bParam6, int bParam7)
+{
+    if (pchPath && strstr(pchPath, "mainmenu.js") && pchScript) {
+        ReFixLog("[PanoramaHook] Intercepting mainmenu.js execution (%zu bytes)", strlen(pchScript));
+        std::string script = pchScript;
+
+        const std::string& bundle = GetInjectedBundle();
+
+        auto replaceAll = [](std::string& str, const std::string& from, const std::string& to) {
+            size_t start_pos = 0;
+            while((start_pos = str.find(from, start_pos)) != std::string::npos) {
+                str.replace(start_pos, from.length(), to);
+                start_pos += to.length();
+            }
+        };
+
+        replaceAll(script, "MainMenu.InitVanity();", "try{MainMenu.InitVanity();}catch(e){$.Msg('InitVanity err: '+e);}");
+        replaceAll(script, "MainMenu.InitFriendsList();", "try{MainMenu.InitFriendsList();}catch(e){$.Msg('InitFriendsList err: '+e);}");
+        replaceAll(script, "MainMenu.InitNewsAndStore();", "try{MainMenu.InitNewsAndStore();}catch(e){$.Msg('InitNewsAndStore err: '+e);}");
+
+        std::string modifiedScript = bundle + script;
+        return g_orig_PanoramaRunScript(pThis, pPanel, modifiedScript.c_str(), pchPath, nLine, nParam5, bParam6, bParam7);
+    }
+    return g_orig_PanoramaRunScript(pThis, pPanel, pchScript, pchPath, nLine, nParam5, bParam6, bParam7);
+}
+
+static DWORD WINAPI CSGO_PanoramaHookThread(LPVOID) {
+    HMODULE hPan = NULL;
+    for (int i = 0; i < 200; ++i) {
+        hPan = GetModuleHandleA("panorama.dll");
+        if (hPan) break;
+        Sleep(50);
+    }
+    if (!hPan) return 0;
+
+    ReFixLog("[PanoramaHook] Found panorama.dll at %p", hPan);
+
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hPan;
+    if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+        PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((uint8_t*)hPan + dos->e_lfanew);
+        if (nt->Signature == IMAGE_NT_SIGNATURE) {
+            uint8_t* base = (uint8_t*)hPan;
+            size_t size = nt->OptionalHeader.SizeOfImage;
+            const uint8_t pat[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0x74, 0x01 };
+            for (size_t i = 0; i + sizeof(pat) <= size; ++i) {
+                if (memcmp(base + i, pat, sizeof(pat)) == 0) {
+                    void* target = (void*)(base + i);
+                    ReFixLog("[PanoramaHook] Located RunScript at %p", target);
+                    MH_Initialize();
+                    if (MH_CreateHook(target, (void*)&Hooked_PanoramaRunScript, (void**)&g_orig_PanoramaRunScript) == MH_OK) {
+                        MH_EnableHook(target);
+                        ReFixLog("[PanoramaHook] Hooked Panorama RunScript successfully!");
+                    } else {
+                        ReFixLog("[PanoramaHook] Failed to hook RunScript");
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 static void StartConsoleHotkeyMonitor() {
     CreateThread(NULL, 0, ConsoleHotkeyThread, NULL, 0, NULL);
 }
@@ -5169,6 +5277,7 @@ static void ReFixInitializePost(bool success) {
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
         ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
+        CreateThread(NULL, 0, CSGO_PanoramaHookThread, NULL, 0, NULL);
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);

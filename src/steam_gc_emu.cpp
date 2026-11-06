@@ -16,6 +16,11 @@
 #include "overlay/refix_overlay.h"
 #include "csgo_item_defs.h"
 
+namespace refix::overlay {
+    void ExecuteEngineClientCommand(const char* cmd);
+    void OpenMatchmakingToast();
+}
+
 extern void ReFixLog(const char* fmt, ...);
 
 namespace {
@@ -90,6 +95,9 @@ struct EconItem {
     uint32_t quantity = 1;
     uint32_t quality = 4;
     uint32_t rarity = 0;
+    uint32_t paintKit = 0;
+    float wear = 0.001f;
+    uint32_t seed = 0;
     std::string customName;
 };
 
@@ -131,19 +139,69 @@ public:
             std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             f.close();
             ParseJson(content);
+
+            // Automatically upgrade legacy items lacking paint kit
+            bool changed = false;
+            for (auto& itm : m_items) {
+                if (itm.paintKit == 0) {
+                    if (itm.defIndex == 9) { itm.paintKit = 344; itm.rarity = 6; changed = true; } // AWP Dragon Lore
+                    else if (itm.defIndex == 7) { itm.paintKit = 180; itm.rarity = 6; changed = true; } // AK-47 Fire Serpent
+                    else if (itm.defIndex == 16) { itm.paintKit = 309; itm.rarity = 8; changed = true; } // M4A4 Howl
+                    else if (itm.defIndex == 60) { itm.paintKit = 430; itm.rarity = 6; changed = true; } // M4A1-S Hyper Beast
+                    else if (itm.defIndex == 1) { itm.paintKit = 757; itm.rarity = 6; changed = true; } // Deagle Printstream
+                    else if (itm.defIndex == 4) { itm.paintKit = 38; itm.rarity = 6; changed = true; } // Glock Fade
+                    else if (itm.defIndex == 61) { itm.paintKit = 504; itm.rarity = 6; changed = true; } // USP Kill Confirmed
+                    else if (itm.defIndex == 507) { itm.paintKit = 416; itm.rarity = 7; changed = true; } // Karambit Sapphire
+                    else if (itm.defIndex == 515) { itm.paintKit = 38; itm.rarity = 7; changed = true; } // Butterfly Fade
+                    else if (itm.defIndex == 508) { itm.paintKit = 562; itm.rarity = 7; changed = true; } // M9 Lore
+                    else if (itm.defIndex == 500) { itm.paintKit = 419; itm.rarity = 7; changed = true; } // Bayonet Doppler
+                    else if (itm.defIndex == 523) { itm.paintKit = 413; itm.rarity = 7; changed = true; } // Talon Tiger Tooth
+                    else if (itm.defIndex == 516) { itm.paintKit = 415; itm.rarity = 7; changed = true; } // Shadow Daggers Ruby
+                    else if (itm.defIndex >= 500 && itm.defIndex <= 530) { itm.paintKit = 38; itm.rarity = 7; changed = true; }
+                }
+            }
+            if (changed) SaveLocked();
         }
 
         if (m_items.empty()) {
             // First time setup: Grant all cases & keys to test the inventory!
             uint64_t nextId = 1000000000ULL;
-            // Grant starter skins and knives first
-            for (size_t i = 0; i < ReFixGC::CSGO::kNumWeaponSkinDefs; ++i) {
+            // Grant starter skins and knives with real paint kits
+            struct StarterSkin {
+                uint32_t defIndex;
+                uint32_t paintKit;
+                uint32_t rarity;
+            };
+            static const StarterSkin kStarters[] = {
+                { 9,   344, 6 }, // AWP | Dragon Lore
+                { 7,   180, 6 }, // AK-47 | Fire Serpent
+                { 16,  309, 8 }, // M4A4 | Howl
+                { 60,  430, 6 }, // M4A1-S | Hyper Beast
+                { 1,   757, 6 }, // Desert Eagle | Printstream
+                { 4,   38,  6 }, // Glock-18 | Fade
+                { 61,  504, 6 }, // USP-S | Kill Confirmed
+                { 507, 416, 7 }, // Karambit | Doppler Sapphire
+                { 515, 38,  7 }, // Butterfly Knife | Fade
+                { 508, 562, 7 }, // M9 Bayonet | Lore
+                { 500, 419, 7 }, // Bayonet | Doppler P2
+                { 523, 413, 7 }, // Talon Knife | Tiger Tooth
+                { 516, 415, 7 }, // Shadow Daggers | Doppler Ruby
+                { 509, 38,  7 }, // Huntsman Knife | Fade
+                { 522, 413, 7 }, // Stiletto Knife | Tiger Tooth
+                { 525, 12,  7 }, // Skeleton Knife | Crimson Web
+                { 5030, 10048, 7 }, // Sport Gloves | Vice
+                { 5031, 10041, 7 }  // Driver Gloves | King Snake
+            };
+            for (const auto& s : kStarters) {
                 EconItem itm;
                 itm.id = ++nextId;
-                itm.defIndex = ReFixGC::CSGO::kWeaponSkinDefs[i];
+                itm.defIndex = s.defIndex;
                 itm.quantity = 1;
                 itm.quality = 4;
-                itm.rarity = 6;
+                itm.rarity = s.rarity;
+                itm.paintKit = s.paintKit;
+                itm.wear = 0.001f;
+                itm.seed = 420;
                 m_items.push_back(itm);
             }
             // Then keys
@@ -245,16 +303,66 @@ public:
             if (it.id > maxId) maxId = it.id;
         }
 
-        static unsigned int s_seed = 12345;
+        struct DropEntry {
+            uint32_t defIndex;
+            uint32_t paintKit;
+            uint32_t quality;
+            uint32_t rarity;
+        };
+
+        static const DropEntry kCrateDrops[] = {
+            { 9,   344, 4, 6 }, // AWP | Dragon Lore
+            { 9,   279, 4, 6 }, // AWP | Asiimov
+            { 9,   475, 4, 6 }, // AWP | Hyper Beast
+            { 9,   446, 4, 6 }, // AWP | Medusa
+            { 7,   180, 4, 6 }, // AK-47 | Fire Serpent
+            { 7,   801, 4, 6 }, // AK-47 | Asiimov
+            { 7,   639, 4, 6 }, // AK-47 | Bloodsport
+            { 7,   302, 4, 6 }, // AK-47 | Vulcan
+            { 7,   282, 4, 5 }, // AK-47 | Redline
+            { 16,  309, 4, 8 }, // M4A4 | Howl
+            { 16,  255, 4, 6 }, // M4A4 | Asiimov
+            { 16,  695, 4, 6 }, // M4A4 | Neo-Noir
+            { 60,  430, 4, 6 }, // M4A1-S | Hyper Beast
+            { 60,  757, 4, 6 }, // M4A1-S | Printstream
+            { 60,  644, 4, 5 }, // M4A1-S | Decimator
+            { 1,   757, 4, 6 }, // Desert Eagle | Printstream
+            { 1,   711, 4, 6 }, // Desert Eagle | Code Red
+            { 1,   527, 4, 5 }, // Desert Eagle | Kumicho Dragon
+            { 4,   38,  4, 6 }, // Glock-18 | Fade
+            { 4,   353, 4, 5 }, // Glock-18 | Water Elemental
+            { 61,  504, 4, 6 }, // USP-S | Kill Confirmed
+            { 61,  653, 4, 6 }, // USP-S | Neo-Noir
+            { 507, 416, 4, 7 }, // Karambit | Doppler Sapphire
+            { 507, 415, 4, 7 }, // Karambit | Doppler Ruby
+            { 507, 38,  4, 7 }, // Karambit | Fade
+            { 515, 38,  4, 7 }, // Butterfly Knife | Fade
+            { 515, 418, 4, 7 }, // Butterfly Knife | Doppler
+            { 515, 568, 4, 7 }, // Butterfly Knife | Gamma Doppler Emerald
+            { 508, 562, 4, 7 }, // M9 Bayonet | Lore
+            { 508, 418, 4, 7 }, // M9 Bayonet | Doppler
+            { 500, 419, 4, 7 }, // Bayonet | Doppler P2
+            { 523, 413, 4, 7 }, // Talon Knife | Tiger Tooth
+            { 525, 12,  4, 7 }, // Skeleton Knife | Crimson Web
+            { 516, 415, 4, 7 }, // Shadow Daggers | Doppler Ruby
+            { 5030, 10048, 4, 7 }, // Sport Gloves | Vice
+            { 5031, 10041, 4, 7 }  // Driver Gloves | King Snake
+        };
+        static const size_t kNumCrateDrops = sizeof(kCrateDrops) / sizeof(kCrateDrops[0]);
+
+        static unsigned int s_seed = (unsigned int)time(nullptr);
         s_seed = s_seed * 1103515245 + 12347;
-        uint32_t skinDef = ReFixGC::CSGO::kWeaponSkinDefs[s_seed % ReFixGC::CSGO::kNumWeaponSkinDefs];
+        const auto& drop = kCrateDrops[s_seed % kNumCrateDrops];
 
         EconItem unboxed;
         unboxed.id = maxId + 1;
-        unboxed.defIndex = skinDef;
+        unboxed.defIndex = drop.defIndex;
         unboxed.quantity = 1;
-        unboxed.quality = 4;
-        unboxed.rarity = (s_seed % 5) + 3; // Classified / Covert
+        unboxed.quality = ((s_seed % 10) == 0) ? 9 : drop.quality; // 10% StatTrak chance
+        unboxed.rarity = drop.rarity;
+        unboxed.paintKit = drop.paintKit;
+        unboxed.wear = 0.001f + ((s_seed % 20) * 0.001f);
+        unboxed.seed = (s_seed % 999) + 1;
         m_items.push_back(unboxed);
 
         SaveLocked();
@@ -290,6 +398,40 @@ public:
         return itm.id;
     }
 
+    uint64_t AddItemWithAttributes(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed) {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        uint64_t maxId = 2000000000ULL;
+        for (const auto& i : m_items) if (i.id > maxId) maxId = i.id;
+
+        if (paintKit == 0) {
+            auto it = std::find_if(m_items.begin(), m_items.end(), [defIndex](const EconItem& it) {
+                return it.defIndex == defIndex && it.paintKit == 0;
+            });
+            if (it != m_items.end()) {
+                it->quantity += count;
+                SaveLocked();
+                return it->id;
+            }
+        }
+
+        EconItem itm;
+        itm.id = maxId + 1;
+        itm.defIndex = defIndex;
+        itm.quantity = count;
+        itm.quality = quality;
+        itm.rarity = rarity;
+        itm.paintKit = paintKit;
+        itm.wear = wear > 0.0f ? wear : 0.001f;
+        itm.seed = seed > 0 ? seed : (rand() % 999 + 1);
+        m_items.push_back(itm);
+        SaveLocked();
+        ReFixLog("[GC] CSGOInventory: Added custom item id=%llu def=%u qty=%u pk=%u wear=%.4f",
+                 (unsigned long long)itm.id, defIndex, count, paintKit, itm.wear);
+        return itm.id;
+    }
+
     void GrantKeys(uint32_t defIndex, uint32_t count) {
         AddItem(defIndex, count, 4, 0);
     }
@@ -310,7 +452,8 @@ private:
             const auto& it = m_items[i];
             ofs << "    { \"id\": " << it.id << ", \"defIndex\": " << it.defIndex
                 << ", \"quantity\": " << it.quantity << ", \"quality\": " << it.quality
-                << ", \"rarity\": " << it.rarity << " }" << (i + 1 < m_items.size() ? ",\n" : "\n");
+                << ", \"rarity\": " << it.rarity << ", \"paintKit\": " << it.paintKit
+                << ", \"wear\": " << it.wear << ", \"seed\": " << it.seed << " }" << (i + 1 < m_items.size() ? ",\n" : "\n");
         }
         ofs << "  ],\n  \"coupons\": [\n";
         for (size_t i = 0; i < m_coupons.size(); ++i) {
@@ -345,6 +488,16 @@ private:
                 itm.quantity = (uint32_t)getNum("\"quantity\"");
                 itm.quality = (uint32_t)getNum("\"quality\"");
                 itm.rarity = (uint32_t)getNum("\"rarity\"");
+                itm.paintKit = (uint32_t)getNum("\"paintKit\"");
+                itm.seed = (uint32_t)getNum("\"seed\"");
+                size_t wp = obj.find("\"wear\"");
+                if (wp != std::string::npos) {
+                    size_t wc = obj.find(':', wp);
+                    if (wc != std::string::npos) {
+                        itm.wear = (float)atof(obj.c_str() + wc + 1);
+                    }
+                }
+                if (itm.wear <= 0.0f) itm.wear = 0.001f;
                 if (itm.id != 0 && itm.defIndex != 0) {
                     m_items.push_back(itm);
                 }
@@ -388,13 +541,58 @@ std::vector<uint8_t> SerializeEconItem(const EconItem& item, uint32_t accountId,
     PutVarintField(out, 4, item.defIndex);
     PutVarintField(out, 5, item.quantity);
     PutVarintField(out, 6, 1); // level
-    PutVarintField(out, 7, item.quality);
+
+    // For Knives: CS:GO knives require quality 3 (★ Unusual) and rarity 6 (Covert)
+    uint32_t quality = item.quality;
+    if (quality == 4 && item.defIndex >= 500 && item.defIndex <= 530) {
+        quality = 3; // ★ Unusual
+    }
+    PutVarintField(out, 7, quality);
     PutVarintField(out, 8, 0); // flags
     PutVarintField(out, 9, 0); // origin
     if (!item.customName.empty()) {
         PutStringField(out, 10, item.customName);
     }
-    if (item.rarity) PutVarintField(out, 18, item.rarity);
+
+    if (item.paintKit > 0) {
+        // Attribute 6: paint kit (set item texture prefab) - stored_as_integer = 0 (FLOAT value_bytes only)
+        float fpk = (float)item.paintKit;
+        std::vector<uint8_t> attr6;
+        PutVarintField(attr6, 1, 6);
+        PutBytesField(attr6, 3, std::vector<uint8_t>((uint8_t*)&fpk, (uint8_t*)&fpk + 4));
+        PutBytesField(out, 12, attr6);
+
+        // Attribute 8: wear (set item texture wear) - stored_as_integer = 0 (FLOAT value_bytes only)
+        float fwear = item.wear > 0.0f ? item.wear : 0.001f;
+        std::vector<uint8_t> attr8;
+        PutVarintField(attr8, 1, 8);
+        PutBytesField(attr8, 3, std::vector<uint8_t>((uint8_t*)&fwear, (uint8_t*)&fwear + 4));
+        PutBytesField(out, 12, attr8);
+
+        // Attribute 7: seed (set item texture seed) - stored_as_integer = 0 (FLOAT value_bytes only)
+        uint32_t seedVal = item.seed > 0 ? item.seed : 420;
+        float fseed = (float)seedVal;
+        std::vector<uint8_t> attr7;
+        PutVarintField(attr7, 1, 7);
+        PutBytesField(attr7, 3, std::vector<uint8_t>((uint8_t*)&fseed, (uint8_t*)&fseed + 4));
+        PutBytesField(out, 12, attr7);
+
+        // StatTrak: Attribute 80 (kill eater)
+        if (quality == 9) {
+            uint32_t zero = 0;
+            std::vector<uint8_t> attr80;
+            PutVarintField(attr80, 1, 80);
+            PutVarintField(attr80, 2, 0);
+            PutBytesField(attr80, 3, std::vector<uint8_t>((uint8_t*)&zero, (uint8_t*)&zero + 4));
+            PutBytesField(out, 12, attr80);
+        }
+    }
+
+    uint32_t rarity = item.rarity;
+    if (rarity == 0 && item.defIndex >= 500 && item.defIndex <= 530) {
+        rarity = 6;
+    }
+    if (rarity) PutVarintField(out, 19, rarity);
     return out;
 }
 
@@ -408,6 +606,13 @@ std::vector<uint8_t> SerializeEconCoupon(const EconCoupon& coupon) {
 
 class CGameCoordinatorLan : public ISteamGameCoordinator {
 public:
+    struct Message {
+        uint32_t type;
+        std::vector<uint8_t> data;
+    };
+
+    const char* Role() const { return m_gameServer ? "server" : "client"; }
+
     explicit CGameCoordinatorLan(bool gameServer) : m_gameServer(gameServer) {}
 
     static std::vector<uint8_t> BuildMatchmakingClientHello(uint32_t accountId) {
@@ -423,22 +628,19 @@ public:
         PutVarintField(commendation, 4, 100);
 
         std::vector<uint8_t> medals;
-        PutVarintField(medals, 1, 1024); // 5 Year Veteran Coin
-        PutVarintField(medals, 2, 1024);
-        PutVarintField(medals, 7, 1024);
-        PutVarintField(medals, 8, 1024); // featured display item
+        PutVarintField(medals, 7, 874); // 5 Year Veteran Coin (874)
+        PutVarintField(medals, 8, 874); // featured display item
 
         std::vector<uint8_t> resp;
         PutVarintField(resp, 1, accountId);
-// Omit penalty fields so CS:GO never triggers ban expired dialog
-        // vac_banned is 0 (omitted)
+        PutVarintField(resp, 6, 0);       // vac_banned = 0 (clean!)
         PutBytesField(resp, 7, ranking);
         PutBytesField(resp, 8, commendation);
         PutBytesField(resp, 9, medals);
-        PutVarintField(resp, 17, 40);   // player_level = 40 (General de rango 40)
-        PutVarintField(resp, 18, 3500); // player_cur_xp = 3500
-        PutVarintField(resp, 19, 1);    // player_xp_bonus_flags = 1
-        PutBytesField(resp, 20, ranking);
+        PutVarintField(resp, 16, 40);     // player_level = 40 (General de rango 40)
+        PutVarintField(resp, 17, 40);     // ranking_type_id / player_level
+        PutVarintField(resp, 18, 327680000 + 3500); // player_cur_xp
+        PutVarintField(resp, 19, 0);      // player_xp_bonus_flags
         return resp;
     }
 
@@ -465,11 +667,7 @@ public:
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(version, UnrealSteamEmu::GetLocalSteamID()));
             Reply(kMsgClientConnectionStatus, ReFixGC::BuildConnectionStatus());
-
-            // Immediately send MatchmakingGC2ClientHello (9110) on client logon so Panorama populates rank & profile!
             Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
-
-
         } else if (m_gameServer && msg == kMsgServerHello) {
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
             if (version == 0) version = 13884;
@@ -482,14 +680,17 @@ public:
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
         } else if (msg == kMsgGCCStrike15_v2_MatchmakingStart) {
-            ReFixLog("[GC] kMsgGCCStrike15_v2_MatchmakingStart: Stopping queue cleanly and opening ReFix Host Match Menu");
+            ReFixLog("[GC] kMsgGCCStrike15_v2_MatchmakingStart: Stopping queue cleanly and opening ReFix Matchmaking toast");
             // Reply with 9104 (MatchmakingGC2ClientUpdate): matchmaking = 0 (stops queue cleanly with no error modal)
             std::vector<uint8_t> updateResp;
             PutVarintField(updateResp, 1, 0); // matchmaking status = 0 (idle)
             Reply(9104, updateResp);
 
-            // Open ReFix Host Match modal so the player can customize mode, map, bots, etc.
-            ReFixOverlay::OpenMatchmakerModal();
+            // Cancel engine matchmaking search so it doesn't fail with VAC error or timeout
+            refix::overlay::ExecuteEngineClientCommand("mm_match_search_cancel");
+
+            // Open ReFix Matchmaking bottom-right toast mini-widget
+            refix::overlay::OpenMatchmakingToast();
         } else if (msg == 9194) { // ClientGCRankUpdate
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             std::vector<uint8_t> ranking;
@@ -543,6 +744,9 @@ public:
             std::vector<uint8_t> relayResp;
             PutVarintField(relayResp, 1, 0);
             Reply(9198, relayResp);
+        } else if (msg == 9201) { // GetEventFavorites_Request
+            std::vector<uint8_t> favResp;
+            Reply(9203, favResp);
         } else if (msg == kMsgGCUnlockCrate) {
             // Unlock container (CS:GO sends non-proto 34-byte struct or proto)
             uint64_t crateId = 0, keyId = 0;
@@ -575,21 +779,42 @@ public:
 
             uint64_t awardedId = CSGOInventoryManager::Get().UnlockCrate(crateId, keyId);
 
-            // 1. Resend full SOCache welcome FIRST so Panorama knows the item exists before notification
-            Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(1, UnrealSteamEmu::GetLocalSteamID()));
-
-            // 2. Dispatch UnlockCrateResponse
-            std::vector<uint8_t> unlockResp;
-            PutVarintField(unlockResp, 1, awardedId != 0 ? 1 : 2); // 1 = k_EResultOK
-            if (awardedId != 0) PutVarintField(unlockResp, 2, awardedId);
-            Reply(kMsgGCUnlockCrateResponse, unlockResp);
-
-            // 3. Dispatch CMsgGCItemCustomizationNotification (EMsg 1090):
-            // field 1: item_id (awardedId), field 2: request (1007 = UnlockCrate)
             if (awardedId != 0) {
+                // 1. Resend full SOCache welcome so Panorama knows all inventory items
+                Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(1, UnrealSteamEmu::GetLocalSteamID()));
+
+                // 2. Dispatch k_ESOMsg_Create (21) CMsgSOSingleObject so active SOCache adds it directly
+                auto allItems = CSGOInventoryManager::Get().GetItems();
+                auto itAwarded = std::find_if(allItems.begin(), allItems.end(), [awardedId](const EconItem& i) {
+                    return i.id == awardedId;
+                });
+                if (itAwarded != allItems.end()) {
+                    uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+                    std::vector<uint8_t> itBytes = SerializeEconItem(*itAwarded, accountId, (uint32_t)allItems.size());
+
+                    std::vector<uint8_t> soid;
+                    PutVarintField(soid, 1, kSOTypeSteamId);
+                    PutVarintField(soid, 2, UnrealSteamEmu::GetLocalSteamID());
+
+                    static uint64_t s_soVersion = 100;
+                    std::vector<uint8_t> soSingle;
+                    PutVarintField(soSingle, 2, 1); // type_id = 1 (CSOEconItem)
+                    PutBytesField(soSingle, 3, itBytes);
+                    PutFixed64Field(soSingle, 4, ++s_soVersion);
+                    PutBytesField(soSingle, 5, soid);
+                    Reply(21 /* k_ESOMsg_Create */, soSingle);
+                }
+
+                // 3. Dispatch UnlockCrateResponse (1008)
+                std::vector<uint8_t> unlockResp;
+                PutVarintField(unlockResp, 1, 1); // 1 = k_EResultOK
+                PutVarintField(unlockResp, 2, awardedId);
+                Reply(kMsgGCUnlockCrateResponse, unlockResp);
+
+                // 4. Dispatch CMsgGCItemCustomizationNotification (EMsg 1090)
                 std::vector<uint8_t> notif;
                 PutVarintField(notif, 1, awardedId);
-                PutVarintField(notif, 2, 1007);
+                PutVarintField(notif, 2, 1007 /* k_EGCItemCustomizationNotification_UnlockCrate */);
                 Reply(1090, notif);
             }
         } else if (msg == kMsgGCStorePurchaseInit || msg == kMsgGCStorePurchaseInitAlt) {
@@ -662,14 +887,7 @@ public:
         return k_EGCResultOK;
     }
 
-private:
-    struct Message {
-        uint32_t type;
-        std::vector<uint8_t> data;
-    };
-
-    const char* Role() const { return m_gameServer ? "server" : "client"; }
-
+public:
     void Reply(uint32_t msg, const std::vector<uint8_t>& body) {
         Message out{ msg | kProtoFlag, {} };
         const uint32_t header[2] = { msg | kProtoFlag, 0 };
@@ -734,9 +952,24 @@ std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId) {
         PutBytesField(couponType, 2, cpBytes);
     }
 
+    // SubscribedType for CSOPersonaDataPublic (type_id = 2) - Prime status, level 40, commendations
+    std::vector<uint8_t> personaData;
+    PutVarintField(personaData, 1, 40); // player_level = 40
+    std::vector<uint8_t> commends;
+    PutVarintField(commends, 1, 100);
+    PutVarintField(commends, 2, 100);
+    PutVarintField(commends, 4, 100);
+    PutBytesField(personaData, 2, commends);
+    PutVarintField(personaData, 3, 1); // elevated_state = 1 (Prime Status!)
+
+    std::vector<uint8_t> personaType;
+    PutVarintField(personaType, 1, 2); // type_id = 2
+    PutBytesField(personaType, 2, personaData);
+
     // CMsgSOCacheSubscribed
     std::vector<uint8_t> cache;
     PutBytesField(cache, 2, itemType);
+    PutBytesField(cache, 2, personaType);
     if (!coupons.empty()) PutBytesField(cache, 2, couponType);
     PutFixed64Field(cache, 3, 1); // version
     PutBytesField(cache, 4, owner);
@@ -780,7 +1013,29 @@ uint32_t ParseHelloVersion(const uint8_t* body, size_t size) {
 
 } // namespace ReFixGC
 
-extern "C" __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity) {
-    CSGOInventoryManager::Get().AddItem(defIndex, count, quality, rarity);
+extern "C" __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed) {
+    uint64_t id = CSGOInventoryManager::Get().AddItemWithAttributes(defIndex, count, quality, rarity, paintKit, wear, seed);
+    if (id != 0) {
+        auto allItems = CSGOInventoryManager::Get().GetItems();
+        auto itGranted = std::find_if(allItems.begin(), allItems.end(), [id](const EconItem& i) { return i.id == id; });
+        if (itGranted != allItems.end()) {
+            uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+            std::vector<uint8_t> itBytes = SerializeEconItem(*itGranted, accountId, (uint32_t)allItems.size());
+
+            std::vector<uint8_t> soid;
+            PutVarintField(soid, 1, kSOTypeSteamId);
+            PutVarintField(soid, 2, UnrealSteamEmu::GetLocalSteamID());
+
+            static uint64_t s_soVersion = 200;
+            std::vector<uint8_t> soSingle;
+            PutVarintField(soSingle, 2, 1);
+            PutBytesField(soSingle, 3, itBytes);
+            PutFixed64Field(soSingle, 4, ++s_soVersion);
+            PutBytesField(soSingle, 5, soid);
+
+            CGameCoordinatorLan* gc = (CGameCoordinatorLan*)ReFixGC::Get(false);
+            if (gc) gc->Reply(21 /* k_ESOMsg_Create */, soSingle);
+        }
+    }
     UnrealSteamEmu::PostCallback(4004 /* kMsgClientWelcome */, nullptr, 0);
 }

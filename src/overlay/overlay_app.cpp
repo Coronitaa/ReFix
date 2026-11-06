@@ -7,6 +7,7 @@
 #include "overlay_text.h"
 #include "overlay_web.h"
 #include "overlay_sound.h"
+#include "overlay_ui_mods.h"
 #include "../imgui/imgui_internal.h"
 #include "save_swap.h"
 #include "refix_overlay.h"
@@ -335,6 +336,16 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
 }
 
 void App::Join(const net::RemotePlayer& p) {
+    if (appId_ == 730) {
+        if (!p.connect.empty()) {
+            ExecuteEngineClientCommand(p.connect.c_str());
+        } else if (p.ip != 0) {
+            char ipBuf[64];
+            snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:27015",
+                     (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF, (p.ip >> 8) & 0xFF, p.ip & 0xFF);
+            ExecuteEngineClientCommand(ipBuf);
+        }
+    }
     if (p.lobbyId) {
         GameLobbyJoinRequested_t cb = {};
         cb.m_steamIDLobby = CSteamID(p.lobbyId);
