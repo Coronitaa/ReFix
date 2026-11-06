@@ -3450,16 +3450,44 @@ namespace UnrealSteamEmu {
 
         // Every LAN peer is an immediate friend and nothing else: queries for blocked/ignored/requesting
         // users get no one (Lethal Company refused to join a host it found in GetFriendCount(Blocked)).
-        static bool CountsLanPeers(int iFriendFlags) { return (iFriendFlags & k_EFriendFlagImmediate) != 0; }
+        static bool CountsLanPeers(int iFriendFlags) {
+            if (iFriendFlags & (k_EFriendFlagBlocked | k_EFriendFlagIgnored | k_EFriendFlagIgnoredFriend)) {
+                if (!(iFriendFlags & (k_EFriendFlagImmediate | k_EFriendFlagAll))) return false;
+            }
+            return true;
+        }
 
         virtual int GetFriendCount(int iFriendFlags) override {
             if (!CountsLanPeers(iFriendFlags)) return 0;
+            if (g_transportMode.load() == TransportMode::Canonical) {
+                auto peers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+                int count = 0;
+                for (const auto& p : peers) {
+                    uint64_t sid = p.externalId.numericId;
+                    if (sid == 0) sid = p.peerId.low;
+                    if (sid != 0 && sid != g_localSteamID) count++;
+                }
+                return count;
+            }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             return (int)g_peers.size();
         }
 
         virtual CSteamID GetFriendByIndex(int iFriend, int iFriendFlags) override {
             if (!CountsLanPeers(iFriendFlags)) return CSteamID();
+            if (g_transportMode.load() == TransportMode::Canonical) {
+                auto peers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+                int idx = 0;
+                for (const auto& p : peers) {
+                    uint64_t sid = p.externalId.numericId;
+                    if (sid == 0) sid = p.peerId.low;
+                    if (sid != 0 && sid != g_localSteamID) {
+                        if (idx == iFriend) return CSteamID(sid);
+                        idx++;
+                    }
+                }
+                return CSteamID();
+            }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             if (iFriend >= 0 && iFriend < (int)g_peers.size()) {
                 auto it = g_peers.begin();
@@ -3561,11 +3589,31 @@ namespace UnrealSteamEmu {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             uint64_t friendSid = steamIDFriend.ConvertToUint64();
             auto it = g_peers.find(friendSid);
-            if (it != g_peers.end() && it->second.port != 0) {
+            uint32_t peerIp = 0;
+            uint16_t peerPort = 27015;
+            bool foundPeer = false;
+
+            if (it != g_peers.end()) {
+                peerIp = it->second.ip;
+                peerPort = it->second.port != 0 ? it->second.port : 27015;
+                foundPeer = true;
+            } else if (g_transportMode.load() == TransportMode::Canonical) {
+                auto pid = refix::lan::ILanCore::Get().Peers().FindBySteamId(friendSid);
+                if (pid) {
+                    auto pinfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*pid);
+                    if (pinfo) {
+                        peerIp = pinfo->endpoint.ipv4;
+                        peerPort = pinfo->endpoint.port != 0 ? pinfo->endpoint.port : 27015;
+                        foundPeer = true;
+                    }
+                }
+            }
+
+            if (foundPeer) {
                 pFriendGameInfo->m_gameID = CGameID(g_appID);
-                pFriendGameInfo->m_unGameIP = it->second.ip;
-                pFriendGameInfo->m_usGamePort = it->second.port;
-                pFriendGameInfo->m_usQueryPort = it->second.port;
+                pFriendGameInfo->m_unGameIP = peerIp;
+                pFriendGameInfo->m_usGamePort = peerPort;
+                pFriendGameInfo->m_usQueryPort = peerPort;
 
                 uint64_t friendLobbyId = 0;
                 for (const auto& rp : ::refix::overlay::net::Players()) {
@@ -3630,11 +3678,24 @@ namespace UnrealSteamEmu {
             ReFixOverlay::ActivateOverlayToUser(pchDialog, steamID.ConvertToUint64());
         }
         virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
-            if (pchURL && (strstr(pchURL, "market") || strstr(pchURL, "community"))) {
-                ReFixOverlay::OpenMarketGiveMenu();
-            } else {
-                ReFixOverlay::ActivateWebPage(pchURL);
+            ReFixLog("[UnrealSteam] ActivateGameOverlayToWebPage('%s')", pchURL ? pchURL : "");
+            if (pchURL) {
+                if (strstr(pchURL, "market") || strstr(pchURL, "community") || strstr(pchURL, "give")) {
+                    ReFixOverlay::OpenMarketGiveMenu();
+                    return;
+                }
+                if (strstr(pchURL, "54029") || strstr(pchURL, "prime") || strstr(pchURL, "sub/")) {
+                    ReFixOverlay::PromptPurchase(730, 54029, "CS:GO Prime Status Upgrade",
+                        "Mejora tu cuenta a Estado Prime. Emparejamiento exclusivo, obtencion de cajas semanales y medallas de servicio.",
+                        false, [](bool approved) {
+                            if (approved) {
+                                ReFixLog("[Overlay] Prime Status Upgrade approved by player!");
+                            }
+                        });
+                    return;
+                }
             }
+            ReFixOverlay::ActivateWebPage(pchURL);
         }
         virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override {
             ReFixLog("[UnrealSteam] ActivateGameOverlayToStore: nAppID=%u", (uint32_t)nAppID);
@@ -4343,6 +4404,7 @@ namespace UnrealSteamEmu {
             // as on Steam. Unreal's OnlineSubsystemSteam rejected every LAN lobby that carried extra untyped keys
             // (HostAddress, SERVER_IP...), so GRAIN ROT's public server list stayed empty.
             refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "__server_ip", refix::lan::AttributeValue(localIpStr));
+            refix::lan::ILanCore::Get().Lobby().SetJoinable(coreLobbyId, true);
 
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -4396,6 +4458,10 @@ namespace UnrealSteamEmu {
                         refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
                         break;
                     }
+                }
+                if (coreLobbyId.empty() && !allLobbies.empty()) {
+                    coreLobbyId = allLobbies[0].lobbyId;
+                    refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
                 }
             }
 
@@ -4860,7 +4926,12 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool SetLobbyJoinable(CSteamID steamIDLobby, bool bLobbyJoinable) override {
-            g_lobbies[steamIDLobby.ConvertToUint64()].joinable = bLobbyJoinable;
+            uint64_t lID = steamIDLobby.ConvertToUint64();
+            g_lobbies[lID].joinable = bLobbyJoinable;
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                refix::lan::ILanCore::Get().Lobby().SetJoinable(coreLobbyId, bLobbyJoinable);
+            }
             return true;
         }
 
@@ -8580,73 +8651,36 @@ namespace UnrealSteamEmu {
                 if (!enginePatched) {
                     HMODULE hEngine = GetModuleHandleW(L"engine.dll");
                     if (hEngine) {
+                        uint8_t* base = (uint8_t*)hEngine;
                         PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hEngine;
                         if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
-                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((uint8_t*)hEngine + dos->e_lfanew);
+                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
                             if (nt->Signature == IMAGE_NT_SIGNATURE) {
-                                uint8_t* base = (uint8_t*)hEngine;
                                 size_t size = nt->OptionalHeader.SizeOfImage;
-
-                                const char targetStr[] = "-insecure";
-                                uint8_t* pInsecureStr = nullptr;
-                                for (size_t i = 0; i + sizeof(targetStr) < size; ++i) {
-                                    if (memcmp(base + i, targetStr, sizeof(targetStr)) == 0) {
-                                        pInsecureStr = base + i;
-                                        break;
-                                    }
-                                }
-
-                                const char toolsStr[] = "-tools";
-                                uint8_t* pToolsStr = nullptr;
-                                for (size_t i = 0; i + sizeof(toolsStr) < size; ++i) {
-                                    if (memcmp(base + i, toolsStr, sizeof(toolsStr)) == 0) {
-                                        pToolsStr = base + i;
-                                        break;
-                                    }
-                                }
-
-                                if (pInsecureStr && pToolsStr) {
-                                    uint8_t pushInsec[5] = { 0x68 };
-                                    memcpy(pushInsec + 1, &pInsecureStr, 4);
-
-                                    uint8_t pushTools[5] = { 0x68 };
-                                    memcpy(pushTools + 1, &pToolsStr, 4);
-
-                                    for (size_t i = 0; i + 64 < size; ++i) {
-                                        if (memcmp(base + i, pushInsec, 5) == 0) {
-                                            bool match = false;
-                                            for (size_t j = i + 5; j < i + 40 && j + 5 < size; ++j) {
-                                                if (memcmp(base + j, pushTools, 5) == 0) {
-                                                    match = true;
+                                for (size_t i = 0; i + 32 < size; ++i) {
+                                    if (base[i] == 0x56 && base[i+1] == 0x8b && base[i+7] == 0xff && base[i+8] == 0xd6) {
+                                        if (memcmp(base + i + 17, "\xff\x52\x2c\x85\xc0", 5) == 0) {
+                                            DWORD oldProt;
+                                            if (VirtualProtect(base + i, 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                                base[i] = 0xB0;     // mov al, 1
+                                                base[i + 1] = 0x01;
+                                                base[i + 2] = 0xC3; // ret
+                                                VirtualProtect(base + i, 8, oldProt, &oldProt);
+                                                ReFixLog("[SourceEngine] Successfully patched IsClientSecure at %p", base + i);
+                                            }
+                                            for (size_t k = i; k < i + 120 && k + 5 < size; ++k) {
+                                                if (base[k] == 0xA0) {
+                                                    uint8_t* pFlag = *(uint8_t**)(base + k + 1);
+                                                    if (pFlag && VirtualProtect(pFlag, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                                        *pFlag = 1;
+                                                        VirtualProtect(pFlag, 1, oldProt, &oldProt);
+                                                        ReFixLog("[SourceEngine] Initialized bSecure flag at %p to 1", pFlag);
+                                                    }
                                                     break;
                                                 }
                                             }
-                                            if (match) {
-                                                uint8_t* pFunc = base + i - 9;
-                                                DWORD oldProt;
-                                                if (VirtualProtect(pFunc, 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                                                    pFunc[0] = 0xB0; // mov al, 1
-                                                    pFunc[1] = 0x01;
-                                                    pFunc[2] = 0xC3; // ret
-                                                    VirtualProtect(pFunc, 8, oldProt, &oldProt);
-                                                    ReFixLog("[SourceEngine] Successfully patched engine.dll! IsClientSecure patched at %p", pFunc);
-                                                }
-
-                                                for (size_t k = i; k < i + 70 && k + 6 < size; ++k) {
-                                                    if (base[k] == 0x8A && base[k + 1] == 0x05) {
-                                                        uint8_t** ppFlag = (uint8_t**)(base + k + 2);
-                                                        uint8_t* pFlag = *ppFlag;
-                                                        if (pFlag && VirtualProtect(pFlag, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                                                            *pFlag = 1;
-                                                            VirtualProtect(pFlag, 1, oldProt, &oldProt);
-                                                            ReFixLog("[SourceEngine] Initialized engine secure flag at %p to 1", pFlag);
-                                                        }
-                                                        break;
-                                                    }
-                                                }
-                                                enginePatched = true;
-                                                break;
-                                            }
+                                            enginePatched = true;
+                                            break;
                                         }
                                     }
                                 }
@@ -8658,13 +8692,32 @@ namespace UnrealSteamEmu {
                 if (!clientPatched) {
                     HMODULE hClient = GetModuleHandleW(L"client_panorama.dll");
                     if (hClient) {
+                        uint8_t* base = (uint8_t*)hClient;
                         PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hClient;
                         if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
-                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((uint8_t*)hClient + dos->e_lfanew);
+                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
                             if (nt->Signature == IMAGE_NT_SIGNATURE) {
-                                uint8_t* base = (uint8_t*)hClient;
                                 size_t size = nt->OptionalHeader.SizeOfImage;
 
+                                // 1. Patch OnClientInsecureBlocked dialog suppression
+                                const uint8_t insecBlockedSig[] = {
+                                    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x81, 0xec, 0x1c, 0x03, 0x00, 0x00, 0x53, 0x8b, 0x5d, 0x08
+                                };
+                                for (size_t i = 0; i + sizeof(insecBlockedSig) < size; ++i) {
+                                    if (memcmp(base + i, insecBlockedSig, sizeof(insecBlockedSig)) == 0) {
+                                        DWORD oldProt;
+                                        if (VirtualProtect(base + i, 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                            base[i] = 0xC2;     // ret 4
+                                            base[i + 1] = 0x04;
+                                            base[i + 2] = 0x00;
+                                            VirtualProtect(base + i, 8, oldProt, &oldProt);
+                                            ReFixLog("[SourceEngine] Successfully patched OnClientInsecureBlocked at %p with ret 4", base + i);
+                                        }
+                                        break;
+                                    }
+                                }
+
+                                // 2. Patch IsInventoryValid and IsConnectedToGC
                                 const uint8_t pat[] = { 0x8A, 0x41, 0x68, 0xC3 }; // mov al, [ecx + 0x68]; ret
                                 for (size_t i = 0; i + 32 < size; ++i) {
                                     if (memcmp(base + i, pat, 4) == 0) {
@@ -8687,6 +8740,7 @@ namespace UnrealSteamEmu {
                                     }
                                 }
 
+                                // 3. Patch GetLicenseType
                                 const uint8_t licPat[] = { 0x53, 0xE8, 0xCA, 0xF0, 0xFF, 0xFF, 0x8B, 0xD8, 0xF6, 0xC3, 0x02 };
                                 for (size_t i = 0; i + 16 < size; ++i) {
                                     if (memcmp(base + i, licPat, sizeof(licPat)) == 0) {
@@ -8807,6 +8861,11 @@ namespace UnrealSteamEmu {
 
                 g_steamFriendsInstance.SendPresenceRequestSync(ev.peerId, pInfo->endpoint);
                 g_steamFriendsInstance.SendPresenceFullSync(ev.peerId, pInfo->endpoint);
+
+                PersonaStateChange_t change = {};
+                change.m_ulSteamID = sid;
+                change.m_nChangeFlags = k_EPersonaChangeName | k_EPersonaChangeStatus | k_EPersonaChangeRelationshipChanged;
+                PostCallback(PersonaStateChange_t::k_iCallback, &change, sizeof(change));
 
                 // Check for persona name collision across LAN
                 if (_stricmp(pInfo->displayName.c_str(), g_personaName.c_str()) == 0 && g_localSteamID > sid) {
@@ -9298,9 +9357,14 @@ namespace UnrealSteamEmu {
         g_contextCounter.fetch_add(1);
         PatchEngineSecurityChecks();
 
-        // Queue SteamServersConnected_t on startup (outside state lock)
+        // Queue SteamServersConnected_t and PersonaStateChange_t on startup
         SteamServersConnected_t conn = {};
         PostCallback(SteamServersConnected_t::k_iCallback, &conn, sizeof(conn), 0.01);
+
+        PersonaStateChange_t localChange = {};
+        localChange.m_ulSteamID = g_localSteamID;
+        localChange.m_nChangeFlags = k_EPersonaChangeName | k_EPersonaChangeStatus;
+        PostCallback(PersonaStateChange_t::k_iCallback, &localChange, sizeof(localChange), 0.05);
 
         // Since SDK 1.61 Steam delivers the local user's stats by itself after init (RequestCurrentStats is gone),
         // and Unreal 5.x waits for this UserStatsReceived_t before it treats stats/achievements as ready

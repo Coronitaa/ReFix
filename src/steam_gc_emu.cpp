@@ -196,16 +196,40 @@ public:
         EnsureLoaded();
         std::lock_guard<std::mutex> lock(m_mutex);
 
-        // Find crate
+        // Find crate by item ID or defIndex
         auto itCrate = std::find_if(m_items.begin(), m_items.end(), [crateId](const EconItem& it) {
-            return it.id == crateId;
+            return it.id == crateId || (crateId != 0 && it.defIndex == (uint32_t)crateId);
         });
+        if (itCrate == m_items.end()) {
+            // Fallback: pick any crate in inventory
+            for (auto it = m_items.begin(); it != m_items.end(); ++it) {
+                for (size_t c = 0; c < ReFixGC::CSGO::kNumCases; ++c) {
+                    if (it->defIndex == ReFixGC::CSGO::kCases[c]) {
+                        itCrate = it;
+                        break;
+                    }
+                }
+                if (itCrate != m_items.end()) break;
+            }
+        }
         if (itCrate == m_items.end()) return 0;
 
-        // Find key
+        // Find key by item ID or defIndex
         auto itKey = std::find_if(m_items.begin(), m_items.end(), [keyId](const EconItem& it) {
-            return it.id == keyId;
+            return it.id == keyId || (keyId != 0 && it.defIndex == (uint32_t)keyId);
         });
+        if (itKey == m_items.end()) {
+            // Fallback: pick any key in inventory
+            for (auto it = m_items.begin(); it != m_items.end(); ++it) {
+                for (size_t k = 0; k < ReFixGC::CSGO::kNumKeys; ++k) {
+                    if (it->defIndex == ReFixGC::CSGO::kKeys[k]) {
+                        itKey = it;
+                        break;
+                    }
+                }
+                if (itKey != m_items.end()) break;
+            }
+        }
         if (itKey != m_items.end()) {
             if (itKey->quantity > 1) itKey->quantity--;
             else m_items.erase(itKey);
@@ -234,8 +258,8 @@ public:
         m_items.push_back(unboxed);
 
         SaveLocked();
-        ReFixLog("[GC] CSGOInventory: Unlocked crate %llu! Awarded item %llu (def %u)",
-                 (unsigned long long)crateId, (unsigned long long)unboxed.id, unboxed.defIndex);
+        ReFixLog("[GC] CSGOInventory: Unlocked crate! Awarded item %llu (def %u, rarity %u)",
+                 (unsigned long long)unboxed.id, unboxed.defIndex, unboxed.rarity);
         return unboxed.id;
     }
 
@@ -389,15 +413,20 @@ public:
     EGCResults SendMessage_(uint32 unMsgType, const void* pubData, uint32 cubData) override {
         const uint32_t msg = unMsgType & ~kProtoFlag;
         const bool proto = (unMsgType & kProtoFlag) != 0;
-        if (m_logged++ < 16)
+        if (m_logged++ < 32)
             ReFixLog("[GC] %s sent %u%s (%u bytes)", Role(), msg, proto ? " (proto)" : "", cubData);
-        if (!proto || !pubData || cubData < kProtoHeaderSize) return k_EGCResultOK;
+        if (!pubData || cubData < 4) return k_EGCResultOK;
 
         const uint8_t* bytes = (const uint8_t*)pubData;
         uint32_t headerLen = 0;
-        memcpy(&headerLen, bytes + 4, sizeof(headerLen));
-        const uint8_t* body = bytes + kProtoHeaderSize + headerLen;
-        size_t bodySize = (kProtoHeaderSize + headerLen <= cubData) ? (cubData - (kProtoHeaderSize + headerLen)) : 0;
+        const uint8_t* body = nullptr;
+        size_t bodySize = 0;
+
+        if (proto && cubData >= kProtoHeaderSize) {
+            memcpy(&headerLen, bytes + 4, sizeof(headerLen));
+            body = bytes + kProtoHeaderSize + headerLen;
+            bodySize = (kProtoHeaderSize + headerLen <= cubData) ? (cubData - (kProtoHeaderSize + headerLen)) : 0;
+        }
 
         if (!m_gameServer && msg == kMsgClientHello) {
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
@@ -440,68 +469,66 @@ public:
             PutVarintField(resp, 19, 1);    // player_xp_bonus_flags = 1
             Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, resp);
         } else if (msg == kMsgGCCStrike15_v2_MatchmakingStart) {
-            // Matchmaking start -> P2P / LAN Listen server reservation (L4D2 style)
-            ReFixLog("[GC] kMsgGCCStrike15_v2_MatchmakingStart: Directing to P2P Listen Server reservation");
-            HMODULE hEngine = GetModuleHandleW(L"engine.dll");
-            if (hEngine) {
-                typedef void* (*CreateInterfaceFn)(const char* pName, int* pReturnCode);
-                CreateInterfaceFn fnCreateInterface = (CreateInterfaceFn)GetProcAddress(hEngine, "CreateInterface");
-                if (fnCreateInterface) {
-                    void* pEngineClient = fnCreateInterface("VEngineClient014", nullptr);
-                    if (pEngineClient) {
-                        typedef void(__thiscall* ExecuteClientCmdFn)(void*, const char*);
-                        ExecuteClientCmdFn ExecCmd = (*(ExecuteClientCmdFn**)pEngineClient)[108];
-                        if (ExecCmd) {
-                            ExecCmd(pEngineClient, "game_type 0; game_mode 1; sv_lan 1; map de_dust2");
-                        }
+            ReFixLog("[GC] kMsgGCCStrike15_v2_MatchmakingStart: Stopping queue cleanly and opening ReFix Host Match Menu");
+            // Reply with 9104 (MatchmakingGC2ClientUpdate): matchmaking = 0 (stops queue cleanly with no error modal)
+            std::vector<uint8_t> updateResp;
+            PutVarintField(updateResp, 1, 0); // matchmaking status = 0 (idle)
+            Reply(9104, updateResp);
+
+            // Open ReFix Host Match modal so the player can customize mode, map, bots, etc.
+            ReFixOverlay::OpenMatchmakerModal();
+        } else if (msg == 9194) { // ClientGCRankUpdate
+            uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+            std::vector<uint8_t> ranking;
+            PutVarintField(ranking, 1, accountId);
+            PutVarintField(ranking, 2, 18);  // Global Elite
+            PutVarintField(ranking, 3, 150); // 150 wins
+            PutVarintField(ranking, 6, 6);   // 5v5 Competitive
+            std::vector<uint8_t> rankResp;
+            PutBytesField(rankResp, 1, ranking);
+            Reply(9194, rankResp);
+        } else if (msg == kMsgGCUnlockCrate) {
+            // Unlock container (CS:GO sends non-proto 34-byte struct or proto)
+            uint64_t crateId = 0, keyId = 0;
+            if (!proto && cubData >= 34) {
+                // Non-proto struct format: 18-byte GC header + 8 bytes crateId + 8 bytes keyId
+                memcpy(&crateId, bytes + 18, sizeof(crateId));
+                memcpy(&keyId, bytes + 26, sizeof(keyId));
+                ReFixLog("[GC] UnlockCrate (non-proto): crateId=%llu keyId=%llu",
+                         (unsigned long long)crateId, (unsigned long long)keyId);
+            } else if (proto && body) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0, val = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (w == 0) {
+                        if (!GetVarint(p, end, val)) break;
+                        if (f == 1) crateId = val;
+                        else if (f == 2) keyId = val;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
                     }
                 }
             }
-            uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
-            std::vector<uint8_t> srvReserve;
-            PutVarintField(srvReserve, 1, accountId); // account_ids
-            PutVarintField(srvReserve, 2, 0);         // game_type
-            PutFixed64Field(srvReserve, 3, 1001ULL);  // match_id
-            PutVarintField(srvReserve, 4, 13800);     // server_version
 
-            std::vector<uint8_t> reserve;
-            PutFixed64Field(reserve, 1, UnrealSteamEmu::GetLocalSteamID()); // serverid
-            PutFixed32Field(reserve, 2, 0x0100007F);                        // direct_udp_ip (127.0.0.1)
-            PutVarintField(reserve, 3, 27015);                              // direct_udp_port
-            PutFixed64Field(reserve, 4, 1ULL);                              // reservationid
-            PutBytesField(reserve, 5, srvReserve);                          // reservation
-            PutStringField(reserve, 6, "de_dust2");                         // map
-            PutStringField(reserve, 7, "127.0.0.1:27015");                   // server_address
-            Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientReserve, reserve);
-        } else if (msg == kMsgGCUnlockCrate) {
-            // Unlock container
-            uint64_t crateId = 0, keyId = 0;
-            const uint8_t* p = body;
-            const uint8_t* end = body + bodySize;
-            while (p < end) {
-                uint64_t tag = 0, val = 0;
-                if (!GetVarint(p, end, tag)) break;
-                uint32_t f = (uint32_t)(tag >> 3);
-                uint32_t w = tag & 7;
-                if (w == 0) {
-                    if (!GetVarint(p, end, val)) break;
-                    if (f == 1) crateId = val;
-                    else if (f == 2) keyId = val;
-                } else if (w == 1) { if (end - p < 8) break; p += 8; }
-                else if (w == 5) { if (end - p < 4) break; p += 4; }
-                else if (w == 2) {
-                    if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
-                    p += val;
-                }
-            }
             uint64_t awardedId = CSGOInventoryManager::Get().UnlockCrate(crateId, keyId);
+
+            // 1. Resend full SOCache welcome FIRST so Panorama knows the item exists before notification
+            Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(1, UnrealSteamEmu::GetLocalSteamID()));
+
+            // 2. Dispatch UnlockCrateResponse
             std::vector<uint8_t> unlockResp;
             PutVarintField(unlockResp, 1, awardedId != 0 ? 1 : 2); // 1 = k_EResultOK
             if (awardedId != 0) PutVarintField(unlockResp, 2, awardedId);
             Reply(kMsgGCUnlockCrateResponse, unlockResp);
 
-            // Panorama popup_capability_decodable.js listens for PanoramaComponent_Inventory_ItemCustomizationNotification!
-            // Dispatch CMsgGCItemCustomizationNotification (EMsg 1090):
+            // 3. Dispatch CMsgGCItemCustomizationNotification (EMsg 1090):
             // field 1: item_id (awardedId), field 2: request (1007 = UnlockCrate)
             if (awardedId != 0) {
                 std::vector<uint8_t> notif;
@@ -509,9 +536,6 @@ public:
                 PutVarintField(notif, 2, 1007);
                 Reply(1090, notif);
             }
-
-            // Resend full SOCache welcome so the new item and updated counts show up immediately
-            Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(1, UnrealSteamEmu::GetLocalSteamID()));
         } else if (msg == kMsgGCStorePurchaseInit || msg == kMsgGCStorePurchaseInitAlt) {
             // Purchase keys or items -> Intercept with ReFix Overlay Purchase Listener!
             uint32_t defIndex = 0, count = 1;

@@ -352,8 +352,18 @@ void ActivateOverlayToUser(const char* dialog, uint64_t steamId) {
 
 void ActivateWebPage(const char* url) {
     if (!IsEnabled() || !url) return;
-    if (strstr(url, "market") || strstr(url, "community")) {
+    if (strstr(url, "market") || strstr(url, "community") || strstr(url, "give")) {
         OpenMarketGiveMenu();
+        return;
+    }
+    if (strstr(url, "54029") || strstr(url, "prime") || strstr(url, "sub/")) {
+        PromptPurchase(730, 54029, "CS:GO Prime Status Upgrade",
+            "Mejora tu cuenta a Estado Prime. Emparejamiento exclusivo, obtencion de cajas semanales y medallas de servicio.",
+            false, [](bool approved) {
+                if (approved) {
+                    ReFixLog("[Overlay] Prime Status Upgrade approved by player!");
+                }
+            });
         return;
     }
     const std::wstring u = FromUtf8(url);

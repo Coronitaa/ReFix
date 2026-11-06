@@ -528,6 +528,38 @@ public:
         return false;
     }
 
+    bool SetJoinable(std::string_view lobbyId, bool joinable) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it != m_lobbies.end()) {
+            it->second.joinable = joinable;
+            it->second.revision++;
+            LanEvent ev;
+            ev.type = LanEvent::Type::LobbyUpdated;
+            ev.lobbyId = std::string(lobbyId);
+            m_callbacks.PostEvent(ev);
+            BroadcastLobbyState(it->second);
+            return true;
+        }
+        return false;
+    }
+
+    bool SetPermission(std::string_view lobbyId, LobbyPermissionLevel permission) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it != m_lobbies.end()) {
+            it->second.permission = permission;
+            it->second.revision++;
+            LanEvent ev;
+            ev.type = LanEvent::Type::LobbyUpdated;
+            ev.lobbyId = std::string(lobbyId);
+            m_callbacks.PostEvent(ev);
+            BroadcastLobbyState(it->second);
+            return true;
+        }
+        return false;
+    }
+
     bool AddRemoteMember(std::string_view lobbyId, const PeerId& memberPid, const std::string& name, const LanEndpoint& ep) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_lobbies.find(std::string(lobbyId));
@@ -1207,13 +1239,8 @@ public:
             }
 
             if (!lobOpt->joinable) {
-                ByteWriter resp;
-                resp.WriteString(Scope());
-                resp.WritePeerId(m_identity.GetLocalPeerId());
-                resp.WriteString(lobbyId);
-                resp.WriteU8(2); // NotJoinable
-                m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
-                return;
+                // Auto-enable joinable on LAN so players are never rejected with 'NotJoinable'
+                m_lobby.SetJoinable(lobbyId, true);
             }
 
             if (lobOpt->AvailableSlots() == 0) {

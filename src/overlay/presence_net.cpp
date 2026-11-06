@@ -15,6 +15,7 @@
 #include <set>
 
 #include "../steam_p2p_hook.h"
+#include "../lan_core/refix_lan_core.h"
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -409,13 +410,51 @@ void SetLocalAvatar(uint32_t key, std::vector<uint8_t> jpeg) {
 std::vector<RemotePlayer> Players() {
     std::lock_guard<std::mutex> lock(g_mu);
     std::vector<RemotePlayer> out;
-    out.reserve(g_players.size());
+    out.reserve(g_players.size() + 8);
     for (const auto& kv : g_players) out.push_back(kv.second);
+
+    // Merge peers discovered by ILanCore
+    auto allPeers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+    for (const auto& p : allPeers) {
+        uint64_t sid = p.externalId.numericId;
+        if (sid == 0) sid = p.peerId.low;
+        if (sid == 0 || sid == g_local.steamId) continue;
+        if (g_players.count(sid) == 0) {
+            RemotePlayer rp;
+            rp.steamId = sid;
+            rp.name = p.displayName;
+            rp.game = "Counter-Strike: Global Offensive";
+            rp.appId = 730;
+            rp.joinable = true;
+            rp.ip = p.endpoint.ipv4;
+            rp.port = p.endpoint.port != 0 ? p.endpoint.port : 47585;
+            rp.lastSeen = GetTickCount64();
+            out.push_back(rp);
+        }
+    }
     return out;
 }
 
 bool SendInvite(uint64_t to, uint64_t lobbyId, const std::string& connect) {
     std::lock_guard<std::mutex> lock(g_mu);
+    if (!g_players.count(to)) {
+        auto pid = refix::lan::ILanCore::Get().Peers().FindBySteamId(to);
+        if (pid) {
+            auto pinfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*pid);
+            if (pinfo) {
+                RemotePlayer rp;
+                rp.steamId = to;
+                rp.name = pinfo->displayName;
+                rp.game = "Counter-Strike: Global Offensive";
+                rp.appId = 730;
+                rp.joinable = true;
+                rp.ip = pinfo->endpoint.ipv4;
+                rp.port = pinfo->endpoint.port != 0 ? pinfo->endpoint.port : 47585;
+                rp.lastSeen = GetTickCount64();
+                g_players[to] = rp;
+            }
+        }
+    }
     if (!g_players.count(to)) return false;
     PendingInvite p;
     p.invite.id = g_nextInviteId++;
