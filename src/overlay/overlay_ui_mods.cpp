@@ -1,3 +1,9 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -11,6 +17,9 @@
 #include "../steam_gc_emu.h"
 #include "../unreal_steam_emu.h"
 #include "presence_net.h"
+#include "csgo_schema.h"
+#include "../lan_core/refix_lan_core.h"
+#include "../steam_lobby_mapping.h"
 #include <algorithm>
 #include <vector>
 #include <string>
@@ -37,17 +46,31 @@ void ExecuteEngineClientCommand(const char* cmd) {
     }
 }
 
-static bool s_showMarketGiveModal = false;
-static bool s_showMatchmakingWidget = false;
 static bool s_showCustomSettings = false;
-
 static int s_selectedMapIdx = 0;
 static int s_selectedModeIdx = 0;
+static int s_cfgSlotsIdx = 0;        // 10, 16, 20, 32
+static int s_cfgMaxRoundsIdx = 0;    // MR12 (24), MR15 (30), 16, 0 (Sin límite)
+static int s_cfgRoundTimeIdx = 1;    // 1.75, 1.92, 2.0, 3.0
 static bool s_cfgBots = true;
-static bool s_cfgFastRounds = false; // MR12 vs MR15
 static bool s_cfgCompMoney = true;   // 16K start money
 static bool s_cfgStatTrak = false;
 static char s_marketSearch[128] = "";
+
+static const char* kSlotsOptions[] = {
+    "10 Jugadores (5v5 Clásico)", "16 Jugadores (8v8 Casual)", "20 Jugadores (10v10 Completo)", "32 Jugadores (16v16 Caos)"
+};
+static const int kSlotsValues[] = { 10, 16, 20, 32 };
+
+static const char* kMaxRoundsOptions[] = {
+    "MR12 (24 Rondas - Actual)", "MR15 (30 Rondas - Clásico)", "16 Rondas", "0 (Sin límite / Ilimitado)"
+};
+static const int kMaxRoundsValues[] = { 24, 30, 16, 0 };
+
+static const char* kRoundTimeOptions[] = {
+    "1:45 min (1.75 Oficial Comp)", "1:55 min (1.92 Oficial Casual)", "2:00 min (2.0 Estándar)", "3:00 min (3.0 Extendido)"
+};
+static const float kRoundTimeValues[] = { 1.75f, 1.92f, 2.0f, 3.0f };
 
 static const char* kOfficialMaps[] = {
     "de_dust2", "de_mirage", "de_inferno", "de_nuke",
@@ -59,163 +82,19 @@ static const char* kGameModes[] = {
     "Competitive (5v5 Clásico)", "Casual (10v10)", "Deathmatch", "Wingman (2v2 Compañero)", "Arms Race"
 };
 
-struct MarketItemEntry {
-    uint32_t defIndex;
-    const char* name;
-    const char* category;
-    uint32_t quality;
-    uint32_t rarity;
-    uint32_t paintKit;
-    float wear;
-    uint32_t seed;
-};
-
-static const MarketItemEntry kCasesMarket[] = {
-    { 4001, "CS:GO Weapon Case 1", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4002, "eSports 2013 Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4003, "Operation Bravo Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4004, "CS:GO Weapon Case 2", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4005, "eSports 2013 Winter Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4009, "Winter Offensive Weapon Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4010, "CS:GO Weapon Case 3", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4011, "Operation Phoenix Weapon Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4017, "Huntsman Weapon Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4018, "Operation Breakout Weapon Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4019, "eSports 2014 Summer Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4029, "Operation Vanguard Weapon Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4061, "Chroma Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4089, "Chroma 2 Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4091, "Falchion Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4138, "Shadow Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4186, "Revolver Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4187, "Operation Wildfire Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4233, "Chroma 3 Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4236, "Gamma Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4281, "Gamma 2 Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4288, "Glove Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4351, "Spectrum Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4352, "Operation Hydra Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4353, "Spectrum 2 Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4403, "Clutch Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4471, "Horizon Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4548, "Danger Zone Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4598, "Prisma Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4620, "CS20 Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4669, "Shattered Web Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4698, "Fracture Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4790, "Snakebite Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4846, "Dreams & Nightmares Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4874, "Recoil Case", "Caja", 4, 0, 0, 0.0f, 0 },
-    { 4901, "Revolution Case", "Caja", 4, 0, 0, 0.0f, 0 },
-};
-
-static const MarketItemEntry kKeysMarket[] = {
-    { 1203, "CS:GO Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1204, "eSports Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1214, "Winter Offensive Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1303, "Operation Phoenix Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1305, "Huntsman Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1309, "Operation Breakout Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1313, "Operation Vanguard Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1322, "Chroma Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1325, "Chroma 2 Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1330, "Falchion Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1333, "Shadow Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1334, "Revolver Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 7000, "Operation Wildfire Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1347, "Chroma 3 Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1350, "Gamma Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1351, "Gamma 2 Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1356, "Glove Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1364, "Spectrum Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1365, "Operation Hydra Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1366, "Spectrum 2 Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1373, "Clutch Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1374, "Horizon Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1375, "Danger Zone Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1383, "Prisma Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1384, "CS20 Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1385, "Shattered Web Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1391, "Fracture Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1398, "Snakebite Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1403, "Dreams & Nightmares Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1405, "Recoil Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-    { 1407, "Revolution Case Key", "Llave", 4, 0, 0, 0.0f, 0 },
-};
-
-static const MarketItemEntry kRiflesMarket[] = {
-    { 9,   "AWP | Dragon Lore", "Rifle", 4, 6, 344, 0.001f, 420 },
-    { 9,   "AWP | Asiimov", "Rifle", 4, 6, 279, 0.18f, 137 },
-    { 9,   "AWP | Hyper Beast", "Rifle", 4, 6, 475, 0.02f, 77 },
-    { 9,   "AWP | Medusa", "Rifle", 4, 6, 446, 0.005f, 999 },
-    { 7,   "AK-47 | Fire Serpent", "Rifle", 4, 6, 180, 0.06f, 321 },
-    { 7,   "AK-47 | Asiimov", "Rifle", 4, 6, 801, 0.05f, 555 },
-    { 7,   "AK-47 | Bloodsport", "Rifle", 4, 6, 639, 0.01f, 888 },
-    { 7,   "AK-47 | Vulcan", "Rifle", 4, 6, 302, 0.02f, 101 },
-    { 7,   "AK-47 | Redline", "Rifle", 4, 5, 282, 0.15f, 202 },
-    { 16,  "M4A4 | Howl", "Rifle", 4, 8, 309, 0.03f, 666 },
-    { 16,  "M4A4 | Asiimov", "Rifle", 4, 6, 255, 0.19f, 404 },
-    { 16,  "M4A4 | Neo-Noir", "Rifle", 4, 6, 695, 0.04f, 512 },
-    { 60,  "M4A1-S | Hyper Beast", "Rifle", 4, 6, 430, 0.01f, 333 },
-    { 60,  "M4A1-S | Printstream", "Rifle", 4, 6, 757, 0.02f, 707 },
-    { 60,  "M4A1-S | Decimator", "Rifle", 4, 5, 644, 0.03f, 818 },
-};
-
-static const MarketItemEntry kPistolsMarket[] = {
-    { 1,   "Desert Eagle | Printstream", "Pistola", 4, 6, 757, 0.01f, 101 },
-    { 1,   "Desert Eagle | Code Red", "Pistola", 4, 6, 711, 0.02f, 202 },
-    { 1,   "Desert Eagle | Kumicho Dragon", "Pistola", 4, 5, 527, 0.03f, 303 },
-    { 4,   "Glock-18 | Fade", "Pistola", 4, 6, 38, 0.005f, 415 },
-    { 4,   "Glock-18 | Water Elemental", "Pistola", 4, 5, 353, 0.02f, 505 },
-    { 61,  "USP-S | Kill Confirmed", "Pistola", 4, 6, 504, 0.01f, 606 },
-    { 61,  "USP-S | Neo-Noir", "Pistola", 4, 6, 653, 0.02f, 707 },
-};
-
-static const MarketItemEntry kKnivesMarket[] = {
-    { 507, "Karambit | Doppler (Sapphire)", "Cuchillo", 3, 7, 416, 0.001f, 420 },
-    { 507, "Karambit | Doppler (Ruby)", "Cuchillo", 3, 7, 415, 0.001f, 777 },
-    { 507, "Karambit | Fade", "Cuchillo", 3, 7, 38, 0.005f, 999 },
-    { 515, "Butterfly Knife | Fade", "Cuchillo", 3, 7, 38, 0.005f, 415 },
-    { 515, "Butterfly Knife | Doppler", "Cuchillo", 3, 7, 418, 0.008f, 101 },
-    { 515, "Butterfly Knife | Gamma Doppler (Emerald)", "Cuchillo", 3, 7, 568, 0.001f, 888 },
-    { 508, "M9 Bayonet | Lore", "Cuchillo", 3, 7, 562, 0.01f, 555 },
-    { 508, "M9 Bayonet | Doppler", "Cuchillo", 3, 7, 418, 0.005f, 666 },
-    { 500, "Bayonet | Doppler (Phase 2)", "Cuchillo", 3, 7, 419, 0.01f, 321 },
-    { 523, "Talon Knife | Tiger Tooth", "Cuchillo", 3, 7, 413, 0.02f, 137 },
-    { 525, "Skeleton Knife | Crimson Web", "Cuchillo", 3, 7, 12, 0.06f, 909 },
-    { 516, "Shadow Daggers | Doppler (Ruby)", "Cuchillo", 3, 7, 415, 0.001f, 123 },
-    { 509, "Huntsman Knife | Fade", "Cuchillo", 3, 7, 38, 0.005f, 234 },
-    { 522, "Stiletto Knife | Tiger Tooth", "Cuchillo", 3, 7, 413, 0.01f, 345 },
-};
-
-static const MarketItemEntry kGlovesAndAgents[] = {
-    { 5030, "Sport Gloves | Vice", "Guantes", 3, 7, 10048, 0.06f, 420 },
-    { 5031, "Driver Gloves | King Snake", "Guantes", 3, 7, 10041, 0.07f, 777 },
-    { 5032, "Hand Wraps | Cobalt Skulls", "Guantes", 3, 7, 10053, 0.08f, 101 },
-    { 5033, "Moto Gloves | Spearmint", "Guantes", 3, 7, 10026, 0.09f, 202 },
-    { 5034, "Specialist Gloves | Crimson Kimono", "Guantes", 3, 7, 10033, 0.05f, 303 },
-};
-
-static const MarketItemEntry kStickersMarket[] = {
-    { 6000, "Pegatina | Titan (Holo) | Katowice 2014", "Pegatina", 4, 7, 0, 0.0f, 0 },
-    { 6001, "Pegatina | iBUYPOWER (Holo) | Katowice 2014", "Pegatina", 4, 7, 0, 0.0f, 0 },
-    { 6002, "Pegatina | Howling Dawn", "Pegatina", 4, 8, 0, 0.0f, 0 },
-    { 6003, "Pegatina | Corona (Foil / Crown Foil)", "Pegatina", 4, 6, 0, 0.0f, 0 },
-};
-
 void OpenMarketGiveMenu() {
-    s_showMarketGiveModal = true;
-    App::Get().OpenOverlay(false);
+    App::Get().CloseOverlay();
+    App::Get().OpenMarketHUD();
 }
 
 void OpenHostMatchModal() {
-    s_showMatchmakingWidget = true;
-    App::Get().OpenOverlay(false);
+    App::Get().CloseOverlay();
+    App::Get().OpenMatchmakingHUD();
 }
 
 void OpenMatchmakingToast() {
-    s_showMatchmakingWidget = true;
-    App::Get().OpenOverlay(false);
+    App::Get().CloseOverlay();
+    App::Get().OpenMatchmakingHUD();
 }
 
 static ImU32 GetRarityColor(uint32_t rarity) {
@@ -231,81 +110,137 @@ static ImU32 GetRarityColor(uint32_t rarity) {
     }
 }
 
-static void RenderItemsList(const MarketItemEntry* items, size_t count, int idOffset) {
+static void RenderItemsTable(const std::vector<refix::csgo::MarketItem>& items, int idOffset) {
     std::string filter = s_marketSearch;
     std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
 
-    ImGui::BeginChild("##items_scroll_area", ImVec2(0, ui::S(380)), false);
-    for (size_t i = 0; i < count; ++i) {
-        const auto& itm = items[i];
-        if (!filter.empty()) {
-            std::string n = itm.name;
-            std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-            if (n.find(filter) == std::string::npos) continue;
+    if (ImGui::BeginTable("##market_table", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, ui::S(360)))) {
+        ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Acción", ImGuiTableColumnFlags_WidthFixed, ui::S(130));
+
+        for (size_t i = 0; i < items.size(); ++i) {
+            const auto& itm = items[i];
+            if (!filter.empty()) {
+                std::string n = itm.name;
+                std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+                if (n.find(filter) == std::string::npos) continue;
+            }
+
+            ImGui::TableNextRow(0, ui::S(28));
+            ImGui::TableSetColumnIndex(0);
+            ImGui::PushID((int)i + idOffset);
+
+            // Rarity color bar
+            ImU32 rCol = GetRarityColor(itm.rarity);
+            ImVec2 cp = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(cp.x, cp.y + ui::S(2)),
+                ImVec2(cp.x + ui::S(4), cp.y + ui::S(24)),
+                rCol, ui::S(2));
+
+            ImGui::Dummy(ImVec2(ui::S(10), 0));
+            ImGui::SameLine();
+            ImGui::TextUnformatted(itm.name.c_str());
+            ImGui::SameLine();
+            char catBuf[64];
+            snprintf(catBuf, sizeof(catBuf), "[%s]", itm.category.c_str());
+            ui::TextColored(ui::color::Muted, catBuf);
+
+            ImGui::TableSetColumnIndex(1);
+            uint32_t finalQual = (s_cfgStatTrak && itm.paintKit > 0) ? 9 : itm.quality;
+            const char* btnLabel = (finalQual == 9) ? "+ StatTrak" : "Añadir";
+            if (ui::Clicked(ui::PrimaryButton(btnLabel, ImVec2(ui::S(120), ui::S(24))))) {
+                CSGO_GrantItemToLocal(itm.defIndex, 1, finalQual, itm.rarity, itm.paintKit, itm.wear, itm.seed);
+                App::Get().ShowInfo("Inventario Actualizado", std::string("Se ha otorgado ") + itm.name);
+            }
+
+            ImGui::PopID();
         }
-
-        ImGui::PushID((int)i + idOffset);
-
-        // Color badge for rarity
-        ImU32 rCol = GetRarityColor(itm.rarity);
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            ImGui::GetCursorScreenPos(),
-            ImVec2(ImGui::GetCursorScreenPos().x + ui::S(4), ImGui::GetCursorScreenPos().y + ui::S(22)),
-            rCol, ui::S(2));
-
-        ImGui::Dummy(ImVec2(ui::S(8), 0));
-        ImGui::SameLine();
-        ImGui::TextUnformatted(itm.name);
-
-        ImGui::SameLine();
-        char catBuf[64];
-        snprintf(catBuf, sizeof(catBuf), "[%s]", itm.category);
-        ui::TextColored(ui::color::Muted, catBuf);
-
-        ImGui::SameLine(ui::S(590));
-        uint32_t finalQual = (s_cfgStatTrak && itm.paintKit > 0) ? 9 : itm.quality;
-        const char* btnLabel = (finalQual == 9) ? "+ StatTrak##give" : "Añadir##give";
-        if (ui::Clicked(ui::PrimaryButton(btnLabel, ImVec2(ui::S(140), ui::S(24))))) {
-            CSGO_GrantItemToLocal(itm.defIndex, 1, finalQual, itm.rarity, itm.paintKit, itm.wear, itm.seed);
-            App::Get().ShowInfo("Inventario Actualizado", std::string("Se ha otorgado ") + itm.name);
-        }
-
-        ImGui::Separator();
-        ImGui::PopID();
+        ImGui::EndTable();
     }
-    ImGui::EndChild();
+}
+
+static void RenderCasesOrKeysTable(const std::vector<refix::csgo::MarketItem>& items, bool isCase, int idOffset) {
+    std::string filter = s_marketSearch;
+    std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
+
+    if (ImGui::BeginTable("##cases_keys_table", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, ui::S(360)))) {
+        ImGui::TableSetupColumn("Contenedor / Llave", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Opciones de Cantidad", ImGuiTableColumnFlags_WidthFixed, ui::S(185));
+
+        for (size_t i = 0; i < items.size(); ++i) {
+            const auto& itm = items[i];
+            if (!filter.empty()) {
+                std::string n = itm.name;
+                std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+                if (n.find(filter) == std::string::npos) continue;
+            }
+
+            ImGui::TableNextRow(0, ui::S(28));
+            ImGui::TableSetColumnIndex(0);
+            ImGui::PushID((int)i + idOffset);
+
+            ImGui::Dummy(ImVec2(ui::S(4), 0));
+            ImGui::SameLine();
+            ImGui::TextUnformatted(itm.name.c_str());
+
+            ImGui::TableSetColumnIndex(1);
+            if (ui::Clicked(ui::SecondaryButton("+1##qty", ImVec2(ui::S(52), ui::S(24))))) {
+                CSGO_GrantItemToLocal(itm.defIndex, 1, 4, 0, 0, 0.0f, 0);
+                App::Get().ShowInfo("Inventario Actualizado", std::string("Se ha añadido 1x ") + itm.name);
+            }
+            ImGui::SameLine();
+            if (ui::Clicked(ui::SecondaryButton("+5##qty", ImVec2(ui::S(52), ui::S(24))))) {
+                CSGO_GrantItemToLocal(itm.defIndex, 5, 4, 0, 0, 0.0f, 0);
+                App::Get().ShowInfo("Inventario Actualizado", std::string("Se han añadido 5x ") + itm.name);
+            }
+            ImGui::SameLine();
+            if (ui::Clicked(ui::PrimaryButton("+20##qty", ImVec2(ui::S(56), ui::S(24))))) {
+                CSGO_GrantItemToLocal(itm.defIndex, 20, 4, 0, 0, 0.0f, 0);
+                App::Get().ShowInfo("Inventario Actualizado", std::string("Se han añadido 20x ") + itm.name);
+            }
+
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
 }
 
 void DrawMarketGiveModal() {
-    if (!s_showMarketGiveModal) return;
+    if (!App::Get().IsMarketHUDOpen()) return;
+
+    refix::csgo::SchemaManager::Get().Load();
 
     ImVec2 vp = ImGui::GetIO().DisplaySize;
-    float winW = (std::min)(ui::S(840), vp.x - ui::S(40));
-    float winH = (std::min)(ui::S(580), vp.y - ui::S(40));
+    float winW = (std::min)(ui::S(860), vp.x - ui::S(40));
+    float winH = (std::min)(ui::S(590), vp.y - ui::S(40));
     ImGui::SetNextWindowPos(ImVec2((vp.x - winW) * 0.5f, (vp.y - winH) * 0.5f), ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_Appearing);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, ui::S(12));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(20), ui::S(18)));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ui::color::PanelRaised);
+    ImGui::PushStyleColor(ImGuiCol_Border, ui::color::Border);
 
-    if (ImGui::Begin("Mercado ReFix - Gestor de Inventario Local##refix_market", &s_showMarketGiveModal,
+    bool isOpen = true;
+    if (ImGui::Begin("Mercado ReFix - Gestor de Inventario Local##refix_market", &isOpen,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar)) {
 
-        // Header Title & Close Button
+        // Header Title
         ImGui::PushFont(ui::F().heading);
         ui::TextColored(ui::color::Accent, ui::icon::Store);
         ImGui::SameLine();
         ImGui::TextUnformatted(i18n::T("Community Market & Inventory Manager", "Mercado ReFix y Gestor de Inventario"));
         ImGui::PopFont();
 
-        ImGui::SameLine(winW - ui::S(56));
-        if (ui::Clicked(ui::NavButton("X##close_market_x", ImVec2(ui::S(28), ui::S(26))))) {
-            s_showMarketGiveModal = false;
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ui::S(36));
+        if (ui::IconButton("close_market_x", ui::icon::Close, i18n::T("Close", "Cerrar"), ui::color::Muted, true, ui::S(26))) {
+            App::Get().CloseMarketHUD();
         }
 
         ImGui::PushFont(ui::F().caption);
-        ui::TextColored(ui::color::Muted, i18n::T("Add official cases, keys, knives, and custom skins directly to your profile inventory.",
-                                                  "Añade cajas, llaves, cuchillos y skins oficiales directamente a tu inventario."));
+        ui::TextColored(ui::color::Muted, i18n::T("Add official cases, keys, knives, and custom skins dynamically loaded from the game.",
+                                                  "Añade cajas, llaves, cuchillos y skins oficiales leídos dinámicamente de esta versión del juego."));
         ImGui::PopFont();
 
         ImGui::Dummy(ImVec2(0, ui::S(4)));
@@ -313,114 +248,86 @@ void DrawMarketGiveModal() {
         ImGui::Dummy(ImVec2(0, ui::S(4)));
 
         // Search Bar & StatTrak Toggle
-        ImGui::SetNextItemWidth(ui::S(460));
+        ImGui::SetNextItemWidth(ui::S(440));
         ImGui::InputTextWithHint("##market_search", "Buscar arma, cuchillo, caja o pegatina...", s_marketSearch, sizeof(s_marketSearch));
 
-        ImGui::SameLine(ui::S(510));
+        ImGui::SameLine();
         ImGui::Checkbox("StatTrak (Contador de Bajas)", &s_cfgStatTrak);
 
         ImGui::Dummy(ImVec2(0, ui::S(4)));
 
+        auto& schema = refix::csgo::SchemaManager::Get();
+
         if (ImGui::BeginTabBar("##market_tabs")) {
             // TAB 1: WEAPON CASES
-            if (ImGui::BeginTabItem(i18n::T("Weapon Cases (36)", "Cajas de Armas (36)"))) {
-                std::string filter = s_marketSearch;
-                std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
-
-                ImGui::BeginChild("##cases_list", ImVec2(0, ui::S(360)), false);
-                for (size_t i = 0; i < sizeof(kCasesMarket) / sizeof(kCasesMarket[0]); ++i) {
-                    if (!filter.empty()) {
-                        std::string n = kCasesMarket[i].name;
-                        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-                        if (n.find(filter) == std::string::npos) continue;
-                    }
-                    ImGui::PushID((int)i);
-                    ImGui::Text("%s", kCasesMarket[i].name);
-                    ImGui::SameLine(ui::S(420));
-                    if (ui::Clicked(ui::NavButton("+1##case", ImVec2(ui::S(55), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 1, 4, 0, 0, 0.0f, 0);
-                        App::Get().ShowInfo("Caja Añadida", std::string("Se ha añadido 1x ") + kCasesMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::NavButton("+5##case", ImVec2(ui::S(55), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 5, 4, 0, 0, 0.0f, 0);
-                        App::Get().ShowInfo("Cajas Añadidas", std::string("Se han añadido 5x ") + kCasesMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::PrimaryButton("+20##case", ImVec2(ui::S(60), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kCasesMarket[i].defIndex, 20, 4, 0, 0, 0.0f, 0);
-                        App::Get().ShowInfo("Cajas Añadidas", std::string("Se han añadido 20x ") + kCasesMarket[i].name);
-                    }
-                    ImGui::Separator();
-                    ImGui::PopID();
-                }
-                ImGui::EndChild();
+            auto cases = schema.GetMarketItemsByCategory("Caja");
+            char caseTabTitle[64];
+            snprintf(caseTabTitle, sizeof(caseTabTitle), "%s (%zu)", i18n::T("Weapon Cases", "Cajas de Armas"), cases.size());
+            if (ImGui::BeginTabItem(caseTabTitle)) {
+                RenderCasesOrKeysTable(cases, true, 100);
                 ImGui::EndTabItem();
             }
 
             // TAB 2: CASE KEYS
-            if (ImGui::BeginTabItem(i18n::T("Case Keys (36)", "Llaves de Cajas (36)"))) {
-                std::string filter = s_marketSearch;
-                std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
-
-                ImGui::BeginChild("##keys_list", ImVec2(0, ui::S(360)), false);
-                for (size_t i = 0; i < sizeof(kKeysMarket) / sizeof(kKeysMarket[0]); ++i) {
-                    if (!filter.empty()) {
-                        std::string n = kKeysMarket[i].name;
-                        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-                        if (n.find(filter) == std::string::npos) continue;
-                    }
-                    ImGui::PushID((int)i + 1000);
-                    ImGui::Text("%s", kKeysMarket[i].name);
-                    ImGui::SameLine(ui::S(420));
-                    if (ui::Clicked(ui::NavButton("+1##key", ImVec2(ui::S(55), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 1, 4, 0, 0, 0.0f, 0);
-                        App::Get().ShowInfo("Llave Añadida", std::string("Se ha añadido 1x ") + kKeysMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::NavButton("+5##key", ImVec2(ui::S(55), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 5, 4, 0, 0, 0.0f, 0);
-                        App::Get().ShowInfo("Llaves Añadidas", std::string("Se han añadido 5x ") + kKeysMarket[i].name);
-                    }
-                    ImGui::SameLine();
-                    if (ui::Clicked(ui::PrimaryButton("+20##key", ImVec2(ui::S(60), ui::S(22))))) {
-                        CSGO_GrantItemToLocal(kKeysMarket[i].defIndex, 20, 4, 0, 0, 0.0f, 0);
-                        App::Get().ShowInfo("Llaves Añadidas", std::string("Se han añadido 20x ") + kKeysMarket[i].name);
-                    }
-                    ImGui::Separator();
-                    ImGui::PopID();
-                }
-                ImGui::EndChild();
+            auto keys = schema.GetMarketItemsByCategory("Llave");
+            char keyTabTitle[64];
+            snprintf(keyTabTitle, sizeof(keyTabTitle), "%s (%zu)", i18n::T("Case Keys", "Llaves de Cajas"), keys.size());
+            if (ImGui::BeginTabItem(keyTabTitle)) {
+                RenderCasesOrKeysTable(keys, false, 500);
                 ImGui::EndTabItem();
             }
 
-            // TAB 3: RIFLES
-            if (ImGui::BeginTabItem(i18n::T("Rifles & Snipers", "Rifles & Snipers"))) {
-                RenderItemsList(kRiflesMarket, sizeof(kRiflesMarket) / sizeof(kRiflesMarket[0]), 2000);
+            // TAB 3: RIFLES & SNIPERS
+            auto rifles = schema.GetMarketItemsByCategory("Rifle");
+            char rifleTabTitle[64];
+            snprintf(rifleTabTitle, sizeof(rifleTabTitle), "%s (%zu)", i18n::T("Rifles & Snipers", "Rifles & Snipers"), rifles.size());
+            if (ImGui::BeginTabItem(rifleTabTitle)) {
+                RenderItemsTable(rifles, 1000);
                 ImGui::EndTabItem();
             }
 
             // TAB 4: PISTOLS
-            if (ImGui::BeginTabItem(i18n::T("Pistols", "Pistolas"))) {
-                RenderItemsList(kPistolsMarket, sizeof(kPistolsMarket) / sizeof(kPistolsMarket[0]), 3000);
+            auto pistols = schema.GetMarketItemsByCategory("Pistola");
+            char pistolTabTitle[64];
+            snprintf(pistolTabTitle, sizeof(pistolTabTitle), "%s (%zu)", i18n::T("Pistols", "Pistolas"), pistols.size());
+            if (ImGui::BeginTabItem(pistolTabTitle)) {
+                RenderItemsTable(pistols, 2000);
                 ImGui::EndTabItem();
             }
 
             // TAB 5: KNIVES
-            if (ImGui::BeginTabItem(i18n::T("Knives", "Cuchillos"))) {
-                RenderItemsList(kKnivesMarket, sizeof(kKnivesMarket) / sizeof(kKnivesMarket[0]), 4000);
+            auto knives = schema.GetMarketItemsByCategory("Cuchillo");
+            char knifeTabTitle[64];
+            snprintf(knifeTabTitle, sizeof(knifeTabTitle), "%s (%zu)", i18n::T("Knives", "Cuchillos"), knives.size());
+            if (ImGui::BeginTabItem(knifeTabTitle)) {
+                RenderItemsTable(knives, 3000);
                 ImGui::EndTabItem();
             }
 
-            // TAB 6: GLOVES & AGENTS
-            if (ImGui::BeginTabItem(i18n::T("Gloves & Agents", "Guantes & Agentes"))) {
-                RenderItemsList(kGlovesAndAgents, sizeof(kGlovesAndAgents) / sizeof(kGlovesAndAgents[0]), 5000);
+            // TAB 6: GLOVES
+            auto gloves = schema.GetMarketItemsByCategory("Guantes");
+            char gloveTabTitle[64];
+            snprintf(gloveTabTitle, sizeof(gloveTabTitle), "%s (%zu)", i18n::T("Gloves", "Guantes"), gloves.size());
+            if (ImGui::BeginTabItem(gloveTabTitle)) {
+                RenderItemsTable(gloves, 4000);
+                ImGui::EndTabItem();
+            }
+
+            // TAB 7: AGENTS
+            auto agents = schema.GetMarketItemsByCategory("Agentes");
+            char agentTabTitle[64];
+            snprintf(agentTabTitle, sizeof(agentTabTitle), "%s (%zu)", i18n::T("Agents", "Agentes"), agents.size());
+            if (ImGui::BeginTabItem(agentTabTitle)) {
+                RenderItemsTable(agents, 4500);
                 ImGui::EndTabItem();
             }
 
             // TAB 7: STICKERS
-            if (ImGui::BeginTabItem(i18n::T("Stickers", "Pegatinas"))) {
-                RenderItemsList(kStickersMarket, sizeof(kStickersMarket) / sizeof(kStickersMarket[0]), 6000);
+            auto stickers = schema.GetMarketItemsByCategory("Pegatina");
+            char stickerTabTitle[64];
+            snprintf(stickerTabTitle, sizeof(stickerTabTitle), "%s (%zu)", i18n::T("Stickers", "Pegatinas"), stickers.size());
+            if (ImGui::BeginTabItem(stickerTabTitle)) {
+                RenderItemsTable(stickers, 5000);
                 ImGui::EndTabItem();
             }
 
@@ -449,100 +356,156 @@ void DrawMarketGiveModal() {
         }
 
         ImGui::Dummy(ImVec2(0, ui::S(6)));
-        if (ui::Clicked(ui::NavButton(i18n::T("Close Menu", "Cerrar Menú"), ImVec2(ui::S(140), ui::S(28))))) {
-            s_showMarketGiveModal = false;
+        if (ui::Clicked(ui::SecondaryButton(i18n::T("Close Menu", "Cerrar Menú"), ImVec2(ui::S(140), ui::S(28))))) {
+            App::Get().CloseMarketHUD();
         }
     }
+    if (!isOpen) {
+        App::Get().CloseMarketHUD();
+    }
     ImGui::End();
+    ImGui::PopStyleColor(2);
     ImGui::PopStyleVar(2);
 }
 
 void DrawMatchmakingToastWidget() {
-    if (!s_showMatchmakingWidget) return;
+    if (!App::Get().IsMatchmakingHUDOpen()) return;
 
     ImVec2 vp = ImGui::GetIO().DisplaySize;
-    const float cardW = ui::S(380);
-    const float pad = ui::S(24);
-    ImGui::SetNextWindowPos(ImVec2(vp.x - cardW - pad, vp.y - pad), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowSize(ImVec2(cardW, 0));
+    float cardW = ui::S(380);
+    float cardH = s_showCustomSettings ? ui::S(530) : ui::S(220);
+    float margin = ui::S(20);
+
+    ImGui::SetNextWindowPos(ImVec2(vp.x - cardW - margin, vp.y - cardH - margin), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(cardW, cardH), ImGuiCond_Always);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, ui::S(12));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(18), ui::S(16)));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ui::color::PanelRaised);
     ImGui::PushStyleColor(ImGuiCol_Border, ui::color::Border);
 
-    if (ImGui::Begin("##matchmaking_toast_widget", &s_showMatchmakingWidget,
+    bool isOpen = true;
+    if (ImGui::Begin("##matchmaking_hud_widget", &isOpen,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoNav)) {
 
-        // Header
+        // Header Title
         ImGui::PushFont(ui::F().strong);
         ui::TextColored(ui::color::Accent, ui::icon::Game);
         ImGui::SameLine();
-        ImGui::TextUnformatted(i18n::T("Matchmaking LAN (P2P)", "Partida LAN / Matchmaking"));
+        ImGui::TextUnformatted(i18n::T("Matchmaking LAN / Local Network", "Partida LAN / Matchmaking"));
         ImGui::PopFont();
 
         ImGui::SameLine(cardW - ui::S(46));
-        if (ui::Clicked(ui::NavButton("X##close_mm_toast", ImVec2(ui::S(24), ui::S(22))))) {
-            s_showMatchmakingWidget = false;
-            App::Get().CloseOverlay();
+        if (ui::IconButton("close_mm_toast", ui::icon::Close, i18n::T("Close", "Cerrar"), ui::color::Muted, true, ui::S(24))) {
+            App::Get().CloseMatchmakingHUD();
         }
 
         ImGui::PushFont(ui::F().caption);
-        ui::TextColored(ui::color::Muted, i18n::T("Play with nearby friends on local network", "Juega con amigos en tu red local"));
+        ui::TextColored(ui::color::Muted, i18n::T("Play with nearby friends on your local network", "Juega con amigos en tu red local"));
         ImGui::PopFont();
 
         ImGui::Dummy(ImVec2(0, ui::S(4)));
         ImGui::Separator();
         ImGui::Dummy(ImVec2(0, ui::S(4)));
 
-        // Action 1: Search LAN Match
-        if (ui::Clicked(ui::PrimaryButton(i18n::T("Search LAN Match", "Buscar Partida LAN"), ImVec2(cardW - ui::S(36), ui::S(36))))) {
-            std::string connectCmd = "connect 127.0.0.1:27015";
-            auto peers = net::Players();
-            for (const auto& p : peers) {
-                if (p.appId == 730 && !p.connect.empty()) {
-                    connectCmd = p.connect;
-                    break;
-                } else if (p.appId == 730 && p.ip != 0) {
-                    char ipBuf[64];
-                    snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:27015",
-                             (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF, (p.ip >> 8) & 0xFF, p.ip & 0xFF);
-                    connectCmd = ipBuf;
+        // Real-time network telemetry: Online players & Available games
+        auto remotePlayers = net::Players();
+        size_t onlineCount = remotePlayers.size() + 1; // including self
+        auto knownLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+        size_t availableGames = knownLobbies.size();
+        for (const auto& p : remotePlayers) {
+            if (p.appId == 730 && (p.lobbyId != 0 || !p.connect.empty() || p.ip != 0)) {
+                availableGames++;
+            }
+        }
+
+        ui::TextColored(ui::color::Online, ui::icon::People);
+        ImGui::SameLine();
+        ImGui::Text(i18n::T("Online Players: %zu", "Jugadores en línea: %zu"), onlineCount);
+
+        ImGui::SameLine(ui::S(210));
+        ui::TextColored(availableGames > 0 ? ui::color::Accent : ui::color::Muted, ui::icon::Lan);
+        ImGui::SameLine();
+        ImGui::Text(i18n::T("Available Matches: %zu", "Partidas disponibles: %zu"), availableGames);
+
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+        // Option 1: Search Match
+        if (ui::Clicked(ui::PrimaryButton(i18n::T("Search LAN Match", "Buscar partida"), ImVec2(cardW - ui::S(36), ui::S(36))))) {
+            refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
+            auto freshLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+            bool found = false;
+
+            // Check LAN Core lobbies first
+            for (const auto& l : freshLobbies) {
+                uint64_t sId = refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId);
+                if (sId == 0) sId = refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(l.lobbyId);
+                if (sId != 0) {
+                    net::RemotePlayer rp;
+                    rp.appId = 730;
+                    rp.steamId = l.ownerPeerId.low;
+                    rp.lobbyId = sId;
+                    App::Get().Join(rp);
+                    App::Get().ShowInfo("Matchmaking LAN", "Partida LAN encontrada en red local. Uniéndose...");
+                    found = true;
+                    App::Get().CloseMatchmakingHUD();
                     break;
                 }
             }
-            ExecuteEngineClientCommand(connectCmd.c_str());
-            App::Get().ShowInfo("Matchmaking LAN", "Conectando con servidor en red local LAN...");
-            s_showMatchmakingWidget = false;
-            App::Get().CloseOverlay();
+
+            // Fallback to presence remote players
+            if (!found) {
+                for (const auto& p : remotePlayers) {
+                    if (p.appId == 730) {
+                        if (p.lobbyId != 0 || !p.connect.empty() || p.ip != 0) {
+                            App::Get().Join(p);
+                            App::Get().ShowInfo("Matchmaking LAN", "Servidor o sala LAN encontrada. Conectando...");
+                            found = true;
+                            App::Get().CloseMatchmakingHUD();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!found) {
+                App::Get().ShowInfo("Matchmaking LAN", "No se encontraron partidas LAN disponibles en tu red local.");
+                App::Get().CloseMatchmakingHUD();
+            }
         }
 
         ImGui::Dummy(ImVec2(0, ui::S(4)));
 
-        // Action 2: Create LAN Match + Settings Toggle Button next to it
-        float createW = cardW - ui::S(36) - ui::S(44);
-        if (ui::Clicked(ui::NavButton(i18n::T("Create LAN Match", "Crear Partida (Host)"), ImVec2(createW, ui::S(34))))) {
-            std::string cmd = "game_type 0; game_mode 1; sv_lan 1; bot_quota 10; map de_dust2";
+        // Option 2: Host Match + adjacent Settings button
+        float hostBtnWidth = cardW - ui::S(36) - ui::S(75);
+        if (ui::Clicked(ui::SecondaryButton(i18n::T("Host Match", "Hostear partida"), ImVec2(hostBtnWidth, ui::S(34))))) {
+            UnrealSteamEmu::Matchmaking_CreateLobby(2 /* k_ELobbyTypePublic */, 10);
+            UnrealSteamEmu::SetRichPresence("connect", "connect 127.0.0.1:27015");
+            std::string cmd = "maxplayers 10; game_type 0; game_mode 1; sv_lan 1; bot_quota 10; map de_dust2";
             ExecuteEngineClientCommand(cmd.c_str());
             App::Get().ShowInfo("Servidor LAN", "Iniciando servidor de partida local (de_dust2)...");
-            s_showMatchmakingWidget = false;
-            App::Get().CloseOverlay();
+            App::Get().CloseMatchmakingHUD();
         }
 
         ImGui::SameLine();
-        const char* gearIcon = s_showCustomSettings ? "[-##cfg]" : "[⚙##cfg]";
-        if (ui::Clicked(ui::NavButton(gearIcon, ImVec2(ui::S(38), ui::S(34))))) {
+        const char* cfgLabel = s_showCustomSettings ? "[-] Config" : "[+] Config";
+        if (ui::Clicked(ui::SecondaryButton(cfgLabel, ImVec2(ui::S(68), ui::S(34))))) {
             s_showCustomSettings = !s_showCustomSettings;
         }
 
-        // Expandable Custom Settings
+        // Custom Match Settings Panel (expanded when clicking [Config])
         if (s_showCustomSettings) {
             ImGui::Dummy(ImVec2(0, ui::S(4)));
             ImGui::Separator();
             ImGui::Dummy(ImVec2(0, ui::S(4)));
 
+            ImGui::PushFont(ui::F().strong);
+            ui::TextColored(ui::color::Accent, i18n::T("Custom Match Settings", "Ajustes de partida personalizada:"));
+            ImGui::PopFont();
+
+            // Map selection
             ImGui::PushFont(ui::F().caption);
             ImGui::TextUnformatted(i18n::T("Map:", "Mapa:"));
             ImGui::PopFont();
@@ -556,8 +519,9 @@ void DrawMatchmakingToastWidget() {
                 ImGui::EndCombo();
             }
 
+            // Game Mode selection
             ImGui::PushFont(ui::F().caption);
-            ImGui::TextUnformatted(i18n::T("Mode:", "Modo:"));
+            ImGui::TextUnformatted(i18n::T("Game Mode:", "Modo de Juego:"));
             ImGui::PopFont();
             ImGui::SetNextItemWidth(cardW - ui::S(36));
             if (ImGui::BeginCombo("##toast_mode_combo", kGameModes[s_selectedModeIdx])) {
@@ -569,32 +533,87 @@ void DrawMatchmakingToastWidget() {
                 ImGui::EndCombo();
             }
 
+            // Slots selection
+            ImGui::PushFont(ui::F().caption);
+            ImGui::TextUnformatted(i18n::T("Max Players (Slots):", "Slots de Jugadores:"));
+            ImGui::PopFont();
+            ImGui::SetNextItemWidth(cardW - ui::S(36));
+            if (ImGui::BeginCombo("##toast_slots_combo", kSlotsOptions[s_cfgSlotsIdx])) {
+                for (int i = 0; i < 4; ++i) {
+                    bool sel = (s_cfgSlotsIdx == i);
+                    if (ImGui::Selectable(kSlotsOptions[i], sel)) s_cfgSlotsIdx = i;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            // Max Rounds selection
+            ImGui::PushFont(ui::F().caption);
+            ImGui::TextUnformatted(i18n::T("Max Rounds:", "Rondas Máximas:"));
+            ImGui::PopFont();
+            ImGui::SetNextItemWidth(cardW - ui::S(36));
+            if (ImGui::BeginCombo("##toast_rounds_combo", kMaxRoundsOptions[s_cfgMaxRoundsIdx])) {
+                for (int i = 0; i < 4; ++i) {
+                    bool sel = (s_cfgMaxRoundsIdx == i);
+                    if (ImGui::Selectable(kMaxRoundsOptions[i], sel)) s_cfgMaxRoundsIdx = i;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            // Round Time selection
+            ImGui::PushFont(ui::F().caption);
+            ImGui::TextUnformatted(i18n::T("Round Time:", "Tiempo de Ronda:"));
+            ImGui::PopFont();
+            ImGui::SetNextItemWidth(cardW - ui::S(36));
+            if (ImGui::BeginCombo("##toast_rtime_combo", kRoundTimeOptions[s_cfgRoundTimeIdx])) {
+                for (int i = 0; i < 4; ++i) {
+                    bool sel = (s_cfgRoundTimeIdx == i);
+                    if (ImGui::Selectable(kRoundTimeOptions[i], sel)) s_cfgRoundTimeIdx = i;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::Dummy(ImVec2(0, ui::S(2)));
             ImGui::Checkbox(i18n::T("Bots (5v5 AI)", "Habilitar Bots (5v5 IA)"), &s_cfgBots);
-            ImGui::Checkbox(i18n::T("Fast Rounds MR12", "Rondas Rápidas MR12"), &s_cfgFastRounds);
-            ImGui::Checkbox(i18n::T("Start Money $16K", "Dinero Inicial $16,000"), &s_cfgCompMoney);
+            ImGui::SameLine();
+            ImGui::Checkbox(i18n::T("Start $16K", "Dinero $16,000"), &s_cfgCompMoney);
 
             ImGui::Dummy(ImVec2(0, ui::S(4)));
-            if (ui::Clicked(ui::PrimaryButton(i18n::T("Launch Custom Server", "Lanzar Servidor Personalizado"), ImVec2(cardW - ui::S(36), ui::S(32))))) {
-                char cmd[256];
+            if (ui::Clicked(ui::PrimaryButton(i18n::T("Launch Custom Server", "Crear Servidor Personalizado"), ImVec2(cardW - ui::S(36), ui::S(34))))) {
+                int slots = kSlotsValues[s_cfgSlotsIdx];
+                int maxRounds = kMaxRoundsValues[s_cfgMaxRoundsIdx];
+                float rTime = kRoundTimeValues[s_cfgRoundTimeIdx];
+
+                UnrealSteamEmu::Matchmaking_CreateLobby(2 /* k_ELobbyTypePublic */, slots);
+                UnrealSteamEmu::SetRichPresence("connect", "connect 127.0.0.1:27015");
+
+                char cmd[384];
                 int gType = 0, gMode = 1;
                 if (s_selectedModeIdx == 1) { gType = 0; gMode = 0; } // Casual
                 else if (s_selectedModeIdx == 2) { gType = 1; gMode = 2; } // Deathmatch
                 else if (s_selectedModeIdx == 3) { gType = 0; gMode = 2; } // Wingman
                 else if (s_selectedModeIdx == 4) { gType = 1; gMode = 0; } // Arms race
 
-                snprintf(cmd, sizeof(cmd), "game_type %d; game_mode %d; sv_lan 1; %s; %s; %s; map %s",
-                         gType, gMode,
+                char rTimeBuf[16];
+                snprintf(rTimeBuf, sizeof(rTimeBuf), "%.2f", rTime);
+
+                snprintf(cmd, sizeof(cmd),
+                         "maxplayers %d; game_type %d; game_mode %d; sv_lan 1; mp_maxrounds %d; mp_roundtime %s; mp_roundtime_defuse %s; mp_roundtime_hostage %s; %s; %s; map %s",
+                         slots, gType, gMode, maxRounds, rTimeBuf, rTimeBuf, rTimeBuf,
                          s_cfgBots ? "bot_quota 10; bot_difficulty 2" : "bot_kick",
-                         s_cfgFastRounds ? "mp_maxrounds 24" : "mp_maxrounds 30",
                          s_cfgCompMoney ? "mp_startmoney 16000; mp_maxmoney 16000" : "mp_startmoney 800",
                          kOfficialMaps[s_selectedMapIdx]);
 
                 ExecuteEngineClientCommand(cmd);
                 App::Get().ShowInfo("Servidor Personalizado", std::string("Iniciando ") + kOfficialMaps[s_selectedMapIdx]);
-                s_showMatchmakingWidget = false;
-                App::Get().CloseOverlay();
+                App::Get().CloseMatchmakingHUD();
             }
         }
+    }
+    if (!isOpen) {
+        App::Get().CloseMatchmakingHUD();
     }
     ImGui::End();
     ImGui::PopStyleColor(2);
@@ -602,39 +621,30 @@ void DrawMatchmakingToastWidget() {
 }
 
 void DrawModsCard(ImVec2 pos, float width, float height) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 max(pos.x + width, pos.y + height);
+    ui::BeginCard("##modscard", pos, ImVec2(width, height), ui::S(12));
 
-    ui::Card(dl, pos, max, ui::color::Panel, 14.0f);
-
-    ImGui::SetCursorScreenPos(ImVec2(pos.x + ui::S(16), pos.y + ui::S(14)));
-    ImGui::BeginGroup();
-
-    ImGui::PushFont(ui::F().heading);
-    ui::TextColored(ui::color::Accent, ui::icon::Store);
+    ImGui::PushFont(ui::F().strong);
+    ui::TextColored(ui::color::Accent, ui::icon::Game);
     ImGui::SameLine();
-    ImGui::TextUnformatted(i18n::T("CS:GO Mod & Market", "Mods & Mercado CS:GO"));
+    ImGui::TextUnformatted(i18n::T("CS:GO LAN & Inventory", "CS:GO LAN e Inventario"));
     ImGui::PopFont();
 
     ImGui::PushFont(ui::F().caption);
-    ui::TextColored(ui::color::Muted, i18n::T("Manage inventory items, keys, and LAN matchmaking",
-                                              "Gestor de items, cajas, llaves y matchmaking"));
+    ui::TextColored(ui::color::Muted, i18n::T("Community market, cases, unboxing and matchmaking.", "Mercado, apertura de cajas y matchmaking LAN."));
     ImGui::PopFont();
 
-    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
 
-    if (ui::Clicked(ui::PrimaryButton(i18n::T("Community Market & Give##mods_btn", "Mercado y Give Menu##mods_btn"),
-                                      ImVec2(ui::S(190), ui::S(28))))) {
+    float btnW = (width - ui::S(28)) * 0.5f;
+    if (ui::Clicked(ui::PrimaryButton(i18n::T("Market & Items", "Mercado / Skins"), ImVec2(btnW, ui::S(28))))) {
         OpenMarketGiveMenu();
     }
-
     ImGui::SameLine();
-    if (ui::Clicked(ui::NavButton(i18n::T("Matchmaking Toast##mods_mm", "Partida LAN##mods_mm"),
-                                  ImVec2(ui::S(140), ui::S(28))))) {
+    if (ui::Clicked(ui::SecondaryButton(i18n::T("Matchmaking", "Matchmaking LAN"), ImVec2(btnW, ui::S(28))))) {
         OpenMatchmakingToast();
     }
 
-    ImGui::EndGroup();
+    ui::EndCard();
 }
 
 void DrawModsApprovalModal() {}

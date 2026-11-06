@@ -115,7 +115,7 @@ void SendTo(SOCKET s, uint32_t ip, uint16_t port, const std::vector<uint8_t>& da
 }
 
 void RefreshBroadcasts() {
-    std::vector<uint32_t> out = { 0xFFFFFFFFu };
+    std::vector<uint32_t> out = { 0xFFFFFFFFu, 0x7F000001u };
     ULONG size = 16 * 1024;
     std::vector<uint8_t> buf(size);
     auto* aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
@@ -178,7 +178,12 @@ void OnPresence(Reader& r, uint32_t fromIp) {
     p.lastSeen = GetTickCount64();
     std::lock_guard<std::mutex> lock(g_mu);
     if (p.steamId == g_local.steamId && p.port == g_ucastPort) return;
-    g_players[p.steamId] = std::move(p);
+    uint64_t playerKey = p.steamId;
+    if (playerKey == g_local.steamId && p.port != g_ucastPort) {
+        playerKey += p.port;
+        p.steamId = playerKey;
+    }
+    g_players[playerKey] = std::move(p);
 }
 
 void OnAvatarReq(Reader& r, uint32_t fromIp) {
@@ -320,7 +325,14 @@ void Housekeeping(ULONGLONG now, ULONGLONG& lastAnnounce, ULONGLONG& lastAdapter
         g_outbox.erase(std::remove_if(g_outbox.begin(), g_outbox.end(), [](const PendingInvite& p) { return p.tries >= kInviteTries; }),
                        g_outbox.end());
     }
-    for (uint32_t ip : targets) SendTo(g_bcast, ip, kPresencePort, presence);
+    for (uint32_t ip : targets) {
+        SendTo(g_bcast, ip, kPresencePort, presence);
+        if (ip == 0x7F000001u || ip == 0xFFFFFFFFu) {
+            for (uint16_t alt = 47691; alt <= 47698; ++alt) {
+                SendTo(g_bcast, ip, alt, presence);
+            }
+        }
+    }
     for (const auto& [player, pkt] : resend) SendTo(g_ucast, player.ip, player.port, pkt);
 }
 
@@ -346,7 +358,10 @@ SOCKET OpenUdp(uint16_t port, bool shared) {
     SteamP2PHook::RegisterInternalSocket((uintptr_t)s);
     BOOL on = TRUE;
     setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&on, sizeof(on));
-    if (shared) setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
+    // Only allow address reuse on ephemeral ports (port == 0).
+    // For fixed listener ports (kPresencePort 47690), each local instance must bind a unique
+    // port (47690, 47691, etc.) so Windows UDP delivers inbound packets to all instances reliably.
+    if (shared && port == 0) setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -376,6 +391,12 @@ bool Start() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
     g_bcast = OpenUdp(kPresencePort, true);
+    if (g_bcast == INVALID_SOCKET) {
+        for (uint16_t alt = 47691; alt <= 47698; ++alt) {
+            g_bcast = OpenUdp(alt, true);
+            if (g_bcast != INVALID_SOCKET) break;
+        }
+    }
     g_ucast = OpenUdp(0, false);
     if (g_bcast == INVALID_SOCKET || g_ucast == INVALID_SOCKET) {
         ReFixLog("[OverlayNet] Could not open the presence sockets (error %d)", WSAGetLastError());

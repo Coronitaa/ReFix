@@ -115,6 +115,7 @@ host::Mode App::DesiredMode() {
     if (dialog_ != DialogKind::None) return host::Mode::Dialog;
     if (!started_) return host::Mode::Hidden;
     if (overlayOpen_) return host::Mode::Overlay;
+    if (hudMarketOpen_ || hudMatchmakingOpen_) return host::Mode::Overlay;
     const host::GameWindow gw = host::CurrentGame();
     if (!toasts_.empty() && gw.foreground) return host::Mode::Toast;
     return host::Mode::Hidden;
@@ -330,39 +331,50 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
     if (dialog_ != DialogKind::None) DrawDialog(viewport);
     else if (overlayOpen_) DrawOverlay(viewport);
     else DrawToasts(viewport, true);
+
+    if (hudMarketOpen_) DrawMarketGiveModal();
+    if (hudMatchmakingOpen_) DrawMatchmakingToastWidget();
     // Keyboard/controller focus moved to another item this frame (never set by the mouse).
     if (ImGui::GetCurrentContext()->NavJustMovedToId != 0 && (overlayOpen_ || dialog_ != DialogKind::None))
         sound::Play(sound::Cue::Move);
 }
 
 void App::Join(const net::RemotePlayer& p) {
-    if (appId_ == 730) {
-        if (!p.connect.empty()) {
-            ExecuteEngineClientCommand(p.connect.c_str());
-        } else if (p.ip != 0) {
-            char ipBuf[64];
-            snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:27015",
-                     (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF, (p.ip >> 8) & 0xFF, p.ip & 0xFF);
-            ExecuteEngineClientCommand(ipBuf);
-        }
-    }
-    if (p.lobbyId) {
+    if (p.lobbyId != 0) {
         GameLobbyJoinRequested_t cb = {};
         cb.m_steamIDLobby = CSteamID(p.lobbyId);
         cb.m_steamIDFriend = CSteamID(p.steamId);
         UnrealSteamEmu::PostCallback(GameLobbyJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-    } else if (!p.connect.empty()) {
-        GameRichPresenceJoinRequested_t cb = {};
-        cb.m_steamIDFriend = CSteamID(p.steamId);
-        strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
-        UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
+        UnrealSteamEmu::Matchmaking_JoinLobby(p.lobbyId);
+    }
+    {
+        if (appId_ == 730) {
+            if (!p.connect.empty()) {
+                ExecuteEngineClientCommand(p.connect.c_str());
+            } else if (p.ip != 0) {
+                char ipBuf[64];
+                snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:27015",
+                         (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF, (p.ip >> 8) & 0xFF, p.ip & 0xFF);
+                ExecuteEngineClientCommand(ipBuf);
+            }
+        }
+        if (!p.connect.empty()) {
+            GameRichPresenceJoinRequested_t cb = {};
+            cb.m_steamIDFriend = CSteamID(p.steamId);
+            strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
+            UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
+        }
     }
     ReFixLog("[Overlay] Join requested: player %llu lobby %llu", (unsigned long long)p.steamId, (unsigned long long)p.lobbyId);
     CloseOverlay();
 }
 
 void App::Invite(const net::RemotePlayer& p) {
-    const uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
+    uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
+    if (lobby == 0 && appId_ == 730) {
+        lobby = UnrealSteamEmu::Matchmaking_CreateLobby(1 /* k_ELobbyTypePublic */, 5);
+        localLobby_ = lobby;
+    }
     const std::string connect = inviteOnly_ && !inviteConnect_.empty() ? inviteConnect_ : localConnect_;
     if (net::SendInvite(p.steamId, lobby, connect)) invitedAt_[p.steamId] = GetTickCount64();
 }

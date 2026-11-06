@@ -99,6 +99,12 @@ public:
     void AcceptInvite(const net::Invite& inv);
     bool DeleteProfile(const std::wstring& id);   // false when it is in use somewhere
     void ShowInfo(const std::string& title, const std::string& body);
+    void OpenMarketHUD() { hudMarketOpen_ = true; }
+    void CloseMarketHUD() { hudMarketOpen_ = false; }
+    void OpenMatchmakingHUD() { hudMatchmakingOpen_ = true; }
+    void CloseMatchmakingHUD() { hudMatchmakingOpen_ = false; }
+    bool IsMarketHUDOpen() const { return hudMarketOpen_; }
+    bool IsMatchmakingHUDOpen() const { return hudMatchmakingOpen_; }
 
     // Data for the screens.
     uint32_t appId_ = 0;
@@ -180,6 +186,8 @@ private:
     std::vector<std::function<void()>> posts_;
     bool started_ = false;
     bool overlayOpen_ = false;
+    bool hudMarketOpen_ = false;
+    bool hudMatchmakingOpen_ = false;
     DialogKind dialog_ = DialogKind::None;
     bool dialogEditing_ = false;
     HANDLE dialogDone_ = nullptr;

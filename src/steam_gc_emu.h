@@ -14,6 +14,8 @@ ISteamGameCoordinator* Get(bool gameServer);
 
 // Protobuf bodies of the replies, exposed for tests.
 std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId);
+std::vector<uint8_t> BuildServerWelcome(uint32_t version, uint64_t steamId);
+std::vector<uint8_t> BuildCacheSubscribed(uint64_t steamId);
 std::vector<uint8_t> BuildConnectionStatus();
 // Field 1 (version) of a CMsgClientHello body, 0 when absent.
 uint32_t ParseHelloVersion(const uint8_t* body, size_t size);

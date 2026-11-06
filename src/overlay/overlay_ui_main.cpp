@@ -119,8 +119,6 @@ void App::DrawOverlay(ImVec2 viewport) {
     DrawDeleteConfirm();
     DrawEditorModal();
     DrawPurchaseModal(viewport);
-    DrawMarketGiveModal();
-    DrawMatchmakingToastWidget();
     if (!inviteOnly_) DrawWebModal(viewport);
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();

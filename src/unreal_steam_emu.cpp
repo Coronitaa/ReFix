@@ -1136,7 +1136,7 @@ namespace UnrealSteamEmu {
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             for (auto it = g_pendingSearches.begin(); it != g_pendingSearches.end(); ) {
-                if (forceAll || std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 50) {
+                if (forceAll || std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 400) {
                     readySearches.push_back(*it);
                     it = g_pendingSearches.erase(it);
                 } else {
@@ -3621,7 +3621,17 @@ namespace UnrealSteamEmu {
                     auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
                     for (const auto& l : allLobbies) {
                         auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(l.ownerPeerId);
-                        if ((pInfo && pInfo->externalId.numericId == friendSid) || l.ownerPeerId.low == friendSid || l.ownerPeerId.high == friendSid) {
+                        bool isMember = ((pInfo && pInfo->externalId.numericId == friendSid) || l.ownerPeerId.low == friendSid || l.ownerPeerId.high == friendSid);
+                        if (!isMember) {
+                            for (const auto& m : l.members) {
+                                auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(m.peerId);
+                                if ((mInfo && mInfo->externalId.numericId == friendSid) || m.peerId.low == friendSid || m.peerId.high == friendSid) {
+                                    isMember = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (isMember) {
                             uint64_t sId = refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId);
                             if (sId == 0) sId = refix::steam::ComputeLobbySteamID(l.lobbyId);
                             friendLobbyId = sId;
@@ -4445,6 +4455,7 @@ namespace UnrealSteamEmu {
             std::string coreLobbyId = GetCoreLobbyId(lID);
 
             if (coreLobbyId.empty()) {
+                refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
                 auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
                 for (const auto& l : allLobbies) {
                     if (refix::steam::ComputeLobbySteamID(l.lobbyId) == lID ||
@@ -8242,6 +8253,8 @@ namespace UnrealSteamEmu {
     }
 
     void* FindOrCreateGameServerInterface(int32_t hUser, const char* pszVersion) {
+        if (pszVersion && (strstr(pszVersion, "SteamGameCoordinator") || strstr(pszVersion, "STEAMGAMECOORDINATOR")))
+            return ReFixGC::Get(true);
         return GetGenericInterface(pszVersion);
     }
 

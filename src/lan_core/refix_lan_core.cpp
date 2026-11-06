@@ -1096,7 +1096,7 @@ public:
             rec.revision = r.ReadU32();
             rec.hostEndpoint = r.ReadEndpoint();
             if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
-            if (sender.ipv4 == 0x7F000001) rec.hostEndpoint.ipv4 = 0x7F000001;
+            if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) rec.hostEndpoint.ipv4 = 0x7F000001;
 
             uint32_t attrCount = r.ReadU32();
             if (!r.HasError() && attrCount <= 1000) {
@@ -1225,7 +1225,7 @@ public:
             if (r.HasError()) return;
 
             LanEndpoint replyEp = clientEp.IsValid() ? clientEp : sender;
-            if (sender.ipv4 == 0x7F000001) replyEp.ipv4 = 0x7F000001;
+            if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) replyEp.ipv4 = 0x7F000001;
 
             auto lobOpt = m_lobby.GetLobby(lobbyId);
             if (!lobOpt || !m_lobby.IsHosting(lobbyId)) {
@@ -1322,7 +1322,7 @@ public:
                 rec.revision = r.ReadU32();
                 rec.hostEndpoint = r.ReadEndpoint();
                 if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
-                if (sender.ipv4 == 0x7F000001) rec.hostEndpoint.ipv4 = 0x7F000001;
+                if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) rec.hostEndpoint.ipv4 = 0x7F000001;
 
                 uint32_t attrCount = r.ReadU32();
                 if (!r.HasError() && attrCount <= 1000) {
