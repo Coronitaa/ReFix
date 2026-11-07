@@ -34,6 +34,7 @@ MSG_MAP = {
 
     # Econ & Store messages (base_gcmessages.proto, econ_gcmessages.proto)
     1008: ("CMsgRequestInventoryRefresh", "base_gcmessages.proto"),
+    1025: ("CMsgUseItem", "base_gcmessages.proto"),
     1090: ("CMsgGCItemCustomizationNotification", "econ_gcmessages.proto"),
     2504: ("CMsgGCStorePurchaseFinalize", "base_gcmessages.proto"),
     2505: ("CMsgGCStorePurchaseFinalizeResponse", "base_gcmessages.proto"),

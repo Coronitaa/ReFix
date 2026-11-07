@@ -25,7 +25,13 @@
 #include <string>
 #include "../source_main_thread_queue.h"
 
-extern "C" void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed);
+extern "C" {
+void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed);
+bool CSGO_IsPrimeStatus();
+void CSGO_SetPrimeStatus(bool enabled);
+bool CSGO_HasOperationPass(uint32_t season);
+void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId);
+}
 
 namespace refix::overlay {
 
@@ -319,24 +325,49 @@ void DrawMarketGiveModal() {
                 ImGui::EndTabItem();
             }
 
-            // TAB 8: PRIME UPGRADE
-            if (ImGui::BeginTabItem(i18n::T("Prime Status", "Estado Prime"))) {
+            // TAB 8: PRIME & OPERATIONS
+            if (ImGui::BeginTabItem(i18n::T("Prime & Operations", "Prime y Operaciones"))) {
                 ImGui::Dummy(ImVec2(0, ui::S(10)));
                 ImGui::PushFont(ui::F().strong);
                 ui::TextColored(ui::color::Online, i18n::T("CS:GO Prime Status Upgrade", "Mejora de Estado Prime Oficial"));
                 ImGui::PopFont();
                 ImGui::TextWrapped(i18n::T("Prime Status matches you with other Prime Status players, grants access to Prime-exclusive souvenir items, item drops, and weapon cases.",
                                          "El estado Prime te empareja con otros jugadores Prime, otorga acceso a cajas de armas exclusivas, drops semanales e insignias de servicio."));
-                ImGui::Dummy(ImVec2(0, ui::S(16)));
+                ImGui::Dummy(ImVec2(0, ui::S(12)));
 
-                if (ui::Clicked(ui::PrimaryButton(i18n::T("Activate Prime Status (Free via ReFix)", "Activar Estado Prime (Gratis vía ReFix)"), ImVec2(ui::S(320), ui::S(36))))) {
-                    ::ReFixOverlay::PromptPurchase(730, 10001, "CS:GO Prime Status Upgrade",
-                        "Activación de Estado Prime para el perfil actual.", false, [](bool ok) {
-                            if (ok) {
-                                App::Get().ShowInfo("Prime Activado", "El Estado Prime ha sido habilitado con éxito para este perfil.");
-                            }
-                        });
+                bool isPrime = CSGO_IsPrimeStatus();
+                if (isPrime) {
+                    ui::TextColored(ui::color::Online, i18n::T("Prime Status is ACTIVE", "Estado Prime ACTIVO en este perfil"));
+                    ImGui::Dummy(ImVec2(0, ui::S(8)));
+                    if (ui::Clicked(ui::SecondaryButton(i18n::T("Deactivate Prime Status", "Desactivar Estado Prime"), ImVec2(ui::S(260), ui::S(34))))) {
+                        CSGO_SetPrimeStatus(false);
+                    }
+                } else {
+                    if (ui::Clicked(ui::PrimaryButton(i18n::T("Activate Prime Status (Free via ReFix)", "Activar Estado Prime (Gratis vía ReFix)"), ImVec2(ui::S(320), ui::S(36))))) {
+                        CSGO_SetPrimeStatus(true);
+                    }
                 }
+
+                ImGui::Dummy(ImVec2(0, ui::S(16)));
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(0, ui::S(12)));
+
+                ImGui::PushFont(ui::F().strong);
+                ui::TextColored(ui::color::Accent, i18n::T("Operation Shattered Web (Season 8)", "Operación Shattered Web (Temporada 8)"));
+                ImGui::PopFont();
+                ImGui::TextWrapped(i18n::T("Activate the Shattered Web Premium Pass to unlock mission progress, weekly rewards, and the Shattered Web Coin.",
+                                         "Activa el Pase Premium de Shattered Web para desbloquear el progreso de misiones, recompensas y la Moneda de la Operación."));
+                ImGui::Dummy(ImVec2(0, ui::S(12)));
+
+                bool hasPass = CSGO_HasOperationPass(8);
+                if (hasPass) {
+                    ui::TextColored(ui::color::Online, i18n::T("Operation Shattered Web Premium Pass is ACTIVE", "Pase Premium Shattered Web ACTIVO"));
+                } else {
+                    if (ui::Clicked(ui::PrimaryButton(i18n::T("Activate Shattered Web Pass (Free via ReFix)", "Activar Pase Shattered Web (Gratis vía ReFix)"), ImVec2(ui::S(360), ui::S(36))))) {
+                        CSGO_ActivateOperationPass(8, 0);
+                    }
+                }
+
                 ImGui::EndTabItem();
             }
 

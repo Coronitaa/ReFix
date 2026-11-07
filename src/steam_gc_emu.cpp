@@ -105,17 +105,30 @@ constexpr uint32_t kMsgServerConnectionStatus = 4010;
 // CS:GO specific GC messages
 constexpr uint32_t kMsgGCUnlockCrate = 1007;
 constexpr uint32_t kMsgGCUnlockCrateResponse = 1008;
+constexpr uint32_t kMsgGCUseItemRequest = 1025;
+constexpr uint32_t kMsgGCStorePurchaseFinalize = 2504;
+constexpr uint32_t kMsgGCStorePurchaseFinalizeResponse = 2505;
+constexpr uint32_t kMsgGCStorePurchaseCancel = 2506;
+constexpr uint32_t kMsgGCStorePurchaseCancelResponse = 2507;
+constexpr uint32_t kMsgGCStorePurchaseInit = 2510;
+constexpr uint32_t kMsgGCStorePurchaseInitResponse = 2511;
 constexpr uint32_t kMsgGCCStrike15_v2_MatchmakingStart = 9101;
 constexpr uint32_t kMsgGCCStrike15_v2_MatchmakingGC2ClientReserve = 9107;
 constexpr uint32_t kMsgGCCStrike15_v2_MatchmakingClient2GCHello = 9109;
 constexpr uint32_t kMsgGCCStrike15_v2_MatchmakingGC2ClientHello = 9110;
-constexpr uint32_t kMsgGCStorePurchaseInit = 2504;
-constexpr uint32_t kMsgGCStorePurchaseInitResponse = 2505;
-constexpr uint32_t kMsgGCStorePurchaseInitAlt = 2510;
 
 constexpr uint32_t kProtoFlag = 0x80000000;
 constexpr size_t kProtoHeaderSize = 8;
 constexpr uint32_t kSOTypeSteamId = 1;
+
+// SO Type IDs (type_id field in CMsgSOCacheSubscribed_SubscribedType / CMsgSOSingleObject)
+constexpr uint32_t kSOTypeItem = 1;
+constexpr uint32_t kSOTypePersonaDataPublic = 2;
+constexpr uint32_t kSOTypeEquipSlot = 3;
+constexpr uint32_t kSOTypeGameAccountClient = 7;
+constexpr uint32_t kSOTypeSeasonalOperation = 40;
+constexpr uint32_t kSOTypeDefaultEquippedDefinitionInstanceClient = 43;
+constexpr uint32_t kSOTypeCoupon = 45;
 
 void PutVarint(std::vector<uint8_t>& out, uint64_t value) {
     while (value >= 0x80) { out.push_back((uint8_t)(value | 0x80)); value >>= 7; }
@@ -192,6 +205,155 @@ struct EconCoupon {
     uint32_t defidx = 0;
     uint32_t expirationDate = 0x7FFFFFFF;
 };
+
+struct Entitlements {
+    bool prime = false;
+    std::vector<uint32_t> operation_passes; // e.g. 8 for Shattered Web
+};
+
+class CSGOEntitlementsManager {
+public:
+    static CSGOEntitlementsManager& Get() {
+        static CSGOEntitlementsManager inst;
+        return inst;
+    }
+
+    std::wstring GetPath() {
+        std::wstring root = ReFixOverlay::InventoryFolder(730);
+        if (root.empty()) {
+            wchar_t appData[MAX_PATH] = {};
+            GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
+            root = std::wstring(appData) + L"\\ReFix\\Inventory\\730";
+        }
+        for (size_t i = 3; i <= root.size(); ++i) {
+            if (i == root.size() || root[i] == L'\\')
+                CreateDirectoryW(root.substr(0, i).c_str(), nullptr);
+        }
+        return root + L"\\entitlements.json";
+    }
+
+    void EnsureLoaded() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_loaded) return;
+        m_loaded = true;
+        std::wstring path = GetPath();
+        std::ifstream f(path, std::ios::binary);
+        if (!f.is_open()) return;
+        try {
+            nlohmann::json j;
+            f >> j;
+            if (j.contains("prime") && j["prime"].is_boolean()) {
+                m_entitlements.prime = j["prime"].get<bool>();
+            }
+            if (j.contains("operation_passes") && j["operation_passes"].is_array()) {
+                m_entitlements.operation_passes.clear();
+                for (const auto& elem : j["operation_passes"]) {
+                    if (elem.is_number()) {
+                        m_entitlements.operation_passes.push_back(elem.get<uint32_t>());
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+
+    void SaveLocked() {
+        std::wstring path = GetPath();
+        try {
+            nlohmann::json j;
+            j["prime"] = m_entitlements.prime;
+            j["operation_passes"] = m_entitlements.operation_passes;
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            if (f.is_open()) {
+                f << j.dump(2);
+            }
+        } catch (...) {}
+    }
+
+    bool IsPrime() {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_entitlements.prime;
+    }
+
+    void SetPrime(bool prime) {
+        EnsureLoaded();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_entitlements.prime = prime;
+            SaveLocked();
+        }
+    }
+
+    bool HasOperationPass(uint32_t season) {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (uint32_t s : m_entitlements.operation_passes) {
+            if (s == season) return true;
+        }
+        return false;
+    }
+
+    void AddOperationPass(uint32_t season) {
+        EnsureLoaded();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (uint32_t s : m_entitlements.operation_passes) {
+                if (s == season) return;
+            }
+            m_entitlements.operation_passes.push_back(season);
+            SaveLocked();
+        }
+    }
+
+    std::vector<uint32_t> GetOperationPasses() {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_entitlements.operation_passes;
+    }
+
+private:
+    std::mutex m_mutex;
+    bool m_loaded = false;
+    Entitlements m_entitlements;
+};
+
+// Serializes CSOEconGameAccountClient (base_gcmessages.proto, type 7)
+std::vector<uint8_t> SerializeGameAccountClient(bool prime) {
+    std::vector<uint8_t> out;
+    PutVarintField(out, 1, 0); // additional_backpack_slots = 0
+    if (prime) {
+        PutFixed32Field(out, 12, (uint32_t)::time(nullptr)); // bonus_xp_timestamp_refresh
+        PutVarintField(out, 13, 16); // bonus_xp_usedflags = 16
+        PutVarintField(out, 14, 5);  // elevated_state = 5 (ElevatedStatePrime)
+        PutVarintField(out, 15, 5);  // elevated_timestamp = 5
+    } else {
+        PutVarintField(out, 14, 0);  // elevated_state = 0
+    }
+    return out;
+}
+
+// Serializes CSOPersonaDataPublic (cstrike15_gcmessages.proto, type 2)
+std::vector<uint8_t> SerializePersonaDataPublic(bool prime) {
+    std::vector<uint8_t> personaData;
+    PutVarintField(personaData, 1, 40); // player_level = 40
+    std::vector<uint8_t> commends;
+    PutVarintField(commends, 1, 100);
+    PutVarintField(commends, 2, 100);
+    PutVarintField(commends, 4, 100);
+    PutBytesField(personaData, 2, commends);
+    PutVarintField(personaData, 3, prime ? 1 : 0); // elevated_state = bool
+    return personaData;
+}
+
+// Serializes CSOAccountSeasonalOperation (cstrike15_gcmessages.proto, type 40)
+std::vector<uint8_t> SerializeSeasonalOperation(uint32_t season) {
+    std::vector<uint8_t> out;
+    PutVarintField(out, 1, season); // season_value = 8 (Shattered Web)
+    PutVarintField(out, 2, 1);      // tier_unlocked = 1
+    PutVarintField(out, 3, 1);      // premium_tiers = 1
+    PutVarintField(out, 7, (uint32_t)::time(nullptr)); // season_pass_time
+    return out;
+}
 
 class CSGOInventoryManager {
 public:
@@ -557,14 +719,41 @@ public:
         return itm.id;
     }
 
-    uint64_t AddItemWithAttributes(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed) {
+    bool ConsumeItem(uint64_t itemId, bool& outDestroyed, EconItem& outItem) {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = std::find_if(m_items.begin(), m_items.end(), [itemId](const EconItem& i) { return i.id == itemId; });
+        if (it == m_items.end()) return false;
+        outItem = *it;
+        if (it->quantity > 1) {
+            it->quantity--;
+            outDestroyed = false;
+        } else {
+            m_items.erase(it);
+            outDestroyed = true;
+        }
+        SaveLocked();
+        return true;
+    }
+
+    bool RemoveItem(uint64_t itemId) {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = std::find_if(m_items.begin(), m_items.end(), [itemId](const EconItem& i) { return i.id == itemId; });
+        if (it == m_items.end()) return false;
+        m_items.erase(it);
+        SaveLocked();
+        return true;
+    }
+
+    uint64_t AddItemWithAttributes(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, uint32_t origin = 0, uint32_t inventory = 0) {
         EnsureLoaded();
         std::lock_guard<std::mutex> lock(m_mutex);
         uint64_t accountId = (UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
 
-        if (paintKit == 0) {
+        if (paintKit == 0 && origin == 0 && inventory == 0) {
             auto it = std::find_if(m_items.begin(), m_items.end(), [defIndex](const EconItem& it) {
-                return it.defIndex == defIndex && it.paintKit == 0;
+                return it.defIndex == defIndex && it.paintKit == 0 && it.origin == 0 && it.inventory == 0;
             });
             if (it != m_items.end()) {
                 it->quantity += count;
@@ -582,10 +771,12 @@ public:
         itm.paintKit = paintKit;
         itm.wear = wear > 0.0f ? wear : 0.001f;
         itm.seed = seed > 0 ? seed : (rand() % 999 + 1);
+        itm.origin = origin;
+        itm.inventory = inventory;
         m_items.push_back(itm);
         SaveLocked();
-        ReFixLog("[GC] CSGOInventory: Added custom item id=%llu def=%u qty=%u pk=%u wear=%.4f",
-                 (unsigned long long)itm.id, defIndex, count, paintKit, itm.wear);
+        ReFixLog("[GC] CSGOInventory: Added custom item id=%llu def=%u qty=%u pk=%u wear=%.4f origin=%u inv=0x%X",
+                 (unsigned long long)itm.id, defIndex, count, paintKit, itm.wear, origin, inventory);
         return itm.id;
     }
 
@@ -1217,6 +1408,18 @@ public:
                 }
             }
 
+            // Check if activating Shattered Web Season Pass (defIndex 4549)
+            auto allCheckItems = CSGOInventoryManager::Get().GetItems();
+            auto itC4549 = std::find_if(allCheckItems.begin(), allCheckItems.end(), [crateId](const EconItem& i) { return i.id == crateId || (crateId && i.defIndex == (uint32_t)crateId); });
+            auto itK4549 = std::find_if(allCheckItems.begin(), allCheckItems.end(), [keyId](const EconItem& i) { return i.id == keyId || (keyId && i.defIndex == (uint32_t)keyId); });
+            if ((itC4549 != allCheckItems.end() && itC4549->defIndex == 4549) || (itK4549 != allCheckItems.end() && itK4549->defIndex == 4549)) {
+                uint64_t pId = (itC4549 != allCheckItems.end() && itC4549->defIndex == 4549) ? itC4549->id : itK4549->id;
+                ReFixGC::ActivateOperationPass(8, pId);
+                std::vector<uint8_t> unlockResp;
+                Reply(kMsgGCUnlockCrateResponse, unlockResp);
+                return k_EGCResultOK;
+            }
+
             UnlockCrateResult res = CSGOInventoryManager::Get().UnlockCrate(crateId, keyId);
 
             if (res.awardedId != 0) {
@@ -1302,50 +1505,193 @@ public:
                 // Step 6: Thread-safe engine call (Rule R5)
                 refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
             }
-        } else if (msg == kMsgGCStorePurchaseInit || msg == kMsgGCStorePurchaseInitAlt) {
-            // Purchase keys or items -> Intercept with ReFix Overlay Purchase Listener!
-            uint32_t defIndex = 0, count = 1;
-            const uint8_t* p = body;
-            const uint8_t* end = body + bodySize;
-            while (p < end) {
-                uint64_t tag = 0, val = 0;
-                if (!GetVarint(p, end, tag)) break;
-                uint32_t f = (tag >> 3);
-                uint32_t w = tag & 7;
-                if (w == 0) {
-                    if (!GetVarint(p, end, val)) break;
-                    if (f == 1) defIndex = (uint32_t)val;
-                    else if (f == 2) count = (uint32_t)val;
-                } else if (w == 1) { if (end - p < 8) break; p += 8; }
-                else if (w == 5) { if (end - p < 4) break; p += 4; }
-                else if (w == 2) {
-                    if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
-                    p += val;
+        } else if (msg == kMsgGCUseItemRequest) {
+            // CMsgUseItem { optional uint64 item_id = 1; }
+            uint64_t itemId = 0;
+            if (proto && body) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0, val = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (w == 0) {
+                        if (!GetVarint(p, end, val)) break;
+                        if (f == 1) itemId = val;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
+                    }
                 }
             }
-            if (defIndex == 0) defIndex = 1203; // Default CS:GO Case Key
-
-            char itemName[128];
-            sprintf_s(itemName, "CS:GO Item #%u (Qty: %u)", defIndex, count);
-            ReFixLog("[GC] Store purchase intercepted: %s. Prompting ReFix Overlay modal...", itemName);
-
-            uint64_t orderId = GetTickCount64();
-            ReFixOverlay::PromptPurchase(730, orderId, itemName, "CS:GO In-Game Store Purchase", true,
-                [defIndex, count, this](bool approved) {
-                    if (approved) {
-                        CSGOInventoryManager::Get().GrantKeys(defIndex, count);
-                        ReFixLog("[GC] Purchase approved by player! Granted %u of def %u", count, defIndex);
-                        std::vector<uint8_t> resp;
-                        PutVarintField(resp, 1, 1); // Success
-                        Reply(kMsgGCStorePurchaseInitResponse, resp);
-                        Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(1, UnrealSteamEmu::GetLocalSteamID()));
-                    } else {
-                        ReFixLog("[GC] Purchase declined or cancelled in overlay.");
-                        std::vector<uint8_t> resp;
-                        PutVarintField(resp, 1, 2); // Cancelled
-                        Reply(kMsgGCStorePurchaseInitResponse, resp);
+            ReFixLog("[GC] kMsgGCUseItemRequest (1025): item_id=%llu", (unsigned long long)itemId);
+            if (itemId != 0) {
+                auto allItems = CSGOInventoryManager::Get().GetItems();
+                auto it = std::find_if(allItems.begin(), allItems.end(), [itemId](const EconItem& i) { return i.id == itemId; });
+                if (it != allItems.end() && it->defIndex == 4549) {
+                    ReFixGC::ActivateOperationPass(8, itemId);
+                }
+            }
+        } else if (msg == kMsgGCStorePurchaseInit) {
+            // CMsgGCStorePurchaseInit { repeated CGCStorePurchaseInit_LineItem line_items = 4; }
+            std::vector<PendingLineItem> lineItems;
+            if (proto && body) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (f == 4 && w == 2) { // line_items submessage
+                        uint64_t subLen = 0;
+                        if (!GetVarint(p, end, subLen) || (size_t)(end - p) < subLen) break;
+                        const uint8_t* subP = p;
+                        const uint8_t* subEnd = p + subLen;
+                        p += subLen;
+                        PendingLineItem item;
+                        while (subP < subEnd) {
+                            uint64_t subTag = 0, subVal = 0;
+                            if (!GetVarint(subP, subEnd, subTag)) break;
+                            uint32_t subF = (uint32_t)(subTag >> 3);
+                            uint32_t subW = subTag & 7;
+                            if (subW == 0) {
+                                if (!GetVarint(subP, subEnd, subVal)) break;
+                                if (subF == 1) item.item_def_id = (uint32_t)subVal;
+                                else if (subF == 2) item.quantity = (uint32_t)subVal;
+                            } else if (subW == 1) { if (subEnd - subP < 8) break; subP += 8; }
+                            else if (subW == 5) { if (subEnd - subP < 4) break; subP += 4; }
+                            else if (subW == 2) {
+                                if (!GetVarint(subP, subEnd, subVal) || (size_t)(subEnd - subP) < subVal) break;
+                                subP += subVal;
+                            }
+                        }
+                        if (item.item_def_id != 0) {
+                            lineItems.push_back(item);
+                        }
+                    } else if (w == 0) {
+                        uint64_t val = 0;
+                        if (!GetVarint(p, end, val)) break;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        uint64_t len = 0;
+                        if (!GetVarint(p, end, len) || (size_t)(end - p) < len) break;
+                        p += len;
                     }
-                });
+                }
+            }
+
+            static uint64_t s_txnCounter = 5000;
+            uint64_t txn_id = ++s_txnCounter;
+            {
+                std::lock_guard<std::mutex> lock(m_txLock);
+                m_pendingPurchases[txn_id] = lineItems;
+            }
+
+            ReFixLog("[GC] StorePurchaseInit 2510: txn_id=%llu items=%u", (unsigned long long)txn_id, (unsigned)lineItems.size());
+
+            // Build CMsgGCStorePurchaseInitResponse (2511):
+            // field 1: optional int32 result = 1;
+            // field 2: optional uint64 txn_id = 2;
+            // field 3: optional string url = 3;
+            std::vector<uint8_t> initResp;
+            PutVarintField(initResp, 1, 1); // result = 1 (success)
+            PutVarintField(initResp, 2, txn_id);
+            char url[128];
+            sprintf_s(url, "https://checkout.steampowered.com/checkout/approvetxn/%llu/?returnurl=steam", (unsigned long long)txn_id);
+            std::string urlStr(url);
+            std::vector<uint8_t> urlBytes(urlStr.begin(), urlStr.end());
+            PutBytesField(initResp, 3, urlBytes);
+            Reply(kMsgGCStorePurchaseInitResponse, initResp);
+
+            // Trigger Steam microtransaction authorization callback
+            UnrealSteamEmu::AuthorizeMicroTxn(730, txn_id, true);
+        } else if (msg == kMsgGCStorePurchaseFinalize) {
+            // CMsgGCStorePurchaseFinalize { optional uint64 txn_id = 1; }
+            uint64_t txn_id = 0;
+            if (proto && body) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0, val = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (w == 0) {
+                        if (!GetVarint(p, end, val)) break;
+                        if (f == 1) txn_id = val;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
+                    }
+                }
+            }
+
+            ReFixLog("[GC] StorePurchaseFinalize 2504: txn_id=%llu", (unsigned long long)txn_id);
+
+            std::vector<PendingLineItem> itemsToGrant;
+            {
+                std::lock_guard<std::mutex> lock(m_txLock);
+                auto it = m_pendingPurchases.find(txn_id);
+                if (it != m_pendingPurchases.end()) {
+                    itemsToGrant = it->second;
+                    m_pendingPurchases.erase(it);
+                }
+            }
+
+            std::vector<uint64_t> awardedItemIds;
+            uint64_t localSteamId = UnrealSteamEmu::GetLocalSteamID();
+            uint32_t accountId = (uint32_t)(localSteamId & 0xFFFFFFFF);
+
+            std::vector<uint8_t> soid;
+            PutVarintField(soid, 1, kSOTypeSteamId);
+            PutVarintField(soid, 2, localSteamId);
+            static uint64_t s_finSoVersion = 400;
+
+            for (const auto& lineItem : itemsToGrant) {
+                for (uint32_t q = 0; q < lineItem.quantity; ++q) {
+                    uint64_t newItemId = CSGOInventoryManager::Get().AddItemWithAttributes(
+                        lineItem.item_def_id, 1, 4, 1, 0, 0.001f, 0,
+                        2 /* ItemOriginPurchased */,
+                        (1u << 30) | 4 /* UnacknowledgedPurchased */);
+                    if (newItemId != 0) {
+                        awardedItemIds.push_back(newItemId);
+                        auto allItems = CSGOInventoryManager::Get().GetItems();
+                        auto itGranted = std::find_if(allItems.begin(), allItems.end(), [newItemId](const EconItem& i) { return i.id == newItemId; });
+                        if (itGranted != allItems.end()) {
+                            std::vector<uint8_t> itBytes = SerializeEconItem(*itGranted, accountId, 1);
+                            std::vector<uint8_t> soSingle;
+                            PutVarintField(soSingle, 2, 1); // type_id = 1
+                            PutBytesField(soSingle, 3, itBytes);
+                            PutFixed64Field(soSingle, 4, ++s_finSoVersion);
+                            PutBytesField(soSingle, 5, soid);
+                            Reply(21 /* k_ESOMsg_Create */, soSingle);
+                        }
+                    }
+                }
+            }
+
+            // Build CMsgGCStorePurchaseFinalizeResponse (2505):
+            // field 1: optional uint32 result = 1;
+            // field 2: repeated uint64 item_ids = 2;
+            std::vector<uint8_t> finResp;
+            PutVarintField(finResp, 1, 1); // result = 1 (success)
+            for (uint64_t id : awardedItemIds) {
+                PutVarintField(finResp, 2, id);
+            }
+            Reply(kMsgGCStorePurchaseFinalizeResponse, finResp);
+
+            refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
+        } else if (msg == kMsgGCStorePurchaseCancel) {
+            std::vector<uint8_t> cancelResp;
+            PutVarintField(cancelResp, 1, 1);
+            Reply(kMsgGCStorePurchaseCancelResponse, cancelResp);
         }
 
         return k_EGCResultOK;
@@ -1395,6 +1741,13 @@ public:
     }
 
 public:
+    struct PendingLineItem {
+        uint32_t item_def_id = 0;
+        uint32_t quantity = 1;
+    };
+    std::mutex m_txLock;
+    std::map<uint64_t, std::vector<PendingLineItem>> m_pendingPurchases;
+
     const bool m_gameServer;
     std::atomic<int> m_logged{ 0 };
     std::mutex m_mutex;
@@ -1477,24 +1830,36 @@ std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId) {
         PutBytesField(couponType, 2, cpBytes);
     }
 
-    // SubscribedType for CSOPersonaDataPublic (type_id = 2) - Prime status, level 40, commendations
-    std::vector<uint8_t> personaData;
-    PutVarintField(personaData, 1, 40); // player_level = 40
-    std::vector<uint8_t> commends;
-    PutVarintField(commends, 1, 100);
-    PutVarintField(commends, 2, 100);
-    PutVarintField(commends, 4, 100);
-    PutBytesField(personaData, 2, commends);
-    PutVarintField(personaData, 3, 1); // elevated_state = 1 (Prime Status!)
-
+    // SubscribedType for CSOPersonaDataPublic (type_id = 2)
+    bool isPrime = CSGOEntitlementsManager::Get().IsPrime();
+    std::vector<uint8_t> personaData = SerializePersonaDataPublic(isPrime);
     std::vector<uint8_t> personaType;
-    PutVarintField(personaType, 1, 2); // type_id = 2
+    PutVarintField(personaType, 1, kSOTypePersonaDataPublic); // type_id = 2
     PutBytesField(personaType, 2, personaData);
+
+    // SubscribedType for CSOEconGameAccountClient (type_id = 7)
+    std::vector<uint8_t> gameAccount = SerializeGameAccountClient(isPrime);
+    std::vector<uint8_t> accountType;
+    PutVarintField(accountType, 1, kSOTypeGameAccountClient); // type_id = 7
+    PutBytesField(accountType, 2, gameAccount);
+
+    // SubscribedType for CSOAccountSeasonalOperation (type_id = 40)
+    std::vector<uint8_t> seasonalType;
+    auto passes = CSGOEntitlementsManager::Get().GetOperationPasses();
+    if (!passes.empty()) {
+        PutVarintField(seasonalType, 1, kSOTypeSeasonalOperation); // type_id = 40
+        for (uint32_t s : passes) {
+            std::vector<uint8_t> sBytes = SerializeSeasonalOperation(s);
+            PutBytesField(seasonalType, 2, sBytes);
+        }
+    }
 
     // CMsgSOCacheSubscribed
     std::vector<uint8_t> cache;
     PutBytesField(cache, 2, itemType);
     PutBytesField(cache, 2, personaType);
+    PutBytesField(cache, 2, accountType);
+    if (!passes.empty()) PutBytesField(cache, 2, seasonalType);
     if (!coupons.empty()) PutBytesField(cache, 2, couponType);
     PutFixed64Field(cache, 3, 1); // version
     PutBytesField(cache, 4, owner);
@@ -1528,18 +1893,53 @@ std::vector<uint8_t> BuildCacheSubscribed(uint64_t steamId) {
     PutVarintField(owner, 2, steamId);
 
     auto items = CSGOInventoryManager::Get().GetItems();
+    auto coupons = CSGOInventoryManager::Get().GetCoupons();
     uint32_t accountId = (uint32_t)(steamId & 0xFFFFFFFF);
 
     std::vector<uint8_t> itemType;
-    PutVarintField(itemType, 1, 1); // type_id = 1 (CSOEconItem)
+    PutVarintField(itemType, 1, kSOTypeItem); // type_id = 1 (CSOEconItem)
     uint32_t pos = 1;
     for (const auto& it : items) {
         std::vector<uint8_t> itBytes = SerializeEconItem(it, accountId, pos++);
         PutBytesField(itemType, 2, itBytes);
     }
 
+    bool isPrime = CSGOEntitlementsManager::Get().IsPrime();
+    std::vector<uint8_t> personaData = SerializePersonaDataPublic(isPrime);
+    std::vector<uint8_t> personaType;
+    PutVarintField(personaType, 1, kSOTypePersonaDataPublic); // type_id = 2
+    PutBytesField(personaType, 2, personaData);
+
+    std::vector<uint8_t> gameAccount = SerializeGameAccountClient(isPrime);
+    std::vector<uint8_t> accountType;
+    PutVarintField(accountType, 1, kSOTypeGameAccountClient); // type_id = 7
+    PutBytesField(accountType, 2, gameAccount);
+
+    std::vector<uint8_t> seasonalType;
+    auto passes = CSGOEntitlementsManager::Get().GetOperationPasses();
+    if (!passes.empty()) {
+        PutVarintField(seasonalType, 1, kSOTypeSeasonalOperation); // type_id = 40
+        for (uint32_t s : passes) {
+            std::vector<uint8_t> sBytes = SerializeSeasonalOperation(s);
+            PutBytesField(seasonalType, 2, sBytes);
+        }
+    }
+
+    std::vector<uint8_t> couponType;
+    if (!coupons.empty()) {
+        PutVarintField(couponType, 1, kSOTypeCoupon);
+        for (const auto& cp : coupons) {
+            std::vector<uint8_t> cpBytes = SerializeEconCoupon(cp);
+            PutBytesField(couponType, 2, cpBytes);
+        }
+    }
+
     std::vector<uint8_t> cache;
     PutBytesField(cache, 2, itemType);
+    PutBytesField(cache, 2, personaType);
+    PutBytesField(cache, 2, accountType);
+    if (!passes.empty()) PutBytesField(cache, 2, seasonalType);
+    if (!coupons.empty()) PutBytesField(cache, 2, couponType);
     PutFixed64Field(cache, 3, 1); // version
     PutBytesField(cache, 4, owner);
     return cache;
@@ -1575,33 +1975,191 @@ uint32_t ParseHelloVersion(const uint8_t* body, size_t size) {
     return 0;
 }
 
+bool IsPrimeEnabled() {
+    return CSGOEntitlementsManager::Get().IsPrime();
+}
+
+void SetPrimeEnabled(bool enabled) {
+    CSGO_SetPrimeStatus(enabled);
+}
+
+bool HasOperationPass(uint32_t season) {
+    return CSGOEntitlementsManager::Get().HasOperationPass(season);
+}
+
+void ActivateOperationPass(uint32_t season, uint64_t passItemId) {
+    refix::source::MainThreadQueue::Enqueue([season, passItemId]() {
+        CSGOEntitlementsManager::Get().AddOperationPass(season);
+        uint64_t steamId = UnrealSteamEmu::GetLocalSteamID();
+        uint32_t accountId = (uint32_t)(steamId & 0xFFFFFFFF);
+
+        std::vector<uint8_t> soid;
+        PutVarintField(soid, 1, kSOTypeSteamId);
+        PutVarintField(soid, 2, steamId);
+
+        CGameCoordinatorLan* gc = (CGameCoordinatorLan*)ReFixGC::Get(false);
+        if (!gc) return;
+
+        static uint64_t s_passSoVersion = 800;
+
+        // Step 1: Destroy or consume the pass item if provided
+        if (passItemId != 0) {
+            bool destroyed = false;
+            EconItem consumed;
+            if (CSGOInventoryManager::Get().ConsumeItem(passItemId, destroyed, consumed)) {
+                if (destroyed) {
+                    std::vector<uint8_t> passProto;
+                    PutVarintField(passProto, 1, passItemId);
+                    std::vector<uint8_t> soDestroy;
+                    PutVarintField(soDestroy, 2, kSOTypeItem); // type_id = 1
+                    PutBytesField(soDestroy, 3, passProto);
+                    PutFixed64Field(soDestroy, 4, ++s_passSoVersion);
+                    PutBytesField(soDestroy, 5, soid);
+                    gc->Reply(23 /* k_ESOMsg_Destroy */, soDestroy);
+                } else {
+                    std::vector<uint8_t> itBytes = SerializeEconItem(consumed, accountId, 1);
+                    std::vector<uint8_t> soUpdate;
+                    PutVarintField(soUpdate, 2, kSOTypeItem);
+                    PutBytesField(soUpdate, 3, itBytes);
+                    PutFixed64Field(soUpdate, 4, ++s_passSoVersion);
+                    PutBytesField(soUpdate, 5, soid);
+                    gc->Reply(22 /* k_ESOMsg_Update */, soUpdate);
+                }
+            }
+        }
+
+        // Step 2: Grant Operation Coin (defIndex 4550) if not present
+        auto allItems = CSGOInventoryManager::Get().GetItems();
+        auto itCoin = std::find_if(allItems.begin(), allItems.end(), [](const EconItem& i) { return i.defIndex == 4550; });
+        uint64_t coinId = 0;
+        if (itCoin == allItems.end()) {
+            coinId = CSGOInventoryManager::Get().AddItemWithAttributes(4550, 1, 4, 1, 0, 0.0f, 0, 8, 0);
+            if (coinId != 0) {
+                auto updatedItems = CSGOInventoryManager::Get().GetItems();
+                auto itNew = std::find_if(updatedItems.begin(), updatedItems.end(), [coinId](const EconItem& i) { return i.id == coinId; });
+                if (itNew != updatedItems.end()) {
+                    std::vector<uint8_t> coinBytes = SerializeEconItem(*itNew, accountId, 1);
+                    std::vector<uint8_t> soCoin;
+                    PutVarintField(soCoin, 2, kSOTypeItem); // type_id = 1
+                    PutBytesField(soCoin, 3, coinBytes);
+                    PutFixed64Field(soCoin, 4, ++s_passSoVersion);
+                    PutBytesField(soCoin, 5, soid);
+                    gc->Reply(21 /* k_ESOMsg_Create */, soCoin);
+
+                    // Customization Notification (1090)
+                    std::vector<uint8_t> notif;
+                    PutVarintField(notif, 1, coinId);
+                    PutVarintField(notif, 2, 1007 /* UnlockCrate notification */);
+                    gc->Reply(1090, notif);
+                }
+            }
+        }
+
+        // Step 3: Create CSOAccountSeasonalOperation (type 40)
+        std::vector<uint8_t> seasonObj = SerializeSeasonalOperation(season);
+        std::vector<uint8_t> soSeasonal;
+        PutVarintField(soSeasonal, 2, kSOTypeSeasonalOperation); // type_id = 40 (CSOAccountSeasonalOperation)
+        PutBytesField(soSeasonal, 3, seasonObj);
+        PutFixed64Field(soSeasonal, 4, ++s_passSoVersion);
+        PutBytesField(soSeasonal, 5, soid);
+        gc->Reply(21 /* k_ESOMsg_Create */, soSeasonal);
+        gc->Reply(22 /* k_ESOMsg_Update */, soSeasonal);
+
+        ReFixLog("[GC] Operation season %u activated! Coin=%llu, SO type 40 dispatched", season, (unsigned long long)coinId);
+
+        refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
+    });
+}
+
 } // namespace ReFixGC
 
-extern "C" __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed) {
-    uint64_t id = CSGOInventoryManager::Get().AddItemWithAttributes(defIndex, count, quality, rarity, paintKit, wear, seed);
-    if (id != 0) {
-        auto allItems = CSGOInventoryManager::Get().GetItems();
-        auto itGranted = std::find_if(allItems.begin(), allItems.end(), [id](const EconItem& i) { return i.id == id; });
-        if (itGranted != allItems.end()) {
-            uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
-            std::vector<uint8_t> itBytes = SerializeEconItem(*itGranted, accountId, (uint32_t)allItems.size());
+extern "C" {
 
-            std::vector<uint8_t> soid;
-            PutVarintField(soid, 1, kSOTypeSteamId);
-            PutVarintField(soid, 2, UnrealSteamEmu::GetLocalSteamID());
+__declspec(dllexport) bool CSGO_IsPrimeStatus() {
+    return CSGOEntitlementsManager::Get().IsPrime();
+}
 
-            static uint64_t s_soVersion = 200;
-            std::vector<uint8_t> soSingle;
-            PutVarintField(soSingle, 2, 1);
-            PutBytesField(soSingle, 3, itBytes);
-            PutFixed64Field(soSingle, 4, ++s_soVersion);
-            PutBytesField(soSingle, 5, soid);
+__declspec(dllexport) void CSGO_SetPrimeStatus(bool enabled) {
+    refix::source::MainThreadQueue::Enqueue([enabled]() {
+        CSGOEntitlementsManager::Get().SetPrime(enabled);
+        uint64_t steamId = UnrealSteamEmu::GetLocalSteamID();
+        uint32_t accountId = (uint32_t)(steamId & 0xFFFFFFFF);
 
-            CGameCoordinatorLan* gc = (CGameCoordinatorLan*)ReFixGC::Get(false);
-            if (gc) {
-                gc->Reply(21 /* k_ESOMsg_Create */, soSingle);
-            }
-            refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
+        std::vector<uint8_t> soid;
+        PutVarintField(soid, 1, kSOTypeSteamId);
+        PutVarintField(soid, 2, steamId);
+
+        CGameCoordinatorLan* gc = (CGameCoordinatorLan*)ReFixGC::Get(false);
+        if (!gc) return;
+
+        static uint64_t s_entSoVersion = 500;
+
+        // 1. Emit k_ESOMsg_Create (21) / Update (22) for type 7 (CSOEconGameAccountClient)
+        std::vector<uint8_t> gameAccount = SerializeGameAccountClient(enabled);
+        std::vector<uint8_t> soAccount;
+        PutVarintField(soAccount, 2, kSOTypeGameAccountClient); // type_id = 7
+        PutBytesField(soAccount, 3, gameAccount);
+        PutFixed64Field(soAccount, 4, ++s_entSoVersion);
+        PutBytesField(soAccount, 5, soid);
+        if (enabled) {
+            gc->Reply(21 /* k_ESOMsg_Create */, soAccount);
+            gc->Reply(22 /* k_ESOMsg_Update */, soAccount);
+        } else {
+            gc->Reply(22 /* k_ESOMsg_Update */, soAccount);
         }
-    }
+
+        // 2. Emit k_ESOMsg_Update (22) for type 2 (CSOPersonaDataPublic)
+        std::vector<uint8_t> personaData = SerializePersonaDataPublic(enabled);
+        std::vector<uint8_t> soPersona;
+        PutVarintField(soPersona, 2, kSOTypePersonaDataPublic); // type_id = 2
+        PutBytesField(soPersona, 3, personaData);
+        PutFixed64Field(soPersona, 4, ++s_entSoVersion);
+        PutBytesField(soPersona, 5, soid);
+        gc->Reply(22 /* k_ESOMsg_Update */, soPersona);
+
+        ReFixLog("[GC] Prime status updated live: enabled=%d (SO types 7 & 2 dispatched)", (int)enabled);
+
+        refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
+    });
+}
+
+__declspec(dllexport) bool CSGO_HasOperationPass(uint32_t season) {
+    return CSGOEntitlementsManager::Get().HasOperationPass(season);
+}
+
+__declspec(dllexport) void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId) {
+    ReFixGC::ActivateOperationPass(season, passItemId);
+}
+
+__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed) {
+    refix::source::MainThreadQueue::Enqueue([defIndex, count, quality, rarity, paintKit, wear, seed]() {
+        uint64_t id = CSGOInventoryManager::Get().AddItemWithAttributes(defIndex, count, quality, rarity, paintKit, wear, seed);
+        if (id != 0) {
+            auto allItems = CSGOInventoryManager::Get().GetItems();
+            auto itGranted = std::find_if(allItems.begin(), allItems.end(), [id](const EconItem& i) { return i.id == id; });
+            if (itGranted != allItems.end()) {
+                uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+                std::vector<uint8_t> itBytes = SerializeEconItem(*itGranted, accountId, (uint32_t)allItems.size());
+
+                std::vector<uint8_t> soid;
+                PutVarintField(soid, 1, kSOTypeSteamId);
+                PutVarintField(soid, 2, UnrealSteamEmu::GetLocalSteamID());
+
+                static uint64_t s_soVersion = 200;
+                std::vector<uint8_t> soSingle;
+                PutVarintField(soSingle, 2, kSOTypeItem);
+                PutBytesField(soSingle, 3, itBytes);
+                PutFixed64Field(soSingle, 4, ++s_soVersion);
+                PutBytesField(soSingle, 5, soid);
+
+                CGameCoordinatorLan* gc = (CGameCoordinatorLan*)ReFixGC::Get(false);
+                if (gc) {
+                    gc->Reply(21 /* k_ESOMsg_Create */, soSingle);
+                }
+                refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
+            }
+        }
+    });
+}
+
 }

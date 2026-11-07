@@ -23,4 +23,17 @@ std::vector<uint8_t> BuildConnectionStatus();
 // Field 1 (version) of a CMsgClientHello body, 0 when absent.
 uint32_t ParseHelloVersion(const uint8_t* body, size_t size);
 
+bool IsPrimeEnabled();
+void SetPrimeEnabled(bool enabled);
+bool HasOperationPass(uint32_t season);
+void ActivateOperationPass(uint32_t season, uint64_t passItemId = 0);
+
 } // namespace ReFixGC
+
+extern "C" {
+__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed);
+__declspec(dllexport) bool CSGO_IsPrimeStatus();
+__declspec(dllexport) void CSGO_SetPrimeStatus(bool enabled);
+__declspec(dllexport) bool CSGO_HasOperationPass(uint32_t season);
+__declspec(dllexport) void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId);
+}

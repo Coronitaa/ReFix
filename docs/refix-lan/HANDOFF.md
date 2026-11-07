@@ -561,3 +561,55 @@ elease\ReFix_v2.1.0, and deployed to D:\Games\PEAK\PEAK_Data\Plugins\x86_64\stea
     - `docs/refix-lan/evidence/phase0/ReFix_gc_21484.log` (10,781 bytes)
     - `docs/refix-lan/evidence/phase0/ReFix_gc_phase0_baseline.log` (21,495 bytes)
   - `tools/gc_decode.py` verified against live traces, successfully decoding messages by name.
+
+### P3: Equipment Persistence and Server Cache Subscribed Relay (VERIFICADO)
+- **Problem**: Weapon and equipment skins were not visible in matches, server log flooded with 1120+ repeated `[GC] server sent 4007`, equipment reset on restart, knife/gloves lost.
+- **Root Causes**:
+  - ServerWelcome body used invalid field varints instead of `CMsgClientWelcome` with embedded `CMsgCStrike15Welcome` in `game_data` (field 2) and cookie `0x293A206F6C6C6548`.
+  - JSON parser and writer truncated JSON on nested `}` in equipped arrays, and discarded slot 0 (knife).
+  - Item IDs were generated with ephemeral counters causing collisions across sessions.
+  - Dedicated and listen servers require a dedicated `k_ESOMsg_CacheSubscribed (24)` per connected player carrying only equipped items with `owner_soid.id = playerSteamId`.
+- **Implementation**:
+  - Replaced parser with robust JSON persistence tracking `last_low_item_id`.
+  - Item IDs composed as `(accountId << 32) | lowId` matching `csgo_gc`.
+  - Fixed `BuildServerWelcome` wire structure.
+  - Implemented LanCore channel 248 (`"RGCS"`) relay: when game server receives a connection, it requests the client's equipped SO cache, and client replies with its equipped items.
+  - Ensured server callbacks are drained in `SteamAPI_RunCallbacks` on the main thread (R5).
+- **Verification**: Verified live with two instances; server accepted handshake immediately with zero repeated 4007s, equipment persisted across game restarts, knife (slot 0) and gloves (slot 41) equipped correctly.
+
+### P2: Case Unboxing Flow and Schema Loot Resolution (VERIFICADO)
+- **Problem**: Opening crates resulted in default skins, broken unbox animation, or unhandled messages.
+- **Root Causes**:
+  - `k_EMsgGCUnlockCrate (1007)` is a non-protobuf raw struct (8-byte keyId + 8-byte crateId).
+  - Client requires strict SO event sequencing: Destroy crate (23), Destroy key (23), Create skin (21) with origin 8 (`ItemOriginCrate`) and inventory `(1 << 30) | 5` (`UnacknowledgedFoundInCrate`), Customization Notification (1090) with request 1007, and UnlockCrateResponse (1008) with result 1.
+  - Crate loot tables and odds were missing schema resolution.
+- **Implementation**:
+  - Implemented `csgo_schema.cpp` loot table resolver and odds simulator ported from `csgo_gc` (BSD-2-Clause preserved).
+  - Implemented raw struct parsing and exact 5-packet response sequence.
+  - Handled `k_EMsgGCSetItemPositions (1077)` acknowledgment from client.
+  - Queued `econ_clear_inventory_images` on `refix::source::MainThreadQueue` (R5).
+- **Verification**: In-game live verification recorded in `evidence_p2`: CS:GO roulette spins cleanly, decelerates, awards skin with 3D inspection view, updates inventory, persists to disk, and decodes with 0 errors in `tools/gc_decode.py`.
+
+### P7: Prime Status, Entitlements, Store Purchases, and Operation Passes (VERIFICADO)
+- **Problem**: Prime status upgrade button only displayed a mock toast, store purchases were mishandled (Init 2510 vs Finalize 2504 confusion), and Shattered Web Operation pass was not implemented.
+- **Root Causes**:
+  - CS:GO client determines Prime status via `CSOEconGameAccountClient` (SO type 7) with `elevated_state = 5` and `elevated_timestamp = 5`. Setting `elevated_state = 1` in `CSOPersonaDataPublic` (type 2) is insufficient.
+  - Type 7 wire format: field 12 (`bonus_xp_timestamp_refresh`) is `fixed32` (wire type 5), not varint.
+  - Shattered Web pass activation requires consuming pass item 4549 (Destroy 23), granting Operation Coin 4550 (Create 21), emitting Customization Notification 1090, and creating `CSOAccountSeasonalOperation` (SO type 40) with `season_value = 8` and `premium_tiers = 1`.
+  - Store purchase protocol was using 2504 for init and finalize; correct protocol is Init 2510 -> Response 2511, Finalize 2504 -> Response 2505.
+- **Implementation**:
+  - Created `CSGOEntitlementsManager` persisting `{ "prime": bool, "operation_passes": [8] }` to `entitlements.json`.
+  - Implemented `SerializeGameAccountClient` (type 7) and `SerializeSeasonalOperation` (type 40).
+  - Updated `BuildClientWelcome` to include SO types 7 and 40 in subscribed cache.
+  - Exported `CSGO_SetPrimeStatus` and `CSGO_ActivateOperationPass` executing on `MainThreadQueue` and emitting `k_ESOMsg_Create` (21) / `k_ESOMsg_Update` (22) for live hot-reloading without restarting.
+  - Handled store purchase 2510/2511 and 2504/2505 with Steam callback 152 dispatch.
+  - Overhauled Overlay Tab 8 to provide real Prime and Shattered Web pass toggle buttons.
+- **Verification**:
+  - Verified live in-game with `scratch/verify_p7_live.py` and `tools/trigger_csgo_action.exe`.
+  - Evidence images captured in `evidence_p7`:
+    - `p7_01_before_prime_cropped.png`: initial state with "GET THE PASS" banner.
+    - `p7_02_after_prime_live_cropped.png`: live Prime activation.
+    - `p7_03_after_pass_live_cropped.png`: live pass activation unlocking the full Shattered Web mission and rewards panel.
+    - `p7_04_persisted_on_restart_cropped.png`: cold restart confirming persistence of both Prime and Operation Pass.
+  - `tools/gc_decode.py` verified 0 protobuf errors across all trace messages.
+

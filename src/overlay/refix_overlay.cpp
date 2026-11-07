@@ -25,6 +25,7 @@
 #include <algorithm>
 
 extern void ReFixLog(const char* fmt, ...);
+extern "C" void CSGO_SetPrimeStatus(bool enabled);
 
 using namespace refix::overlay;
 
@@ -362,6 +363,7 @@ void ActivateWebPage(const char* url) {
             false, [](bool approved) {
                 if (approved) {
                     ReFixLog("[Overlay] Prime Status Upgrade approved by player!");
+                    CSGO_SetPrimeStatus(true);
                 }
             });
         return;
