@@ -1985,8 +1985,9 @@ void ReFixLog(const char* fmt, ...) {
         sprintf_s(tag, "[pid=%lu tid=%lu mod=%p %s] ", GetCurrentProcessId(), GetCurrentThreadId(), (void*)self, modPath);
     }
     char head[96];
-    int hn = sprintf_s(head, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [steam_api64] ",
-                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    int hn = sprintf_s(head, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%lu] ",
+                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                       GetCurrentProcessId());
     std::string line(head, hn > 0 ? static_cast<size_t>(hn) : 0);
     line += tag;
     line += buf;

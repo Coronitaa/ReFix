@@ -10,6 +10,8 @@ analysis/
 *.exp
 *.lib
 *.log
+!docs/refix-lan/evidence/**
+__pycache__/
 *.tmp
 *.bak
 

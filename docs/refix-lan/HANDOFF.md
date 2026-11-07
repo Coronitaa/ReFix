@@ -537,3 +537,27 @@ elease\ReFix_v2.1.0, and deployed to D:\Games\PEAK\PEAK_Data\Plugins\x86_64\stea
     - `sdk/docs/CLI_REFERENCE.md`: Complete reference manual and exit codes for `refixmod.exe` (`keygen`, `lint`, `pack`, `sign`, `verify`, `inspect`).
     - `docs/refix-lan/NVIDIA_REFLEX_SUPPRESSION.md`: Systems engineering documentation on NVIDIA Reflex overlay interference, environment variable suppression, API interception, and verification.
     - `docs/refix-lan/MODS_ARCHITECTURE_SPEC.md`: Subsystem internals, DAG topological scheduler (Kahn's algorithm), Loader Lock avoidance, MinHook mediation, SEH fault handling, and DPAPI persistence.
+
+
+---
+
+## CS:GO Protocol Remediation & Overhaul
+
+### Phase 0: Diagnostic & Verification Harness (VERIFICADO)
+- **Official Protocol Source of Truth (R1)**:
+  - Cloned official CS:GO protobuf definitions from `https://github.com/SteamDatabase/Protobufs/tree/master/csgo` into `third_party/protos/csgo/`.
+  - Recorded commit hash `5414eb56e4a033fefbe667f1988af5297864a784` in `third_party/protos/csgo/README.md`.
+  - Added reference implementation `csgo_gc` (BSD-2-Clause) notice and license in `THIRD_PARTY_NOTICES`.
+  - Removed Valve copyrighted Panorama scripts (`csgo/refix_injected_mainmenu.js`) in accordance with R9.
+- **Diagnostic Tools**:
+  - `0.1 GC Trace`: Added `[Debug] GCTrace=1` in `ReFix.ini` and implemented atomic per-process trace logging `ReFix_gc_<pid>.log` in `src/steam_gc_emu.cpp`.
+  - `0.2 PID Logging`: Updated `ReFixLog` in `src/steam_proxy.cpp` to tag every log line with `[%lu]` (PID), enabling multi-instance diagnosis.
+  - `0.3 GC Decoder`: Implemented `tools/gc_decode.py` (standard library + system `protoc`) mapping message numbers to official `.proto` types.
+  - `0.4 Protocol Regression Harness`: Implemented `tests/test_gc_protocol_regression.py` validating that emulator responses decode cleanly with zero unknown fields and zero wire errors.
+- **Verification Evidence**:
+  - Two live instances executed: Instance 1 (PID 25596) and Instance 2 (PID 21484).
+  - Traces recorded:
+    - `docs/refix-lan/evidence/phase0/ReFix_gc_25596.log` (49,011 bytes)
+    - `docs/refix-lan/evidence/phase0/ReFix_gc_21484.log` (10,781 bytes)
+    - `docs/refix-lan/evidence/phase0/ReFix_gc_phase0_baseline.log` (21,495 bytes)
+  - `tools/gc_decode.py` verified against live traces, successfully decoding messages by name.

@@ -27,6 +27,67 @@ extern void ReFixLog(const char* fmt, ...);
 
 namespace {
 
+static bool IsGCTraceEnabled() {
+    static int s_gcTrace = -1;
+    if (s_gcTrace == -1) {
+        char exePath[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string dir(exePath);
+        size_t p = dir.find_last_of("\\/");
+        std::string ini = (p != std::string::npos ? dir.substr(0, p + 1) : "") + "ReFix.ini";
+        if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            std::string cand = (p != std::string::npos ? dir.substr(0, p + 1) : "") + "..\\ReFix.ini";
+            if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) ini = cand;
+        }
+        s_gcTrace = GetPrivateProfileIntA("Debug", "GCTrace", 0, ini.c_str()) ? 1 : 0;
+    }
+    return s_gcTrace == 1;
+}
+
+static void LogGCTrace(const char* role, const char* dir, uint32_t msg, bool proto, const void* data, size_t size) {
+    if (!IsGCTraceEnabled()) return;
+
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string logPath(exePath);
+    size_t pos = logPath.find_last_of("\\/");
+    char filename[64];
+    sprintf_s(filename, "ReFix_gc_%lu.log", GetCurrentProcessId());
+    if (pos != std::string::npos) logPath = logPath.substr(0, pos + 1) + filename;
+    else logPath = filename;
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    std::string hex;
+    hex.reserve(size * 2 + 1);
+    static const char hexChars[] = "0123456789abcdef";
+    const uint8_t* p = (const uint8_t*)data;
+    for (size_t i = 0; i < size; ++i) {
+        hex.push_back(hexChars[(p[i] >> 4) & 0x0F]);
+        hex.push_back(hexChars[p[i] & 0x0F]);
+    }
+    if (hex.empty()) hex = "-";
+
+    char line[256];
+    int n = sprintf_s(line, "%04d-%02d-%02d %02d:%02d:%02d.%03d %lu %s %s %u %d ",
+                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                      GetCurrentProcessId(), role, dir, msg, proto ? 1 : 0);
+    std::string fullLine;
+    if (n > 0) fullLine.append(line, n);
+    fullLine.append(hex);
+    fullLine.push_back('\n');
+
+    HANDLE hf = CreateFileA(logPath.c_str(), FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(hf, fullLine.data(), (DWORD)fullLine.size(), &written, nullptr);
+        CloseHandle(hf);
+    }
+}
+
 // GC SDK base messages (gcsystemmsgs.proto, EGCBaseClientMsg)
 constexpr uint32_t kMsgClientWelcome = 4004;
 constexpr uint32_t kMsgServerWelcome = 4005;
@@ -770,7 +831,15 @@ public:
             memcpy(&headerLen, bytes + 4, sizeof(headerLen));
             body = bytes + kProtoHeaderSize + headerLen;
             bodySize = (kProtoHeaderSize + headerLen <= cubData) ? (cubData - (kProtoHeaderSize + headerLen)) : 0;
+        } else if (!proto && cubData >= 18) {
+            body = bytes + 18;
+            bodySize = cubData - 18;
+        } else {
+            body = bytes;
+            bodySize = cubData;
         }
+
+        LogGCTrace(Role(), "in", msg, proto, body, bodySize);
 
         if (!m_gameServer && msg == kMsgClientHello) {
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
@@ -1137,6 +1206,7 @@ public:
         else
             UnrealSteamEmu::PostCallback(GCMessageAvailable_t::k_iCallback, &available, sizeof(available));
         ReFixLog("[GC] %s <- %u (%u bytes)", Role(), msg, available.m_nMessageSize);
+        LogGCTrace(Role(), "out", msg, true, body.data(), body.size());
     }
 
     const bool m_gameServer;
