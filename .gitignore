@@ -1,5 +1,6 @@
 # Build output and temp directories
 build/
+build_csgo_mod/
 deploy/
 pre_release/
 *.zip
