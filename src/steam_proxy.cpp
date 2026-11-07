@@ -6632,6 +6632,7 @@ extern "C" __declspec(dllexport) void SteamGameServer_RunCallbacks() {
 
 extern "C" __declspec(dllexport) void SteamGameServer_Shutdown() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::SetLocalPresence("refix:server", ""); // the listen server is gone: stop advertising it
         UnrealSteamEmu::Shutdown();
         return;
     }

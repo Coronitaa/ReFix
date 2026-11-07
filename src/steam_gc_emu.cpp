@@ -1164,93 +1164,89 @@ public:
             PutVarintField(updateResp, 1, 1);
             Reply(9104, updateResp);
 
-            // 2. Resolve host configuration
-            std::string mapName = "de_dust2";
-            uint32_t gameType = 0; // classic
-            uint32_t gameMode = 1; // competitive
-            uint32_t maxRounds = 30;
-            float roundTime = 1.92f;
-            uint32_t buyTime = 20;
-            uint32_t startMoney = 800;
-            uint32_t maxMoney = 16000;
-            uint32_t friendlyFire = 0;
-            uint32_t botQuota = 10;
-            uint32_t botDifficulty = 1;
-            uint32_t svCheats = 0;
-            uint32_t overtime = 0;
-            uint32_t limitTeams = 2;
+            auto hostMatch = []() {
+                // 2. Resolve host configuration
+                std::string mapName = "de_dust2";
+                uint32_t gameType = 0; // classic
+                uint32_t gameMode = 1; // competitive
+                uint32_t maxRounds = 30;
+                float roundTime = 1.92f;
+                uint32_t buyTime = 20;
+                uint32_t startMoney = 800;
+                uint32_t maxMoney = 16000;
+                uint32_t friendlyFire = 0;
+                uint32_t botQuota = 10;
+                uint32_t botDifficulty = 1;
+                uint32_t svCheats = 0;
+                uint32_t overtime = 0;
+                uint32_t limitTeams = 2;
 
-            std::string cfgStr = refix::source::GetConVarString("refix_host_cfg");
-            if (cfgStr.empty()) {
-                cfgStr = ReFixGC::GetHostConfigJson();
-            }
+                std::string cfgStr = ReFixGC::GetHostConfigJson();
 
-            if (!cfgStr.empty()) {
-                try {
-                    auto j = nlohmann::json::parse(cfgStr, nullptr, false);
-                    if (!j.is_discarded()) {
-                        if (j.contains("map") && j["map"].is_string()) mapName = j["map"].get<std::string>();
-                        if (j.contains("mode") && j["mode"].is_string()) {
-                            std::string m = j["mode"].get<std::string>();
-                            if (m == "casual") { gameType = 0; gameMode = 0; }
-                            else if (m == "competitive") { gameType = 0; gameMode = 1; }
-                            else if (m == "armsrace") { gameType = 1; gameMode = 0; }
-                            else if (m == "demolition") { gameType = 1; gameMode = 1; }
-                            else if (m == "deathmatch") { gameType = 1; gameMode = 2; }
-                            else if (m == "survival" || m == "dangerzone") { gameType = 6; gameMode = 0; }
+                if (!cfgStr.empty()) {
+                    try {
+                        auto j = nlohmann::json::parse(cfgStr, nullptr, false);
+                        if (!j.is_discarded()) {
+                            if (j.contains("map") && j["map"].is_string()) mapName = j["map"].get<std::string>();
+                            if (j.contains("mode") && j["mode"].is_string()) {
+                                std::string m = j["mode"].get<std::string>();
+                                if (m == "casual") { gameType = 0; gameMode = 0; }
+                                else if (m == "competitive") { gameType = 0; gameMode = 1; }
+                                else if (m == "scrimcomp2v2") { gameType = 0; gameMode = 2; } // wingman
+                                else if (m == "gungameprogressive") { gameType = 1; gameMode = 0; }
+                                else if (m == "gungametrbomb") { gameType = 1; gameMode = 1; }
+                                else if (m == "armsrace") { gameType = 1; gameMode = 0; }
+                                else if (m == "demolition") { gameType = 1; gameMode = 1; }
+                                else if (m == "deathmatch") { gameType = 1; gameMode = 2; }
+                                else if (m == "survival" || m == "dangerzone") { gameType = 6; gameMode = 0; }
+                            }
+                            if (j.contains("maxrounds") && j["maxrounds"].is_number()) maxRounds = j["maxrounds"].get<uint32_t>();
+                            if (j.contains("roundtime") && j["roundtime"].is_number()) roundTime = j["roundtime"].get<float>();
+                            if (j.contains("buytime") && j["buytime"].is_number()) buyTime = j["buytime"].get<uint32_t>();
+                            if (j.contains("startmoney") && j["startmoney"].is_number()) startMoney = j["startmoney"].get<uint32_t>();
+                            if (j.contains("maxmoney") && j["maxmoney"].is_number()) maxMoney = j["maxmoney"].get<uint32_t>();
+                            if (j.contains("friendlyfire") && j["friendlyfire"].is_number()) friendlyFire = j["friendlyfire"].get<uint32_t>();
+                            if (j.contains("bot_quota") && j["bot_quota"].is_number()) botQuota = j["bot_quota"].get<uint32_t>();
+                            if (j.contains("bot_difficulty") && j["bot_difficulty"].is_number()) botDifficulty = j["bot_difficulty"].get<uint32_t>();
+                            if (j.contains("sv_cheats") && j["sv_cheats"].is_number()) svCheats = j["sv_cheats"].get<uint32_t>();
+                            if (j.contains("overtime") && j["overtime"].is_number()) overtime = j["overtime"].get<uint32_t>();
+                            if (j.contains("limitteams") && j["limitteams"].is_number()) limitTeams = j["limitteams"].get<uint32_t>();
+                            ReFixLog("[GC] Parsed refix_host_cfg: map=%s mode=%u/%u rounds=%u roundtime=%.2f",
+                                     mapName.c_str(), gameType, gameMode, maxRounds, roundTime);
                         }
-                        if (j.contains("maxrounds") && j["maxrounds"].is_number()) maxRounds = j["maxrounds"].get<uint32_t>();
-                        if (j.contains("roundtime") && j["roundtime"].is_number()) roundTime = j["roundtime"].get<float>();
-                        if (j.contains("buytime") && j["buytime"].is_number()) buyTime = j["buytime"].get<uint32_t>();
-                        if (j.contains("startmoney") && j["startmoney"].is_number()) startMoney = j["startmoney"].get<uint32_t>();
-                        if (j.contains("maxmoney") && j["maxmoney"].is_number()) maxMoney = j["maxmoney"].get<uint32_t>();
-                        if (j.contains("friendlyfire") && j["friendlyfire"].is_number()) friendlyFire = j["friendlyfire"].get<uint32_t>();
-                        if (j.contains("bot_quota") && j["bot_quota"].is_number()) botQuota = j["bot_quota"].get<uint32_t>();
-                        if (j.contains("bot_difficulty") && j["bot_difficulty"].is_number()) botDifficulty = j["bot_difficulty"].get<uint32_t>();
-                        if (j.contains("sv_cheats") && j["sv_cheats"].is_number()) svCheats = j["sv_cheats"].get<uint32_t>();
-                        if (j.contains("overtime") && j["overtime"].is_number()) overtime = j["overtime"].get<uint32_t>();
-                        if (j.contains("limitteams") && j["limitteams"].is_number()) limitTeams = j["limitteams"].get<uint32_t>();
-                        ReFixLog("[GC] Parsed refix_host_cfg: map=%s mode=%u/%u rounds=%u roundtime=%.2f",
-                                 mapName.c_str(), gameType, gameMode, maxRounds, roundTime);
+                    } catch (...) {
+                        ReFixLog("[GC] Error parsing refix_host_cfg JSON, using defaults");
                     }
-                } catch (...) {
-                    ReFixLog("[GC] Error parsing refix_host_cfg JSON, using defaults");
                 }
-            }
 
-            // 3. Enqueue listen server launch onto main thread (R5)
-            char launchCmd[512];
+                // 3. Enqueue listen server launch onto main thread (R5)
+                char launchCmd[512];
+                // sv_lan 1: with 0, CS:GO refuses every direct connect that lacks a Valve matchmaking reservation
+            // ("connect-lan-only"); with 1 it only requires a private-network client address.
             snprintf(launchCmd, sizeof(launchCmd),
-                     "game_type %u; game_mode %u; mp_maxrounds %u; mp_roundtime %f; mp_buytime %u; "
-                     "mp_startmoney %u; mp_maxmoney %u; mp_friendlyfire %u; bot_quota %u; bot_difficulty %u; "
-                     "sv_cheats %u; mp_overtime_enable %u; mp_limitteams %u; map %s",
-                     gameType, gameMode, maxRounds, roundTime, buyTime,
-                     startMoney, maxMoney, friendlyFire, botQuota, botDifficulty,
-                     svCheats, overtime, limitTeams, mapName.c_str());
+                         "sv_lan 1; game_type %u; game_mode %u; mp_maxrounds %u; mp_roundtime %f; mp_buytime %u; "
+                         "mp_startmoney %u; mp_maxmoney %u; mp_friendlyfire %u; bot_quota %u; bot_difficulty %u; "
+                         "sv_cheats %u; mp_overtime_enable %u; mp_limitteams %u; map %s",
+                         gameType, gameMode, maxRounds, roundTime, buyTime,
+                         startMoney, maxMoney, friendlyFire, botQuota, botDifficulty,
+                         svCheats, overtime, limitTeams, mapName.c_str());
 
-            ReFixLog("[GC] Launching listen server on main thread: %s", launchCmd);
-            refix::source::MainThreadQueue::ExecuteClientCmd(launchCmd);
+                ReFixLog("[GC] Launching listen server on main thread: %s", launchCmd);
+                refix::source::MainThreadQueue::ExecuteClientCmd(launchCmd);
 
-            // 4. Construct MatchmakingGC2ClientReserve (9107)
-            auto endpoint = refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint();
-            uint32_t localIp = endpoint.ipv4;
-            if (localIp == 0 || (localIp >> 24) == 127) {
-                localIp = refix::lan::ResolveLocalIpv4();
-            }
-            uint16_t localPort = 27015;
-            uint64_t reservationId = 12345678ULL;
-            uint64_t serverId = 0x0110000100000000ULL | (uint64_t)((UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF) ^ 0x12345678ULL);
-            uint32_t targetAccountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+                // 6. Complete matchmaking update on local client
+                std::vector<uint8_t> doneResp;
+                PutVarintField(doneResp, 1, 0); // idle / match complete
+                ReFixGC::SendToClient(9104, doneResp);
+            };
 
-            std::vector<uint8_t> reserveBytes = BuildMatchmakingReserve(serverId, localIp, localPort, reservationId, mapName, targetAccountId);
-
-            // 5. Broadcast 9107 reservation to all peers in the lobby via LanCore
-            refix::gc::BroadcastMatchmakingReserve(reserveBytes);
-
-            // 6. Complete matchmaking update on local client
-            std::vector<uint8_t> doneResp;
-            PutVarintField(doneResp, 1, 0); // idle / match complete
-            Reply(9104, doneResp);
+            // "Host match" hosts right away; "Start" joins a match another player hosts on the LAN, else hosts one.
+            if (ReFixGC::ConsumeHostRequest()) hostMatch();
+            else refix::gc::FindLanMatch(0, hostMatch);
+        } else if (msg == 9102) { // MatchmakingStop
+            std::vector<uint8_t> idle;
+            PutVarintField(idle, 1, 0);
+            Reply(9104, idle);
         } else if (msg == 9194) { // ClientGCRankUpdate
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             std::vector<uint8_t> ranking;
@@ -1368,6 +1364,13 @@ public:
             if (targetAccountId != 0 && targetLobbyId != 0) {
                 std::lock_guard<std::mutex> lock(s_partyMutex);
                 s_accountToLobby[targetAccountId] = targetLobbyId;
+            }
+            // Join the friend's match: ask that peer over LanCore for its listen server and connect to it.
+            if (targetAccountId != 0) {
+                uint64_t targetSteamId = 76561197960265728ULL + targetAccountId;
+                refix::gc::FindLanMatch(targetSteamId, [targetSteamId]() {
+                    ReFixLog("[GC] ClientPartyJoinRelay: SteamID %llu is not hosting a match", targetSteamId);
+                });
             }
             // Do NOT reply with 9198 (CMsgGCCStrike15_v2_ClientPartyWarning is an error rejection!)
         } else if (msg == 9163) { // k_EMsgGCCStrike15_v2_ClientRequestJoinFriendData
@@ -1995,10 +1998,15 @@ bool IsGameServerActive() {
 static std::string s_hostConfigJson;
 static std::mutex s_hostConfigMutex;
 
+static std::atomic<bool> s_hostRequested{ false };
+
 void SetHostConfigJson(const std::string& json) {
     std::lock_guard<std::mutex> lock(s_hostConfigMutex);
     s_hostConfigJson = json;
 }
+
+void RequestHostOnNextStart() { s_hostRequested.store(true); }
+bool ConsumeHostRequest() { return s_hostRequested.exchange(false); }
 
 std::string GetHostConfigJson() {
     std::lock_guard<std::mutex> lock(s_hostConfigMutex);

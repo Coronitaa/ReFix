@@ -34,12 +34,10 @@ inline const std::string& GetRefixPlayMenuScript() {
                 if (s && s.game) {
                     if (s.game.mode) mode = s.game.mode;
                     if (s.game.mapgroupname) {
-                        var mg = s.game.mapgroupname;
-                        if (mg.indexOf('mg_') === 0) {
-                            map = mg.substring(3);
-                        } else {
-                            map = mg;
-                        }
+                        // One entry per ticked map ("mg_de_inferno,mg_de_nuke"): host a random one of them.
+                        var groups = s.game.mapgroupname.split(',');
+                        var mg = groups[Math.floor(Math.random() * groups.length)];
+                        map = mg.indexOf('mg_') === 0 ? mg.substring(3) : mg;
                     }
                 }
             }
@@ -71,37 +69,40 @@ inline const std::string& GetRefixPlayMenuScript() {
 
         var cfgStr = JSON.stringify(fullCfg);
         $.Msg('[ReFix LAN] Host config prepared: ' + cfgStr);
-        if (typeof GameInterfaceAPI !== 'undefined' && GameInterfaceAPI.SetSettingString) {
-            GameInterfaceAPI.SetSettingString('refix_host_cfg', cfgStr);
-        }
+        // ReFix reads this URL in ISteamFriends::ActivateGameOverlayToWebPage: the next match start hosts with it.
+        SteamOverlayAPI.OpenURL('refix://host/' + encodeURIComponent(cfgStr));
 
         // Trigger native match start
-        var startBtn = $('#StartMatchBtn');
-        if (startBtn && startBtn.visible) {
-            $.DispatchEvent('PlaySoundEffect', 'mainmenu_press_GO', 'MOUSE');
-            if (typeof LobbyAPI !== 'undefined' && LobbyAPI.StartMatchmaking) {
-                LobbyAPI.StartMatchmaking('', '', '', '');
-            } else {
-                startBtn.TriggerEvent('onactivate');
-            }
-        }
+        $.DispatchEvent('PlaySoundEffect', 'mainmenu_press_GO', 'MOUSE');
+        LobbyAPI.StartMatchmaking('', '', '', '');
     }
 
     function _ShowAdvancedPopup() {
+        try {
+            _BuildAdvancedPopup();
+        } catch (e) {
+            $.Msg('[ReFix LAN] Advanced settings popup failed: ' + e);
+        }
+    }
+
+    function _BuildAdvancedPopup() {
+        // Hang the modal off the main menu root: inside the play panel it lands below the visible area.
         var mainPanel = $.GetContextPanel();
+        while (mainPanel.GetParent()) mainPanel = mainPanel.GetParent();
         var popupId = 'RefixAdvConfigModal';
-        var existing = mainPanel.FindChildInLayoutFile(popupId);
+        var existing = mainPanel.FindChildTraverse(popupId);
         if (existing) {
             existing.visible = true;
             return;
         }
+        $.Msg('[ReFix LAN] Building advanced settings popup on ' + mainPanel.id);
 
         var modal = $.CreatePanel('Panel', mainPanel, popupId);
         modal.style.width = '100%';
         modal.style.height = '100%';
         modal.style.backgroundColor = 'rgba(0, 0, 0, 0.85)';
-        modal.style.zIndex = '1000';
         modal.style.flowChildren = 'none';
+        modal.hittest = true;
 
         var card = $.CreatePanel('Panel', modal, 'RefixAdvCard');
         card.style.horizontalAlign = 'center';
@@ -196,11 +197,8 @@ inline const std::string& GetRefixPlayMenuScript() {
 
         btnSave.SetPanelEvent('onactivate', function() {
             modal.visible = false;
-            var cfgStr = JSON.stringify(s_advSettings);
-            if (typeof GameInterfaceAPI !== 'undefined' && GameInterfaceAPI.SetSettingString) {
-                GameInterfaceAPI.SetSettingString('refix_host_cfg', cfgStr);
-            }
-            $.Msg('[ReFix LAN] Advanced settings saved: ' + cfgStr);
+            // Applied when "Host match" is pressed (sent with the rest of the host settings).
+            $.Msg('[ReFix LAN] Advanced settings saved: ' + JSON.stringify(s_advSettings));
         });
 
         var btnClose = $.CreatePanel('Button', btnRow, 'RefixAdvCloseBtn');

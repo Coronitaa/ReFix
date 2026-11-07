@@ -11,6 +11,7 @@
 #include "unreal_steam_emu.h"
 #include "lan_core/refix_lan_core.h"
 #include "lan_core/refix_lan_transport.h"
+#include "source_main_thread_queue.h"
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -97,6 +98,86 @@ static uint64_t ExtractOwnerSteamId(const uint8_t* data, size_t size) {
 
 } // namespace
 
+void HandleRelayPacket(const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
+    if (!data || len < sizeof(GCRelayHeader)) return;
+    const GCRelayHeader* hdr = reinterpret_cast<const GCRelayHeader*>(data);
+    if (hdr->magic != kGCRelayMagic) return;
+    ReFixLog("[GC-Relay] Received relay message %u for SteamID %llu (%zu bytes)", hdr->msgType, (unsigned long long)hdr->steamId, len);
+
+    const uint8_t* payload = data + sizeof(GCRelayHeader);
+    size_t payloadLen = len - sizeof(GCRelayHeader);
+    if (payloadLen < hdr->dataLen) return;
+
+    switch (static_cast<GCRelayMsgType>(hdr->msgType)) {
+    case GCRelayMsgType::RequestEquippedCache: {
+        uint64_t localSid = UnrealSteamEmu::GetLocalSteamID();
+        if (hdr->steamId == localSid) {
+            ReFixLog("[GC-Relay] Received RequestEquippedCache from host for local SteamID %llu", localSid);
+            std::vector<uint8_t> cache = ReFixGC::BuildEquippedCacheSubscribed(localSid);
+
+            std::vector<uint8_t> packet(sizeof(GCRelayHeader) + cache.size());
+            GCRelayHeader* respHdr = reinterpret_cast<GCRelayHeader*>(packet.data());
+            respHdr->magic = kGCRelayMagic;
+            respHdr->msgType = static_cast<uint8_t>(GCRelayMsgType::ResponseEquippedCache);
+            respHdr->steamId = localSid;
+            respHdr->ticket = hdr->ticket;
+            respHdr->dataLen = (uint32_t)cache.size();
+            memcpy(packet.data() + sizeof(GCRelayHeader), cache.data(), cache.size());
+
+            auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(sender);
+            if (pInfo) {
+                refix::lan::ILanCore::Get().Transport().SendReliable(sender, pInfo->endpoint, kLanChannelGC, packet.data(), packet.size());
+                ReFixLog("[GC-Relay] Dispatched ResponseEquippedCache (%zu bytes) to host peer", cache.size());
+            }
+        }
+        break;
+    }
+    case GCRelayMsgType::ResponseEquippedCache: {
+        ReFixLog("[GC-Relay] Received ResponseEquippedCache from peer for SteamID %llu (%u bytes)", hdr->steamId, hdr->dataLen);
+        std::vector<uint8_t> cacheBytes(payload, payload + hdr->dataLen);
+
+        uint64_t ownerId = ExtractOwnerSteamId(cacheBytes.data(), cacheBytes.size());
+        if (ownerId == hdr->steamId) {
+            ReFixGC::SendToGameServer(24 /* k_ESOMsg_CacheSubscribed */, cacheBytes);
+            ReFixLog("[GC] Injected verified remote player SOCacheSubscribed (24) for SteamID %llu into game server (%u bytes)",
+                     hdr->steamId, hdr->dataLen);
+
+            GCRelayHeader ackHdr = {};
+            ackHdr.magic = kGCRelayMagic;
+            ackHdr.msgType = static_cast<uint8_t>(GCRelayMsgType::AckEquippedCache);
+            ackHdr.steamId = hdr->steamId;
+            ackHdr.ticket = hdr->ticket;
+            ackHdr.dataLen = 0;
+            auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(sender);
+            if (pInfo) {
+                refix::lan::ILanCore::Get().Transport().SendReliable(sender, pInfo->endpoint, kLanChannelGC, &ackHdr, sizeof(ackHdr));
+            }
+        } else {
+            ReFixLog("[GC-Relay] WARNING: owner_soid %llu mismatch with header SteamID %llu!", ownerId, hdr->steamId);
+        }
+        break;
+    }
+    case GCRelayMsgType::AckEquippedCache: {
+        ReFixLog("[GC-Relay] Host confirmed SOCacheSubscribed receipt for SteamID %llu", hdr->steamId);
+        break;
+    }
+    case GCRelayMsgType::UpdateItemEquipped: {
+        ReFixLog("[GC-Relay] Host received UpdateItemEquipped for SteamID %llu (%u bytes)", hdr->steamId, hdr->dataLen);
+        std::vector<uint8_t> updateBytes(payload, payload + hdr->dataLen);
+        ReFixGC::SendToGameServer(26 /* k_ESOMsg_UpdateMultiple */, updateBytes);
+        ReFixLog("[GC] Injected remote player UpdateMultiple (26) for SteamID %llu into game server", hdr->steamId);
+        break;
+    }
+    case GCRelayMsgType::MatchmakingReserve: {
+        ReFixLog("[GC-Relay] Received MatchmakingReserve from leader (%u bytes)", hdr->dataLen);
+        std::vector<uint8_t> reserveBytes(payload, payload + hdr->dataLen);
+        ReFixGC::SendToClient(9107 /* kMsgGCCStrike15_v2_MatchmakingGC2ClientReserve */, reserveBytes);
+        ReFixLog("[GC] Delivered MatchmakingGC2ClientReserve (9107) to local CS:GO client");
+        break;
+    }
+    }
+}
+
 void InitializeGCRelay() {
     std::lock_guard<std::mutex> lock(s_mutex);
     if (s_initialized) return;
@@ -104,91 +185,15 @@ void InitializeGCRelay() {
 
     ReFixLog("[GC-Relay] Initializing CS:GO GC Cache Relay on LanCore channel %u ('RGCS')", kLanChannelGC);
 
-    refix::lan::ILanCore::Get().SetChannelHandler(kLanChannelGC, [](const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
-        if (!data || len < sizeof(GCRelayHeader)) return;
-        const GCRelayHeader* hdr = reinterpret_cast<const GCRelayHeader*>(data);
-        if (hdr->magic != kGCRelayMagic) return;
-
-        const uint8_t* payload = data + sizeof(GCRelayHeader);
-        size_t payloadLen = len - sizeof(GCRelayHeader);
-        if (payloadLen < hdr->dataLen) return;
-
-        switch (static_cast<GCRelayMsgType>(hdr->msgType)) {
-        case GCRelayMsgType::RequestEquippedCache: {
-            uint64_t localSid = UnrealSteamEmu::GetLocalSteamID();
-            if (hdr->steamId == localSid) {
-                ReFixLog("[GC-Relay] Received RequestEquippedCache from host for local SteamID %llu", localSid);
-                std::vector<uint8_t> cache = ReFixGC::BuildEquippedCacheSubscribed(localSid);
-
-                std::vector<uint8_t> packet(sizeof(GCRelayHeader) + cache.size());
-                GCRelayHeader* respHdr = reinterpret_cast<GCRelayHeader*>(packet.data());
-                respHdr->magic = kGCRelayMagic;
-                respHdr->msgType = static_cast<uint8_t>(GCRelayMsgType::ResponseEquippedCache);
-                respHdr->steamId = localSid;
-                respHdr->ticket = hdr->ticket;
-                respHdr->dataLen = (uint32_t)cache.size();
-                memcpy(packet.data() + sizeof(GCRelayHeader), cache.data(), cache.size());
-
-                auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(sender);
-                if (pInfo) {
-                    refix::lan::ILanCore::Get().Transport().SendReliable(sender, pInfo->endpoint, kLanChannelGC, packet.data(), packet.size());
-                    ReFixLog("[GC-Relay] Dispatched ResponseEquippedCache (%zu bytes) to host peer", cache.size());
-                }
-            }
-            break;
-        }
-        case GCRelayMsgType::ResponseEquippedCache: {
-            ReFixLog("[GC-Relay] Received ResponseEquippedCache from peer for SteamID %llu (%u bytes)", hdr->steamId, hdr->dataLen);
-            std::vector<uint8_t> cacheBytes(payload, payload + hdr->dataLen);
-
-            uint64_t ownerId = ExtractOwnerSteamId(cacheBytes.data(), cacheBytes.size());
-            if (ownerId == hdr->steamId) {
-                ReFixGC::SendToGameServer(24 /* k_ESOMsg_CacheSubscribed */, cacheBytes);
-                ReFixLog("[GC] Injected verified remote player SOCacheSubscribed (24) for SteamID %llu into game server (%u bytes)",
-                         hdr->steamId, hdr->dataLen);
-
-                GCRelayHeader ackHdr = {};
-                ackHdr.magic = kGCRelayMagic;
-                ackHdr.msgType = static_cast<uint8_t>(GCRelayMsgType::AckEquippedCache);
-                ackHdr.steamId = hdr->steamId;
-                ackHdr.ticket = hdr->ticket;
-                ackHdr.dataLen = 0;
-                auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(sender);
-                if (pInfo) {
-                    refix::lan::ILanCore::Get().Transport().SendReliable(sender, pInfo->endpoint, kLanChannelGC, &ackHdr, sizeof(ackHdr));
-                }
-            } else {
-                ReFixLog("[GC-Relay] WARNING: owner_soid %llu mismatch with header SteamID %llu!", ownerId, hdr->steamId);
-            }
-            break;
-        }
-        case GCRelayMsgType::AckEquippedCache: {
-            ReFixLog("[GC-Relay] Host confirmed SOCacheSubscribed receipt for SteamID %llu", hdr->steamId);
-            break;
-        }
-        case GCRelayMsgType::UpdateItemEquipped: {
-            ReFixLog("[GC-Relay] Host received UpdateItemEquipped for SteamID %llu (%u bytes)", hdr->steamId, hdr->dataLen);
-            std::vector<uint8_t> updateBytes(payload, payload + hdr->dataLen);
-            ReFixGC::SendToGameServer(26 /* k_ESOMsg_UpdateMultiple */, updateBytes);
-            ReFixLog("[GC] Injected remote player UpdateMultiple (26) for SteamID %llu into game server", hdr->steamId);
-            break;
-        }
-        case GCRelayMsgType::MatchmakingReserve: {
-            ReFixLog("[GC-Relay] Received MatchmakingReserve from leader (%u bytes)", hdr->dataLen);
-            std::vector<uint8_t> reserveBytes(payload, payload + hdr->dataLen);
-            ReFixGC::SendToClient(9107 /* kMsgGCCStrike15_v2_MatchmakingGC2ClientReserve */, reserveBytes);
-            ReFixLog("[GC] Delivered MatchmakingGC2ClientReserve (9107) to local CS:GO client");
-            break;
-        }
-        }
-    });
+    // Packets reach HandleRelayPacket from the LanCore event loop in unreal_steam_emu (no direct handler: the
+    // channel is shared with rich presence).
 }
 
 void ShutdownGCRelay() {
     std::lock_guard<std::mutex> lock(s_mutex);
     if (!s_initialized) return;
     s_initialized = false;
-    refix::lan::ILanCore::Get().SetChannelHandler(kLanChannelGC, nullptr);
+
 }
 
 void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
@@ -224,9 +229,9 @@ void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
             if (peerIdOpt) {
                 auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*peerIdOpt);
                 if (pInfo) {
-                    refix::lan::ILanCore::Get().Transport().SendReliable(*peerIdOpt, pInfo->endpoint, kLanChannelGC, &req, sizeof(req));
-                    ReFixLog("[GC-Relay] Dispatched RequestEquippedCache to peer endpoint for SteamID %llu (attempt %d/5)",
-                             clientSteamId, attempt);
+                    auto res = refix::lan::ILanCore::Get().Transport().SendReliableDetailed(*peerIdOpt, pInfo->endpoint, kLanChannelGC, &req, sizeof(req));
+                    ReFixLog("[GC-Relay] Dispatched RequestEquippedCache to %s for SteamID %llu (attempt %d/5, result %d)",
+                             pInfo->endpoint.ToString().c_str(), clientSteamId, attempt, (int)res);
                     break;
                 }
             }
@@ -277,6 +282,20 @@ void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes) {
                      p.endpoint.ToString().c_str(), p.endpoint.port);
         }
     }
+}
+
+void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFound) {
+    // Hosts advertise their listen server as rich presence "refix:server" = "ip:port" (see unreal_steam_emu).
+    for (const auto& peer : UnrealSteamEmu::PeersWithPresence("refix:server")) {
+        if (targetSteamId != 0 && peer.first != targetSteamId) continue;
+        std::string cmd = "connect " + peer.second;
+        ReFixLog("[GC-Relay] SteamID %llu hosts a match, joining: %s", (unsigned long long)peer.first, cmd.c_str());
+        refix::source::MainThreadQueue::ExecuteClientCmd(cmd);
+        ReFixGC::SendToClient(9104, { 0x08, 0x00 }); // MatchmakingGC2ClientUpdate: matchmaking = 0 (search over)
+        return;
+    }
+    ReFixLog("[GC-Relay] No hosted match found on the LAN (target=%llu)", (unsigned long long)targetSteamId);
+    if (onNotFound) onNotFound();
 }
 
 } // namespace refix::csgo

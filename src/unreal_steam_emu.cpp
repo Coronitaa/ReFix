@@ -3721,6 +3721,23 @@ namespace UnrealSteamEmu {
         }
         virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
             ReFixLog("[UnrealSteam] ActivateGameOverlayToWebPage('%s')", pchURL ? pchURL : "");
+            // The CS:GO play menu's "Host match" button passes its settings as refix://host/<url-encoded JSON>.
+            static const char kHostPrefix[] = "refix://host/";
+            if (pchURL && strncmp(pchURL, kHostPrefix, sizeof(kHostPrefix) - 1) == 0) {
+                std::string json;
+                for (const char* p = pchURL + sizeof(kHostPrefix) - 1; *p; ++p) {
+                    if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+                        char hex[3] = { p[1], p[2], 0 };
+                        json += (char)strtol(hex, nullptr, 16);
+                        p += 2;
+                    } else {
+                        json += *p;
+                    }
+                }
+                ReFixGC::SetHostConfigJson(json);
+                ReFixGC::RequestHostOnNextStart();
+                return;
+            }
             if (pchURL) {
                 if (strstr(pchURL, "market") || strstr(pchURL, "community") || strstr(pchURL, "give")) {
                     ReFixOverlay::OpenMarketGiveMenu();
@@ -3959,18 +3976,33 @@ namespace UnrealSteamEmu {
         }
 
         virtual void ClearRichPresence() override {
+            std::map<std::string, std::string> kept; // ReFix's own "refix:" keys survive the game clearing its presence
             {
                 std::lock_guard<std::mutex> lock(m_richPresenceMu);
-                m_richPresence.clear();
+                for (const auto& kv : m_richPresence)
+                    if (kv.first.rfind("refix:", 0) == 0) kept.insert(kv);
+                m_richPresence = kept;
             }
             ReFixLog("[UnrealSteam] ClearRichPresence called");
 
             BroadcastPresenceClear();
+            for (const auto& kv : kept) BroadcastPresenceSetKey(kv.first, kv.second);
 
             FriendRichPresenceUpdate_t update = {};
             update.m_steamIDFriend = CSteamID(g_localSteamID);
             update.m_nAppID = g_appID;
             PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+        }
+
+        // Peers whose rich presence has pchKey set, with its value.
+        std::vector<std::pair<uint64_t, std::string>> PeersWithPresence(const char *pchKey) {
+            std::vector<std::pair<uint64_t, std::string>> out;
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            for (const auto& peer : m_peerRichPresence) {
+                auto it = peer.second.find(pchKey);
+                if (it != peer.second.end() && !it->second.empty()) out.emplace_back(peer.first, it->second);
+            }
+            return out;
         }
 
         // Copy of a local rich presence value, safe from other threads (the overlay).
@@ -4108,6 +4140,23 @@ namespace UnrealSteamEmu {
         virtual uint32 GetProfileItemPropertyUint(CSteamID steamID, ECommunityProfileItemType itemType, ECommunityProfileItemProperty prop) override { return 0; }
     };
     static CSteamFriendsEmu g_steamFriendsInstance;
+
+    // A listen server started here: publish "refix:server" = "ip:port" so LAN players can find and join it.
+    static void PublishLocalServer(uint16_t port) {
+        uint32_t ip = refix::lan::ResolveLocalIpv4();
+        char addr[32];
+        snprintf(addr, sizeof(addr), "%u.%u.%u.%u:%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+                 port ? port : 27015);
+        g_steamFriendsInstance.SetRichPresence("refix:server", addr);
+    }
+
+    std::vector<std::pair<uint64_t, std::string>> PeersWithPresence(const char* key) {
+        return g_steamFriendsInstance.PeersWithPresence(key);
+    }
+
+    void SetLocalPresence(const char* key, const char* value) {
+        g_steamFriendsInstance.SetRichPresence(key, value);
+    }
 
     // --- ISteamFriends018 (ABI without SetPersonaName in vtable slot 1) ---
     class CSteamFriends018Emu : public ISteamFriends {
@@ -7239,6 +7288,7 @@ namespace UnrealSteamEmu {
     public:
         virtual bool InitGameServer(uint32 unIP, uint16 usGamePort, uint16 usQueryPort, uint32 unFlags, AppId_t nGameAppId, const char *pchVersion) override {
             ReFixLog("[UnrealSteam] InitGameServer: port=%u, queryPort=%u, appID=%u", usGamePort, usQueryPort, nGameAppId);
+            PublishLocalServer(usGamePort);
             return true;
         }
         virtual void SetProduct(const char *pszProduct) override {}
@@ -9271,6 +9321,10 @@ namespace UnrealSteamEmu {
                 ProcessRfxsPacket(senderSteamId, ev.payload.data(), ev.payload.size());
                 return;
             }
+            if (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == refix::gc::kGCRelayMagicValue) {
+                refix::gc::HandleRelayPacket(ev.peerId, ev.payload.data(), ev.payload.size());
+                return;
+            }
             if (ev.channel == CSteamFriendsEmu::kRichPresenceChannel || (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == CSteamFriendsEmu::kRichPresenceMagic)) {
                 g_steamFriendsInstance.HandleReceiveRichPresence(senderSteamId, ev.payload.data(), ev.payload.size());
                 return;
@@ -9435,7 +9489,9 @@ namespace UnrealSteamEmu {
     bool GameServer_Init(uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort, int eServerMode, const char* pchVersionString) {
         ReFixLog("[UnrealSteam] GameServer_Init: IP=%u, GamePort=%u, QueryPort=%u, Mode=%d, Ver=%s",
                  unIP, usGamePort, usQueryPort, eServerMode, pchVersionString ? pchVersionString : "null");
-        return Initialize();
+        bool ok = Initialize();
+        PublishLocalServer(usGamePort);
+        return ok;
     }
 
     bool GameServer_InitSafe() {

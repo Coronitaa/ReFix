@@ -17,6 +17,9 @@ void SendToClient(uint32_t msg, const std::vector<uint8_t>& body);
 bool IsGameServerActive();
 void SetHostConfigJson(const std::string& json);
 std::string GetHostConfigJson();
+// Set by the play menu's "Host match" button: the next MatchmakingStart hosts instead of searching first.
+void RequestHostOnNextStart();
+bool ConsumeHostRequest();
 
 // Protobuf bodies of the replies, exposed for tests.
 std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId);
