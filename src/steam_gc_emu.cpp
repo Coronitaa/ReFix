@@ -988,6 +988,16 @@ private:
     }
 };
 
+// CSOEconItemAttribute { def_index = 1; value_bytes = 3 } holding the raw 4 bytes of the value.
+template <typename T>
+static void PutAttribute(std::vector<uint8_t>& item, uint32_t defIndex, T value) {
+    static_assert(sizeof(T) == 4, "econ attributes are 4 bytes");
+    std::vector<uint8_t> attr;
+    PutVarintField(attr, 1, defIndex);
+    PutBytesField(attr, 3, std::vector<uint8_t>((uint8_t*)&value, (uint8_t*)&value + 4));
+    PutBytesField(item, 12, attr);
+}
+
 std::vector<uint8_t> SerializeEconItem(const EconItem& item, uint32_t accountId, uint32_t pos) {
     std::vector<uint8_t> out;
     PutVarintField(out, 1, item.id);
@@ -1010,46 +1020,14 @@ std::vector<uint8_t> SerializeEconItem(const EconItem& item, uint32_t accountId,
     }
 
     if (item.paintKit > 0) {
-        // Attribute 6: paint kit (set item texture prefab) - provide BOTH value bits and value_bytes
-        float fpk = (float)item.paintKit;
-        uint32_t ufpk = *(uint32_t*)&fpk;
-        std::vector<uint8_t> attr6;
-        PutVarintField(attr6, 1, 6);
-        PutVarintField(attr6, 2, ufpk);
-        PutBytesField(attr6, 3, std::vector<uint8_t>((uint8_t*)&fpk, (uint8_t*)&fpk + 4));
-        PutBytesField(out, 12, attr6);
-
-        // Attribute 8: wear (set item texture wear) - provide BOTH value bits and value_bytes
-        float fwear = item.wear > 0.0f ? item.wear : 0.001f;
-        uint32_t ufwear = *(uint32_t*)&fwear;
-        std::vector<uint8_t> attr8;
-        PutVarintField(attr8, 1, 8);
-        PutVarintField(attr8, 2, ufwear);
-        PutBytesField(attr8, 3, std::vector<uint8_t>((uint8_t*)&fwear, (uint8_t*)&fwear + 4));
-        PutBytesField(out, 12, attr8);
-
-        // Attribute 7: seed (set item texture seed) - provide BOTH value bits and value_bytes
-        uint32_t seedVal = item.seed > 0 ? item.seed : 420;
-        float fseed = (float)seedVal;
-        uint32_t ufseed = *(uint32_t*)&fseed;
-        std::vector<uint8_t> attr7;
-        PutVarintField(attr7, 1, 7);
-        PutVarintField(attr7, 2, ufseed);
-        PutBytesField(attr7, 3, std::vector<uint8_t>((uint8_t*)&fseed, (uint8_t*)&fseed + 4));
-        PutBytesField(out, 12, attr7);
-
-        // StatTrak: Attribute 80 (kill eater) & 81 (kill eater score type)
-        // Stored as integer = 1, so MUST be varint field 2 (value), NO value_bytes!
-        if (quality == 9) {
-            std::vector<uint8_t> attr80;
-            PutVarintField(attr80, 1, 80);
-            PutVarintField(attr80, 2, 0); // 0 kills
-            PutBytesField(out, 12, attr80);
-
-            std::vector<uint8_t> attr81;
-            PutVarintField(attr81, 1, 81);
-            PutVarintField(attr81, 2, 0); // score type 0 = kills
-            PutBytesField(out, 12, attr81);
+        // Post-GCSDK clients (this build) read only value_bytes; a 'value' field makes them cast the float bits
+        // numerically, so the paint kit becomes garbage and the item shows its stock look (as csgo_gc does).
+        PutAttribute(out, 6, (float)item.paintKit);                          // set item texture prefab
+        PutAttribute(out, 8, item.wear > 0.0f ? item.wear : 0.001f);         // set item texture wear
+        PutAttribute(out, 7, (float)(item.seed > 0 ? item.seed : 420));      // set item texture seed
+        if (quality == 9) {                                                  // StatTrak
+            PutAttribute(out, 80, (uint32_t)0);                              // kill eater
+            PutAttribute(out, 81, (uint32_t)0);                              // kill eater score type
         }
     }
 
