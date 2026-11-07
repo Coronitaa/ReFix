@@ -346,8 +346,7 @@ void App::Join(const net::RemotePlayer& p) {
         cb.m_steamIDFriend = CSteamID(p.steamId);
         UnrealSteamEmu::PostCallback(GameLobbyJoinRequested_t::k_iCallback, &cb, sizeof(cb));
         UnrealSteamEmu::Matchmaking_JoinLobby(p.lobbyId);
-    }
-    {
+    } else {
         if (appId_ == 730) {
             if (!p.connect.empty()) {
                 ExecuteEngineClientCommand(p.connect.c_str());

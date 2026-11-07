@@ -5,6 +5,7 @@
 #include <deque>
 #include <fstream>
 #include <map>
+#include <set>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -153,17 +154,25 @@ public:
                 if (itm.id < 0x100000000ULL && accountId != 0) {
                     itm.id = (accountId << 32) | (itm.id & 0xFFFFFFFFULL);
                 }
-                if (itm.equipped.empty() && itm.paintKit > 0) {
-                    if (itm.defIndex == 9) { itm.equipped.push_back({2, 18}); itm.equipped.push_back({3, 18}); }
-                    else if (itm.defIndex == 7) { itm.equipped.push_back({2, 15}); }
-                    else if (itm.defIndex == 16 || itm.defIndex == 60) { itm.equipped.push_back({3, 15}); }
-                    else if (itm.defIndex == 61) { itm.equipped.push_back({3, 2}); }
-                    else if (itm.defIndex == 4) { itm.equipped.push_back({2, 2}); }
-                    else if (itm.defIndex == 1) { itm.equipped.push_back({2, 6}); itm.equipped.push_back({3, 6}); }
-                    else if (itm.defIndex >= 500 && itm.defIndex <= 530) { itm.equipped.push_back({2, 0}); itm.equipped.push_back({3, 0}); }
-                    else if (itm.defIndex >= 5000 && itm.defIndex <= 5040) { itm.equipped.push_back({2, 41}); itm.equipped.push_back({3, 41}); }
+            }
+
+            // Sanitize equipped loadout: guarantee strictly ONE item per (class, slot)
+            std::set<std::pair<uint32_t, uint32_t>> seenEquipped;
+            bool changedEquipped = false;
+            for (auto& itm : m_items) {
+                auto it = itm.equipped.begin();
+                while (it != itm.equipped.end()) {
+                    auto key = std::make_pair(it->new_class, it->new_slot);
+                    if (seenEquipped.count(key)) {
+                        it = itm.equipped.erase(it);
+                        changedEquipped = true;
+                    } else {
+                        seenEquipped.insert(key);
+                        ++it;
+                    }
                 }
             }
+            if (changedEquipped) SaveLocked();
 
             // Automatically upgrade legacy items lacking paint kit
             bool changed = false;
@@ -228,12 +237,12 @@ public:
                 itm.seed = 420;
                 if (itm.defIndex == 9) { itm.equipped.push_back({2, 18}); itm.equipped.push_back({3, 18}); }
                 else if (itm.defIndex == 7) { itm.equipped.push_back({2, 15}); }
-                else if (itm.defIndex == 16 || itm.defIndex == 60) { itm.equipped.push_back({3, 15}); }
+                else if (itm.defIndex == 16) { itm.equipped.push_back({3, 15}); }
                 else if (itm.defIndex == 61) { itm.equipped.push_back({3, 2}); }
                 else if (itm.defIndex == 4) { itm.equipped.push_back({2, 2}); }
                 else if (itm.defIndex == 1) { itm.equipped.push_back({2, 6}); itm.equipped.push_back({3, 6}); }
-                else if (itm.defIndex >= 500 && itm.defIndex <= 530) { itm.equipped.push_back({2, 0}); itm.equipped.push_back({3, 0}); }
-                else if (itm.defIndex >= 5000 && itm.defIndex <= 5040) { itm.equipped.push_back({2, 41}); itm.equipped.push_back({3, 41}); }
+                else if (itm.defIndex == 507) { itm.equipped.push_back({2, 0}); itm.equipped.push_back({3, 0}); }
+                else if (itm.defIndex == 5030) { itm.equipped.push_back({2, 41}); itm.equipped.push_back({3, 41}); }
                 m_items.push_back(itm);
             }
             // Then keys
@@ -290,6 +299,17 @@ public:
         auto itCrate = std::find_if(m_items.begin(), m_items.end(), [crateId](const EconItem& it) {
             return it.id == crateId || (crateId != 0 && it.defIndex == (uint32_t)crateId);
         });
+        auto itKey = std::find_if(m_items.begin(), m_items.end(), [keyId](const EconItem& it) {
+            return it.id == keyId || (keyId != 0 && it.defIndex == (uint32_t)keyId);
+        });
+
+        // Bidirectional case vs key sanity check: if parameters were reversed in packet
+        if (itCrate != m_items.end() && itKey != m_items.end()) {
+            if (itCrate->defIndex < 4000 && itKey->defIndex >= 4000) {
+                std::swap(itCrate, itKey);
+                std::swap(crateId, keyId);
+            }
+        }
         if (itCrate == m_items.end()) {
             for (auto it = m_items.begin(); it != m_items.end(); ++it) {
                 for (size_t c = 0; c < ReFixGC::CSGO::kNumCases; ++c) {
@@ -305,10 +325,12 @@ public:
 
         uint32_t crateDef = itCrate->defIndex;
 
-        // Find key by item ID or defIndex
-        auto itKey = std::find_if(m_items.begin(), m_items.end(), [keyId](const EconItem& it) {
-            return it.id == keyId || (keyId != 0 && it.defIndex == (uint32_t)keyId);
-        });
+        // If key was not found by exact ID, fallback search
+        if (itKey == m_items.end()) {
+            itKey = std::find_if(m_items.begin(), m_items.end(), [keyId](const EconItem& it) {
+                return it.id == keyId || (keyId != 0 && it.defIndex == (uint32_t)keyId);
+            });
+        }
         if (itKey == m_items.end()) {
             for (auto it = m_items.begin(); it != m_items.end(); ++it) {
                 for (size_t k = 0; k < ReFixGC::CSGO::kNumKeys; ++k) {
@@ -422,7 +444,9 @@ public:
         EnsureLoaded();
         std::lock_guard<std::mutex> lock(m_mutex);
 
-        if (newSlot > 0) {
+        bool isEquipping = (newSlot < 65535);
+
+        if (isEquipping) {
             for (auto& itm : m_items) {
                 if (itm.id != itemId) {
                     itm.equipped.erase(std::remove_if(itm.equipped.begin(), itm.equipped.end(),
@@ -436,11 +460,14 @@ public:
         for (auto& itm : m_items) {
             if (itm.id == itemId) {
                 itm.equipped.erase(std::remove_if(itm.equipped.begin(), itm.equipped.end(),
-                    [newClass](const EconItem::EquippedSlot& es) {
-                        return es.new_class == newClass;
+                    [newClass, newSlot, isEquipping](const EconItem::EquippedSlot& es) {
+                        if (!isEquipping) {
+                            return es.new_class == newClass;
+                        }
+                        return es.new_class == newClass && es.new_slot == newSlot;
                     }), itm.equipped.end());
 
-                if (newSlot > 0) {
+                if (isEquipping) {
                     EconItem::EquippedSlot es;
                     es.new_class = newClass;
                     es.new_slot = newSlot;
@@ -450,8 +477,8 @@ public:
             }
         }
         SaveLocked();
-        ReFixLog("[GC] CSGOInventory: Adjusted equipped state for item %llu (class %u, slot %u)",
-                 (unsigned long long)itemId, newClass, newSlot);
+        ReFixLog("[GC] CSGOInventory: Adjusted equipped state for item %llu (class %u, slot %u, equipping=%d)",
+                 (unsigned long long)itemId, newClass, newSlot, isEquipping ? 1 : 0);
     }
 
     void GrantKeys(uint32_t defIndex, uint32_t count) {
@@ -862,7 +889,7 @@ public:
             affectedItemIds.push_back(itemId);
             {
                 auto currentItems = CSGOInventoryManager::Get().GetItems();
-                if (newSlot > 0) {
+                if (newSlot < 65535) {
                     for (const auto& itm : currentItems) {
                         if (itm.id != itemId) {
                             for (const auto& es : itm.equipped) {
@@ -956,11 +983,11 @@ public:
             // Unlock container (CS:GO sends non-proto 34-byte struct or proto)
             uint64_t crateId = 0, keyId = 0;
             if (!proto && cubData >= 34) {
-                // Non-proto struct format: 18-byte GC header + 8 bytes crateId + 8 bytes keyId
-                memcpy(&crateId, bytes + 18, sizeof(crateId));
-                memcpy(&keyId, bytes + 26, sizeof(keyId));
-                ReFixLog("[GC] UnlockCrate (non-proto): crateId=%llu keyId=%llu",
-                         (unsigned long long)crateId, (unsigned long long)keyId);
+                // Valve MsgGCUnlockCrate_t: 18-byte GC header + 8 bytes m_ulKeyID + 8 bytes m_ulCrateID
+                memcpy(&keyId, bytes + 18, sizeof(keyId));
+                memcpy(&crateId, bytes + 26, sizeof(crateId));
+                ReFixLog("[GC] UnlockCrate (non-proto): keyId=%llu crateId=%llu",
+                         (unsigned long long)keyId, (unsigned long long)crateId);
             } else if (proto && body) {
                 const uint8_t* p = body;
                 const uint8_t* end = body + bodySize;

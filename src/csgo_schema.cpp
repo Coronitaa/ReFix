@@ -197,34 +197,40 @@ bool SchemaManager::LoadFromItemsGameFile(const std::string& filePath) {
         // Find each "id" { "name" "..." }
         size_t pos = 0;
         while (pos < pkBlock.size()) {
-            size_t q1 = pkBlock.find('\"', pos);
+            size_t q1 = pkBlock.find('"', pos);
             if (q1 == std::string::npos) break;
-            size_t q2 = pkBlock.find('\"', q1 + 1);
+            size_t q2 = pkBlock.find('"', q1 + 1);
             if (q2 == std::string::npos) break;
             std::string key = pkBlock.substr(q1 + 1, q2 - q1 - 1);
 
-            size_t nextOpen = pkBlock.find('{', q2);
-            if (nextOpen == std::string::npos) break;
-            size_t nextClose = pkBlock.find('}', nextOpen);
-            if (nextClose == std::string::npos) break;
+            size_t nextCharPos = q2 + 1;
+            while (nextCharPos < pkBlock.size() && isspace((unsigned char)pkBlock[nextCharPos])) {
+                nextCharPos++;
+            }
 
-            if (std::all_of(key.begin(), key.end(), ::isdigit)) {
-                uint32_t pkId = (uint32_t)std::stoul(key);
-                std::string sub = pkBlock.substr(nextOpen, nextClose - nextOpen + 1);
-                size_t npos = sub.find("\"name\"");
-                if (npos != std::string::npos) {
-                    size_t s1 = sub.find('\"', npos + 6);
-                    if (s1 != std::string::npos) {
-                        size_t s2 = sub.find('\"', s1 + 1);
-                        if (s2 != std::string::npos) {
-                            std::string name = sub.substr(s1 + 1, s2 - s1 - 1);
-                            m_paintKitNameToId[name] = pkId;
-                            m_paintKitIdToName[pkId] = name;
+            if (nextCharPos < pkBlock.size() && pkBlock[nextCharPos] == '{') {
+                size_t nextClose = pkBlock.find('}', nextCharPos);
+                if (nextClose == std::string::npos) break;
+                if (!key.empty() && std::all_of(key.begin(), key.end(), ::isdigit)) {
+                    uint32_t pkId = (uint32_t)std::stoul(key);
+                    std::string sub = pkBlock.substr(nextCharPos, nextClose - nextCharPos + 1);
+                    size_t npos = sub.find("\"name\"");
+                    if (npos != std::string::npos) {
+                        size_t s1 = sub.find('"', npos + 6);
+                        if (s1 != std::string::npos) {
+                            size_t s2 = sub.find('"', s1 + 1);
+                            if (s2 != std::string::npos) {
+                                std::string name = sub.substr(s1 + 1, s2 - s1 - 1);
+                                m_paintKitNameToId[name] = pkId;
+                                m_paintKitIdToName[pkId] = name;
+                            }
                         }
                     }
                 }
+                pos = nextClose + 1;
+            } else {
+                pos = q2 + 1;
             }
-            pos = nextClose + 1;
         }
         pkPos = p;
     }
@@ -243,7 +249,7 @@ bool SchemaManager::LoadFromItemsGameFile(const std::string& filePath) {
         { 4017, "crate_community_3", "Huntsman Weapon Case" },
         { 4018, "crate_community_4", "Operation Breakout Weapon Case" },
         { 4019, "crate_esports_2014_summer", "eSports 2014 Summer Case" },
-        { 4029, "crate_operation_vanguard", "Operation Vanguard Case" },
+        { 4029, "crate_community_5", "Operation Vanguard Case" },
         { 4061, "crate_community_6", "Chroma Case" },
         { 4089, "crate_community_7", "Chroma 2 Case" },
         { 4091, "crate_community_8", "Falchion Case" },

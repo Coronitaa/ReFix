@@ -373,8 +373,10 @@ void DrawMatchmakingToastWidget() {
 
     ImVec2 vp = ImGui::GetIO().DisplaySize;
     float cardW = ui::S(380);
-    float cardH = s_showCustomSettings ? ui::S(530) : ui::S(220);
     float margin = ui::S(20);
+    float maxCardH = vp.y - margin * 2.0f;
+    float desiredH = s_showCustomSettings ? ui::S(530) : ui::S(215);
+    float cardH = (std::min)(maxCardH, desiredH);
 
     ImGui::SetNextWindowPos(ImVec2(vp.x - cardW - margin, vp.y - cardH - margin), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(cardW, cardH), ImGuiCond_Always);
@@ -386,9 +388,9 @@ void DrawMatchmakingToastWidget() {
 
     bool isOpen = true;
     if (ImGui::Begin("##matchmaking_hud_widget", &isOpen,
-                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-                     ImGuiWindowFlags_NoNav)) {
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
 
         // Header Title
         ImGui::PushFont(ui::F().strong);
@@ -482,7 +484,6 @@ void DrawMatchmakingToastWidget() {
         float hostBtnWidth = cardW - ui::S(36) - ui::S(75);
         if (ui::Clicked(ui::SecondaryButton(i18n::T("Host Match", "Hostear partida"), ImVec2(hostBtnWidth, ui::S(34))))) {
             UnrealSteamEmu::Matchmaking_CreateLobby(2 /* k_ELobbyTypePublic */, 10);
-            UnrealSteamEmu::SetRichPresence("connect", "connect 127.0.0.1:27015");
             std::string cmd = "maxplayers 10; game_type 0; game_mode 1; sv_lan 1; bot_quota 10; map de_dust2";
             ExecuteEngineClientCommand(cmd.c_str());
             App::Get().ShowInfo("Servidor LAN", "Iniciando servidor de partida local (de_dust2)...");
@@ -500,6 +501,10 @@ void DrawMatchmakingToastWidget() {
             ImGui::Dummy(ImVec2(0, ui::S(4)));
             ImGui::Separator();
             ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+            float childH = cardH - ui::S(205);
+            if (childH < ui::S(80)) childH = ui::S(80);
+            ImGui::BeginChild("##custom_cfg_scroll", ImVec2(0, childH), false, ImGuiWindowFlags_None);
 
             ImGui::PushFont(ui::F().strong);
             ui::TextColored(ui::color::Accent, i18n::T("Custom Match Settings", "Ajustes de partida personalizada:"));
@@ -587,7 +592,6 @@ void DrawMatchmakingToastWidget() {
                 float rTime = kRoundTimeValues[s_cfgRoundTimeIdx];
 
                 UnrealSteamEmu::Matchmaking_CreateLobby(2 /* k_ELobbyTypePublic */, slots);
-                UnrealSteamEmu::SetRichPresence("connect", "connect 127.0.0.1:27015");
 
                 char cmd[384];
                 int gType = 0, gMode = 1;
@@ -610,6 +614,7 @@ void DrawMatchmakingToastWidget() {
                 App::Get().ShowInfo("Servidor Personalizado", std::string("Iniciando ") + kOfficialMaps[s_selectedMapIdx]);
                 App::Get().CloseMatchmakingHUD();
             }
+            ImGui::EndChild();
         }
     }
     if (!isOpen) {

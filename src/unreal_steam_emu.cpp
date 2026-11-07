@@ -964,7 +964,7 @@ namespace UnrealSteamEmu {
     // Centralized 1:1 bidirectional lobby mapping is managed by refix::steam::SteamLobbyRegistry
 
     struct PendingJoin {
-        SteamAPICall_t callHandle = 0;
+        std::vector<SteamAPICall_t> callHandles;
         uint64_t steamLobbyId = 0;
         std::string coreLobbyId;
         std::chrono::steady_clock::time_point requestTime;
@@ -2873,7 +2873,7 @@ namespace UnrealSteamEmu {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             for (auto it = g_pendingJoins.begin(); it != g_pendingJoins.end(); ) {
                 if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.requestTime).count() > 5000) {
-                    uint64_t callHandle = it->second.callHandle;
+                    auto callHandles = it->second.callHandles;
                     uint64_t sId = it->second.steamLobbyId;
                     it = g_pendingJoins.erase(it);
 
@@ -2884,13 +2884,15 @@ namespace UnrealSteamEmu {
                     resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseError;
 
                     PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                    if (callHandle != 0) {
-                        auto itCR = g_callResultMap.find(callHandle);
-                        if (itCR != g_callResultMap.end()) {
-                            itCR->second.failed = true;
-                            itCR->second.completed = false;
-                            itCR->second.triggerTime = now;
-                            itCR->second.data.assign((const uint8_t*)&resp, (const uint8_t*)&resp + sizeof(resp));
+                    for (uint64_t callHandle : callHandles) {
+                        if (callHandle != 0) {
+                            auto itCR = g_callResultMap.find(callHandle);
+                            if (itCR != g_callResultMap.end()) {
+                                itCR->second.failed = true;
+                                itCR->second.completed = false;
+                                itCR->second.triggerTime = now;
+                                itCR->second.data.assign((const uint8_t*)&resp, (const uint8_t*)&resp + sizeof(resp));
+                            }
                         }
                     }
                     ReFixLog("[UnrealSteam] JoinLobby timed out for lobby %llu", sId);
@@ -4452,23 +4454,16 @@ namespace UnrealSteamEmu {
 
         virtual SteamAPICall_t JoinLobby(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
-            std::string coreLobbyId = GetCoreLobbyId(lID);
 
-            if (coreLobbyId.empty()) {
-                refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
-                auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
-                for (const auto& l : allLobbies) {
-                    if (refix::steam::ComputeLobbySteamID(l.lobbyId) == lID ||
-                        refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId) == lID) {
-                        coreLobbyId = l.lobbyId;
-                        refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
-                        break;
-                    }
-                }
-                if (coreLobbyId.empty() && !allLobbies.empty()) {
-                    coreLobbyId = allLobbies[0].lobbyId;
-                    refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
-                }
+            // 1. If already in or hosting this lobby, immediately report successful entry
+            if (g_activeLobbyID.load() == lID && lID != 0) {
+                LobbyEnter_t resp = {};
+                resp.m_ulSteamIDLobby = lID;
+                resp.m_rgfChatPermissions = 0xFFFFFFFF;
+                resp.m_bLocked = false;
+                resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseSuccess;
+                PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
+                return PostCallResult(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
             }
 
             bool isLocalHost = false;
@@ -4491,7 +4486,32 @@ namespace UnrealSteamEmu {
                 return PostCallResult(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
             }
 
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (coreLobbyId.empty()) {
+                refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
+                // Brief poll (up to 300ms) for UDP announcement to resolve
+                for (int attempt = 0; attempt < 15; ++attempt) {
+                    auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                    for (const auto& l : allLobbies) {
+                        if (refix::steam::ComputeLobbySteamID(l.lobbyId) == lID ||
+                            refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId) == lID) {
+                            coreLobbyId = l.lobbyId;
+                            refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
+                            break;
+                        }
+                    }
+                    if (!coreLobbyId.empty()) break;
+                    if (attempt == 14 && !allLobbies.empty()) {
+                        coreLobbyId = allLobbies[0].lobbyId;
+                        refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+            }
+
             uint64_t hCall = 0;
+            bool needSendReq = false;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 hCall = ++g_nextAPICall;
@@ -4503,18 +4523,26 @@ namespace UnrealSteamEmu {
                 item.triggerTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
                 g_callResultMap[hCall] = item;
 
-                PendingJoin pj;
-                pj.callHandle = hCall;
-                pj.steamLobbyId = lID;
-                pj.coreLobbyId = coreLobbyId;
-                pj.requestTime = std::chrono::steady_clock::now();
                 if (!coreLobbyId.empty()) {
+                    auto itPJ = g_pendingJoins.find(coreLobbyId);
+                    if (itPJ != g_pendingJoins.end()) {
+                        itPJ->second.callHandles.push_back(hCall);
+                        ReFixLog("[UnrealSteam] JoinLobby: Coalesced join request for lobby %llu (coreId='%s', hCall=%llu)",
+                                 lID, coreLobbyId.c_str(), hCall);
+                        return hCall;
+                    }
+                    PendingJoin pj;
+                    pj.callHandles.push_back(hCall);
+                    pj.steamLobbyId = lID;
+                    pj.coreLobbyId = coreLobbyId;
+                    pj.requestTime = std::chrono::steady_clock::now();
                     g_pendingJoins[coreLobbyId] = pj;
+                    needSendReq = true;
                 }
             }
 
             bool sentReq = false;
-            if (!coreLobbyId.empty()) {
+            if (needSendReq && !coreLobbyId.empty()) {
                 sentReq = refix::lan::ILanCore::Get().Lobby().RequestJoin(coreLobbyId);
             }
 
@@ -9070,12 +9098,12 @@ namespace UnrealSteamEmu {
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyJoinResult, [](const refix::lan::LanEvent& ev) {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
-            SteamAPICall_t callHandle = 0;
+            std::vector<SteamAPICall_t> callHandles;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 auto it = g_pendingJoins.find(ev.lobbyId);
                 if (it != g_pendingJoins.end()) {
-                    callHandle = it->second.callHandle;
+                    callHandles = it->second.callHandles;
                     g_pendingJoins.erase(it);
                 }
             }
@@ -9090,8 +9118,8 @@ namespace UnrealSteamEmu {
                 resp.m_bLocked = false;
                 resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseError;
                 PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                if (callHandle != 0) {
-                    CompleteCallResult(callHandle, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
+                for (uint64_t ch : callHandles) {
+                    if (ch != 0) CompleteCallResult(ch, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
                 }
                 return;
             }
@@ -9154,8 +9182,8 @@ namespace UnrealSteamEmu {
                     }
                 }
                 PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                if (callHandle != 0) {
-                    CompleteCallResult(callHandle, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), false);
+                for (uint64_t ch : callHandles) {
+                    if (ch != 0) CompleteCallResult(ch, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), false);
                 }
 
                 LobbyDataUpdate_t dataUpd = {};
@@ -9191,8 +9219,8 @@ namespace UnrealSteamEmu {
                     resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseDoesntExist;
                 }
                 PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                if (callHandle != 0) {
-                    CompleteCallResult(callHandle, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
+                for (uint64_t ch : callHandles) {
+                    if (ch != 0) CompleteCallResult(ch, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
                 }
                 ReFixLog("[UnrealSteam] LanCore LobbyJoinResult: Join REJECTED for lobby %llu (coreId='%s', code=%u)",
                          steamLobbyId, ev.lobbyId.c_str(), ev.joinResponseCode);
