@@ -1032,11 +1032,13 @@ namespace UnrealSteamEmu {
 
     static bool SendLobbyChat(uint64_t lobbyId, const void* data, int len) {
         if (!data || len <= 0) return false;
-        std::vector<uint8_t> wire(sizeof(uint32_t) + sizeof(uint64_t) + 1 + (size_t)len);
+        // Wire packet: [magic 4B][lobbyId 8B][senderSteamId 8B][type 1B][data...]
+        std::vector<uint8_t> wire(sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint64_t) + 1 + (size_t)len);
         memcpy(wire.data(), &kLobbyChatMagic, sizeof(uint32_t));
         memcpy(wire.data() + 4, &lobbyId, sizeof(uint64_t));
-        wire[12] = (uint8_t)k_EChatEntryTypeChatMsg;
-        memcpy(wire.data() + 13, data, (size_t)len);
+        memcpy(wire.data() + 12, &g_localSteamID, sizeof(uint64_t));
+        wire[20] = (uint8_t)k_EChatEntryTypeChatMsg;
+        memcpy(wire.data() + 21, data, (size_t)len);
 
         auto& core = refix::lan::ILanCore::Get();
         const std::string coreLobbyId = GetCoreLobbyId(lobbyId);
@@ -1066,7 +1068,33 @@ namespace UnrealSteamEmu {
         if (magic != kLobbyChatMagic) return false;
         uint64_t lobbyId = 0;
         memcpy(&lobbyId, payload.data() + 4, sizeof(lobbyId));
-        DeliverLobbyChat(lobbyId, sender, payload[12], payload.data() + 13, payload.size() - 13);
+
+        uint64_t senderSteamId = sender;
+        uint8_t entryType = 0;
+        const uint8_t* msgData = nullptr;
+        size_t msgLen = 0;
+
+        if (payload.size() >= 21) {
+            uint64_t embeddedSender = 0;
+            memcpy(&embeddedSender, payload.data() + 12, sizeof(embeddedSender));
+            if (embeddedSender != 0) {
+                senderSteamId = embeddedSender;
+            }
+            entryType = payload[20];
+            msgData = payload.data() + 21;
+            msgLen = payload.size() - 21;
+        } else {
+            entryType = payload[12];
+            msgData = payload.data() + 13;
+            msgLen = payload.size() - 13;
+        }
+
+        if (senderSteamId == 0) {
+            ReFixLog("[UnrealSteam] ReceiveLobbyChat: senderSteamId unknown, skipping message for lobby %llu", lobbyId);
+            return true;
+        }
+
+        DeliverLobbyChat(lobbyId, senderSteamId, entryType, msgData, msgLen);
         return true;
     }
 
@@ -3475,7 +3503,6 @@ namespace UnrealSteamEmu {
                 auto peers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
                 for (const auto& p : peers) {
                     uint64_t sid = p.externalId.numericId;
-                    if (sid == 0) sid = p.peerId.low;
                     if (sid != 0 && sid != g_localSteamID) {
                         uniqueSids.insert(sid);
                     }
@@ -3555,7 +3582,7 @@ namespace UnrealSteamEmu {
                     }
                     for (const auto& mem : lob.members) {
                         auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(mem.peerId);
-                        if ((pInfo && pInfo->externalId.numericId == targetSid) || mem.peerId.low == targetSid) {
+                        if (pInfo && pInfo->externalId.numericId == targetSid) {
                             if (!mem.displayName.empty()) {
                                 thread_local char nameBuf[128];
                                 strncpy_s(nameBuf, sizeof(nameBuf), mem.displayName.c_str(), _TRUNCATE);
@@ -3633,11 +3660,11 @@ namespace UnrealSteamEmu {
                     auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
                     for (const auto& l : allLobbies) {
                         auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(l.ownerPeerId);
-                        bool isMember = ((pInfo && pInfo->externalId.numericId == friendSid) || l.ownerPeerId.low == friendSid || l.ownerPeerId.high == friendSid);
+                        bool isMember = (pInfo && pInfo->externalId.numericId == friendSid);
                         if (!isMember) {
                             for (const auto& m : l.members) {
                                 auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(m.peerId);
-                                if ((mInfo && mInfo->externalId.numericId == friendSid) || m.peerId.low == friendSid || m.peerId.high == friendSid) {
+                                if (mInfo && mInfo->externalId.numericId == friendSid) {
                                     isMember = true;
                                     break;
                                 }
@@ -9056,8 +9083,6 @@ namespace UnrealSteamEmu {
             auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (mInfo && mInfo->externalId.numericId != 0) {
                 memberSteamId = mInfo->externalId.numericId;
-            } else if (ev.peerId.low != 0) {
-                memberSteamId = ev.peerId.low;
             }
 
             if (memberSteamId != 0) {
@@ -9092,8 +9117,6 @@ namespace UnrealSteamEmu {
             auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (mInfo && mInfo->externalId.numericId != 0) {
                 memberSteamId = mInfo->externalId.numericId;
-            } else if (ev.peerId.low != 0) {
-                memberSteamId = ev.peerId.low;
             }
 
             if (memberSteamId != 0) {
@@ -9173,8 +9196,6 @@ namespace UnrealSteamEmu {
                             lob.owner = ownerInfo->externalId.numericId;
                         } else if (ownerSteamId != 0) {
                             lob.owner = ownerSteamId;
-                        } else if (rec->ownerPeerId.low != 0) {
-                            lob.owner = rec->ownerPeerId.low;
                         }
 
                         lob.members.clear();
@@ -9183,10 +9204,6 @@ namespace UnrealSteamEmu {
                             if (mInfo && mInfo->externalId.numericId != 0) {
                                 if (std::find(lob.members.begin(), lob.members.end(), mInfo->externalId.numericId) == lob.members.end()) {
                                     lob.members.push_back(mInfo->externalId.numericId);
-                                }
-                            } else if (m.peerId.low != 0) {
-                                if (std::find(lob.members.begin(), lob.members.end(), m.peerId.low) == lob.members.end()) {
-                                    lob.members.push_back(m.peerId.low);
                                 }
                             }
                         }
@@ -9251,8 +9268,6 @@ namespace UnrealSteamEmu {
             auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (pInfo && pInfo->externalId.numericId != 0) {
                 senderSteamId = pInfo->externalId.numericId;
-            } else {
-                senderSteamId = ev.peerId.low != 0 ? ev.peerId.low : ev.peerId.high;
             }
 
             if (ev.channel == 250 || (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == k_nRfxsMagic)) {
