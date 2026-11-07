@@ -1,3 +1,4 @@
+#include "panorama/refix_play_menu_js.h"
 // =============================================================================
 // ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
 // =============================================================================
@@ -3605,67 +3606,44 @@ static DWORD WINAPI ConsoleHotkeyThread(LPVOID) {
 typedef void* (__thiscall *FnPanoramaRunScript)(void* pThis, void* pPanel, const char* pchScript, const char* pchPath, int nLine, int nParam5, int bParam6, int bParam7);
 static FnPanoramaRunScript g_orig_PanoramaRunScript = nullptr;
 
-static std::string s_injectedBundle;
-static bool s_injectedBundleChecked = false;
-
 static const std::string& GetInjectedBundle() {
-    if (!s_injectedBundleChecked) {
-        s_injectedBundleChecked = true;
-        FILE* f = fopen("csgo\\refix_injected_mainmenu.js", "rb");
-        if (!f) f = fopen("csgo/refix_injected_mainmenu.js", "rb");
-        if (!f) {
-            char gamePath[MAX_PATH] = {0};
-            GetModuleFileNameA(NULL, gamePath, MAX_PATH);
-            char* slash = strrchr(gamePath, '\\');
-            if (slash) {
-                *(slash + 1) = '\0';
-                std::string p = std::string(gamePath) + "csgo\\refix_injected_mainmenu.js";
-                f = fopen(p.c_str(), "rb");
-            }
-        }
-        if (f) {
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            if (sz > 0) {
-                s_injectedBundle.resize(sz);
-                fread(&s_injectedBundle[0], 1, sz, f);
-                s_injectedBundle += "\n;\n";
-            }
-            fclose(f);
-            ReFixLog("[PanoramaHook] Loaded refix_injected_mainmenu.js (%zu bytes)", s_injectedBundle.size());
-        } else {
-            ReFixLog("[PanoramaHook] Warning: Could not locate refix_injected_mainmenu.js, using fallback stubs");
-            s_injectedBundle = "var CharacterAnims=CharacterAnims||{PlayAnimsOnPanel:function(){}};\n"
-                               "var ItemInfo=ItemInfo||{GetOrUpdateVanityCharacterSettings:function(){return{activity:'',arrModifiers:[]};}};\n"
-                               "var LicenseUtil=LicenseUtil||{GetCurrentLicense:function(){return 'purchased';}};\n";
-        }
-    }
-    return s_injectedBundle;
+    static const std::string s_stubs =
+        "var CharacterAnims=CharacterAnims||{PlayAnimsOnPanel:function(){}};\n"
+        "var ItemInfo=ItemInfo||{GetOrUpdateVanityCharacterSettings:function(){return{activity:'',arrModifiers:[]};}};\n"
+        "var LicenseUtil=LicenseUtil||{GetCurrentLicense:function(){return 'purchased';}};\n";
+    return s_stubs;
 }
 
 static void* __fastcall Hooked_PanoramaRunScript(void* pThis, void* /*edx*/, void* pPanel, const char* pchScript, const char* pchPath, int nLine, int nParam5, int bParam6, int bParam7)
 {
-    if (pchPath && strstr(pchPath, "mainmenu.js") && pchScript) {
-        ReFixLog("[PanoramaHook] Intercepting mainmenu.js execution (%zu bytes)", strlen(pchScript));
-        std::string script = pchScript;
+    if (pchPath && pchScript) {
+        if (strstr(pchPath, "mainmenu.js") && !strstr(pchPath, "mainmenu_play.js")) {
+            ReFixLog("[PanoramaHook] Intercepting mainmenu.js execution (%zu bytes)", strlen(pchScript));
+            std::string script = pchScript;
 
-        const std::string& bundle = GetInjectedBundle();
+            const std::string& bundle = GetInjectedBundle();
 
-        auto replaceAll = [](std::string& str, const std::string& from, const std::string& to) {
-            size_t start_pos = 0;
-            while((start_pos = str.find(from, start_pos)) != std::string::npos) {
-                str.replace(start_pos, from.length(), to);
-                start_pos += to.length();
-            }
-        };
+            auto replaceAll = [](std::string& str, const std::string& from, const std::string& to) {
+                size_t start_pos = 0;
+                while((start_pos = str.find(from, start_pos)) != std::string::npos) {
+                    str.replace(start_pos, from.length(), to);
+                    start_pos += to.length();
+                }
+            };
 
-        replaceAll(script, "MainMenu.InitVanity();", "try{MainMenu.InitVanity();}catch(e){$.Msg('InitVanity err: '+e);}");
-        replaceAll(script, "MainMenu.InitFriendsList();", "try{MainMenu.InitFriendsList();}catch(e){$.Msg('InitFriendsList err: '+e);}");
-        replaceAll(script, "MainMenu.InitNewsAndStore();", "try{MainMenu.InitNewsAndStore();}catch(e){$.Msg('InitNewsAndStore err: '+e);}");
+            replaceAll(script, "MainMenu.InitVanity();", "try{MainMenu.InitVanity();}catch(e){$.Msg('InitVanity err: '+e);}");
+            replaceAll(script, "MainMenu.InitFriendsList();", "try{MainMenu.InitFriendsList();}catch(e){$.Msg('InitFriendsList err: '+e);}");
+            replaceAll(script, "MainMenu.InitNewsAndStore();", "try{MainMenu.InitNewsAndStore();}catch(e){$.Msg('InitNewsAndStore err: '+e);}");
 
-        std::string modifiedScript = bundle + script;
-        return g_orig_PanoramaRunScript(pThis, pPanel, modifiedScript.c_str(), pchPath, nLine, nParam5, bParam6, bParam7);
+            std::string modifiedScript = bundle + script;
+            return g_orig_PanoramaRunScript(pThis, pPanel, modifiedScript.c_str(), pchPath, nLine, nParam5, bParam6, bParam7);
+        }
+        else if (strstr(pchPath, "mainmenu_play.js")) {
+            ReFixLog("[PanoramaHook] Intercepting mainmenu_play.js execution (%zu bytes) - injecting ReFix LAN Play Menu", strlen(pchScript));
+            const std::string& playExt = refix::panorama::GetRefixPlayMenuScript();
+            std::string modifiedScript = std::string(pchScript) + "\n;\n" + playExt;
+            return g_orig_PanoramaRunScript(pThis, pPanel, modifiedScript.c_str(), pchPath, nLine, nParam5, bParam6, bParam7);
+        }
     }
     return g_orig_PanoramaRunScript(pThis, pPanel, pchScript, pchPath, nLine, nParam5, bParam6, bParam7);
 }

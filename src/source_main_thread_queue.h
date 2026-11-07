@@ -46,4 +46,6 @@ private:
     }
 };
 
+std::string GetConVarString(const char* name);
+
 } // namespace refix::source

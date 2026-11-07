@@ -12,7 +12,10 @@ namespace ReFixGC {
 // One coordinator per pipe: the client and an in-process game server (listen server) poll their own queues.
 ISteamGameCoordinator* Get(bool gameServer);
 void SendToGameServer(uint32_t msg, const std::vector<uint8_t>& body);
+void SendToClient(uint32_t msg, const std::vector<uint8_t>& body);
 bool IsGameServerActive();
+void SetHostConfigJson(const std::string& json);
+std::string GetHostConfigJson();
 
 // Protobuf bodies of the replies, exposed for tests.
 std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId);
@@ -36,4 +39,5 @@ __declspec(dllexport) bool CSGO_IsPrimeStatus();
 __declspec(dllexport) void CSGO_SetPrimeStatus(bool enabled);
 __declspec(dllexport) bool CSGO_HasOperationPass(uint32_t season);
 __declspec(dllexport) void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId);
+__declspec(dllexport) void CSGO_SetHostConfig(const char* json);
 }

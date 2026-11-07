@@ -24,7 +24,8 @@ enum class GCRelayMsgType : uint8_t {
     RequestEquippedCache = 1,
     ResponseEquippedCache = 2,
     AckEquippedCache = 3,
-    UpdateItemEquipped = 4
+    UpdateItemEquipped = 4,
+    MatchmakingReserve = 5
 };
 
 #pragma pack(push, 1)
@@ -172,6 +173,13 @@ void InitializeGCRelay() {
             ReFixLog("[GC] Injected remote player UpdateMultiple (26) for SteamID %llu into game server", hdr->steamId);
             break;
         }
+        case GCRelayMsgType::MatchmakingReserve: {
+            ReFixLog("[GC-Relay] Received MatchmakingReserve from leader (%u bytes)", hdr->dataLen);
+            std::vector<uint8_t> reserveBytes(payload, payload + hdr->dataLen);
+            ReFixGC::SendToClient(9107 /* kMsgGCCStrike15_v2_MatchmakingGC2ClientReserve */, reserveBytes);
+            ReFixLog("[GC] Delivered MatchmakingGC2ClientReserve (9107) to local CS:GO client");
+            break;
+        }
         }
     });
 }
@@ -247,6 +255,27 @@ void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlo
             }
         }
         ReFixLog("[GC-Relay] Broadcasted UpdateItemEquipped to peers (%zu bytes)", soUpdateBytes.size());
+    }
+}
+
+
+void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes) {
+    std::vector<uint8_t> packet(sizeof(GCRelayHeader) + reserveBytes.size());
+    GCRelayHeader* hdr = reinterpret_cast<GCRelayHeader*>(packet.data());
+    hdr->magic = kGCRelayMagic;
+    hdr->msgType = static_cast<uint8_t>(GCRelayMsgType::MatchmakingReserve);
+    hdr->steamId = UnrealSteamEmu::GetLocalSteamID();
+    hdr->ticket = 0;
+    hdr->dataLen = (uint32_t)reserveBytes.size();
+    memcpy(packet.data() + sizeof(GCRelayHeader), reserveBytes.data(), reserveBytes.size());
+
+    auto allPeers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+    for (const auto& p : allPeers) {
+        if (p.peerId != refix::lan::ILanCore::Get().Identity().GetLocalPeerId()) {
+            refix::lan::ILanCore::Get().Transport().SendReliable(p.peerId, p.endpoint, kLanChannelGC, packet.data(), packet.size());
+            ReFixLog("[GC-Relay] Sent MatchmakingReserve (9107) to peer at %s:%u",
+                     p.endpoint.ToString().c_str(), p.endpoint.port);
+        }
     }
 }
 

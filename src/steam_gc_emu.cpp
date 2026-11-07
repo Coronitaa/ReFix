@@ -1169,17 +1169,100 @@ public:
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
         } else if (msg == kMsgGCCStrike15_v2_MatchmakingStart) {
-            ReFixLog("[GC] kMsgGCCStrike15_v2_MatchmakingStart: Stopping queue cleanly and opening ReFix Matchmaking toast");
-            // Reply with 9104 (MatchmakingGC2ClientUpdate): matchmaking = 0 (stops queue cleanly with no error modal)
+            ReFixLog("[GC] kMsgGCCStrike15_v2_MatchmakingStart received from client");
+
+            // 1. Send 9104 MatchmakingGC2ClientUpdate: matchmaking = 1 (Searching/Starting)
             std::vector<uint8_t> updateResp;
-            PutVarintField(updateResp, 1, 0); // matchmaking status = 0 (idle)
+            PutVarintField(updateResp, 1, 1);
             Reply(9104, updateResp);
 
-            // Cancel engine matchmaking search so it doesn't fail with VAC error or timeout
-            refix::overlay::ExecuteEngineClientCommand("mm_match_search_cancel");
+            // 2. Resolve host configuration
+            std::string mapName = "de_dust2";
+            uint32_t gameType = 0; // classic
+            uint32_t gameMode = 1; // competitive
+            uint32_t maxRounds = 30;
+            float roundTime = 1.92f;
+            uint32_t buyTime = 20;
+            uint32_t startMoney = 800;
+            uint32_t maxMoney = 16000;
+            uint32_t friendlyFire = 0;
+            uint32_t botQuota = 10;
+            uint32_t botDifficulty = 1;
+            uint32_t svCheats = 0;
+            uint32_t overtime = 0;
+            uint32_t limitTeams = 2;
 
-            // Open ReFix Matchmaking bottom-right toast mini-widget
-            refix::overlay::OpenMatchmakingToast();
+            std::string cfgStr = refix::source::GetConVarString("refix_host_cfg");
+            if (cfgStr.empty()) {
+                cfgStr = ReFixGC::GetHostConfigJson();
+            }
+
+            if (!cfgStr.empty()) {
+                try {
+                    auto j = nlohmann::json::parse(cfgStr, nullptr, false);
+                    if (!j.is_discarded()) {
+                        if (j.contains("map") && j["map"].is_string()) mapName = j["map"].get<std::string>();
+                        if (j.contains("mode") && j["mode"].is_string()) {
+                            std::string m = j["mode"].get<std::string>();
+                            if (m == "casual") { gameType = 0; gameMode = 0; }
+                            else if (m == "competitive") { gameType = 0; gameMode = 1; }
+                            else if (m == "armsrace") { gameType = 1; gameMode = 0; }
+                            else if (m == "demolition") { gameType = 1; gameMode = 1; }
+                            else if (m == "deathmatch") { gameType = 1; gameMode = 2; }
+                            else if (m == "survival" || m == "dangerzone") { gameType = 6; gameMode = 0; }
+                        }
+                        if (j.contains("maxrounds") && j["maxrounds"].is_number()) maxRounds = j["maxrounds"].get<uint32_t>();
+                        if (j.contains("roundtime") && j["roundtime"].is_number()) roundTime = j["roundtime"].get<float>();
+                        if (j.contains("buytime") && j["buytime"].is_number()) buyTime = j["buytime"].get<uint32_t>();
+                        if (j.contains("startmoney") && j["startmoney"].is_number()) startMoney = j["startmoney"].get<uint32_t>();
+                        if (j.contains("maxmoney") && j["maxmoney"].is_number()) maxMoney = j["maxmoney"].get<uint32_t>();
+                        if (j.contains("friendlyfire") && j["friendlyfire"].is_number()) friendlyFire = j["friendlyfire"].get<uint32_t>();
+                        if (j.contains("bot_quota") && j["bot_quota"].is_number()) botQuota = j["bot_quota"].get<uint32_t>();
+                        if (j.contains("bot_difficulty") && j["bot_difficulty"].is_number()) botDifficulty = j["bot_difficulty"].get<uint32_t>();
+                        if (j.contains("sv_cheats") && j["sv_cheats"].is_number()) svCheats = j["sv_cheats"].get<uint32_t>();
+                        if (j.contains("overtime") && j["overtime"].is_number()) overtime = j["overtime"].get<uint32_t>();
+                        if (j.contains("limitteams") && j["limitteams"].is_number()) limitTeams = j["limitteams"].get<uint32_t>();
+                        ReFixLog("[GC] Parsed refix_host_cfg: map=%s mode=%u/%u rounds=%u roundtime=%.2f",
+                                 mapName.c_str(), gameType, gameMode, maxRounds, roundTime);
+                    }
+                } catch (...) {
+                    ReFixLog("[GC] Error parsing refix_host_cfg JSON, using defaults");
+                }
+            }
+
+            // 3. Enqueue listen server launch onto main thread (R5)
+            char launchCmd[512];
+            snprintf(launchCmd, sizeof(launchCmd),
+                     "game_type %u; game_mode %u; mp_maxrounds %u; mp_roundtime %f; mp_buytime %u; "
+                     "mp_startmoney %u; mp_maxmoney %u; mp_friendlyfire %u; bot_quota %u; bot_difficulty %u; "
+                     "sv_cheats %u; mp_overtime_enable %u; mp_limitteams %u; map %s",
+                     gameType, gameMode, maxRounds, roundTime, buyTime,
+                     startMoney, maxMoney, friendlyFire, botQuota, botDifficulty,
+                     svCheats, overtime, limitTeams, mapName.c_str());
+
+            ReFixLog("[GC] Launching listen server on main thread: %s", launchCmd);
+            refix::source::MainThreadQueue::ExecuteClientCmd(launchCmd);
+
+            // 4. Construct MatchmakingGC2ClientReserve (9107)
+            auto endpoint = refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint();
+            uint32_t localIp = endpoint.ipv4;
+            if (localIp == 0 || (localIp >> 24) == 127) {
+                localIp = refix::lan::ResolveLocalIpv4();
+            }
+            uint16_t localPort = 27015;
+            uint64_t reservationId = 12345678ULL;
+            uint64_t serverId = 0x0110000100000000ULL | (uint64_t)((UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF) ^ 0x12345678ULL);
+            uint32_t targetAccountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+
+            std::vector<uint8_t> reserveBytes = BuildMatchmakingReserve(serverId, localIp, localPort, reservationId, mapName, targetAccountId);
+
+            // 5. Broadcast 9107 reservation to all peers in the lobby via LanCore
+            refix::csgo::BroadcastMatchmakingReserve(reserveBytes);
+
+            // 6. Complete matchmaking update on local client
+            std::vector<uint8_t> doneResp;
+            PutVarintField(doneResp, 1, 0); // idle / match complete
+            Reply(9104, doneResp);
         } else if (msg == 9194) { // ClientGCRankUpdate
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             std::vector<uint8_t> ranking;
@@ -1921,8 +2004,28 @@ bool IsGameServerActive() {
     return s_gameServerActive.load();
 }
 
+static std::string s_hostConfigJson;
+static std::mutex s_hostConfigMutex;
+
+void SetHostConfigJson(const std::string& json) {
+    std::lock_guard<std::mutex> lock(s_hostConfigMutex);
+    s_hostConfigJson = json;
+}
+
+std::string GetHostConfigJson() {
+    std::lock_guard<std::mutex> lock(s_hostConfigMutex);
+    return s_hostConfigJson;
+}
+
 void SendToGameServer(uint32_t msg, const std::vector<uint8_t>& body) {
     CGameCoordinatorLan* gc = static_cast<CGameCoordinatorLan*>(Get(true));
+    if (gc) {
+        gc->Reply(msg, body);
+    }
+}
+
+void SendToClient(uint32_t msg, const std::vector<uint8_t>& body) {
+    CGameCoordinatorLan* gc = static_cast<CGameCoordinatorLan*>(Get(false));
     if (gc) {
         gc->Reply(msg, body);
     }
@@ -2288,6 +2391,10 @@ __declspec(dllexport) bool CSGO_HasOperationPass(uint32_t season) {
 
 __declspec(dllexport) void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId) {
     ReFixGC::ActivateOperationPass(season, passItemId);
+}
+
+__declspec(dllexport) void CSGO_SetHostConfig(const char* json) {
+    if (json) ReFixGC::SetHostConfigJson(json);
 }
 
 __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed) {
