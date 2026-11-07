@@ -373,7 +373,7 @@ void App::Join(const net::RemotePlayer& p) {
 
 void App::Invite(const net::RemotePlayer& p) {
     uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
-    if (lobby == 0 && appId_ == 730) {
+    if (lobby == 0) {
         lobby = UnrealSteamEmu::Matchmaking_CreateLobby(1 /* k_ELobbyTypePublic */, 5);
         localLobby_ = lobby;
     }

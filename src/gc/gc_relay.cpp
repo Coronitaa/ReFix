@@ -1,4 +1,4 @@
-#include "csgo_gc_relay.h"
+#include "gc_relay.h"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <chrono>
@@ -14,7 +14,7 @@
 
 extern void ReFixLog(const char* fmt, ...);
 
-namespace refix::csgo {
+namespace refix::gc {
 
 namespace {
 

@@ -25,7 +25,6 @@
 #include <algorithm>
 
 extern void ReFixLog(const char* fmt, ...);
-extern "C" void CSGO_SetPrimeStatus(bool enabled);
 
 using namespace refix::overlay;
 
@@ -357,17 +356,7 @@ void ActivateWebPage(const char* url) {
         OpenMarketGiveMenu();
         return;
     }
-    if (strstr(url, "54029") || strstr(url, "prime") || strstr(url, "sub/")) {
-        PromptPurchase(730, 54029, "CS:GO Prime Status Upgrade",
-            "Mejora tu cuenta a Estado Prime. Emparejamiento exclusivo, obtencion de cajas semanales y medallas de servicio.",
-            false, [](bool approved) {
-                if (approved) {
-                    ReFixLog("[Overlay] Prime Status Upgrade approved by player!");
-                    CSGO_SetPrimeStatus(true);
-                }
-            });
-        return;
-    }
+
     const std::wstring u = FromUtf8(url);
     App::Get().Post([u] { App::Get().OpenWeb(u); });
 }

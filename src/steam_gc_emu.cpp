@@ -15,7 +15,7 @@
 #include "include/steam/steam_api.h"
 #include "include/steam/isteamgamecoordinator.h"
 #include "steam_gc_emu.h"
-#include "csgo_gc_relay.h"
+#include "gc/gc_relay.h"
 #include "unreal_steam_emu.h"
 #include "overlay/refix_overlay.h"
 #include "csgo_item_defs.h"
@@ -1258,7 +1258,7 @@ public:
             std::vector<uint8_t> reserveBytes = BuildMatchmakingReserve(serverId, localIp, localPort, reservationId, mapName, targetAccountId);
 
             // 5. Broadcast 9107 reservation to all peers in the lobby via LanCore
-            refix::csgo::BroadcastMatchmakingReserve(reserveBytes);
+            refix::gc::BroadcastMatchmakingReserve(reserveBytes);
 
             // 6. Complete matchmaking update on local client
             std::vector<uint8_t> doneResp;
@@ -1518,7 +1518,7 @@ public:
             PutFixed64Field(soMult, 3, ++s_soUpdateVer); // version = 3
             PutBytesField(soMult, 6, soid);              // owner_soid = 6
             Reply(26 /* k_ESOMsg_UpdateMultiple */, soMult);
-            refix::csgo::BroadcastEquippedUpdate(itemId, newClass, newSlot, soMult);
+            refix::gc::BroadcastEquippedUpdate(itemId, newClass, newSlot, soMult);
             // CRITICAL: DO NOT send kMsgClientWelcome here!
             // Sending kMsgClientWelcome destroys all CEconItem pointers in Panorama JS heap,
             // causing immediate 0xC0000005 access violation crash!

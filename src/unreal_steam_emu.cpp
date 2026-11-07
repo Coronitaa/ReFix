@@ -64,7 +64,7 @@
 #include "include/steam/isteamunifiedmessages.h"
 
 #include "unreal_steam_emu.h"
-#include "csgo_gc_relay.h"
+#include "gc/gc_relay.h"
 #include "unreal_detect.h"
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
@@ -3272,9 +3272,7 @@ namespace UnrealSteamEmu {
             PostCallback(ValidateAuthTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
 
             ReFixLog("[UnrealSteam] BeginAuthSession: Accepted session for SteamID %llu", steamID.ConvertToUint64());
-            if (g_appID == 730) {
-                refix::csgo::OnGameServerClientAuth(steamID.ConvertToUint64(), 1);
-            }
+            refix::gc::OnGameServerClientAuth(steamID.ConvertToUint64(), 1);
             return k_EBeginAuthSessionResultOK;
         }
 
@@ -3728,32 +3726,13 @@ namespace UnrealSteamEmu {
                     ReFixOverlay::OpenMarketGiveMenu();
                     return;
                 }
-                if (strstr(pchURL, "54029") || strstr(pchURL, "prime") || strstr(pchURL, "sub/")) {
-                    ReFixOverlay::PromptPurchase(730, 54029, "CS:GO Prime Status Upgrade",
-                        "Mejora tu cuenta a Estado Prime. Emparejamiento exclusivo, obtencion de cajas semanales y medallas de servicio.",
-                        false, [](bool approved) {
-                            if (approved) {
-                                ReFixLog("[Overlay] Prime Status Upgrade approved by player!");
-                            }
-                        });
-                    return;
-                }
+
             }
             ReFixOverlay::ActivateWebPage(pchURL);
         }
         virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override {
             ReFixLog("[UnrealSteam] ActivateGameOverlayToStore: nAppID=%u", (uint32_t)nAppID);
-            if (nAppID == 730) {
-                ReFixOverlay::PromptPurchase(730, 10001, "CS:GO Prime Status Upgrade",
-                    "Mejora tu cuenta a Estado Prime. Emparejamiento exclusivo, obtención de cajas semanales y medallas de servicio.",
-                    false, [](bool approved) {
-                        if (approved) {
-                            ReFixLog("[Overlay] Prime Status Upgrade approved by player!");
-                        }
-                    });
-            } else {
-                ReFixOverlay::PromptPurchase((uint32_t)nAppID, 0, "", "", false);
-            }
+            ReFixOverlay::PromptPurchase((uint32_t)nAppID, 0, "", "", false);
         }
         virtual void SetPlayedWith(CSteamID steamIDUserPlayedWith) override {}
         virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override {
@@ -6968,8 +6947,6 @@ namespace UnrealSteamEmu {
 
             std::vector<std::wstring> scanPaths = {
                 baseDir + L"\\maps\\workshop",
-                baseDir + L"\\..\\csgo\\maps\\workshop",
-                baseDir + L"\\csgo\\maps\\workshop",
                 baseDir + L"\\workshop\\content\\" + std::to_wstring(g_appID),
                 baseDir + L"\\..\\workshop\\content\\" + std::to_wstring(g_appID)
             };
@@ -7021,11 +6998,9 @@ namespace UnrealSteamEmu {
                 FindClose(hFind);
             }
 
-            // For CS:GO, sync subscribed_file_ids.txt so engine knows local workshop items
-            if (g_appID == 730 && !m_items.empty()) {
+            if (!m_items.empty()) {
                 std::vector<std::wstring> subFiles = {
-                    baseDir + L"\\..\\csgo\\subscribed_file_ids.txt",
-                    baseDir + L"\\csgo\\subscribed_file_ids.txt"
+                    baseDir + L"\\subscribed_file_ids.txt"
                 };
                 for (const auto& sf : subFiles) {
                     std::ofstream ofs(sf, std::ios::binary | std::ios::trunc);
@@ -7327,9 +7302,7 @@ namespace UnrealSteamEmu {
             g_callbackQueue.push_back(item);
 
             ReFixLog("[UnrealSteam] SendUserConnectAndAuthenticate: Approved client %llu", clientID.ConvertToUint64());
-            if (g_appID == 730) {
-                refix::csgo::OnGameServerClientAuth(clientID.ConvertToUint64(), 1);
-            }
+            refix::gc::OnGameServerClientAuth(clientID.ConvertToUint64(), 1);
             return true;
         }
 
@@ -8372,9 +8345,7 @@ namespace UnrealSteamEmu {
         if (g_transportMode.load() == TransportMode::Canonical) {
             refix::lan::ILanCore::Get().SetAppScope("Steam_" + std::to_string(appId));
             refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
-            if (appId == 730) {
-                refix::csgo::InitializeGCRelay();
-            }
+            refix::gc::InitializeGCRelay();
         }
         ReFixLog("[UnrealSteam] Adopted AppID %u (was %u): LAN discovery scope updated", appId, previous);
     }
@@ -8811,9 +8782,7 @@ namespace UnrealSteamEmu {
                 (ep.ipv4 >> 24) & 0xFF, (ep.ipv4 >> 16) & 0xFF, (ep.ipv4 >> 8) & 0xFF, ep.ipv4 & 0xFF,
                 ep.port, core.Transport().GetDiscoveryPort());
             core.Identity().SetDisplayName(g_personaName);
-            if (g_appID == 730) {
-                refix::csgo::InitializeGCRelay();
-            }
+            refix::gc::InitializeGCRelay();
 
         // Bind local SteamID
         refix::lan::PeerId localPeer = core.Identity().GetLocalPeerId();

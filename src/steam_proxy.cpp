@@ -3648,7 +3648,7 @@ static void* __fastcall Hooked_PanoramaRunScript(void* pThis, void* /*edx*/, voi
     return g_orig_PanoramaRunScript(pThis, pPanel, pchScript, pchPath, nLine, nParam5, bParam6, bParam7);
 }
 
-static DWORD WINAPI CSGO_PanoramaHookThread(LPVOID) {
+static DWORD WINAPI Source_PanoramaHookThread(LPVOID) {
     HMODULE hPan = NULL;
     for (int i = 0; i < 200; ++i) {
         hPan = GetModuleHandleA("panorama.dll");
@@ -5257,7 +5257,7 @@ static void ReFixInitializePost(bool success) {
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
         ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
-        CreateThread(NULL, 0, CSGO_PanoramaHookThread, NULL, 0, NULL);
+        CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);

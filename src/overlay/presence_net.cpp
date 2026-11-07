@@ -443,8 +443,8 @@ std::vector<RemotePlayer> Players() {
             RemotePlayer rp;
             rp.steamId = sid;
             rp.name = p.displayName;
-            rp.game = "Counter-Strike: Global Offensive";
-            rp.appId = 730;
+            rp.game = !g_local.game.empty() ? g_local.game : "LAN Game";
+            rp.appId = g_local.appId != 0 ? g_local.appId : 480;
             rp.joinable = true;
             rp.ip = p.endpoint.ipv4;
             rp.port = p.endpoint.port != 0 ? p.endpoint.port : 47585;
@@ -465,8 +465,8 @@ bool SendInvite(uint64_t to, uint64_t lobbyId, const std::string& connect) {
                 RemotePlayer rp;
                 rp.steamId = to;
                 rp.name = pinfo->displayName;
-                rp.game = "Counter-Strike: Global Offensive";
-                rp.appId = 730;
+                rp.game = !g_local.game.empty() ? g_local.game : "LAN Game";
+                rp.appId = g_local.appId != 0 ? g_local.appId : 480;
                 rp.joinable = true;
                 rp.ip = pinfo->endpoint.ipv4;
                 rp.port = pinfo->endpoint.port != 0 ? pinfo->endpoint.port : 47585;
