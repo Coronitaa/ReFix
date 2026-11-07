@@ -39,3 +39,12 @@ Source: https://github.com/SteamDatabase/Protobufs
 Commit: 5414eb56e4a033fefbe667f1988af5297864a784
 Copyright (c) Valve Corporation. All rights reserved.
 Protobuf message definitions used under fair use for interoperability.
+
+
+---
+
+## JSON for Modern C++ (nlohmann/json)
+Source: https://github.com/nlohmann/json
+License: MIT License
+Copyright (c) 2013-2022 Niels Lohmann <https://nlohmann.me>
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction.

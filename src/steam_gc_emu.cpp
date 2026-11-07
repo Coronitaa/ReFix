@@ -10,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
 #include "include/steam/steam_api.h"
 #include "include/steam/isteamgamecoordinator.h"
 #include "steam_gc_emu.h"
@@ -183,6 +184,47 @@ public:
         return inst;
     }
 
+    uint64_t ComposeItemId(uint32_t accountId, uint32_t lowId) const {
+        return ((uint64_t)accountId << 32) | lowId;
+    }
+
+    uint32_t GetLowItemId(uint32_t lowItemId = 0) {
+        if (!lowItemId) {
+            m_lastLowItemId++;
+            lowItemId = m_lastLowItemId;
+        }
+
+        uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+
+        for (;; lowItemId++) {
+            if (!lowItemId) {
+                m_lastLowItemId = 1;
+                lowItemId = m_lastLowItemId;
+            }
+
+            uint64_t candidateId = ComposeItemId(accountId, lowItemId);
+            bool collision = false;
+            for (const auto& itm : m_items) {
+                if (itm.id == candidateId) {
+                    collision = true;
+                    break;
+                }
+            }
+            if (collision) continue;
+
+            if (lowItemId > m_lastLowItemId) {
+                m_lastLowItemId = lowItemId;
+            }
+            return lowItemId;
+        }
+    }
+
+    uint64_t GenerateNewItemId() {
+        uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+        uint32_t low = GetLowItemId(0);
+        return ComposeItemId(accountId, low);
+    }
+
     std::wstring GetInventoryPath() {
         std::wstring root = ReFixOverlay::InventoryFolder(730);
         if (root.empty()) {
@@ -288,7 +330,7 @@ public:
             };
             for (const auto& s : kStarters) {
                 EconItem itm;
-                itm.id = (accountId << 32) | (++nextId);
+                itm.id = GenerateNewItemId();
                 itm.defIndex = s.defIndex;
                 itm.quantity = 1;
                 itm.quality = 4;
@@ -309,7 +351,7 @@ public:
             // Then keys
             for (size_t i = 0; i < ReFixGC::CSGO::kNumKeys; ++i) {
                 EconItem itm;
-                itm.id = (accountId << 32) | (++nextId);
+                itm.id = GenerateNewItemId();
                 itm.defIndex = ReFixGC::CSGO::kKeys[i];
                 itm.quantity = 20; // 20 keys each for easy testing
                 itm.quality = 4;
@@ -318,7 +360,7 @@ public:
             // Then 36 cases
             for (size_t i = 0; i < ReFixGC::CSGO::kNumCases; ++i) {
                 EconItem itm;
-                itm.id = (accountId << 32) | (++nextId);
+                itm.id = GenerateNewItemId();
                 itm.defIndex = ReFixGC::CSGO::kCases[i];
                 itm.quantity = 10; // 10 of every real weapon case
                 itm.quality = 4;
@@ -418,12 +460,8 @@ public:
         uint32_t outSeed = 420;
         refix::csgo::SchemaManager::Get().RollCaseDrop(crateDef, outDef, outPaintKit, outRarity, outQuality, outWear, outSeed);
 
-        uint64_t accountId = (UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
-        static uint32_t s_dropSeq = 1;
-        uint32_t seq = (uint32_t)(m_items.size() + (++s_dropSeq));
-
         EconItem unboxed;
-        unboxed.id = (accountId << 32) | (uint64_t)seq;
+        unboxed.id = GenerateNewItemId();
         unboxed.defIndex = outDef;
         unboxed.quantity = 1;
         unboxed.quality = outQuality;
@@ -453,10 +491,8 @@ public:
             return it->id;
         }
 
-        static uint32_t s_addSeq = 1;
-        uint32_t seq = (uint32_t)(m_items.size() + (++s_addSeq));
         EconItem itm;
-        itm.id = (accountId << 32) | (uint64_t)seq;
+        itm.id = GenerateNewItemId();
         itm.defIndex = defIndex;
         itm.quantity = count;
         itm.quality = quality;
@@ -483,10 +519,8 @@ public:
             }
         }
 
-        static uint32_t s_addAttrSeq = 1;
-        uint32_t seq = (uint32_t)(m_items.size() + (++s_addAttrSeq));
         EconItem itm;
-        itm.id = (accountId << 32) | (uint64_t)seq;
+        itm.id = GenerateNewItemId();
         itm.defIndex = defIndex;
         itm.quantity = count;
         itm.quality = quality;
@@ -549,6 +583,7 @@ public:
 private:
     std::mutex m_mutex;
     bool m_loaded = false;
+    uint32_t m_lastLowItemId = 0;
     std::vector<EconItem> m_items;
     std::vector<EconCoupon> m_coupons;
 
@@ -557,123 +592,115 @@ private:
         std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
         if (!ofs.is_open()) return;
 
-        ofs << "{\n  \"items\": [\n";
-        for (size_t i = 0; i < m_items.size(); ++i) {
-            const auto& it = m_items[i];
-            ofs << "    { \"id\": " << it.id << ", \"defIndex\": " << it.defIndex
-                << ", \"quantity\": " << it.quantity << ", \"quality\": " << it.quality
-                << ", \"rarity\": " << it.rarity << ", \"paintKit\": " << it.paintKit
-                << ", \"wear\": " << it.wear << ", \"seed\": " << it.seed;
-            if (!it.equipped.empty()) {
-                ofs << ", \"equipped\": [";
-                for (size_t e = 0; e < it.equipped.size(); ++e) {
-                    ofs << "{\"class\":" << it.equipped[e].new_class << ",\"slot\":" << it.equipped[e].new_slot << "}"
-                        << (e + 1 < it.equipped.size() ? "," : "");
-                }
-                ofs << "]";
+        nlohmann::json j;
+        j["last_low_item_id"] = m_lastLowItemId;
+        j["items"] = nlohmann::json::array();
+        for (const auto& it : m_items) {
+            nlohmann::json itm;
+            itm["id"] = it.id;
+            itm["defIndex"] = it.defIndex;
+            itm["quantity"] = it.quantity;
+            itm["quality"] = it.quality;
+            itm["rarity"] = it.rarity;
+            itm["paintKit"] = it.paintKit;
+            itm["wear"] = it.wear;
+            itm["seed"] = it.seed;
+            if (!it.customName.empty()) {
+                itm["customName"] = it.customName;
             }
-            ofs << " }" << (i + 1 < m_items.size() ? ",\n" : "\n");
+            if (!it.equipped.empty()) {
+                nlohmann::json eqArr = nlohmann::json::array();
+                for (const auto& es : it.equipped) {
+                    nlohmann::json eqObj;
+                    eqObj["class"] = es.new_class;
+                    eqObj["slot"] = es.new_slot;
+                    eqArr.push_back(eqObj);
+                }
+                itm["equipped"] = eqArr;
+            }
+            j["items"].push_back(itm);
         }
-        ofs << "  ],\n  \"coupons\": [\n";
-        for (size_t i = 0; i < m_coupons.size(); ++i) {
-            const auto& cp = m_coupons[i];
-            ofs << "    { \"entryId\": " << cp.entryId << ", \"defidx\": " << cp.defidx
-                << ", \"expirationDate\": " << cp.expirationDate << " }" << (i + 1 < m_coupons.size() ? ",\n" : "\n");
+        j["coupons"] = nlohmann::json::array();
+        for (const auto& cp : m_coupons) {
+            nlohmann::json c;
+            c["entryId"] = cp.entryId;
+            c["defidx"] = cp.defidx;
+            c["expirationDate"] = cp.expirationDate;
+            j["coupons"].push_back(c);
         }
-        ofs << "  ]\n}\n";
+
+        std::string dumped = j.dump(2);
+        ofs.write(dumped.data(), dumped.size());
     }
 
     void ParseJson(const std::string& str) {
-        size_t itemsPos = str.find("\"items\"");
-        if (itemsPos != std::string::npos) {
-            size_t endItems = str.find("\"coupons\"", itemsPos);
-            std::string itemsBlock = str.substr(itemsPos, endItems == std::string::npos ? std::string::npos : endItems - itemsPos);
-            size_t pos = 0;
-            while ((pos = itemsBlock.find('{', pos)) != std::string::npos) {
-                size_t close = itemsBlock.find('}', pos);
-                if (close == std::string::npos) break;
-                std::string obj = itemsBlock.substr(pos, close - pos + 1);
-                auto getNum = [&](const char* key) -> uint64_t {
-                    size_t kp = obj.find(key);
-                    if (kp == std::string::npos) return 0;
-                    size_t col = obj.find(':', kp);
-                    if (col == std::string::npos) return 0;
-                    return _strtoui64(obj.c_str() + col + 1, nullptr, 10);
-                };
+        m_items.clear();
+        m_coupons.clear();
+        if (str.empty()) return;
+
+        nlohmann::json j;
+        try {
+            j = nlohmann::json::parse(str);
+        } catch (const std::exception& e) {
+            ReFixLog("[GC] CSGOInventory: Failed to parse inventory JSON: %s", e.what());
+            return;
+        }
+
+        if (j.contains("last_low_item_id") && j["last_low_item_id"].is_number()) {
+            m_lastLowItemId = j["last_low_item_id"].get<uint32_t>();
+        } else {
+            m_lastLowItemId = 0;
+        }
+
+        if (j.contains("items") && j["items"].is_array()) {
+            for (const auto& itmJson : j["items"]) {
+                if (!itmJson.is_object()) continue;
                 EconItem itm;
-                itm.id = getNum("\"id\"");
-                itm.defIndex = (uint32_t)getNum("\"defIndex\"");
-                itm.quantity = (uint32_t)getNum("\"quantity\"");
-                itm.quality = (uint32_t)getNum("\"quality\"");
-                itm.rarity = (uint32_t)getNum("\"rarity\"");
-                itm.paintKit = (uint32_t)getNum("\"paintKit\"");
-                itm.seed = (uint32_t)getNum("\"seed\"");
-                size_t wp = obj.find("\"wear\"");
-                if (wp != std::string::npos) {
-                    size_t wc = obj.find(':', wp);
-                    if (wc != std::string::npos) {
-                        itm.wear = (float)atof(obj.c_str() + wc + 1);
-                    }
-                }
+                if (itmJson.contains("id") && itmJson["id"].is_number()) itm.id = itmJson["id"].get<uint64_t>();
+                if (itmJson.contains("defIndex") && itmJson["defIndex"].is_number()) itm.defIndex = itmJson["defIndex"].get<uint32_t>();
+                if (itmJson.contains("quantity") && itmJson["quantity"].is_number()) itm.quantity = itmJson["quantity"].get<uint32_t>();
+                if (itmJson.contains("quality") && itmJson["quality"].is_number()) itm.quality = itmJson["quality"].get<uint32_t>();
+                if (itmJson.contains("rarity") && itmJson["rarity"].is_number()) itm.rarity = itmJson["rarity"].get<uint32_t>();
+                if (itmJson.contains("paintKit") && itmJson["paintKit"].is_number()) itm.paintKit = itmJson["paintKit"].get<uint32_t>();
+                if (itmJson.contains("wear") && itmJson["wear"].is_number()) itm.wear = itmJson["wear"].get<float>();
+                if (itmJson.contains("seed") && itmJson["seed"].is_number()) itm.seed = itmJson["seed"].get<uint32_t>();
+                if (itmJson.contains("customName") && itmJson["customName"].is_string()) itm.customName = itmJson["customName"].get<std::string>();
+
                 if (itm.wear <= 0.0f) itm.wear = 0.001f;
 
-                size_t eqPos = obj.find("\"equipped\"");
-                if (eqPos != std::string::npos) {
-                    size_t eqEnd = obj.find(']', eqPos);
-                    if (eqEnd != std::string::npos) {
-                        std::string eqBlock = obj.substr(eqPos, eqEnd - eqPos);
-                        size_t ep = 0;
-                        while ((ep = eqBlock.find('{', ep)) != std::string::npos) {
-                            size_t epClose = eqBlock.find('}', ep);
-                            if (epClose == std::string::npos) break;
-                            std::string sub = eqBlock.substr(ep, epClose - ep + 1);
-                            auto getSubNum = [&](const char* k) -> uint32_t {
-                                size_t kp = sub.find(k);
-                                if (kp == std::string::npos) return 0;
-                                size_t c = sub.find(':', kp);
-                                if (c == std::string::npos) return 0;
-                                return (uint32_t)strtoul(sub.c_str() + c + 1, nullptr, 10);
-                            };
-                            uint32_t cl = getSubNum("\"class\"");
-                            uint32_t sl = getSubNum("\"slot\"");
-                            if (cl > 0 && sl > 0) {
-                                itm.equipped.push_back({ cl, sl });
-                            }
-                            ep = epClose + 1;
+                if (itmJson.contains("equipped") && itmJson["equipped"].is_array()) {
+                    for (const auto& eqJson : itmJson["equipped"]) {
+                        if (!eqJson.is_object()) continue;
+                        uint32_t cl = 0, sl = 0;
+                        if (eqJson.contains("class") && eqJson["class"].is_number()) cl = eqJson["class"].get<uint32_t>();
+                        if (eqJson.contains("slot") && eqJson["slot"].is_number()) sl = eqJson["slot"].get<uint32_t>();
+                        // Support all valid equip slots, including slot 0 (knife)
+                        if (cl > 0) {
+                            itm.equipped.push_back({ cl, sl });
                         }
                     }
                 }
-
                 if (itm.id != 0 && itm.defIndex != 0) {
                     m_items.push_back(itm);
                 }
-                pos = close + 1;
+
+                uint32_t lowId = (uint32_t)(itm.id & 0xFFFFFFFFULL);
+                if (lowId > m_lastLowItemId) {
+                    m_lastLowItemId = lowId;
+                }
             }
         }
 
-        size_t cpnPos = str.find("\"coupons\"");
-        if (cpnPos != std::string::npos) {
-            std::string cpnBlock = str.substr(cpnPos);
-            size_t pos = 0;
-            while ((pos = cpnBlock.find('{', pos)) != std::string::npos) {
-                size_t close = cpnBlock.find('}', pos);
-                if (close == std::string::npos) break;
-                std::string obj = cpnBlock.substr(pos, close - pos + 1);
-                auto getNum = [&](const char* key) -> uint64_t {
-                    size_t kp = obj.find(key);
-                    if (kp == std::string::npos) return 0;
-                    size_t col = obj.find(':', kp);
-                    if (col == std::string::npos) return 0;
-                    return _strtoui64(obj.c_str() + col + 1, nullptr, 10);
-                };
-                EconCoupon cpn;
-                cpn.entryId = (uint32_t)getNum("\"entryId\"");
-                cpn.defidx = (uint32_t)getNum("\"defidx\"");
-                cpn.expirationDate = (uint32_t)getNum("\"expirationDate\"");
-                if (cpn.defidx != 0) {
-                    m_coupons.push_back(cpn);
+        if (j.contains("coupons") && j["coupons"].is_array()) {
+            for (const auto& cpJson : j["coupons"]) {
+                if (!cpJson.is_object()) continue;
+                EconCoupon cp;
+                if (cpJson.contains("entryId") && cpJson["entryId"].is_number()) cp.entryId = cpJson["entryId"].get<uint32_t>();
+                if (cpJson.contains("defidx") && cpJson["defidx"].is_number()) cp.defidx = cpJson["defidx"].get<uint32_t>();
+                if (cpJson.contains("expirationDate") && cpJson["expirationDate"].is_number()) cp.expirationDate = cpJson["expirationDate"].get<uint32_t>();
+                if (cp.defidx != 0) {
+                    m_coupons.push_back(cp);
                 }
-                pos = close + 1;
             }
         }
     }
