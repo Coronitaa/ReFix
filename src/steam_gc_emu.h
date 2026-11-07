@@ -34,10 +34,12 @@ void ActivateOperationPass(uint32_t season, uint64_t passItemId = 0);
 } // namespace ReFixGC
 
 extern "C" {
-__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed);
+__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, const char* customName = nullptr);
 __declspec(dllexport) bool CSGO_IsPrimeStatus();
 __declspec(dllexport) void CSGO_SetPrimeStatus(bool enabled);
 __declspec(dllexport) bool CSGO_HasOperationPass(uint32_t season);
 __declspec(dllexport) void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId);
 __declspec(dllexport) void CSGO_SetHostConfig(const char* json);
+__declspec(dllexport) void CSGO_OpenMarketHUD();
+__declspec(dllexport) void CSGO_CloseMarketHUD();
 }

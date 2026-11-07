@@ -36,12 +36,22 @@ struct CaseDropTable {
 struct MarketItem {
     uint32_t defIndex = 0;
     std::string name;
-    std::string category; // "Caja", "Llave", "Rifle", "Pistola", "Subfusil", "Pesada", "Cuchillo", "Guantes", "Pegatina"
+    std::string category; // "Rifles", "Pistolas", "Subfusiles", "Pesadas", "Cuchillos", "Guantes", "Agentes", "Cajas", "Llaves", "Música y Coleccionables"
     uint32_t quality = 4;
     uint32_t rarity = 0;
     uint32_t paintKit = 0;
     float wear = 0.001f;
     uint32_t seed = 0;
+    float minWear = 0.0f;
+    float maxWear = 1.0f;
+    std::string weaponName;
+    std::string skinName;
+    std::string imageInventory;
+};
+
+struct CategoryInfo {
+    std::string name;
+    size_t count = 0;
 };
 
 class SchemaManager {
@@ -56,9 +66,12 @@ public:
 
     const std::vector<MarketItem>& GetMarketItems() const { return m_marketItems; }
     std::vector<MarketItem> GetMarketItemsByCategory(const std::string& category) const;
+    const std::vector<CategoryInfo>& GetCategories() const { return m_categories; }
+    size_t GetTotalGrantableCount() const { return m_marketItems.size(); }
 
     std::string GetWeaponDisplayName(uint32_t defIndex) const;
     std::string GetPaintKitDisplayName(uint32_t paintKit) const;
+    std::string ResolveToken(const std::string& token) const;
 
 private:
     SchemaManager();
@@ -74,7 +87,9 @@ private:
     std::unordered_map<uint32_t, std::string> m_paintKitIdToName;
     std::unordered_map<uint32_t, CaseDropTable> m_caseTables;
     std::vector<MarketItem> m_marketItems;
+    std::vector<CategoryInfo> m_categories;
     std::vector<SkinDrop> m_universalSpecialKnives;
+    std::unordered_map<std::string, std::string> m_tokens;
 };
 
 } // namespace refix::csgo

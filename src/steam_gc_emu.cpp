@@ -777,14 +777,14 @@ public:
         return true;
     }
 
-    uint64_t AddItemWithAttributes(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, uint32_t origin = 0, uint32_t inventory = 0) {
+    uint64_t AddItemWithAttributes(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, uint32_t origin = 0, uint32_t inventory = 0, const std::string& customName = "") {
         EnsureLoaded();
         std::lock_guard<std::mutex> lock(m_mutex);
         uint64_t accountId = (UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
 
-        if (paintKit == 0 && origin == 0 && inventory == 0) {
+        if (paintKit == 0 && origin == 0 && inventory == 0 && customName.empty()) {
             auto it = std::find_if(m_items.begin(), m_items.end(), [defIndex](const EconItem& it) {
-                return it.defIndex == defIndex && it.paintKit == 0 && it.origin == 0 && it.inventory == 0;
+                return it.defIndex == defIndex && it.paintKit == 0 && it.origin == 0 && it.inventory == 0 && it.customName.empty();
             });
             if (it != m_items.end()) {
                 it->quantity += count;
@@ -802,12 +802,13 @@ public:
         itm.paintKit = paintKit;
         itm.wear = wear > 0.0f ? wear : 0.001f;
         itm.seed = seed > 0 ? seed : (rand() % 999 + 1);
+        itm.customName = customName;
         itm.origin = origin;
         itm.inventory = inventory;
         m_items.push_back(itm);
         SaveLocked();
-        ReFixLog("[GC] CSGOInventory: Added custom item id=%llu def=%u qty=%u pk=%u wear=%.4f origin=%u inv=0x%X",
-                 (unsigned long long)itm.id, defIndex, count, paintKit, itm.wear, origin, inventory);
+        ReFixLog("[GC] CSGOInventory: Added custom item id=%llu def=%u qty=%u pk=%u wear=%.4f customName='%s' origin=%u inv=0x%X",
+                 (unsigned long long)itm.id, defIndex, count, paintKit, itm.wear, customName.c_str(), origin, inventory);
         return itm.id;
     }
 
@@ -2397,34 +2398,44 @@ __declspec(dllexport) void CSGO_SetHostConfig(const char* json) {
     if (json) ReFixGC::SetHostConfigJson(json);
 }
 
-__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed) {
-    refix::source::MainThreadQueue::Enqueue([defIndex, count, quality, rarity, paintKit, wear, seed]() {
-        uint64_t id = CSGOInventoryManager::Get().AddItemWithAttributes(defIndex, count, quality, rarity, paintKit, wear, seed);
-        if (id != 0) {
-            auto allItems = CSGOInventoryManager::Get().GetItems();
-            auto itGranted = std::find_if(allItems.begin(), allItems.end(), [id](const EconItem& i) { return i.id == id; });
-            if (itGranted != allItems.end()) {
-                uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
-                std::vector<uint8_t> itBytes = SerializeEconItem(*itGranted, accountId, (uint32_t)allItems.size());
+__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, const char* customName) {
+    std::string cname = customName ? customName : "";
+    refix::source::MainThreadQueue::Enqueue([defIndex, count, quality, rarity, paintKit, wear, seed, cname]() {
+        uint32_t safeCount = (std::max)(1u, (std::min)(count, 100u));
+        bool isIndividual = (paintKit > 0 || !cname.empty() || (defIndex >= 500 && defIndex <= 530) || (defIndex >= 5027 && defIndex <= 5035));
 
-                std::vector<uint8_t> soid;
-                PutVarintField(soid, 1, kSOTypeSteamId);
-                PutVarintField(soid, 2, UnrealSteamEmu::GetLocalSteamID());
+        uint32_t iterations = isIndividual ? safeCount : 1;
+        uint32_t singleQty = isIndividual ? 1 : safeCount;
 
-                static uint64_t s_soVersion = 200;
-                std::vector<uint8_t> soSingle;
-                PutVarintField(soSingle, 2, kSOTypeItem);
-                PutBytesField(soSingle, 3, itBytes);
-                PutFixed64Field(soSingle, 4, ++s_soVersion);
-                PutBytesField(soSingle, 5, soid);
+        for (uint32_t n = 0; n < iterations; n++) {
+            uint32_t itemSeed = (seed > 0) ? seed : (rand() % 999 + 1);
+            uint64_t id = CSGOInventoryManager::Get().AddItemWithAttributes(defIndex, singleQty, quality, rarity, paintKit, wear, itemSeed, 0, 0, cname);
+            if (id != 0) {
+                auto allItems = CSGOInventoryManager::Get().GetItems();
+                auto itGranted = std::find_if(allItems.begin(), allItems.end(), [id](const EconItem& i) { return i.id == id; });
+                if (itGranted != allItems.end()) {
+                    uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+                    std::vector<uint8_t> itBytes = SerializeEconItem(*itGranted, accountId, (uint32_t)allItems.size());
 
-                CGameCoordinatorLan* gc = (CGameCoordinatorLan*)ReFixGC::Get(false);
-                if (gc) {
-                    gc->Reply(21 /* k_ESOMsg_Create */, soSingle);
+                    std::vector<uint8_t> soid;
+                    PutVarintField(soid, 1, kSOTypeSteamId);
+                    PutVarintField(soid, 2, UnrealSteamEmu::GetLocalSteamID());
+
+                    static uint64_t s_soVersion = 200;
+                    std::vector<uint8_t> soSingle;
+                    PutVarintField(soSingle, 2, kSOTypeItem);
+                    PutBytesField(soSingle, 3, itBytes);
+                    PutFixed64Field(soSingle, 4, ++s_soVersion);
+                    PutBytesField(soSingle, 5, soid);
+
+                    CGameCoordinatorLan* gc = (CGameCoordinatorLan*)ReFixGC::Get(false);
+                    if (gc) {
+                        gc->Reply(21 /* k_ESOMsg_Create */, soSingle);
+                    }
                 }
-                refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
             }
         }
+        refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
     });
 }
 

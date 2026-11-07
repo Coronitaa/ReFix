@@ -25,13 +25,7 @@
 #include <string>
 #include "../source_main_thread_queue.h"
 
-extern "C" {
-void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed);
-bool CSGO_IsPrimeStatus();
-void CSGO_SetPrimeStatus(bool enabled);
-bool CSGO_HasOperationPass(uint32_t season);
-void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId);
-}
+// Exports already declared in steam_gc_emu.h
 
 namespace refix::overlay {
 
@@ -75,6 +69,15 @@ static const size_t kNumOfficialMaps = sizeof(kOfficialMaps) / sizeof(kOfficialM
 static const char* kGameModes[] = {
     "Competitive (5v5 Clásico)", "Casual (10v10)", "Deathmatch", "Wingman (2v2 Compañero)", "Arms Race"
 };
+
+extern "C" {
+__declspec(dllexport) void CSGO_OpenMarketHUD() {
+    App::Get().OpenMarketHUD();
+}
+__declspec(dllexport) void CSGO_CloseMarketHUD() {
+    App::Get().CloseMarketHUD();
+}
+}
 
 void OpenMarketGiveMenu() {
     App::Get().CloseOverlay();
@@ -200,19 +203,31 @@ static void RenderCasesOrKeysTable(const std::vector<refix::csgo::MarketItem>& i
     }
 }
 
+// State for Market Give Menu
+static std::string s_selectedCategory = "Todos";
+static int s_selectedItemIdx = 0;
+static float s_detailWear = 0.001f;
+static int s_detailSeed = 420;
+static bool s_detailStatTrak = false;
+static char s_detailCustomName[64] = "";
+static int s_detailQuantity = 1;
+static std::string s_grantStatusMsg = "";
+static DWORD s_grantStatusExpiry = 0;
+
 void DrawMarketGiveModal() {
     if (!App::Get().IsMarketHUDOpen()) return;
 
-    refix::csgo::SchemaManager::Get().Load();
+    auto& schema = refix::csgo::SchemaManager::Get();
+    schema.Load();
 
     ImVec2 vp = ImGui::GetIO().DisplaySize;
-    float winW = (std::min)(ui::S(860), vp.x - ui::S(40));
-    float winH = (std::min)(ui::S(590), vp.y - ui::S(40));
+    float winW = (std::min)(ui::S(1050), vp.x - ui::S(30));
+    float winH = (std::min)(ui::S(680), vp.y - ui::S(20));
     ImGui::SetNextWindowPos(ImVec2((vp.x - winW) * 0.5f, (vp.y - winH) * 0.5f), ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_Appearing);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, ui::S(12));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(20), ui::S(18)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(18), ui::S(16)));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ui::color::PanelRaised);
     ImGui::PushStyleColor(ImGuiCol_Border, ui::color::Border);
 
@@ -220,125 +235,122 @@ void DrawMarketGiveModal() {
     if (ImGui::Begin("Mercado ReFix - Gestor de Inventario Local##refix_market", &isOpen,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar)) {
 
-        // Header Title
+        // --- Top Bar: Title & Search ---
         ImGui::PushFont(ui::F().heading);
         ui::TextColored(ui::color::Accent, ui::icon::Store);
         ImGui::SameLine();
-        ImGui::TextUnformatted(i18n::T("Community Market & Inventory Manager", "Mercado ReFix y Gestor de Inventario"));
+        ImGui::TextUnformatted(i18n::T("Community Market & Item Manager", "Mercado ReFix y Gestor de Inventario"));
         ImGui::PopFont();
 
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ui::S(36));
-        if (ui::IconButton("close_market_x", ui::icon::Close, i18n::T("Close", "Cerrar"), ui::color::Muted, true, ui::S(26))) {
+        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - ui::S(32));
+        if (ui::IconButton("close_market_x", ui::icon::Close, i18n::T("Close", "Cerrar"), ui::color::Muted, true, ui::S(24))) {
             App::Get().CloseMarketHUD();
         }
 
         ImGui::PushFont(ui::F().caption);
-        ui::TextColored(ui::color::Muted, i18n::T("Add official cases, keys, knives, and custom skins dynamically loaded from the game.",
-                                                  "Añade cajas, llaves, cuchillos y skins oficiales leídos dinámicamente de esta versión del juego."));
+        char headerSub[128];
+        snprintf(headerSub, sizeof(headerSub), "%s (%zu %s)",
+                 i18n::T("Official catalogue extracted from game schema", "Catálogo oficial cargado dinámicamente del esquema del juego"),
+                 schema.GetTotalGrantableCount(),
+                 i18n::T("items available", "ítems disponibles"));
+        ui::TextColored(ui::color::Muted, headerSub);
         ImGui::PopFont();
 
         ImGui::Dummy(ImVec2(0, ui::S(4)));
         ImGui::Separator();
         ImGui::Dummy(ImVec2(0, ui::S(4)));
 
-        // Search Bar & StatTrak Toggle
-        ImGui::SetNextItemWidth(ui::S(440));
-        ImGui::InputTextWithHint("##market_search", "Buscar arma, cuchillo, caja o pegatina...", s_marketSearch, sizeof(s_marketSearch));
+        // Search Bar with instant filter
+        ImGui::PushFont(ui::F().caption);
+        ui::TextColored(ui::color::Muted, ui::icon::Search);
+        ImGui::SameLine();
+        ImGui::PopFont();
+        ImGui::SetNextItemWidth(ui::S(380));
+        ImGui::InputTextWithHint("##market_search", i18n::T("Search weapon, skin, knife, case, agent...", "Buscar arma, skin, cuchillo, caja, agente..."), s_marketSearch, sizeof(s_marketSearch));
+        if (s_marketSearch[0] != '\0') {
+            ImGui::SameLine();
+            if (ui::Clicked(ui::SecondaryButton(i18n::T("Clear", "Limpiar"), ImVec2(ui::S(65), ui::S(24))))) {
+                s_marketSearch[0] = '\0';
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+        // --- 3-Column Layout: Sidebar (left) | Grid (center) | Details (right) ---
+        float sideW = ui::S(185);
+        float detailW = ui::S(270);
+        float availW = ImGui::GetContentRegionAvail().x;
+        float availH = ImGui::GetContentRegionAvail().y - ui::S(36);
+        float gridW = availW - sideW - detailW - ui::S(24);
+
+        // 1. LEFT COLUMN: CATEGORIES SIDEBAR
+        ImGui::BeginChild("##cat_sidebar", ImVec2(sideW, availH), true);
+        {
+            ImGui::PushFont(ui::F().caption);
+            ui::TextColored(ui::color::Faint, i18n::T("CATEGORIES", "CATEGORÍAS"));
+            ImGui::PopFont();
+            ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+            const auto& categories = schema.GetCategories();
+            for (size_t c = 0; c < categories.size(); c++) {
+                const auto& cat = categories[c];
+                bool isSelected = (s_selectedCategory == cat.name);
+
+                char btnText[96];
+                snprintf(btnText, sizeof(btnText), "%s (%zu)", cat.name.c_str(), cat.count);
+
+                if (isSelected) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ui::color::RowHover);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ui::color::Accent);
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ui::color::Text);
+                }
+
+                if (ImGui::Button(btnText, ImVec2(sideW - ui::S(16), ui::S(28)))) {
+                    s_selectedCategory = cat.name;
+                    s_selectedItemIdx = 0;
+                }
+                ImGui::PopStyleColor(2);
+            }
+
+            ImGui::Dummy(ImVec2(0, ui::S(8)));
+            ImGui::Separator();
+            ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+            bool isPrimeTab = (s_selectedCategory == "Prime & Pases");
+            if (isPrimeTab) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ui::color::RowHover);
+                ImGui::PushStyleColor(ImGuiCol_Text, ui::color::Accent);
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_Text, ui::color::Online);
+            }
+            if (ImGui::Button(i18n::T("★ Prime & Operation Passes", "★ Prime y Operaciones"), ImVec2(sideW - ui::S(16), ui::S(30)))) {
+                s_selectedCategory = "Prime & Pases";
+            }
+            ImGui::PopStyleColor(2);
+        }
+        ImGui::EndChild();
 
         ImGui::SameLine();
-        ImGui::Checkbox("StatTrak (Contador de Bajas)", &s_cfgStatTrak);
 
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
-
-        auto& schema = refix::csgo::SchemaManager::Get();
-
-        if (ImGui::BeginTabBar("##market_tabs")) {
-            // TAB 1: WEAPON CASES
-            auto cases = schema.GetMarketItemsByCategory("Caja");
-            char caseTabTitle[64];
-            snprintf(caseTabTitle, sizeof(caseTabTitle), "%s (%zu)", i18n::T("Weapon Cases", "Cajas de Armas"), cases.size());
-            if (ImGui::BeginTabItem(caseTabTitle)) {
-                RenderCasesOrKeysTable(cases, true, 100);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 2: CASE KEYS
-            auto keys = schema.GetMarketItemsByCategory("Llave");
-            char keyTabTitle[64];
-            snprintf(keyTabTitle, sizeof(keyTabTitle), "%s (%zu)", i18n::T("Case Keys", "Llaves de Cajas"), keys.size());
-            if (ImGui::BeginTabItem(keyTabTitle)) {
-                RenderCasesOrKeysTable(keys, false, 500);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 3: RIFLES & SNIPERS
-            auto rifles = schema.GetMarketItemsByCategory("Rifle");
-            char rifleTabTitle[64];
-            snprintf(rifleTabTitle, sizeof(rifleTabTitle), "%s (%zu)", i18n::T("Rifles & Snipers", "Rifles & Snipers"), rifles.size());
-            if (ImGui::BeginTabItem(rifleTabTitle)) {
-                RenderItemsTable(rifles, 1000);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 4: PISTOLS
-            auto pistols = schema.GetMarketItemsByCategory("Pistola");
-            char pistolTabTitle[64];
-            snprintf(pistolTabTitle, sizeof(pistolTabTitle), "%s (%zu)", i18n::T("Pistols", "Pistolas"), pistols.size());
-            if (ImGui::BeginTabItem(pistolTabTitle)) {
-                RenderItemsTable(pistols, 2000);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 5: KNIVES
-            auto knives = schema.GetMarketItemsByCategory("Cuchillo");
-            char knifeTabTitle[64];
-            snprintf(knifeTabTitle, sizeof(knifeTabTitle), "%s (%zu)", i18n::T("Knives", "Cuchillos"), knives.size());
-            if (ImGui::BeginTabItem(knifeTabTitle)) {
-                RenderItemsTable(knives, 3000);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 6: GLOVES
-            auto gloves = schema.GetMarketItemsByCategory("Guantes");
-            char gloveTabTitle[64];
-            snprintf(gloveTabTitle, sizeof(gloveTabTitle), "%s (%zu)", i18n::T("Gloves", "Guantes"), gloves.size());
-            if (ImGui::BeginTabItem(gloveTabTitle)) {
-                RenderItemsTable(gloves, 4000);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 7: AGENTS
-            auto agents = schema.GetMarketItemsByCategory("Agentes");
-            char agentTabTitle[64];
-            snprintf(agentTabTitle, sizeof(agentTabTitle), "%s (%zu)", i18n::T("Agents", "Agentes"), agents.size());
-            if (ImGui::BeginTabItem(agentTabTitle)) {
-                RenderItemsTable(agents, 4500);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 7: STICKERS
-            auto stickers = schema.GetMarketItemsByCategory("Pegatina");
-            char stickerTabTitle[64];
-            snprintf(stickerTabTitle, sizeof(stickerTabTitle), "%s (%zu)", i18n::T("Stickers", "Pegatinas"), stickers.size());
-            if (ImGui::BeginTabItem(stickerTabTitle)) {
-                RenderItemsTable(stickers, 5000);
-                ImGui::EndTabItem();
-            }
-
-            // TAB 8: PRIME & OPERATIONS
-            if (ImGui::BeginTabItem(i18n::T("Prime & Operations", "Prime y Operaciones"))) {
+        // 2. CENTER COLUMN: VIRTUALIZED ITEM GRID (or Prime & Passes view)
+        if (s_selectedCategory == "Prime & Pases") {
+            ImGui::BeginChild("##prime_center", ImVec2(gridW + detailW + ui::S(12), availH), true);
+            {
                 ImGui::Dummy(ImVec2(0, ui::S(10)));
-                ImGui::PushFont(ui::F().strong);
+                ImGui::PushFont(ui::F().heading);
                 ui::TextColored(ui::color::Online, i18n::T("CS:GO Prime Status Upgrade", "Mejora de Estado Prime Oficial"));
                 ImGui::PopFont();
                 ImGui::TextWrapped(i18n::T("Prime Status matches you with other Prime Status players, grants access to Prime-exclusive souvenir items, item drops, and weapon cases.",
-                                         "El estado Prime te empareja con otros jugadores Prime, otorga acceso a cajas de armas exclusivas, drops semanales e insignias de servicio."));
-                ImGui::Dummy(ImVec2(0, ui::S(12)));
+                                         "El estado Prime te empareja con otros jugadores Prime, otorga acceso a cajas de armas exclusivas, drops semanales e insignias de servicio oficiales (CSOEconGameAccountClient SO tipo 7)."));
+                ImGui::Dummy(ImVec2(0, ui::S(10)));
 
                 bool isPrime = CSGO_IsPrimeStatus();
                 if (isPrime) {
                     ui::TextColored(ui::color::Online, i18n::T("Prime Status is ACTIVE", "Estado Prime ACTIVO en este perfil"));
-                    ImGui::Dummy(ImVec2(0, ui::S(8)));
+                    ImGui::Dummy(ImVec2(0, ui::S(6)));
                     if (ui::Clicked(ui::SecondaryButton(i18n::T("Deactivate Prime Status", "Desactivar Estado Prime"), ImVec2(ui::S(260), ui::S(34))))) {
                         CSGO_SetPrimeStatus(false);
                     }
@@ -348,16 +360,16 @@ void DrawMarketGiveModal() {
                     }
                 }
 
-                ImGui::Dummy(ImVec2(0, ui::S(16)));
+                ImGui::Dummy(ImVec2(0, ui::S(18)));
                 ImGui::Separator();
-                ImGui::Dummy(ImVec2(0, ui::S(12)));
+                ImGui::Dummy(ImVec2(0, ui::S(14)));
 
-                ImGui::PushFont(ui::F().strong);
+                ImGui::PushFont(ui::F().heading);
                 ui::TextColored(ui::color::Accent, i18n::T("Operation Shattered Web (Season 8)", "Operación Shattered Web (Temporada 8)"));
                 ImGui::PopFont();
                 ImGui::TextWrapped(i18n::T("Activate the Shattered Web Premium Pass to unlock mission progress, weekly rewards, and the Shattered Web Coin.",
-                                         "Activa el Pase Premium de Shattered Web para desbloquear el progreso de misiones, recompensas y la Moneda de la Operación."));
-                ImGui::Dummy(ImVec2(0, ui::S(12)));
+                                         "Activa el Pase Premium de Shattered Web para desbloquear el progreso de misiones, recompensas de estrellas y la Moneda de la Operación en tu inventario."));
+                ImGui::Dummy(ImVec2(0, ui::S(10)));
 
                 bool hasPass = CSGO_HasOperationPass(8);
                 if (hasPass) {
@@ -367,15 +379,274 @@ void DrawMarketGiveModal() {
                         CSGO_ActivateOperationPass(8, 0);
                     }
                 }
+            }
+            ImGui::EndChild();
+        } else {
+            // Get items for current category and apply search query
+            std::vector<refix::csgo::MarketItem> allCatItems = schema.GetMarketItemsByCategory(s_selectedCategory);
+            std::vector<refix::csgo::MarketItem> filtered;
+            filtered.reserve(allCatItems.size());
 
-                ImGui::EndTabItem();
+            std::string q = s_marketSearch;
+            std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+
+            for (const auto& itm : allCatItems) {
+                if (!q.empty()) {
+                    std::string n = itm.name;
+                    std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+                    if (n.find(q) == std::string::npos) {
+                        std::string wn = itm.weaponName;
+                        std::transform(wn.begin(), wn.end(), wn.begin(), ::tolower);
+                        if (wn.find(q) == std::string::npos) {
+                            std::string sn = itm.skinName;
+                            std::transform(sn.begin(), sn.end(), sn.begin(), ::tolower);
+                            if (sn.find(q) == std::string::npos) continue;
+                        }
+                    }
+                }
+                filtered.push_back(itm);
             }
 
-            ImGui::EndTabBar();
+            if (s_selectedItemIdx >= (int)filtered.size()) {
+                s_selectedItemIdx = 0;
+            }
+
+            // Grid Child Window with Clipper
+            ImGui::BeginChild("##item_grid", ImVec2(gridW, availH), true);
+            {
+                float cardW = ui::S(138);
+                float cardH = ui::S(115);
+                float spaceX = ui::S(8);
+                float spaceY = ui::S(8);
+
+                float gridAvailW = ImGui::GetContentRegionAvail().x;
+                int cols = (std::max)(1, (int)((gridAvailW + spaceX) / (cardW + spaceX)));
+                int numRows = ((int)filtered.size() + cols - 1) / cols;
+
+                ImGuiListClipper clipper;
+                clipper.Begin(numRows, cardH + spaceY);
+
+                while (clipper.Step()) {
+                    for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+                        for (int col = 0; col < cols; col++) {
+                            int idx = row * cols + col;
+                            if (idx >= (int)filtered.size()) break;
+                            if (col > 0) ImGui::SameLine(0, spaceX);
+
+                            const auto& item = filtered[idx];
+                            bool isSelected = (s_selectedItemIdx == idx);
+
+                            ImGui::PushID(idx);
+                            ImVec2 cp = ImGui::GetCursorScreenPos();
+                            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+                            ImU32 rCol = GetRarityColor(item.rarity);
+                            ImU32 bgCol = isSelected ? ui::color::RowHover : ui::color::Panel;
+
+                            // Card Background & Border
+                            dl->AddRectFilled(cp, ImVec2(cp.x + cardW, cp.y + cardH), bgCol, ui::S(6));
+                            dl->AddRect(cp, ImVec2(cp.x + cardW, cp.y + cardH),
+                                        isSelected ? ui::color::Accent : ui::color::Border, ui::S(6), 0, isSelected ? 2.0f : 1.0f);
+
+                            // Top Rarity Stripe
+                            dl->AddRectFilled(ImVec2(cp.x + ui::S(4), cp.y + ui::S(2)),
+                                              ImVec2(cp.x + cardW - ui::S(4), cp.y + ui::S(6)), rCol, ui::S(2));
+
+                            // Placeholder Icon Glow Circle
+                            ImVec2 iconCenter(cp.x + cardW * 0.5f, cp.y + ui::S(38));
+                            dl->AddCircleFilled(iconCenter, ui::S(20), (rCol & 0x00FFFFFF) | 0x22000000);
+                            dl->AddCircle(iconCenter, ui::S(20), (rCol & 0x00FFFFFF) | 0x55000000, 0, 1.2f);
+
+                            // Category Tag Initial at Center
+                            std::string tag = item.category.substr(0, (std::min)((size_t)3, item.category.size()));
+                            ImVec2 tagSz = ImGui::CalcTextSize(tag.c_str());
+                            dl->AddText(ImVec2(iconCenter.x - tagSz.x * 0.5f, iconCenter.y - tagSz.y * 0.5f), ui::color::Muted, tag.c_str());
+
+                            // Item Name Lines
+                            ImVec2 textPos(cp.x + ui::S(6), cp.y + ui::S(66));
+                            std::string line1 = item.name;
+                            std::string line2 = "";
+                            size_t pipe = line1.find(" | ");
+                            if (pipe != std::string::npos) {
+                                line2 = line1.substr(pipe + 3);
+                                line1 = line1.substr(0, pipe);
+                            }
+
+                            ImGui::PushFont(ui::F().strong);
+                            std::string el1 = ui::Ellipsize(line1, cardW - ui::S(12));
+                            dl->AddText(textPos, ui::color::Text, el1.c_str());
+                            ImGui::PopFont();
+
+                            if (!line2.empty()) {
+                                ImGui::PushFont(ui::F().caption);
+                                std::string el2 = ui::Ellipsize(line2, cardW - ui::S(12));
+                                dl->AddText(ImVec2(textPos.x, textPos.y + ui::S(16)), rCol, el2.c_str());
+                                ImGui::PopFont();
+                            }
+
+                            // Invisible Button for clicking the card
+                            if (ImGui::InvisibleButton("##card_btn", ImVec2(cardW, cardH))) {
+                                s_selectedItemIdx = idx;
+                                s_detailWear = item.wear;
+                                s_detailSeed = (item.seed > 0) ? item.seed : 420;
+                                s_detailStatTrak = false;
+                                s_detailCustomName[0] = '\0';
+                                s_detailQuantity = 1;
+                                s_grantStatusMsg = "";
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                }
+                clipper.End();
+            }
+            ImGui::EndChild();
+
+            ImGui::SameLine();
+
+            // 3. RIGHT COLUMN: DETAIL & ATTRIBUTE PANE
+            ImGui::BeginChild("##item_details", ImVec2(detailW, availH), true);
+            {
+                if (!filtered.empty() && s_selectedItemIdx >= 0 && s_selectedItemIdx < (int)filtered.size()) {
+                    const auto& selItem = filtered[s_selectedItemIdx];
+
+                    ImGui::PushFont(ui::F().caption);
+                    ui::TextColored(ui::color::Faint, i18n::T("ITEM DETAILS", "DETALLES DEL ÍTEM"));
+                    ImGui::PopFont();
+                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+                    ImGui::PushFont(ui::F().strong);
+                    std::string titleEl = ui::Ellipsize(selItem.name, detailW - ui::S(24));
+                    ui::TextColored(ui::color::Text, titleEl.c_str());
+                    ImGui::PopFont();
+
+                    char catRarBuf[128];
+                    snprintf(catRarBuf, sizeof(catRarBuf), "[%s] DefIndex: %u", selItem.category.c_str(), selItem.defIndex);
+                    ui::TextColored(ui::color::Muted, catRarBuf);
+
+                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+                    ImGui::Separator();
+                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+                    // 1. Quantity Selection & Primary Grant Action (Always at top of pane)
+                    ImGui::PushFont(ui::F().caption);
+                    ui::TextColored(ui::color::Text, i18n::T("Quantity", "Cantidad"));
+                    ImGui::PopFont();
+
+                    ImGui::SetNextItemWidth(ui::S(70));
+                    ImGui::InputInt("##qty_input", &s_detailQuantity);
+                    if (s_detailQuantity < 1) s_detailQuantity = 1;
+                    if (s_detailQuantity > 100) s_detailQuantity = 100;
+
+                    ImGui::SameLine();
+                    if (ui::Clicked(ui::SecondaryButton("+1", ImVec2(ui::S(38), ui::S(24))))) { s_detailQuantity = 1; }
+                    ImGui::SameLine();
+                    if (ui::Clicked(ui::SecondaryButton("+5", ImVec2(ui::S(38), ui::S(24))))) { s_detailQuantity = 5; }
+                    ImGui::SameLine();
+                    if (ui::Clicked(ui::SecondaryButton("+20", ImVec2(ui::S(42), ui::S(24))))) { s_detailQuantity = 20; }
+
+                    ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+                    // Primary Button: Añadir al Inventario
+                    char grantBtnLabel[96];
+                    snprintf(grantBtnLabel, sizeof(grantBtnLabel), "%s (%d)",
+                             i18n::T("Add to Inventory", "Añadir al Inventario"), s_detailQuantity);
+
+                    if (ui::Clicked(ui::PrimaryButton(grantBtnLabel, ImVec2(detailW - ui::S(28), ui::S(34))))) {
+                        uint32_t finalQual = (s_detailStatTrak && selItem.paintKit > 0) ? 9 : selItem.quality;
+                        const char* pCName = (s_detailCustomName[0] != '\0') ? s_detailCustomName : nullptr;
+                        CSGO_GrantItemToLocal(selItem.defIndex, s_detailQuantity, finalQual, selItem.rarity,
+                                              selItem.paintKit, s_detailWear, (uint32_t)s_detailSeed, pCName);
+
+                        char succMsg[128];
+                        snprintf(succMsg, sizeof(succMsg), "%s: %dx %s",
+                                 i18n::T("Granted", "¡Añadido con éxito!"), s_detailQuantity, selItem.name.c_str());
+                        s_grantStatusMsg = succMsg;
+                        s_grantStatusExpiry = GetTickCount() + 3500;
+                    }
+
+                    // In-pane feedback message
+                    if (GetTickCount() < s_grantStatusExpiry && !s_grantStatusMsg.empty()) {
+                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+                        ImGui::PushFont(ui::F().caption);
+                        ui::TextColored(ui::color::Online, s_grantStatusMsg.c_str());
+                        ImGui::PopFont();
+                    }
+
+                    ImGui::Dummy(ImVec2(0, ui::S(6)));
+                    ImGui::Separator();
+                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+                    // 2. Custom Attributes (Wear, Seed, StatTrak, Name tag)
+                    if (selItem.paintKit > 0) {
+                        ImGui::PushFont(ui::F().caption);
+                        ui::TextColored(ui::color::Faint, i18n::T("SKIN ATTRIBUTES", "ATRIBUTOS DE LA SKIN"));
+                        ImGui::PopFont();
+                        ImGui::Dummy(ImVec2(0, ui::S(2)));
+
+                        // Wear Slider
+                        float minW = selItem.minWear;
+                        float maxW = selItem.maxWear;
+                        if (minW >= maxW) { minW = 0.0f; maxW = 1.0f; }
+
+                        ImGui::PushFont(ui::F().caption);
+                        const char* condStr = "Recién fabricado (FN)";
+                        if (s_detailWear >= 0.45f) condStr = "Deplorable (BS)";
+                        else if (s_detailWear >= 0.38f) condStr = "Bastante desgastado (WW)";
+                        else if (s_detailWear >= 0.15f) condStr = "Algo desgastado (FT)";
+                        else if (s_detailWear >= 0.07f) condStr = "Casi nuevo (MW)";
+                        char wearLabel[96];
+                        snprintf(wearLabel, sizeof(wearLabel), "%s: %.4f (%s)",
+                                 i18n::T("Float", "Desgaste"), s_detailWear, condStr);
+                        ui::TextColored(ui::color::Accent, wearLabel);
+                        ImGui::PopFont();
+
+                        ImGui::SetNextItemWidth(detailW - ui::S(28));
+                        ImGui::SliderFloat("##wear_slider", &s_detailWear, minW, maxW, "%.4f");
+
+                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+                        // Seed / Pattern Input
+                        ImGui::PushFont(ui::F().caption);
+                        ui::TextColored(ui::color::Text, i18n::T("Pattern / Seed", "Semilla / Patrón"));
+                        ImGui::PopFont();
+
+                        ImGui::SetNextItemWidth(detailW - ui::S(110));
+                        ImGui::InputInt("##seed_input", &s_detailSeed);
+                        if (s_detailSeed < 1) s_detailSeed = 1;
+                        if (s_detailSeed > 1000) s_detailSeed = 1000;
+
+                        ImGui::SameLine();
+                        if (ui::Clicked(ui::SecondaryButton(i18n::T("Roll", "Azar"), ImVec2(ui::S(65), ui::S(24))))) {
+                            s_detailSeed = rand() % 999 + 1;
+                        }
+
+                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+                        // StatTrak Toggle
+                        ImGui::Checkbox(i18n::T("StatTrak™ (Kill Counter)", "StatTrak™ (Contador de Bajas)"), &s_detailStatTrak);
+
+                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+                        // Custom Name Tag
+                        ImGui::PushFont(ui::F().caption);
+                        ui::TextColored(ui::color::Text, i18n::T("Custom Name Tag", "Etiqueta Personalizada"));
+                        ImGui::PopFont();
+                        ImGui::SetNextItemWidth(detailW - ui::S(28));
+                        ImGui::InputTextWithHint("##cname_input", i18n::T("Optional name...", "Nombre opcional..."), s_detailCustomName, sizeof(s_detailCustomName));
+                    }
+                } else {
+                    ImGui::Dummy(ImVec2(0, ui::S(20)));
+                    ui::TextColored(ui::color::Muted, i18n::T("Select an item from the catalogue to configure attributes and add to inventory.",
+                                                             "Selecciona un ítem del catálogo para configurar sus atributos y añadirlo al inventario."));
+                }
+            }
+            ImGui::EndChild();
         }
 
-        ImGui::Dummy(ImVec2(0, ui::S(6)));
-        if (ui::Clicked(ui::SecondaryButton(i18n::T("Close Menu", "Cerrar Menú"), ImVec2(ui::S(140), ui::S(28))))) {
+        // --- Bottom Bar: Close Button ---
+        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        if (ui::Clicked(ui::SecondaryButton(i18n::T("Close Menu", "Cerrar Menú"), ImVec2(ui::S(130), ui::S(28))))) {
             App::Get().CloseMarketHUD();
         }
     }

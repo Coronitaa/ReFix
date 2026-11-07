@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <random>
 #include <ctime>
+#include <set>
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -88,6 +89,66 @@ static Rarity PaintedItemRarity(Rarity itemRarity, Rarity paintKitRarity) {
     return rarity;
 }
 
+static std::string Utf16ToUtf8(const wchar_t* wstr, int len) {
+    if (len <= 0) return "";
+    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL);
+    std::string strTo(sizeNeeded, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr, len, &strTo[0], sizeNeeded, NULL, NULL);
+    return strTo;
+}
+
+static std::string StringToLower(std::string s) {
+    for (char& c : s) c = (char)::tolower((unsigned char)c);
+    return s;
+}
+
+static void LoadLanguageTokens(const std::wstring& path, std::unordered_map<std::string, std::string>& tokens) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return;
+    file.seekg(0, std::ios::end);
+    size_t size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    if (size < 2) return;
+    std::vector<char> raw(size);
+    file.read(raw.data(), size);
+    const wchar_t* p = reinterpret_cast<const wchar_t*>(raw.data());
+    size_t wlen = size / 2;
+    if (wlen > 0 && p[0] == 0xFEFF) { p++; wlen--; }
+
+    size_t i = 0;
+    while (i < wlen) {
+        while (i < wlen && (p[i] == L' ' || p[i] == L'\t' || p[i] == L'\r' || p[i] == L'\n')) i++;
+        if (i >= wlen) break;
+        if (p[i] == L'/' && i + 1 < wlen && p[i+1] == L'/') {
+            while (i < wlen && p[i] != L'\n') i++;
+            continue;
+        }
+        if (p[i] == L'"') {
+            i++;
+            size_t kStart = i;
+            while (i < wlen && p[i] != L'"' && p[i] != L'\n') i++;
+            size_t kLen = i - kStart;
+            if (i < wlen && p[i] == L'"') i++;
+            while (i < wlen && (p[i] == L' ' || p[i] == L'\t')) i++;
+            if (i < wlen && p[i] == L'"') {
+                i++;
+                size_t vStart = i;
+                while (i < wlen && p[i] != L'"' && p[i] != L'\n') {
+                    if (p[i] == L'\\' && i + 1 < wlen) i += 2;
+                    else i++;
+                }
+                size_t vLen = i - vStart;
+                if (i < wlen && p[i] == L'"') i++;
+                std::string key = StringToLower(Utf16ToUtf8(p + kStart, (int)kLen));
+                std::string val = Utf16ToUtf8(p + vStart, (int)vLen);
+                tokens[key] = val;
+            }
+        } else {
+            i++;
+        }
+    }
+}
+
 static std::string DetectGamePath() {
     char exePath[MAX_PATH] = {};
     if (GetModuleFileNameA(NULL, exePath, MAX_PATH) > 0) {
@@ -146,11 +207,42 @@ static std::string DetectExtraPath(const std::string& gamePath) {
     return "";
 }
 
+static std::wstring DetectResourcePath(const std::string& gamePath, const wchar_t* langFileName) {
+    if (!gamePath.empty()) {
+        size_t csgoPos = gamePath.find("\\csgo\\");
+        if (csgoPos != std::string::npos) {
+            std::string dir = gamePath.substr(0, csgoPos);
+            std::wstring wcand(dir.begin(), dir.end());
+            wcand += L"\\csgo\\resource\\";
+            wcand += langFileName;
+            DWORD attr = GetFileAttributesW(wcand.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                return wcand;
+            }
+        }
+    }
+    std::wstring fallbacks[] = {
+        std::wstring(L"D:\\Games\\CSGO\\csgo\\resource\\") + langFileName,
+        std::wstring(L"csgo\\resource\\") + langFileName
+    };
+    for (const auto& fb : fallbacks) {
+        DWORD attr = GetFileAttributesW(fb.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            return fb;
+        }
+    }
+    return L"";
+}
+
 } // anonymous namespace
 
 struct SchemaItemInfo {
     uint32_t m_defIndex = 0;
     std::string m_name;
+    std::string m_itemNameToken;
+    std::string m_itemTypeName;
+    std::string m_prefab;
+    std::string m_imageInventory;
     Rarity m_rarity = Rarity::Common;
     Quality m_quality = Quality::Normal;
     uint32_t m_level = 1;
@@ -161,6 +253,8 @@ struct SchemaItemInfo {
 
 struct SchemaPaintKitInfo {
     uint32_t m_defIndex = 0;
+    std::string m_name;
+    std::string m_descriptionTag;
     Rarity m_rarity = Rarity::Common;
     float m_minFloat = 0.0f;
     float m_maxFloat = 1.0f;
@@ -215,6 +309,7 @@ public:
     std::unordered_map<uint32_t, std::string> m_paintKitIdToName;
     std::unordered_map<std::string, SchemaLootList> m_lootLists;
     std::unordered_map<uint32_t, SchemaLootList> m_revolvingLootLists;
+    std::set<std::pair<std::string, std::string>> m_paintedPairs; // (weaponName, paintKitName)
 
     const SchemaItemInfo* ItemInfoByName(std::string_view name) const {
         for (const auto& pair : m_itemInfo) {
@@ -279,6 +374,18 @@ public:
         std::string_view name = itemKey.GetString("name");
         if (!name.empty()) info.m_name = std::string(name);
 
+        std::string_view in = itemKey.GetString("item_name");
+        if (!in.empty()) info.m_itemNameToken = std::string(in);
+
+        std::string_view itn = itemKey.GetString("item_type_name");
+        if (!itn.empty()) info.m_itemTypeName = std::string(itn);
+
+        std::string_view pf = itemKey.GetString("prefab");
+        if (!pf.empty()) {
+            if (!info.m_prefab.empty()) info.m_prefab += " ";
+            info.m_prefab += std::string(pf);
+        }
+
         std::string_view quality = itemKey.GetString("item_quality");
         if (!quality.empty()) info.m_quality = ItemQualityFromString(quality);
 
@@ -287,6 +394,9 @@ public:
 
         std::string_view lootListName = itemKey.GetString("loot_list_name");
         if (!lootListName.empty()) info.m_lootListName = std::string(lootListName);
+
+        std::string_view img = itemKey.GetString("image_inventory");
+        if (!img.empty()) info.m_imageInventory = std::string(img);
 
         info.m_willProduceStatTrak = itemKey.GetNumber<bool>("will_produce_stattrak", info.m_willProduceStatTrak);
 
@@ -322,6 +432,8 @@ public:
                 if (pkName.empty()) continue;
                 SchemaPaintKitInfo info;
                 info.m_defIndex = FromString<uint32_t>(sub.Name());
+                info.m_name = std::string(pkName);
+                info.m_descriptionTag = std::string(sub.GetString("description_tag"));
                 info.m_minFloat = sub.GetNumber<float>("wear_remap_min", 0.0f);
                 info.m_maxFloat = sub.GetNumber<float>("wear_remap_max", 1.0f);
                 m_paintKitInfo[std::string(pkName)] = info;
@@ -354,7 +466,7 @@ public:
             }
         }
 
-        // 4. Client loot lists
+        // 4. Client loot lists & painted pairs extraction
         const KeyValue* cllKey = root->GetSubkey("client_loot_lists");
         if (cllKey) {
             for (const KeyValue& sub : cllKey->Subkeys()) {
@@ -364,6 +476,15 @@ public:
                     std::string_view en = entry.Name();
                     if (en == "will_produce_stattrak") { list.willProduceStatTrak = true; continue; }
                     if (en == "all_entries_as_additional_drops") { list.allEntriesAsAdditionalDrops = true; continue; }
+
+                    if (en.size() > 2 && en[0] == '[') {
+                        size_t endBracket = en.find(']', 1);
+                        if (endBracket != std::string_view::npos) {
+                            std::string pkName = std::string(en.substr(1, endBracket - 1));
+                            std::string wpName = std::string(en.substr(endBracket + 1));
+                            m_paintedPairs.insert({ wpName, pkName });
+                        }
+                    }
 
                     auto subSearch = m_lootLists.find(std::string(en));
                     if (subSearch != m_lootLists.end()) {
@@ -401,8 +522,8 @@ public:
                 }
             }
         }
-        ReFixLog("[GC] CSGOSchema: Loaded %zu items, %zu paint kits, %zu loot lists, %zu revolving lists",
-                 m_itemInfo.size(), m_paintKitInfo.size(), m_lootLists.size(), m_revolvingLootLists.size());
+        ReFixLog("[GC] CSGOSchema: Loaded %zu items, %zu paint kits, %zu loot lists, %zu revolving lists, %zu painted combos",
+                 m_itemInfo.size(), m_paintKitInfo.size(), m_lootLists.size(), m_revolvingLootLists.size(), m_paintedPairs.size());
         return true;
     }
 
@@ -429,8 +550,31 @@ SchemaManager& SchemaManager::Get() {
     return s_instance;
 }
 
+std::string SchemaManager::ResolveToken(const std::string& token) const {
+    if (token.empty()) return "";
+    std::string key = token;
+    if (key[0] == '#') key = key.substr(1);
+    std::string lk = StringToLower(key);
+    auto it = m_tokens.find(lk);
+    if (it != m_tokens.end()) return it->second;
+    return key;
+}
+
 bool SchemaManager::Load() {
     if (m_loaded) return true;
+
+    // Load language resource files (Spanish first, English as fallback)
+    std::string gamePath = DetectGamePath();
+    std::wstring spanishPath = DetectResourcePath(gamePath, L"csgo_spanish.txt");
+    std::wstring englishPath = DetectResourcePath(gamePath, L"csgo_english.txt");
+
+    if (!englishPath.empty()) {
+        LoadLanguageTokens(englishPath, m_tokens);
+    }
+    if (!spanishPath.empty()) {
+        LoadLanguageTokens(spanishPath, m_tokens);
+    }
+    ReFixLog("[GC] CSGOSchema: Loaded %zu localization tokens", m_tokens.size());
 
     // Initialize universal knives and gloves
     struct SpecialEntry { uint32_t def; uint32_t pk; const char* w; const char* s; };
@@ -472,7 +616,6 @@ bool SchemaManager::Load() {
         m_universalSpecialKnives.push_back(d);
     }
 
-    std::string gamePath = DetectGamePath();
     std::string extraPath = DetectExtraPath(gamePath);
 
     if (!gamePath.empty()) {
@@ -482,43 +625,160 @@ bool SchemaManager::Load() {
         }
     }
 
-    // Populate lookup maps and market items
+    // Populate lookup maps
+    std::unordered_map<std::string, uint32_t> nameToDef;
     for (const auto& pair : m_impl->m_itemInfo) {
         const auto& itm = pair.second;
         m_weaponNameToDef[itm.m_name] = itm.m_defIndex;
         m_defToWeaponName[itm.m_defIndex] = itm.m_name;
+        nameToDef[itm.m_name] = itm.m_defIndex;
     }
     for (const auto& pair : m_impl->m_paintKitInfo) {
         m_paintKitNameToId[pair.first] = pair.second.m_defIndex;
         m_paintKitIdToName[pair.second.m_defIndex] = pair.first;
     }
 
-    // Categorized market items for give menu
+    // Categorization helper
+    auto determineCategory = [](const SchemaItemInfo& itm) -> std::string {
+        if (itm.m_supplyCrateSeries > 0 || itm.m_prefab.find("weapon_case") != std::string::npos || itm.m_prefab.find("supply_crate") != std::string::npos) {
+            return "Cajas";
+        }
+        if (itm.m_prefab.find("case_key") != std::string::npos || (itm.m_prefab.find("tool") != std::string::npos && itm.m_name.find("key") != std::string::npos)) {
+            return "Llaves";
+        }
+        if (itm.m_defIndex >= 500 && itm.m_defIndex <= 530 || itm.m_prefab.find("melee") != std::string::npos) {
+            return "Cuchillos";
+        }
+        if (itm.m_defIndex >= 5027 && itm.m_defIndex <= 5035 || itm.m_prefab.find("hands") != std::string::npos || itm.m_prefab.find("gloves") != std::string::npos) {
+            return "Guantes";
+        }
+        if (itm.m_prefab.find("customplayer") != std::string::npos || (itm.m_defIndex >= 4613 && itm.m_defIndex <= 5601)) {
+            return "Agentes";
+        }
+        if (itm.m_prefab.find("sticker") != std::string::npos || itm.m_defIndex == 1209 || itm.m_prefab.find("patch") != std::string::npos || itm.m_defIndex == 4609) {
+            return "Pegatinas y Parches";
+        }
+        if (itm.m_prefab.find("music") != std::string::npos || itm.m_defIndex == 1314 || itm.m_prefab.find("operation_pass") != std::string::npos || itm.m_defIndex == 4549 || itm.m_defIndex == 4550 || itm.m_prefab.find("collectible") != std::string::npos) {
+            return "Música y Coleccionables";
+        }
+        const std::string& n = itm.m_name;
+        if (n.find("ak47") != std::string::npos || n.find("m4a1") != std::string::npos || n.find("m4a4") != std::string::npos || n.find("awp") != std::string::npos ||
+            n.find("aug") != std::string::npos || n.find("sg556") != std::string::npos || n.find("galilar") != std::string::npos || n.find("famas") != std::string::npos ||
+            n.find("ssg08") != std::string::npos || n.find("g3sg1") != std::string::npos || n.find("scar20") != std::string::npos) {
+            return "Rifles";
+        }
+        if (n.find("glock") != std::string::npos || n.find("usp") != std::string::npos || n.find("hkp2000") != std::string::npos || n.find("deagle") != std::string::npos ||
+            n.find("p250") != std::string::npos || n.find("fiveseven") != std::string::npos || n.find("tec9") != std::string::npos || n.find("cz75a") != std::string::npos ||
+            n.find("elite") != std::string::npos || n.find("revolver") != std::string::npos) {
+            return "Pistolas";
+        }
+        if (n.find("mp9") != std::string::npos || n.find("mac10") != std::string::npos || n.find("mp7") != std::string::npos || n.find("mp5sd") != std::string::npos ||
+            n.find("ump45") != std::string::npos || n.find("p90") != std::string::npos || n.find("bizon") != std::string::npos) {
+            return "Subfusiles";
+        }
+        if (n.find("nova") != std::string::npos || n.find("xm1014") != std::string::npos || n.find("mag7") != std::string::npos || n.find("sawedoff") != std::string::npos ||
+            n.find("m249") != std::string::npos || n.find("negev") != std::string::npos) {
+            return "Pesadas";
+        }
+        return "Música y Coleccionables";
+    };
+
+    m_marketItems.clear();
+    std::unordered_map<std::string, size_t> catCounts;
+
+    // 1. Painted weapon, knife, and glove combos from client_loot_lists
+    for (const auto& pair : m_impl->m_paintedPairs) {
+        const std::string& wpName = pair.first;
+        const std::string& pkName = pair.second;
+
+        auto itWp = nameToDef.find(wpName);
+        if (itWp == nameToDef.end()) continue;
+        const SchemaItemInfo& wpItem = m_impl->m_itemInfo[itWp->second];
+
+        auto itPk = m_impl->m_paintKitInfo.find(pkName);
+        if (itPk == m_impl->m_paintKitInfo.end()) continue;
+        const SchemaPaintKitInfo& pk = itPk->second;
+
+        MarketItem mi;
+        mi.defIndex = wpItem.m_defIndex;
+        mi.paintKit = pk.m_defIndex;
+        mi.minWear = pk.m_minFloat;
+        mi.maxWear = pk.m_maxFloat;
+        mi.wear = pk.m_minFloat + 0.001f;
+        mi.seed = 420;
+        mi.weaponName = wpItem.m_name;
+        mi.skinName = pk.m_name;
+        mi.imageInventory = wpItem.m_imageInventory;
+
+        std::string wpDisp = ResolveToken(wpItem.m_itemNameToken);
+        if (wpDisp.empty()) wpDisp = wpItem.m_name;
+
+        std::string pkDisp = ResolveToken(pk.m_descriptionTag);
+        if (pkDisp.empty()) pkDisp = pk.m_name;
+
+        mi.name = wpDisp + " | " + pkDisp;
+        mi.category = determineCategory(wpItem);
+
+        bool isUnusual = (mi.category == "Cuchillos" || mi.category == "Guantes");
+        mi.quality = isUnusual ? 3 : 4;
+        mi.rarity = isUnusual ? 7 : FromEnum(PaintedItemRarity(wpItem.m_rarity, pk.m_rarity));
+
+        m_marketItems.push_back(mi);
+        catCounts[mi.category]++;
+    }
+
+    // 2. Base grantable items from items (cases, keys, agents, collectibles, base knives/gloves, base weapons)
     for (const auto& pair : m_impl->m_itemInfo) {
-        const auto& itm = pair.second;
+        const SchemaItemInfo& itm = pair.second;
+        if (itm.m_defIndex == 0) continue;
+        if (itm.m_name.empty() || itm.m_name.find("test") != std::string::npos) continue;
+
+        std::string cat = determineCategory(itm);
+
         MarketItem mi;
         mi.defIndex = itm.m_defIndex;
-        mi.name = itm.m_name;
+        mi.paintKit = 0;
+        mi.minWear = 0.0f;
+        mi.maxWear = 1.0f;
+        mi.wear = 0.0f;
+        mi.seed = 0;
+        mi.category = cat;
+        mi.weaponName = itm.m_name;
         mi.quality = FromEnum(itm.m_quality);
         mi.rarity = FromEnum(itm.m_rarity);
+        mi.imageInventory = itm.m_imageInventory;
 
-        if (itm.m_supplyCrateSeries > 0) {
-            mi.category = "Caja";
-        } else if (itm.m_defIndex >= 1200 && itm.m_defIndex <= 1390) {
-            mi.category = "Llave";
-        } else if (itm.m_defIndex >= 500 && itm.m_defIndex <= 530) {
-            mi.category = "Cuchillo";
-        } else if (itm.m_defIndex >= 5030 && itm.m_defIndex <= 5035) {
-            mi.category = "Guantes";
-        } else if (itm.m_name.find("weapon_ak47") != std::string::npos || itm.m_name.find("weapon_m4a1") != std::string::npos || itm.m_name.find("weapon_awp") != std::string::npos) {
-            mi.category = "Rifle";
-        } else if (itm.m_name.find("weapon_deagle") != std::string::npos || itm.m_name.find("weapon_glock") != std::string::npos || itm.m_name.find("weapon_usp_silencer") != std::string::npos) {
-            mi.category = "Pistola";
-        } else {
-            mi.category = "Otro";
+        if (cat == "Cuchillos" || cat == "Guantes") {
+            mi.quality = 3;
+            if (mi.rarity < 7) mi.rarity = 7;
         }
+
+        std::string nameDisp = ResolveToken(itm.m_itemNameToken);
+        if (nameDisp.empty()) nameDisp = itm.m_name;
+        mi.name = nameDisp;
+
         m_marketItems.push_back(mi);
+        catCounts[cat]++;
     }
+
+    // 3. Build CategoryInfo list
+    m_categories.clear();
+    m_categories.push_back({ "Todos", m_marketItems.size() });
+
+    const char* orderedCats[] = {
+        "Rifles", "Pistolas", "Subfusiles", "Pesadas",
+        "Cuchillos", "Guantes", "Agentes", "Cajas",
+        "Llaves", "Pegatinas y Parches", "Música y Coleccionables"
+    };
+    for (const char* oc : orderedCats) {
+        size_t cnt = catCounts[oc];
+        if (cnt > 0) {
+            m_categories.push_back({ oc, cnt });
+        }
+    }
+
+    ReFixLog("[GC] CSGOSchema: Total %zu grantable items catalogued across %zu categories",
+             m_marketItems.size(), m_categories.size());
 
     m_loaded = true;
     return true;
@@ -619,9 +879,12 @@ bool SchemaManager::RollCaseDrop(uint32_t caseDefIndex, uint32_t& outDef, uint32
 }
 
 std::vector<MarketItem> SchemaManager::GetMarketItemsByCategory(const std::string& category) const {
+    if (category.empty() || category == "Todos") {
+        return m_marketItems;
+    }
     std::vector<MarketItem> res;
     for (const auto& it : m_marketItems) {
-        if (category.empty() || it.category == category) {
+        if (it.category == category) {
             res.push_back(it);
         }
     }
