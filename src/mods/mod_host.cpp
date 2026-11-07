@@ -1,4 +1,5 @@
 #include "mod_host.h"
+#include "../include/refix_services.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -147,7 +148,7 @@ bool ModHost::LoadPackage(const std::string& rfmod_path, std::string& out_error)
     } else if (loaded.manifest.execution_tier == ExecutionTier::Native) {
         std::string dll_file = (extract_dir / loaded.manifest.entrypoint).string();
         loaded.native_instance = std::make_unique<NativeModInstance>(loaded.manifest, dll_file);
-        if (!loaded.native_instance->Load(nullptr, out_error)) {
+        if (!loaded.native_instance->Load(&refix::GetRefixServices(), out_error)) {
             return false;
         }
         loaded.is_active = true;
