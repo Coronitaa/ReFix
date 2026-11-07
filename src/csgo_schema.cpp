@@ -249,12 +249,14 @@ struct SchemaItemInfo {
     std::string m_lootListName;
     bool m_willProduceStatTrak = false;
     uint32_t m_supplyCrateSeries = 0;
+    int m_seasonAccess = -1;
 };
 
 struct SchemaPaintKitInfo {
     uint32_t m_defIndex = 0;
     std::string m_name;
     std::string m_descriptionTag;
+    std::string m_pattern;
     Rarity m_rarity = Rarity::Common;
     float m_minFloat = 0.0f;
     float m_maxFloat = 1.0f;
@@ -406,6 +408,7 @@ public:
                 if (a.GetString("attribute_class") == "supply_crate_series" || a.Name() == "set supply crate series") {
                     info.m_supplyCrateSeries = a.GetNumber<uint32_t>("value", 0);
                 }
+                if (a.Name() == "season access") info.m_seasonAccess = FromString<int>(a.String());
             }
         }
     }
@@ -434,6 +437,7 @@ public:
                 info.m_defIndex = FromString<uint32_t>(sub.Name());
                 info.m_name = std::string(pkName);
                 info.m_descriptionTag = std::string(sub.GetString("description_tag"));
+                info.m_pattern = std::string(sub.GetString("pattern"));
                 info.m_minFloat = sub.GetNumber<float>("wear_remap_min", 0.0f);
                 info.m_maxFloat = sub.GetNumber<float>("wear_remap_max", 1.0f);
                 m_paintKitInfo[std::string(pkName)] = info;
@@ -658,6 +662,9 @@ bool SchemaManager::Load() {
         if (itm.m_prefab.find("sticker") != std::string::npos || itm.m_defIndex == 1209 || itm.m_prefab.find("patch") != std::string::npos || itm.m_defIndex == 4609) {
             return "Pegatinas y Parches";
         }
+        if (itm.m_seasonAccess >= 0 && itm.m_prefab.find("season_pass") != std::string::npos) {
+            return "Pases";
+        }
         if (itm.m_prefab.find("music") != std::string::npos || itm.m_defIndex == 1314 || itm.m_prefab.find("operation_pass") != std::string::npos || itm.m_defIndex == 4549 || itm.m_defIndex == 4550 || itm.m_prefab.find("collectible") != std::string::npos) {
             return "Música y Coleccionables";
         }
@@ -709,6 +716,7 @@ bool SchemaManager::Load() {
         mi.weaponName = wpItem.m_name;
         mi.skinName = pk.m_name;
         mi.imageInventory = wpItem.m_imageInventory;
+        mi.pattern = pk.m_pattern;
 
         std::string wpDisp = ResolveToken(wpItem.m_itemNameToken);
         if (wpDisp.empty()) wpDisp = wpItem.m_name;
@@ -747,6 +755,7 @@ bool SchemaManager::Load() {
         mi.quality = FromEnum(itm.m_quality);
         mi.rarity = FromEnum(itm.m_rarity);
         mi.imageInventory = itm.m_imageInventory;
+        mi.seasonAccess = itm.m_seasonAccess;
 
         if (cat == "Cuchillos" || cat == "Guantes") {
             mi.quality = 3;
@@ -768,7 +777,7 @@ bool SchemaManager::Load() {
     const char* orderedCats[] = {
         "Rifles", "Pistolas", "Subfusiles", "Pesadas",
         "Cuchillos", "Guantes", "Agentes", "Cajas",
-        "Llaves", "Pegatinas y Parches", "Música y Coleccionables"
+        "Llaves", "Pases", "Pegatinas y Parches", "Música y Coleccionables"
     };
     for (const char* oc : orderedCats) {
         size_t cnt = catCounts[oc];

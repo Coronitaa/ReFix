@@ -5,6 +5,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <cstdio>
 #include <unordered_map>
 #include <optional>
 #include "steam_gc_emu.h"
@@ -288,6 +289,10 @@ void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFoun
     // Hosts advertise their listen server as rich presence "refix:server" = "ip:port" (see unreal_steam_emu).
     for (const auto& peer : UnrealSteamEmu::PeersWithPresence("refix:server")) {
         if (targetSteamId != 0 && peer.first != targetSteamId) continue;
+        if (!IsValidLanServerAddress(peer.second)) {
+            ReFixLog("[GC-Relay] Ignoring invalid server address from SteamID %llu", (unsigned long long)peer.first);
+            continue;
+        }
         std::string cmd = "connect " + peer.second;
         ReFixLog("[GC-Relay] SteamID %llu hosts a match, joining: %s", (unsigned long long)peer.first, cmd.c_str());
         refix::source::MainThreadQueue::ExecuteClientCmd(cmd);
@@ -296,6 +301,15 @@ void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFoun
     }
     ReFixLog("[GC-Relay] No hosted match found on the LAN (target=%llu)", (unsigned long long)targetSteamId);
     if (onNotFound) onNotFound();
+}
+
+bool IsValidLanServerAddress(const std::string& address) {
+    unsigned a, b, c, d, port;
+    char tail;
+    if (address.size() > 21 || address.find_first_not_of("0123456789.:") != std::string::npos) return false;
+    if (sscanf_s(address.c_str(), "%u.%u.%u.%u:%u%c", &a, &b, &c, &d, &port, &tail, 1) != 5) return false;
+    if (a > 255 || b > 255 || c > 255 || d > 255 || port == 0 || port > 65535) return false;
+    return a == 10 || a == 127 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
 }
 
 } // namespace refix::csgo

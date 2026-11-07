@@ -46,6 +46,7 @@
 #include "refix_il2cpp.h"
 #endif
 #include "source_main_thread_queue.h"
+#include "gc/lan_rooms.h"
 
 static bool EnsureOriginal();
 
@@ -3648,6 +3649,38 @@ static void* __fastcall Hooked_PanoramaRunScript(void* pThis, void* /*edx*/, voi
     return g_orig_PanoramaRunScript(pThis, pPanel, pchScript, pchPath, nLine, nParam5, bParam6, bParam7);
 }
 
+// Version-independent lookup: CUIEngine::RunScript pushes its VPROF label "CUIEngine::RunScript (compile+run)".
+// Find the instruction that references the string and walk back to the function prologue (55 8B EC) that follows
+// int3/nop padding. Falls back to the 2019 byte pattern when the label is missing.
+static void* FindPanoramaRunScriptByAnchor(uint8_t* base, size_t size) {
+    static const char kLabel[] = "CUIEngine::RunScript (compile+run)";
+    uint8_t* str = nullptr;
+    for (size_t i = 0; i + sizeof(kLabel) <= size; ++i)
+        if (base[i] == 'C' && memcmp(base + i, kLabel, sizeof(kLabel)) == 0) { str = base + i; break; }
+    if (!str) return nullptr;
+    uint32_t va = (uint32_t)(uintptr_t)str;
+    // Only code references count (data tables also hold the pointer), and only the stack-aligned prologue
+    // (55 8B EC 83 E4 F8) of the 8-argument RunScript the hook is written for: other shapes are left alone.
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + ((PIMAGE_DOS_HEADER)base)->e_lfanew);
+    PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s, ++sec) {
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        uint8_t* begin = base + sec->VirtualAddress;
+        uint8_t* end = begin + (std::min<size_t>)(sec->Misc.VirtualSize, size - sec->VirtualAddress);
+        for (uint8_t* ref = begin + 1; ref + 4 <= end; ++ref) {
+            if (memcmp(ref, &va, 4) != 0) continue;
+            for (uint8_t* p = ref; p > ref - 0x200 && p > begin + 1; --p) {
+                if (p[0] == 0x55 && p[1] == 0x8B && p[2] == 0xEC && (p[-1] == 0xCC || p[-1] == 0x90 || p[-1] == 0xC3)) {
+                    if (p[3] != 0x83 || p[4] != 0xE4 || p[5] != 0xF8) break;
+                    ReFixLog("[PanoramaHook] RunScript located through its VPROF label at %p", p);
+                    return p;
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
 static DWORD WINAPI Source_PanoramaHookThread(LPVOID) {
     HMODULE hPan = NULL;
     for (int i = 0; i < 200; ++i) {
@@ -3666,9 +3699,12 @@ static DWORD WINAPI Source_PanoramaHookThread(LPVOID) {
             uint8_t* base = (uint8_t*)hPan;
             size_t size = nt->OptionalHeader.SizeOfImage;
             const uint8_t pat[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0x74, 0x01 };
-            for (size_t i = 0; i + sizeof(pat) <= size; ++i) {
-                if (memcmp(base + i, pat, sizeof(pat)) == 0) {
-                    void* target = (void*)(base + i);
+            void* found = FindPanoramaRunScriptByAnchor(base, size);
+            for (size_t i = 0; !found && i + sizeof(pat) <= size; ++i)
+                if (memcmp(base + i, pat, sizeof(pat)) == 0) found = base + i;
+            if (found) {
+                {
+                    void* target = found;
                     ReFixLog("[PanoramaHook] Located RunScript at %p", target);
                     MH_Initialize();
                     if (MH_CreateHook(target, (void*)&Hooked_PanoramaRunScript, (void**)&g_orig_PanoramaRunScript) == MH_OK) {
@@ -3677,8 +3713,9 @@ static DWORD WINAPI Source_PanoramaHookThread(LPVOID) {
                     } else {
                         ReFixLog("[PanoramaHook] Failed to hook RunScript");
                     }
-                    break;
                 }
+            } else {
+                ReFixLog("[PanoramaHook] RunScript not found in this panorama.dll build");
             }
         }
     }
@@ -5617,6 +5654,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
     refix::source::MainThreadQueue::Drain();
+    refix::rooms::Tick();
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     if (provider) {
         provider->RunCallbacks();

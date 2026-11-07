@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <ctime>
@@ -22,6 +23,7 @@
 #include "csgo_item_defs.h"
 #include "csgo_schema.h"
 #include "source_main_thread_queue.h"
+#include "gc/lan_rooms.h"
 #include "lan_core/refix_lan_core.h"
 
 namespace refix::overlay {
@@ -989,12 +991,22 @@ private:
 };
 
 // CSOEconItemAttribute { def_index = 1; value_bytes = 3 } holding the raw 4 bytes of the value.
+// Builds from before the GCSDK merge (they ask for k_EMsgGCRequestInventoryRefresh, 1050) read the 'value' field
+// instead, holding the same 4 bytes (as csgo_gc does).
+static std::atomic<bool> s_oldGcProtocol{ false };
+
 template <typename T>
 static void PutAttribute(std::vector<uint8_t>& item, uint32_t defIndex, T value) {
     static_assert(sizeof(T) == 4, "econ attributes are 4 bytes");
     std::vector<uint8_t> attr;
     PutVarintField(attr, 1, defIndex);
-    PutBytesField(attr, 3, std::vector<uint8_t>((uint8_t*)&value, (uint8_t*)&value + 4));
+    if (s_oldGcProtocol.load()) {
+        uint32_t bits;
+        memcpy(&bits, &value, 4);
+        PutVarintField(attr, 2, bits);
+    } else {
+        PutBytesField(attr, 3, std::vector<uint8_t>((uint8_t*)&value, (uint8_t*)&value + 4));
+    }
     PutBytesField(item, 12, attr);
 }
 
@@ -1137,7 +1149,11 @@ public:
                 return k_EGCResultOK;
         }
 
-        if (!m_gameServer && msg == kMsgClientHello) {
+        if (!m_gameServer && msg == 1050) { // k_EMsgGCRequestInventoryRefresh: pre-GCSDK-merge build
+            s_oldGcProtocol.store(true);
+            ReFixLog("[GC] Old GC protocol detected (RequestInventoryRefresh): sending the full SO cache");
+            Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
+        } else if (!m_gameServer && (msg == kMsgClientHello || (msg >= 4011 && msg <= 4015))) { // Hello, Partner/PW/R2-R4 variants
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             Reply(kMsgClientWelcome, ReFixGC::BuildClientWelcome(version, UnrealSteamEmu::GetLocalSteamID()));
@@ -1164,85 +1180,9 @@ public:
             PutVarintField(updateResp, 1, 1);
             Reply(9104, updateResp);
 
-            auto hostMatch = []() {
-                // 2. Resolve host configuration
-                std::string mapName = "de_dust2";
-                uint32_t gameType = 0; // classic
-                uint32_t gameMode = 1; // competitive
-                uint32_t maxRounds = 30;
-                float roundTime = 1.92f;
-                uint32_t buyTime = 20;
-                uint32_t startMoney = 800;
-                uint32_t maxMoney = 16000;
-                uint32_t friendlyFire = 0;
-                uint32_t botQuota = 10;
-                uint32_t botDifficulty = 1;
-                uint32_t svCheats = 0;
-                uint32_t overtime = 0;
-                uint32_t limitTeams = 2;
-
-                std::string cfgStr = ReFixGC::GetHostConfigJson();
-
-                if (!cfgStr.empty()) {
-                    try {
-                        auto j = nlohmann::json::parse(cfgStr, nullptr, false);
-                        if (!j.is_discarded()) {
-                            if (j.contains("map") && j["map"].is_string()) mapName = j["map"].get<std::string>();
-                            if (j.contains("mode") && j["mode"].is_string()) {
-                                std::string m = j["mode"].get<std::string>();
-                                if (m == "casual") { gameType = 0; gameMode = 0; }
-                                else if (m == "competitive") { gameType = 0; gameMode = 1; }
-                                else if (m == "scrimcomp2v2") { gameType = 0; gameMode = 2; } // wingman
-                                else if (m == "gungameprogressive") { gameType = 1; gameMode = 0; }
-                                else if (m == "gungametrbomb") { gameType = 1; gameMode = 1; }
-                                else if (m == "armsrace") { gameType = 1; gameMode = 0; }
-                                else if (m == "demolition") { gameType = 1; gameMode = 1; }
-                                else if (m == "deathmatch") { gameType = 1; gameMode = 2; }
-                                else if (m == "survival" || m == "dangerzone") { gameType = 6; gameMode = 0; }
-                            }
-                            if (j.contains("maxrounds") && j["maxrounds"].is_number()) maxRounds = j["maxrounds"].get<uint32_t>();
-                            if (j.contains("roundtime") && j["roundtime"].is_number()) roundTime = j["roundtime"].get<float>();
-                            if (j.contains("buytime") && j["buytime"].is_number()) buyTime = j["buytime"].get<uint32_t>();
-                            if (j.contains("startmoney") && j["startmoney"].is_number()) startMoney = j["startmoney"].get<uint32_t>();
-                            if (j.contains("maxmoney") && j["maxmoney"].is_number()) maxMoney = j["maxmoney"].get<uint32_t>();
-                            if (j.contains("friendlyfire") && j["friendlyfire"].is_number()) friendlyFire = j["friendlyfire"].get<uint32_t>();
-                            if (j.contains("bot_quota") && j["bot_quota"].is_number()) botQuota = j["bot_quota"].get<uint32_t>();
-                            if (j.contains("bot_difficulty") && j["bot_difficulty"].is_number()) botDifficulty = j["bot_difficulty"].get<uint32_t>();
-                            if (j.contains("sv_cheats") && j["sv_cheats"].is_number()) svCheats = j["sv_cheats"].get<uint32_t>();
-                            if (j.contains("overtime") && j["overtime"].is_number()) overtime = j["overtime"].get<uint32_t>();
-                            if (j.contains("limitteams") && j["limitteams"].is_number()) limitTeams = j["limitteams"].get<uint32_t>();
-                            ReFixLog("[GC] Parsed refix_host_cfg: map=%s mode=%u/%u rounds=%u roundtime=%.2f",
-                                     mapName.c_str(), gameType, gameMode, maxRounds, roundTime);
-                        }
-                    } catch (...) {
-                        ReFixLog("[GC] Error parsing refix_host_cfg JSON, using defaults");
-                    }
-                }
-
-                // 3. Enqueue listen server launch onto main thread (R5)
-                char launchCmd[512];
-                // sv_lan 1: with 0, CS:GO refuses every direct connect that lacks a Valve matchmaking reservation
-            // ("connect-lan-only"); with 1 it only requires a private-network client address.
-            snprintf(launchCmd, sizeof(launchCmd),
-                         "sv_lan 1; game_type %u; game_mode %u; mp_maxrounds %u; mp_roundtime %f; mp_buytime %u; "
-                         "mp_startmoney %u; mp_maxmoney %u; mp_friendlyfire %u; bot_quota %u; bot_difficulty %u; "
-                         "sv_cheats %u; mp_overtime_enable %u; mp_limitteams %u; map %s",
-                         gameType, gameMode, maxRounds, roundTime, buyTime,
-                         startMoney, maxMoney, friendlyFire, botQuota, botDifficulty,
-                         svCheats, overtime, limitTeams, mapName.c_str());
-
-                ReFixLog("[GC] Launching listen server on main thread: %s", launchCmd);
-                refix::source::MainThreadQueue::ExecuteClientCmd(launchCmd);
-
-                // 6. Complete matchmaking update on local client
-                std::vector<uint8_t> doneResp;
-                PutVarintField(doneResp, 1, 0); // idle / match complete
-                ReFixGC::SendToClient(9104, doneResp);
-            };
-
             // "Host match" hosts right away; "Start" joins a match another player hosts on the LAN, else hosts one.
-            if (ReFixGC::ConsumeHostRequest()) hostMatch();
-            else refix::gc::FindLanMatch(0, hostMatch);
+            if (ReFixGC::ConsumeHostRequest()) ReFixGC::HostLanMatch();
+            else refix::gc::FindLanMatch(0, [] { ReFixGC::HostLanMatch(); });
         } else if (msg == 9102) { // MatchmakingStop
             std::vector<uint8_t> idle;
             PutVarintField(idle, 1, 0);
@@ -1369,7 +1309,13 @@ public:
             if (targetAccountId != 0) {
                 uint64_t targetSteamId = 76561197960265728ULL + targetAccountId;
                 refix::gc::FindLanMatch(targetSteamId, [targetSteamId]() {
-                    ReFixLog("[GC] ClientPartyJoinRelay: SteamID %llu is not hosting a match", targetSteamId);
+                    // Not in a match yet: join the friend's LAN room, so we follow them when they start one.
+                    if (refix::rooms::OwnsRoom(targetSteamId)) {
+                        refix::rooms::Join(targetSteamId);
+                        ReFixLog("[GC] ClientPartyJoinRelay: joined the LAN room of %llu", targetSteamId);
+                    } else {
+                        ReFixLog("[GC] ClientPartyJoinRelay: SteamID %llu has no match or room", targetSteamId);
+                    }
                 });
             }
             // Do NOT reply with 9198 (CMsgGCCStrike15_v2_ClientPartyWarning is an error rejection!)
@@ -2003,6 +1949,57 @@ static std::atomic<bool> s_hostRequested{ false };
 void SetHostConfigJson(const std::string& json) {
     std::lock_guard<std::mutex> lock(s_hostConfigMutex);
     s_hostConfigJson = json;
+}
+
+
+// Starts a listen server with the settings last stored by SetHostConfigJson (play menu or overlay).
+void HostLanMatch() {
+    nlohmann::json j = nlohmann::json::parse(GetHostConfigJson(), nullptr, false);
+    if (!j.is_object()) j = nlohmann::json::object();
+    auto num = [&](const char* key, double def) {
+        double v = j.contains(key) && j[key].is_number() ? j[key].get<double>() : def;
+        return (std::max)(-1.0e6, (std::min)(1.0e6, v));  // keeps the (int) casts defined
+    };
+    auto str = [&](const char* key, const char* def) { return j.contains(key) && j[key].is_string() ? j[key].get<std::string>() : std::string(def); };
+
+    struct Mode { const char* name; int type; int mode; };
+    static const Mode kModes[] = {
+        { "casual", 0, 0 }, { "competitive", 0, 1 }, { "scrimcomp2v2", 0, 2 }, { "wingman", 0, 2 },
+        { "gungameprogressive", 1, 0 }, { "armsrace", 1, 0 }, { "gungametrbomb", 1, 1 }, { "demolition", 1, 1 },
+        { "deathmatch", 1, 2 }, { "survival", 6, 0 }, { "dangerzone", 6, 0 },
+    };
+    std::string modeName = str("mode", "competitive");
+    int gameType = 0, gameMode = 1;
+    for (const Mode& m : kModes)
+        if (modeName == m.name) { gameType = m.type; gameMode = m.mode; break; }
+
+    std::string map = str("map", "de_dust2");
+    if (map.empty() || map.find_first_of(";\"\n ") != std::string::npos) map = "de_dust2"; // never inject commands
+    std::string password = str("password", "");
+    password.erase(std::remove_if(password.begin(), password.end(), [](char c) { return c == '"' || c == ';' || c == '\n'; }),
+                   password.end());
+    if (password.size() > 64) password.resize(64);
+
+    // sv_lan 1: with 0, CS:GO refuses every direct connect that lacks a Valve matchmaking reservation
+    // ("connect-lan-only"); with 1 it only requires a private-network client address.
+    char cmd[768];
+    snprintf(cmd, sizeof(cmd),
+             "sv_lan 1; maxplayers %d; game_type %d; game_mode %d; mp_maxrounds %d; mp_roundtime %.2f; "
+             "mp_roundtime_defuse %.2f; mp_roundtime_hostage %.2f; mp_buytime %d; mp_startmoney %d; mp_maxmoney %d; "
+             "mp_friendlyfire %d; bot_quota %d; bot_difficulty %d; sv_cheats %d; mp_overtime_enable %d; "
+             "mp_limitteams %d; sv_password \"%s\"; map %s",
+             (int)num("maxplayers", 10), gameType, gameMode, (int)num("maxrounds", 30), num("roundtime", 1.92),
+             num("roundtime", 1.92), num("roundtime", 1.92), (int)num("buytime", 20), (int)num("startmoney", 800),
+             (int)num("maxmoney", 16000), (int)num("friendlyfire", 0), (int)num("bot_quota", 10),
+             (int)num("bot_difficulty", 1), (int)num("sv_cheats", 0), (int)num("overtime", 0),
+             (int)num("limitteams", 2), password.c_str(), map.c_str());
+
+    ReFixLog("[GC] Launching listen server on main thread: %s", cmd);
+    refix::source::MainThreadQueue::ExecuteClientCmd(cmd);
+
+    std::vector<uint8_t> idle;
+    PutVarintField(idle, 1, 0); // MatchmakingGC2ClientUpdate: matchmaking = 0 (search over)
+    SendToClient(9104, idle);
 }
 
 void RequestHostOnNextStart() { s_hostRequested.store(true); }

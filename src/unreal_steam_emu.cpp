@@ -4158,6 +4158,10 @@ namespace UnrealSteamEmu {
         g_steamFriendsInstance.SetRichPresence(key, value);
     }
 
+    std::string GetLocalPresence(const char* key) {
+        return g_steamFriendsInstance.LocalRichPresence(key);
+    }
+
     // --- ISteamFriends018 (ABI without SetPersonaName in vtable slot 1) ---
     class CSteamFriends018Emu : public ISteamFriends {
     public:

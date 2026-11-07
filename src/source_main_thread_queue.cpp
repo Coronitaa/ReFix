@@ -10,14 +10,17 @@ void MainThreadQueue::ExecuteClientCmdImmediate(const char* cmd) {
     typedef void* (*CreateInterfaceFn)(const char* pName, int* pReturnCode);
     auto factory = (CreateInterfaceFn)GetProcAddress(hEngine, "CreateInterface");
     if (!factory) return;
-    void* engineClient = factory("VEngineClient014", nullptr);
-    if (!engineClient) return;
-
-    typedef void(__thiscall* ExecuteClientCmdFn)(void*, const char*);
-    void** vtable = *(void***)engineClient;
-    if (vtable && vtable[108]) {
-        auto fn = (ExecuteClientCmdFn)vtable[108];
-        fn(engineClient, cmd);
+    // IVEngineClient::ExecuteClientCmd by interface version. 014 covers CS:GO from 2014 to its last build;
+    // 013 is the pre-2014 layout (Source SDK 2013 index).
+    struct Candidate { const char* name; int index; };
+    static const Candidate kCandidates[] = { { "VEngineClient014", 108 }, { "VEngineClient013", 104 } };
+    for (const Candidate& c : kCandidates) {
+        void* engineClient = factory(c.name, nullptr);
+        if (!engineClient) continue;
+        typedef void(__thiscall* ExecuteClientCmdFn)(void*, const char*);
+        void** vtable = *(void***)engineClient;
+        if (vtable && vtable[c.index]) ((ExecuteClientCmdFn)vtable[c.index])(engineClient, cmd);
+        return;
     }
 }
 

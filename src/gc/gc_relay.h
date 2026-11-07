@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <string>
 #include "lan_core/refix_lan_types.h"
 #include <vector>
 
@@ -21,5 +22,9 @@ void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes);
 // Joins the match hosted by targetSteamId (or by any LAN player when 0) with "connect ip:port"; runs onNotFound
 // when nobody hosts one.
 void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFound);
+
+// "a.b.c.d:port" with a private/loopback IPv4 address. Peer-supplied server addresses go into a console
+// "connect" command, so anything else (e.g. "1.2.3.4; quit") is rejected.
+bool IsValidLanServerAddress(const std::string& address);
 
 } // namespace refix::gc

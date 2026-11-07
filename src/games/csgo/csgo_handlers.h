@@ -5,6 +5,5 @@
 namespace refix::csgo {
 
 void RegisterCSGOHandlers(refix::IRefixServices* services);
-void RegisterCSGOUi(refix::IRefixServices* services);
 
 } // namespace refix::csgo

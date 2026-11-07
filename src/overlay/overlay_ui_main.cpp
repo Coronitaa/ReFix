@@ -106,9 +106,10 @@ void App::DrawOverlay(ImVec2 viewport) {
             DrawCommunity(ImVec2(m, leftY), leftW);
             leftY += ui::S(56 + 2 * kTileHeight + 10 + 40) + ui::S(20);
         }
-        const float actH = GetModsCardHeight(leftW);
-        if (leftY + actH <= top + height) {
-            DrawModsCard(ImVec2(m, leftY), leftW, actH);
+        const float actH = GetModsCardHeight(leftW);  // 0 when the game has no card
+        const float roomH = top + height - leftY;
+        if (actH > 0.0f && roomH >= ui::S(120)) {
+            DrawModsCard(ImVec2(m, leftY), leftW, (std::min)(actH, roomH));  // scrolls rather than vanishing
         }
         const float px = m + leftW + ui::S(20);
         DrawPlayers(ImVec2(px, top), ImVec2(viewport.x - px - m, height), false);

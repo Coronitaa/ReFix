@@ -23,7 +23,7 @@ if defined VCVARS (
 
 :COMPILE
 echo [*] Building x86 refix_csgo.dll (Native Tier Mod)...
-set "SRC=src\games\csgo\csgo_mod.cpp src\games\csgo\csgo_handlers.cpp src\games\csgo\csgo_ui.cpp src\csgo_schema.cpp src\keyvalue.cpp src\imgui\imgui.cpp src\imgui\imgui_draw.cpp src\imgui\imgui_widgets.cpp src\imgui\imgui_tables.cpp"
+set "SRC=src\games\csgo\csgo_mod.cpp src\games\csgo\csgo_handlers.cpp"
 
 cl /nologo /O2 /Zi /FS /EHsc /std:c++17 /utf-8 /DREFIX_MOD_EXPORTS=1 /LD /Fobuild_csgo_mod\ /Isrc /Isrc\include /Ithird_party !SRC! /Febuild_csgo_mod\refix_csgo.dll /Fdbuild_csgo_mod\refix_csgo.pdb user32.lib kernel32.lib ws2_32.lib advapi32.lib ole32.lib /link /MACHINE:X86 /DEBUG
 

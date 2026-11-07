@@ -67,6 +67,7 @@ namespace UnrealSteamEmu {
     // Rich presence of LAN peers that have `key` set, and the local value of a ReFix presence key.
     std::vector<std::pair<uint64_t, std::string>> PeersWithPresence(const char* key);
     void SetLocalPresence(const char* key, const char* value);
+    std::string GetLocalPresence(const char* key);
     uint64_t GetActiveLobbyID(); // lobby the local user is in (0 when none)
     void AdoptAppId(uint32_t appId);
     const char* GetPersonaName();

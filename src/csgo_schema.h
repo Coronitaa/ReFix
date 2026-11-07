@@ -47,6 +47,8 @@ struct MarketItem {
     std::string weaponName;
     std::string skinName;
     std::string imageInventory;
+    std::string pattern;      // paint kit texture name (materials/.../customization/paints/*/<pattern>.vtf)
+    int seasonAccess = -1;    // operation pass: the season it unlocks ("season access" attribute)
 };
 
 struct CategoryInfo {

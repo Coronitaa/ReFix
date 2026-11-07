@@ -219,10 +219,13 @@ inline const std::string& GetRefixPlayMenuScript() {
         });
     }
 
+    var s_injectTries = 0;
     function _InjectRefixLanSection() {
         var startBtn = $('#StartMatchBtn');
         if (!startBtn) {
-            $.Schedule(0.15, _InjectRefixLanSection);
+            // Builds whose play menu has no #StartMatchBtn keep their own UI; the overlay still hosts and joins.
+            if (++s_injectTries < 100) $.Schedule(0.15, _InjectRefixLanSection);
+            else $.Msg('[ReFix LAN] Play menu layout not recognised; buttons not injected');
             return;
         }
 

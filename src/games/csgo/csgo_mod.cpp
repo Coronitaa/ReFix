@@ -3,7 +3,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include "csgo_handlers.h"
-#include "../../imgui/imgui.h"
 
 static refix::IRefixServices* g_modServices = nullptr;
 
@@ -31,8 +30,7 @@ __declspec(dllexport) int refix_mod_init(const void* host_api) {
     // Register GC Handlers
     refix::csgo::RegisterCSGOHandlers(g_modServices);
 
-    // Register Overlay UI
-    refix::csgo::RegisterCSGOUi(g_modServices);
+    // The CS:GO overlay UI (LAN card, Market & Skins, LAN server) is drawn by the host overlay (overlay/csgo/).
 
     if (g_modServices->Log) {
         g_modServices->Log("[CSGO Mod] CS:GO LAN & Economy Overhaul native mod initialized successfully");

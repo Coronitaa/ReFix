@@ -19,6 +19,8 @@ void SetHostConfigJson(const std::string& json);
 std::string GetHostConfigJson();
 // Set by the play menu's "Host match" button: the next MatchmakingStart hosts instead of searching first.
 void RequestHostOnNextStart();
+// Starts a listen server now with the stored host settings (map, mode, rounds, bots, password...).
+void HostLanMatch();
 bool ConsumeHostRequest();
 
 // Protobuf bodies of the replies, exposed for tests.
