@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <atomic>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <fstream>
 #include <map>
@@ -1310,9 +1311,18 @@ std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId) {
 }
 
 std::vector<uint8_t> BuildServerWelcome(uint32_t version, uint64_t steamId) {
+    // k_EMsgGCServerWelcome (4005) is a CMsgClientWelcome protobuf:
+    // field 1: optional uint32 version = 1 (0)
+    // field 2: optional bytes game_data = 2 (CMsgCStrike15Welcome { gscookieid = 0x293A206F6C6C6548 })
+    // field 7: optional uint32 rtime32_gc_welcome_timestamp = 7 (current time)
+    std::vector<uint8_t> gameData;
+    // CMsgCStrike15Welcome: field 18 = gscookieid (uint64)
+    PutVarintField(gameData, 18, 0x293A206F6C6C6548ULL);
+
     std::vector<uint8_t> welcome;
-    PutVarintField(welcome, 1, 1); // min_allowed_version = 1
-    PutVarintField(welcome, 2, version ? version : 13884); // active_version = uint32 varint
+    PutVarintField(welcome, 1, 0); // version = 0
+    PutBytesField(welcome, 2, gameData); // game_data = serialized CMsgCStrike15Welcome
+    PutVarintField(welcome, 7, (uint32_t)::time(nullptr)); // rtime32_gc_welcome_timestamp
     return welcome;
 }
 
