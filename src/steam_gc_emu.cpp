@@ -21,6 +21,7 @@
 #include "csgo_item_defs.h"
 #include "csgo_schema.h"
 #include "source_main_thread_queue.h"
+#include "lan_core/refix_lan_core.h"
 
 namespace refix::overlay {
     void ExecuteEngineClientCommand(const char* cmd);
@@ -32,6 +33,10 @@ extern void ReFixLog(const char* fmt, ...);
 namespace {
 
 static std::atomic<bool> s_gameServerActive{ false };
+static std::mutex s_partyMutex;
+static std::unordered_map<uint32_t, uint64_t> s_accountToLobby;
+
+
 
 static bool IsGCTraceEnabled() {
     static int s_gcTrace = -1;
@@ -169,6 +174,32 @@ bool GetVarint(const uint8_t*& p, const uint8_t* end, uint64_t& value) {
         if (!(b & 0x80)) return true;
     }
     return false;
+}
+
+static std::vector<uint8_t> BuildMatchmakingReserve(uint64_t serverId, uint32_t ip, uint16_t port, uint64_t reservationId, const std::string& mapName, uint32_t targetAccountId) {
+    std::vector<uint8_t> srvReserve;
+    PutVarintField(srvReserve, 1, targetAccountId); // account_ids
+    uint32_t localAccountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+    if (localAccountId != targetAccountId) {
+        PutVarintField(srvReserve, 1, localAccountId);
+    }
+    PutVarintField(srvReserve, 2, 0); // game_type
+    PutVarintField(srvReserve, 3, reservationId); // match_id
+    PutVarintField(srvReserve, 4, 1014); // server_version
+
+    std::vector<uint8_t> clientReserve;
+    PutVarintField(clientReserve, 1, serverId);
+    PutVarintField(clientReserve, 2, ip); // direct_udp_ip (uint32 varint per .proto)
+    PutVarintField(clientReserve, 3, port); // direct_udp_port (uint32 varint per .proto)
+    PutVarintField(clientReserve, 4, reservationId);
+    PutBytesField(clientReserve, 5, srvReserve);
+    PutStringField(clientReserve, 6, mapName.empty() ? "de_dust2" : mapName);
+
+    char addrBuf[64];
+    snprintf(addrBuf, sizeof(addrBuf), "%u.%u.%u.%u:%u",
+             (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, port);
+    PutStringField(clientReserve, 7, addrBuf);
+    return clientReserve;
 }
 
 struct EconItem {
@@ -1198,11 +1229,139 @@ public:
             PutVarintField(playersProfileResp, 1, reqId);
             PutBytesField(playersProfileResp, 2, profile);
             Reply(9128, playersProfileResp);
-        } else if (msg == 9197) { // ClientPartyJoinRelay
-            // Do NOT reply with 9198 (CMsgGCCStrike15_v2_ClientPartyWarning) to avoid rejecting lobby joins
-            std::vector<uint8_t> relayResp;
-            PutVarintField(relayResp, 1, 0);
-            // Non-error response
+        } else if (msg == 9189) { // k_EMsgGCCStrike15_v2_Party_Register
+            uint32_t partyId = 0, ver = 0, launcher = 0, game_type = 0;
+            if (body && bodySize > 0) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0, val = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (w == 0) {
+                        if (!GetVarint(p, end, val)) break;
+                        if (f == 1) partyId = (uint32_t)val;
+                        else if (f == 2) ver = (uint32_t)val;
+                        else if (f == 8) launcher = (uint32_t)val;
+                        else if (f == 9) game_type = (uint32_t)val;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
+                    }
+                }
+            }
+            if (partyId == 0) {
+                partyId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+            }
+            ReFixLog("[GC] Party_Register: partyId=%u ver=%u launcher=%u game_type=%u",
+                     partyId, ver, launcher, game_type);
+
+            std::vector<uint8_t> resp;
+            PutVarintField(resp, 1, partyId);
+            PutVarintField(resp, 2, ver);
+            PutVarintField(resp, 3, 1);    // apr = 1
+            PutVarintField(resp, 4, 180);  // ark = rank 18 * 10
+            PutVarintField(resp, 6, 3);    // grp = 3
+            PutVarintField(resp, 7, 5);    // slots = 5
+            PutVarintField(resp, 8, launcher);
+            PutVarintField(resp, 9, game_type);
+            Reply(9189, resp);
+        } else if (msg == 9197) { // k_EMsgGCCStrike15_v2_ClientPartyJoinRelay
+            uint32_t targetAccountId = 0;
+            uint64_t targetLobbyId = 0;
+            if (body && bodySize > 0) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0, val = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (w == 0) {
+                        if (!GetVarint(p, end, val)) break;
+                        if (f == 1) targetAccountId = (uint32_t)val;
+                        else if (f == 2) targetLobbyId = val;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
+                    }
+                }
+            }
+            ReFixLog("[GC] ClientPartyJoinRelay: accountid=%u lobbyid=%llu",
+                     targetAccountId, (unsigned long long)targetLobbyId);
+            if (targetAccountId != 0 && targetLobbyId != 0) {
+                std::lock_guard<std::mutex> lock(s_partyMutex);
+                s_accountToLobby[targetAccountId] = targetLobbyId;
+            }
+            // Do NOT reply with 9198 (CMsgGCCStrike15_v2_ClientPartyWarning is an error rejection!)
+        } else if (msg == 9163) { // k_EMsgGCCStrike15_v2_ClientRequestJoinFriendData
+            uint32_t ver = 1, friendAccountId = 0, joinToken = 0;
+            if (body && bodySize > 0) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0, val = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (w == 0) {
+                        if (!GetVarint(p, end, val)) break;
+                        if (f == 1) ver = (uint32_t)val;
+                        else if (f == 2) friendAccountId = (uint32_t)val;
+                        else if (f == 3) joinToken = (uint32_t)val;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
+                    }
+                }
+            }
+            ReFixLog("[GC] ClientRequestJoinFriendData: friendAccountId=%u joinToken=%u",
+                     friendAccountId, joinToken);
+
+            uint32_t friendIp = 0x7F000001; // default loopback 127.0.0.1
+            uint16_t friendPort = 27015;
+            uint64_t targetServerId = 0;
+
+            // Resolve friend endpoint from LanCore peers
+            auto allPeers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+            for (const auto& peer : allPeers) {
+                uint32_t pAcc = (uint32_t)(peer.externalId.numericId & 0xFFFFFFFF);
+                if (pAcc == friendAccountId && peer.endpoint.IsValid()) {
+                    friendIp = peer.endpoint.ipv4;
+                    friendPort = peer.endpoint.port != 0 ? peer.endpoint.port : 27015;
+                    targetServerId = peer.externalId.numericId;
+                    break;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(s_partyMutex);
+                auto itLobby = s_accountToLobby.find(friendAccountId);
+                if (itLobby != s_accountToLobby.end() && itLobby->second != 0) {
+                    targetServerId = itLobby->second;
+                }
+            }
+            if (targetServerId == 0) {
+                targetServerId = 76561197960265728ULL + friendAccountId;
+            }
+
+            std::vector<uint8_t> reserve = BuildMatchmakingReserve(targetServerId, friendIp, friendPort, 1, "de_dust2", friendAccountId);
+
+            std::vector<uint8_t> resp;
+            PutVarintField(resp, 1, ver);
+            PutVarintField(resp, 2, friendAccountId);
+            PutVarintField(resp, 3, joinToken);
+            PutVarintField(resp, 4, friendIp);
+            PutBytesField(resp, 5, reserve);
+            PutVarintField(resp, 7, 1); // is_local_server = true
+            Reply(9163, resp);
         } else if (msg == 1059) { // k_EMsgGCAdjustItemEquippedState
             uint64_t itemId = 0;
             uint32_t newClass = 0;
