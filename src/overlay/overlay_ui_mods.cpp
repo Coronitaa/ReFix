@@ -77,6 +77,18 @@ __declspec(dllexport) void CSGO_OpenMarketHUD() {
 __declspec(dllexport) void CSGO_CloseMarketHUD() {
     App::Get().CloseMarketHUD();
 }
+__declspec(dllexport) void CSGO_OpenOverlay() {
+    App::Get().Post([] { App::Get().OpenOverlay(); });
+}
+__declspec(dllexport) void CSGO_CloseOverlay() {
+    App::Get().Post([] { App::Get().CloseOverlay(); });
+}
+__declspec(dllexport) void CSGO_ToggleOverlay() {
+    App::Get().Post([] {
+        if (App::Get().IsOverlayOpen()) App::Get().CloseOverlay();
+        else App::Get().OpenOverlay();
+    });
+}
 }
 
 void OpenMarketGiveMenu() {
@@ -256,9 +268,9 @@ void DrawMarketGiveModal() {
         ui::TextColored(ui::color::Muted, headerSub);
         ImGui::PopFont();
 
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
         ImGui::Separator();
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
 
         // Search Bar with instant filter
         ImGui::PushFont(ui::F().caption);
@@ -289,7 +301,7 @@ void DrawMarketGiveModal() {
             ImGui::PushFont(ui::F().caption);
             ui::TextColored(ui::color::Faint, i18n::T("CATEGORIES", "CATEGORÍAS"));
             ImGui::PopFont();
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            ImGui::Dummy(ImVec2(0, ui::S(6)));
 
             const auto& categories = schema.GetCategories();
             for (size_t c = 0; c < categories.size(); c++) {
@@ -316,7 +328,7 @@ void DrawMarketGiveModal() {
 
             ImGui::Dummy(ImVec2(0, ui::S(8)));
             ImGui::Separator();
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            ImGui::Dummy(ImVec2(0, ui::S(6)));
 
             bool isPrimeTab = (s_selectedCategory == "Prime & Pases");
             if (isPrimeTab) {
@@ -513,7 +525,7 @@ void DrawMarketGiveModal() {
                     ImGui::PushFont(ui::F().caption);
                     ui::TextColored(ui::color::Faint, i18n::T("ITEM DETAILS", "DETALLES DEL ÍTEM"));
                     ImGui::PopFont();
-                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+                    ImGui::Dummy(ImVec2(0, ui::S(6)));
 
                     ImGui::PushFont(ui::F().strong);
                     std::string titleEl = ui::Ellipsize(selItem.name, detailW - ui::S(24));
@@ -524,9 +536,9 @@ void DrawMarketGiveModal() {
                     snprintf(catRarBuf, sizeof(catRarBuf), "[%s] DefIndex: %u", selItem.category.c_str(), selItem.defIndex);
                     ui::TextColored(ui::color::Muted, catRarBuf);
 
-                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+                    ImGui::Dummy(ImVec2(0, ui::S(6)));
                     ImGui::Separator();
-                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+                    ImGui::Dummy(ImVec2(0, ui::S(6)));
 
                     // 1. Quantity Selection & Primary Grant Action (Always at top of pane)
                     ImGui::PushFont(ui::F().caption);
@@ -567,7 +579,7 @@ void DrawMarketGiveModal() {
 
                     // In-pane feedback message
                     if (GetTickCount() < s_grantStatusExpiry && !s_grantStatusMsg.empty()) {
-                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+                        ImGui::Dummy(ImVec2(0, ui::S(6)));
                         ImGui::PushFont(ui::F().caption);
                         ui::TextColored(ui::color::Online, s_grantStatusMsg.c_str());
                         ImGui::PopFont();
@@ -575,7 +587,7 @@ void DrawMarketGiveModal() {
 
                     ImGui::Dummy(ImVec2(0, ui::S(6)));
                     ImGui::Separator();
-                    ImGui::Dummy(ImVec2(0, ui::S(4)));
+                    ImGui::Dummy(ImVec2(0, ui::S(6)));
 
                     // 2. Custom Attributes (Wear, Seed, StatTrak, Name tag)
                     if (selItem.paintKit > 0) {
@@ -604,7 +616,7 @@ void DrawMarketGiveModal() {
                         ImGui::SetNextItemWidth(detailW - ui::S(28));
                         ImGui::SliderFloat("##wear_slider", &s_detailWear, minW, maxW, "%.4f");
 
-                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+                        ImGui::Dummy(ImVec2(0, ui::S(6)));
 
                         // Seed / Pattern Input
                         ImGui::PushFont(ui::F().caption);
@@ -621,12 +633,12 @@ void DrawMarketGiveModal() {
                             s_detailSeed = rand() % 999 + 1;
                         }
 
-                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+                        ImGui::Dummy(ImVec2(0, ui::S(6)));
 
                         // StatTrak Toggle
                         ImGui::Checkbox(i18n::T("StatTrak™ (Kill Counter)", "StatTrak™ (Contador de Bajas)"), &s_detailStatTrak);
 
-                        ImGui::Dummy(ImVec2(0, ui::S(4)));
+                        ImGui::Dummy(ImVec2(0, ui::S(6)));
 
                         // Custom Name Tag
                         ImGui::PushFont(ui::F().caption);
@@ -645,7 +657,7 @@ void DrawMarketGiveModal() {
         }
 
         // --- Bottom Bar: Close Button ---
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
         if (ui::Clicked(ui::SecondaryButton(i18n::T("Close Menu", "Cerrar Menú"), ImVec2(ui::S(130), ui::S(28))))) {
             App::Get().CloseMarketHUD();
         }
@@ -698,9 +710,9 @@ void DrawMatchmakingToastWidget() {
         ui::TextColored(ui::color::Muted, i18n::T("Play with nearby friends on your local network", "Juega con amigos en tu red local"));
         ImGui::PopFont();
 
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
         ImGui::Separator();
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
 
         // Real-time network telemetry: Online players & Available games
         auto remotePlayers = net::Players();
@@ -778,7 +790,7 @@ void DrawMatchmakingToastWidget() {
             }
         }
 
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
 
         // Option 2: Host Match + adjacent Settings button
         float hostBtnWidth = cardW - ui::S(36) - ui::S(75);
@@ -798,9 +810,9 @@ void DrawMatchmakingToastWidget() {
 
         // Custom Match Settings Panel (expanded when clicking [Config])
         if (s_showCustomSettings) {
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            ImGui::Dummy(ImVec2(0, ui::S(6)));
             ImGui::Separator();
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            ImGui::Dummy(ImVec2(0, ui::S(6)));
 
             float childH = cardH - ui::S(205);
             if (childH < ui::S(80)) childH = ui::S(80);
@@ -885,7 +897,7 @@ void DrawMatchmakingToastWidget() {
             ImGui::SameLine();
             ImGui::Checkbox(i18n::T("Start $16K", "Dinero $16,000"), &s_cfgCompMoney);
 
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            ImGui::Dummy(ImVec2(0, ui::S(6)));
             if (ui::Clicked(ui::PrimaryButton(i18n::T("Launch Custom Server", "Crear Servidor Personalizado"), ImVec2(cardW - ui::S(36), ui::S(34))))) {
                 int slots = kSlotsValues[s_cfgSlotsIdx];
                 int maxRounds = kMaxRoundsValues[s_cfgMaxRoundsIdx];
@@ -925,28 +937,87 @@ void DrawMatchmakingToastWidget() {
     ImGui::PopStyleVar(2);
 }
 
+float GetModsCardHeight(float width) {
+    const float kCardPad = 12.0f; // unscaled points: BeginCard scales with S(kCardPad)
+    const float padPx = ui::S(kCardPad);
+    const float availW = width - padPx * 2.0f;
+
+    const float titleH = ui::F().strong ? ui::F().strong->FontSize : ui::S(16.0f);
+    const float captionH = ui::F().caption ? ui::F().caption->FontSize : ui::S(14.0f);
+    const float spacingY = ImGui::GetStyle().ItemSpacing.y;
+    const float gapY = ui::S(6.0f);
+    const float btnH = ui::S(36.0f);
+
+    const char* label0 = i18n::T("Market & Skins", "Mercado & Skins");
+    const char* label1 = i18n::T("Matchmaking LAN", "Matchmaking LAN");
+
+    float minW0 = ImGui::CalcTextSize(label0).x + ui::S(24.0f);
+    float minW1 = ImGui::CalcTextSize(label1).x + ui::S(24.0f);
+    float spaceX = ImGui::GetStyle().ItemSpacing.x;
+
+    bool fitsOneRow = (minW0 + minW1 + spaceX <= availW);
+    float btnAreaH = fitsOneRow ? btnH : (btnH * 2.0f + spacingY);
+
+    return padPx * 2.0f + titleH + spacingY + captionH + gapY + btnAreaH + ui::S(10.0f);
+}
+
 void DrawModsCard(ImVec2 pos, float width, float height) {
-    ui::BeginCard("##modscard", pos, ImVec2(width, height), ui::S(12));
+    if (height <= 0.0f) {
+        height = GetModsCardHeight(width);
+    }
+    const float kCardPad = 12.0f; // unscaled points: BeginCard will call S(kCardPad) internally
+    ui::BeginCard("##modscard", pos, ImVec2(width, height), kCardPad);
 
     ImGui::PushFont(ui::F().strong);
     ui::TextColored(ui::color::Accent, ui::icon::Game);
     ImGui::SameLine();
-    ImGui::TextUnformatted(i18n::T("CS:GO LAN & Inventory", "CS:GO LAN e Inventario"));
+    ImGui::TextUnformatted(i18n::T("Game Actions", "Acciones del juego"));
     ImGui::PopFont();
 
     ImGui::PushFont(ui::F().caption);
-    ui::TextColored(ui::color::Muted, i18n::T("Community market, cases, unboxing and matchmaking.", "Mercado, apertura de cajas y matchmaking LAN."));
+    ui::TextColored(ui::color::Muted, i18n::T("Quick actions and local LAN features", "Acciones rápidas y funciones de red LAN"));
     ImGui::PopFont();
 
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
-    float btnW = (width - ui::S(28)) * 0.5f;
-    if (ui::Clicked(ui::PrimaryButton(i18n::T("Market & Items", "Mercado / Skins"), ImVec2(btnW, ui::S(28))))) {
-        OpenMarketGiveMenu();
-    }
-    ImGui::SameLine();
-    if (ui::Clicked(ui::SecondaryButton(i18n::T("Matchmaking", "Matchmaking LAN"), ImVec2(btnW, ui::S(28))))) {
-        OpenMatchmakingToast();
+    const float padPx = ui::S(kCardPad);
+    const float availW = width - padPx * 2.0f;
+    const float btnH = ui::S(36.0f);
+
+    const char* label0 = i18n::T("Market & Skins", "Mercado & Skins");
+    const char* label1 = i18n::T("Matchmaking LAN", "Matchmaking LAN");
+
+    float minW0 = ImGui::CalcTextSize(label0).x + ui::S(24.0f);
+    float minW1 = ImGui::CalcTextSize(label1).x + ui::S(24.0f);
+    float spaceX = ImGui::GetStyle().ItemSpacing.x;
+
+    bool fitsOneRow = (minW0 + minW1 + spaceX <= availW);
+
+    if (fitsOneRow) {
+        float equalW = (availW - spaceX) * 0.5f;
+        float w0 = (std::max)(equalW, minW0);
+        float w1 = availW - w0 - spaceX;
+        if (w1 < minW1) {
+            w0 = minW0;
+            w1 = availW - w0 - spaceX;
+        }
+
+        if (ui::Clicked(ui::PrimaryButton(label0, ImVec2(w0, btnH)))) {
+            OpenMarketGiveMenu();
+        }
+        ImGui::SameLine();
+        if (ui::Clicked(ui::SecondaryButton(label1, ImVec2(w1, btnH)))) {
+            OpenMatchmakingToast();
+        }
+    } else {
+        // Auto-wrap to next line if width is narrow
+        if (ui::Clicked(ui::PrimaryButton(label0, ImVec2(availW, btnH)))) {
+            OpenMarketGiveMenu();
+        }
+        ImGui::Dummy(ImVec2(0, ui::S(2)));
+        if (ui::Clicked(ui::SecondaryButton(label1, ImVec2(availW, btnH)))) {
+            OpenMatchmakingToast();
+        }
     }
 
     ui::EndCard();

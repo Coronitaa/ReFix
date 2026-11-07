@@ -252,6 +252,13 @@ constexpr float kMinScale = 0.8f;
 constexpr float kMaxScale = 3.0f;
 
 float ScaleFor(const GameWindow* gw) {
+    char scaleBuf[32] = {};
+    if (GetPrivateProfileStringA("Overlay", "Scale", "", scaleBuf, sizeof(scaleBuf), ".\\ReFix.ini") > 0) {
+        float customScale = (float)atof(scaleBuf);
+        if (customScale >= 0.5f && customScale <= 4.0f) {
+            return customScale;
+        }
+    }
     float h = 0;
     if (gw && gw->hwnd && !gw->minimized) h = (float)(gw->client.bottom - gw->client.top);
     if (h < 240) {

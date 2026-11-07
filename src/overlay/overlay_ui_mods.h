@@ -2,7 +2,8 @@
 #include "../imgui/imgui.h"
 
 namespace refix::overlay {
-    void DrawModsCard(ImVec2 pos, float width, float height);
+    float GetModsCardHeight(float width);
+    void DrawModsCard(ImVec2 pos, float width, float height = 0.0f);
     void DrawModsApprovalModal();
     void DrawMarketGiveModal();
     void DrawMatchmakingToastWidget();

@@ -105,6 +105,7 @@ public:
     void CloseMatchmakingHUD() { hudMatchmakingOpen_ = false; }
     bool IsMarketHUDOpen() const { return hudMarketOpen_; }
     bool IsMatchmakingHUDOpen() const { return hudMatchmakingOpen_; }
+    bool IsOverlayOpen() const { return overlayOpen_; }
 
     // Data for the screens.
     uint32_t appId_ = 0;

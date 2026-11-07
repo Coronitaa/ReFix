@@ -47,7 +47,7 @@ uintptr_t GetRemoteModuleBase(DWORD pid, const wchar_t* modName) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        printf("Usage: trigger_csgo_action <prime|pass|open_market|close_market|grant|stress_grant> [args...]\n");
+        printf("Usage: trigger_csgo_action <prime|pass|open_market|close_market|open_overlay|close_overlay|toggle_overlay|grant|stress_grant> [args...]\n");
         return 1;
     }
 
@@ -94,6 +94,30 @@ int main(int argc, char** argv) {
     } else if (_stricmp(argv[1], "close_market") == 0) {
         FARPROC localFunc = GetProcAddress(localSteamApi, "CSGO_CloseMarketHUD");
         if (!localFunc) { printf("[-] CSGO_CloseMarketHUD not found!\n"); CloseHandle(hProc); return 1; }
+        uintptr_t remoteFunc = remoteSteamApi + ((uintptr_t)localFunc - (uintptr_t)localSteamApi);
+        code[codeLen++] = 0xB8; memcpy(&code[codeLen], &remoteFunc, 4); codeLen += 4;
+        code[codeLen++] = 0xFF; code[codeLen++] = 0xD0;
+        code[codeLen++] = 0x31; code[codeLen++] = 0xC0;
+        code[codeLen++] = 0xC2; code[codeLen++] = 0x04; code[codeLen++] = 0x00;
+    } else if (_stricmp(argv[1], "open_overlay") == 0) {
+        FARPROC localFunc = GetProcAddress(localSteamApi, "CSGO_OpenOverlay");
+        if (!localFunc) { printf("[-] CSGO_OpenOverlay not found!\n"); CloseHandle(hProc); return 1; }
+        uintptr_t remoteFunc = remoteSteamApi + ((uintptr_t)localFunc - (uintptr_t)localSteamApi);
+        code[codeLen++] = 0xB8; memcpy(&code[codeLen], &remoteFunc, 4); codeLen += 4;
+        code[codeLen++] = 0xFF; code[codeLen++] = 0xD0;
+        code[codeLen++] = 0x31; code[codeLen++] = 0xC0;
+        code[codeLen++] = 0xC2; code[codeLen++] = 0x04; code[codeLen++] = 0x00;
+    } else if (_stricmp(argv[1], "close_overlay") == 0) {
+        FARPROC localFunc = GetProcAddress(localSteamApi, "CSGO_CloseOverlay");
+        if (!localFunc) { printf("[-] CSGO_CloseOverlay not found!\n"); CloseHandle(hProc); return 1; }
+        uintptr_t remoteFunc = remoteSteamApi + ((uintptr_t)localFunc - (uintptr_t)localSteamApi);
+        code[codeLen++] = 0xB8; memcpy(&code[codeLen], &remoteFunc, 4); codeLen += 4;
+        code[codeLen++] = 0xFF; code[codeLen++] = 0xD0;
+        code[codeLen++] = 0x31; code[codeLen++] = 0xC0;
+        code[codeLen++] = 0xC2; code[codeLen++] = 0x04; code[codeLen++] = 0x00;
+    } else if (_stricmp(argv[1], "toggle_overlay") == 0) {
+        FARPROC localFunc = GetProcAddress(localSteamApi, "CSGO_ToggleOverlay");
+        if (!localFunc) { printf("[-] CSGO_ToggleOverlay not found!\n"); CloseHandle(hProc); return 1; }
         uintptr_t remoteFunc = remoteSteamApi + ((uintptr_t)localFunc - (uintptr_t)localSteamApi);
         code[codeLen++] = 0xB8; memcpy(&code[codeLen], &remoteFunc, 4); codeLen += 4;
         code[codeLen++] = 0xFF; code[codeLen++] = 0xD0;

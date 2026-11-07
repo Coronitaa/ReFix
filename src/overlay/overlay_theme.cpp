@@ -342,11 +342,15 @@ void BeginCard(const char* id, ImVec2 pos, ImVec2 size, float padding) {
     Card(ImGui::GetWindowDrawList(), pos, ImVec2(pos.x + size.x, pos.y + size.y));
     const float pad = S(padding);
     ImGui::SetCursorScreenPos(ImVec2(pos.x + pad, pos.y + pad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::BeginChild(id, ImVec2(size.x - pad * 2, size.y - pad * 2), ImGuiChildFlags_NavFlattened,
-                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                      ImGuiWindowFlags_NoBackground);
 }
 
-void EndCard() { ImGui::EndChild(); }
+void EndCard() {
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+}
 
 void SectionLabel(const char* text, int count) {
     std::string label = text;

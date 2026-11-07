@@ -76,6 +76,12 @@ struct Fonts {
 };
 
 Fonts& F();
+// DPI Scaling Convention:
+// - ui::S(px) scales a point/pixel dimension by g_fonts.scale.
+// - RULE: Either the caller scales, or the callee scales - NEVER both.
+//   * BeginCard(id, pos, size, padding): 'padding' is unscaled points (e.g. 12.0f, 20.0f);
+//     BeginCard calls ui::S(padding) internally. Do NOT pass ui::S(12.0f) to BeginCard.
+//   * Widget sizes (ImVec2) passed to Button, Dummy, etc. must be scaled by caller via ui::S().
 float S(float px);               // scaled pixels
 void BuildFonts(float scale);    // rebuilds the atlas; call before NewFrame
 void ApplyStyle(float scale);

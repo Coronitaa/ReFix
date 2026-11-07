@@ -42,4 +42,7 @@ __declspec(dllexport) void CSGO_ActivateOperationPass(uint32_t season, uint64_t 
 __declspec(dllexport) void CSGO_SetHostConfig(const char* json);
 __declspec(dllexport) void CSGO_OpenMarketHUD();
 __declspec(dllexport) void CSGO_CloseMarketHUD();
+__declspec(dllexport) void CSGO_OpenOverlay();
+__declspec(dllexport) void CSGO_CloseOverlay();
+__declspec(dllexport) void CSGO_ToggleOverlay();
 }
