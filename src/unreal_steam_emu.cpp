@@ -3020,6 +3020,12 @@ namespace UnrealSteamEmu {
         for (auto& item : cbToDispatch) {
             item.pCallback->Run(item.data.data());
         }
+
+        // For listen servers (client + server in the same process), drain server callbacks
+        // so server.dll receives GCMessageAvailable_t and establishes its GC session.
+        if (!g_serverCallbacks.empty()) {
+            GameServer_RunCallbacks();
+        }
     }
 
     void GameServer_RunCallbacks() {
