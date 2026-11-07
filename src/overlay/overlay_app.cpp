@@ -11,6 +11,7 @@
 #include "../imgui/imgui_internal.h"
 #include "save_swap.h"
 #include "refix_overlay.h"
+#include "../source_main_thread_queue.h"
 
 #include "../include/steam/steam_api.h"
 #include "../unreal_steam_emu.h"
@@ -341,30 +342,32 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
 
 void App::Join(const net::RemotePlayer& p) {
     if (p.lobbyId != 0) {
+        // P1.b: ONLY dispatch GameLobbyJoinRequested_t (callback 333).
+        // Let CS:GO call JoinLobby and perform its handshake natively without competing JoinLobby calls.
         GameLobbyJoinRequested_t cb = {};
         cb.m_steamIDLobby = CSteamID(p.lobbyId);
         cb.m_steamIDFriend = CSteamID(p.steamId);
         UnrealSteamEmu::PostCallback(GameLobbyJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-        UnrealSteamEmu::Matchmaking_JoinLobby(p.lobbyId);
-    } else {
-        if (appId_ == 730) {
-            if (!p.connect.empty()) {
-                ExecuteEngineClientCommand(p.connect.c_str());
-            } else if (p.ip != 0) {
-                char ipBuf[64];
-                snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:27015",
-                         (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF, (p.ip >> 8) & 0xFF, p.ip & 0xFF);
-                ExecuteEngineClientCommand(ipBuf);
-            }
-        }
-        if (!p.connect.empty()) {
-            GameRichPresenceJoinRequested_t cb = {};
-            cb.m_steamIDFriend = CSteamID(p.steamId);
-            strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
-            UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-        }
+    } else if (!p.connect.empty()) {
+        // P1.b: ONLY dispatch GameRichPresenceJoinRequested_t (callback 337).
+        // Do NOT execute +gcconnectG... as an engine console command and do not call engine from overlay thread.
+        GameRichPresenceJoinRequested_t cb = {};
+        cb.m_steamIDFriend = CSteamID(p.steamId);
+        strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
+        UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
+    } else if (p.ip != 0) {
+        // Direct IP connect without rich presence connect string: queue to main thread (satisfies R5)
+        char ipBuf[64];
+        snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:%u",
+                 (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF, (p.ip >> 8) & 0xFF, p.ip & 0xFF,
+                 p.port != 0 ? p.port : 27015);
+        std::string cmd = ipBuf;
+        refix::source::MainThreadQueue::Enqueue([cmd]() {
+            ExecuteEngineClientCommand(cmd.c_str());
+        });
     }
-    ReFixLog("[Overlay] Join requested: player %llu lobby %llu", (unsigned long long)p.steamId, (unsigned long long)p.lobbyId);
+    ReFixLog("[Overlay] Join requested: player %llu lobby %llu connect='%s'",
+             (unsigned long long)p.steamId, (unsigned long long)p.lobbyId, p.connect.c_str());
     CloseOverlay();
 }
 
