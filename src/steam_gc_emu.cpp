@@ -15,6 +15,7 @@
 #include "include/steam/steam_api.h"
 #include "include/steam/isteamgamecoordinator.h"
 #include "steam_gc_emu.h"
+#include "csgo_gc_relay.h"
 #include "unreal_steam_emu.h"
 #include "overlay/refix_overlay.h"
 #include "csgo_item_defs.h"
@@ -28,6 +29,8 @@ namespace refix::overlay {
 extern void ReFixLog(const char* fmt, ...);
 
 namespace {
+
+static std::atomic<bool> s_gameServerActive{ false };
 
 static bool IsGCTraceEnabled() {
     static int s_gcTrace = -1;
@@ -876,14 +879,15 @@ public:
             Reply(kMsgClientConnectionStatus, ReFixGC::BuildConnectionStatus());
             Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
         } else if (m_gameServer && msg == kMsgServerHello) {
+            s_gameServerActive.store(true);
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
             if (version == 0) version = 13884;
             ReFixLog("[GC] Handling ServerHello v%u: Sending ServerWelcome with active SOCache", version);
             Reply(kMsgServerWelcome, ReFixGC::BuildServerWelcome(version, UnrealSteamEmu::GetLocalSteamID()));
             Reply(kMsgServerConnectionStatus, ReFixGC::BuildConnectionStatus());
-            Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
+            Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildEquippedCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
         } else if (m_gameServer && (msg == 27 || msg == 28)) { // k_ESOMsg_CacheSubscriptionCheck / Refresh
-            Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
+            Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildEquippedCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
         } else if (msg == kMsgGCCStrike15_v2_MatchmakingClient2GCHello) {
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
@@ -1025,6 +1029,7 @@ public:
             PutFixed64Field(soMult, 3, ++s_soUpdateVer); // version = 3
             PutBytesField(soMult, 6, soid);              // owner_soid = 6
             Reply(26 /* k_ESOMsg_UpdateMultiple */, soMult);
+            refix::csgo::BroadcastEquippedUpdate(itemId, newClass, newSlot, soMult);
             // CRITICAL: DO NOT send kMsgClientWelcome here!
             // Sending kMsgClientWelcome destroys all CEconItem pointers in Panorama JS heap,
             // causing immediate 0xC0000005 access violation crash!
@@ -1237,6 +1242,7 @@ public:
         LogGCTrace(Role(), "out", msg, true, body.data(), body.size());
     }
 
+public:
     const bool m_gameServer;
     std::atomic<int> m_logged{ 0 };
     std::mutex m_mutex;
@@ -1246,6 +1252,44 @@ public:
 } // namespace
 
 namespace ReFixGC {
+
+bool IsGameServerActive() {
+    return s_gameServerActive.load();
+}
+
+void SendToGameServer(uint32_t msg, const std::vector<uint8_t>& body) {
+    CGameCoordinatorLan* gc = static_cast<CGameCoordinatorLan*>(Get(true));
+    if (gc) {
+        gc->Reply(msg, body);
+    }
+}
+
+std::vector<uint8_t> BuildEquippedCacheSubscribed(uint64_t steamId) {
+    std::vector<uint8_t> owner;
+    PutVarintField(owner, 1, kSOTypeSteamId);
+    PutVarintField(owner, 2, steamId);
+
+    auto items = CSGOInventoryManager::Get().GetItems();
+    uint32_t accountId = (uint32_t)(steamId & 0xFFFFFFFF);
+
+    std::vector<uint8_t> itemType;
+    PutVarintField(itemType, 1, 1); // type_id = 1 (CSOEconItem)
+    uint32_t pos = 1;
+    for (const auto& it : items) {
+        if (it.equipped.empty()) continue; // ONLY EQUIPPED ITEMS!
+        std::vector<uint8_t> itBytes = SerializeEconItem(it, accountId, pos++);
+        PutBytesField(itemType, 2, itBytes);
+        if (pos > 64) break; // Maximum 64 items
+    }
+
+    std::vector<uint8_t> cache;
+    if (pos > 1) {
+        PutBytesField(cache, 2, itemType); // objects = 2
+    }
+    PutFixed64Field(cache, 3, 1);       // version = 3
+    PutBytesField(cache, 4, owner);     // owner_soid = 4
+    return cache;
+}
 
 ISteamGameCoordinator* Get(bool gameServer) {
     static CGameCoordinatorLan client(false);

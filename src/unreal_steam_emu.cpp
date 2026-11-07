@@ -64,6 +64,7 @@
 #include "include/steam/isteamunifiedmessages.h"
 
 #include "unreal_steam_emu.h"
+#include "csgo_gc_relay.h"
 #include "unreal_detect.h"
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
@@ -3237,6 +3238,9 @@ namespace UnrealSteamEmu {
             PostCallback(ValidateAuthTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
 
             ReFixLog("[UnrealSteam] BeginAuthSession: Accepted session for SteamID %llu", steamID.ConvertToUint64());
+            if (g_appID == 730) {
+                refix::csgo::OnGameServerClientAuth(steamID.ConvertToUint64(), 1);
+            }
             return k_EBeginAuthSessionResultOK;
         }
 
@@ -7290,6 +7294,9 @@ namespace UnrealSteamEmu {
             g_callbackQueue.push_back(item);
 
             ReFixLog("[UnrealSteam] SendUserConnectAndAuthenticate: Approved client %llu", clientID.ConvertToUint64());
+            if (g_appID == 730) {
+                refix::csgo::OnGameServerClientAuth(clientID.ConvertToUint64(), 1);
+            }
             return true;
         }
 
@@ -8332,6 +8339,9 @@ namespace UnrealSteamEmu {
         if (g_transportMode.load() == TransportMode::Canonical) {
             refix::lan::ILanCore::Get().SetAppScope("Steam_" + std::to_string(appId));
             refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
+            if (appId == 730) {
+                refix::csgo::InitializeGCRelay();
+            }
         }
         ReFixLog("[UnrealSteam] Adopted AppID %u (was %u): LAN discovery scope updated", appId, previous);
     }
@@ -8768,6 +8778,9 @@ namespace UnrealSteamEmu {
                 (ep.ipv4 >> 24) & 0xFF, (ep.ipv4 >> 16) & 0xFF, (ep.ipv4 >> 8) & 0xFF, ep.ipv4 & 0xFF,
                 ep.port, core.Transport().GetDiscoveryPort());
             core.Identity().SetDisplayName(g_personaName);
+            if (g_appID == 730) {
+                refix::csgo::InitializeGCRelay();
+            }
 
         // Bind local SteamID
         refix::lan::PeerId localPeer = core.Identity().GetLocalPeerId();
