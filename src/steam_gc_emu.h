@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include "include/refix_services.h"
 
 class ISteamGameCoordinator;
 
@@ -23,6 +24,8 @@ std::vector<uint8_t> BuildServerWelcome(uint32_t version, uint64_t steamId);
 std::vector<uint8_t> BuildCacheSubscribed(uint64_t steamId);
 std::vector<uint8_t> BuildEquippedCacheSubscribed(uint64_t steamId);
 std::vector<uint8_t> BuildConnectionStatus();
+// Local player's persisted inventory (the one the GC handlers serve), for the IInventoryStore service.
+std::vector<refix::InventoryItem> GetLocalInventory();
 // Field 1 (version) of a CMsgClientHello body, 0 when absent.
 uint32_t ParseHelloVersion(const uint8_t* body, size_t size);
 

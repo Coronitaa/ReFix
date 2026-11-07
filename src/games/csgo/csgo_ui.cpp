@@ -19,13 +19,23 @@ static char s_search[64] = "";
 static std::string s_statusMsg = "";
 static DWORD s_statusExp = 0;
 
+// The mod's ImGui globals are separate from the host's; bind them to the host's context before every draw.
+static refix::OverlayRenderFn WithHostImGui(refix::OverlayRenderFn fn) {
+    return [fn](float w, float h) {
+        if (!s_uiServices || !s_uiServices->imgui_context || !s_uiServices->imgui_alloc) return;
+        ImGui::SetAllocatorFunctions(s_uiServices->imgui_alloc, s_uiServices->imgui_free, s_uiServices->imgui_alloc_user_data);
+        ImGui::SetCurrentContext(static_cast<ImGuiContext*>(s_uiServices->imgui_context));
+        fn(w, h);
+    };
+}
+
 void RegisterCSGOUi(refix::IRefixServices* services) {
     s_uiServices = services;
     if (!services || !services->overlay) return;
 
     // 1. Register Card in Main Overlay
     services->overlay->RegisterCard("csgo_actions", "CS:GO LAN Actions", "Acciones rápidas y funciones de red LAN",
-        [](float availW, float height) {
+        WithHostImGui([](float availW, float height) {
             float spaceX = ImGui::GetStyle().ItemSpacing.x;
             float btnH = 36.0f;
             float btnW = (availW - spaceX) * 0.5f;
@@ -56,11 +66,11 @@ void RegisterCSGOUi(refix::IRefixServices* services) {
                 s_uiServices->entitlements->GrantEntitlement(steamId, 10001);
                 if (s_uiServices->Log) s_uiServices->Log("[CSGO Mod] Activated Prime Status for SteamID %llu", steamId);
             }
-        });
+        }));
 
     // 2. Register Give Menu Modal
     services->overlay->RegisterModal("csgo_give_menu",
-        [](float width, float height) {
+        WithHostImGui([](float width, float height) {
             auto& schema = refix::csgo::SchemaManager::Get();
             schema.Load();
 
@@ -182,7 +192,7 @@ void RegisterCSGOUi(refix::IRefixServices* services) {
             if (!isOpen) {
                 s_uiServices->overlay->CloseModal("csgo_give_menu");
             }
-        });
+        }));
 
     if (services->Log) {
         services->Log("[CSGO Mod] Registered overlay action card and give menu modal");

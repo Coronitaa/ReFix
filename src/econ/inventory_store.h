@@ -1,15 +1,14 @@
-// Valve Economy Inventory Persistence: JSON profile inventory, persistent 64-bit IDs, equipment
+// IInventoryStore service: thin adapter over the GC emulator's persisted inventory, so native mods and the
+// built-in GC handlers read and write the same items (one inventory.json per ReFix profile).
 #pragma once
 
 #include "../include/refix_services.h"
 #include <cstdint>
 #include <vector>
-#include <unordered_map>
-#include <string>
-#include <mutex>
 
 namespace refix::econ {
 
+// shortcut: only the local player's inventory exists; steam_id is ignored. Upgrade when remote caches are relayed.
 class InventoryStore : public refix::IInventoryStore {
 public:
     static InventoryStore& Get();
@@ -23,15 +22,6 @@ public:
     virtual uint64_t GrantItem(uint64_t steam_id, uint32_t defIndex, uint32_t level, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, const char* customName = nullptr) override;
     virtual bool SetEquipped(uint64_t steam_id, uint64_t item_id, uint32_t team, uint32_t slot) override;
     virtual uint64_t AllocateItemId(uint64_t steam_id) override;
-
-    static uint64_t ComposeItemId(uint32_t account_id, uint32_t low);
-
-private:
-    std::string GetInventoryFilePath(uint64_t steam_id) const;
-
-    std::mutex m_mu;
-    std::unordered_map<uint64_t, std::vector<InventoryItem>> m_profiles;
-    std::unordered_map<uint64_t, uint32_t> m_lastLowIds;
 };
 
 } // namespace refix::econ

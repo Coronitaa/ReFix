@@ -24,11 +24,6 @@ __declspec(dllexport) int refix_mod_init(const void* host_api) {
     g_modServices = const_cast<refix::IRefixServices*>(static_cast<const refix::IRefixServices*>(host_api));
     if (g_modServices->version < 1) return -2;
 
-    // Set shared ImGui context if available
-    if (g_modServices->imgui_context) {
-        ImGui::SetCurrentContext(static_cast<ImGuiContext*>(g_modServices->imgui_context));
-    }
-
     if (g_modServices->Log) {
         g_modServices->Log("[CSGO Mod] Initializing CS:GO LAN & Economy Overhaul (Native Tier)...");
     }

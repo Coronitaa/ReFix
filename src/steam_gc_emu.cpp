@@ -2343,6 +2343,24 @@ void ActivateOperationPass(uint32_t season, uint64_t passItemId) {
     });
 }
 
+std::vector<refix::InventoryItem> GetLocalInventory() {
+    std::vector<refix::InventoryItem> out;
+    for (const EconItem& e : CSGOInventoryManager::Get().GetItems()) {
+        refix::InventoryItem it;
+        it.id = e.id;
+        it.defIndex = e.defIndex;
+        it.quality = e.quality;
+        it.rarity = e.rarity;
+        it.paintKit = e.paintKit;
+        it.wear = e.wear;
+        it.seed = e.seed;
+        it.customName = e.customName;
+        for (const auto& eq : e.equipped) it.equipped.push_back({ eq.new_class, eq.new_slot });
+        out.push_back(std::move(it));
+    }
+    return out;
+}
+
 } // namespace ReFixGC
 
 extern "C" {

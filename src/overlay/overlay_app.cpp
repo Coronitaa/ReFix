@@ -329,7 +329,11 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
                                  [&](const Toast& t) { return t.closing && now - t.closingAt > kToastFadeMs; }),
                   toasts_.end());
 
-    refix::GetRefixServices().imgui_context = ImGui::GetCurrentContext();
+    {
+        refix::IRefixServices& svc = refix::GetRefixServices();
+        ImGui::GetAllocatorFunctions(&svc.imgui_alloc, &svc.imgui_free, &svc.imgui_alloc_user_data);
+        svc.imgui_context = ImGui::GetCurrentContext();
+    }
     if (viewport.x <= 0 || viewport.y <= 0) return;
     if (dialog_ != DialogKind::None) DrawDialog(viewport);
     else if (overlayOpen_) DrawOverlay(viewport);

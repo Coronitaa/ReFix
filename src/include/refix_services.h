@@ -151,6 +151,10 @@ struct IRefixServices {
     IEntitlements* entitlements = nullptr;
     void (*Log)(const char* fmt, ...) = nullptr;
     void* imgui_context = nullptr;
+    // Native mods link their own ImGui copy and CRT heap: they must use the host's allocator with the shared context.
+    void* (*imgui_alloc)(size_t sz, void* user_data) = nullptr;
+    void (*imgui_free)(void* ptr, void* user_data) = nullptr;
+    void* imgui_alloc_user_data = nullptr;
 };
 
 // Singleton host access
