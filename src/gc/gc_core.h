@@ -40,6 +40,8 @@ public:
     virtual uint64_t GetActiveSteamID() override;
     virtual uint32_t GetActiveAppID() override;
     virtual void RelayCacheToServer(uint64_t remote_steam_id) override;
+    virtual void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlot, const void* data, size_t size) override;
+    virtual void BroadcastMatchmakingReserve(const void* data, size_t size) override;
 
     // Internal GC routing
     bool DispatchClientMessage(uint32_t msgType, const uint8_t* pubData, size_t cubData);

@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "overlay_app.h"
+#include "game_actions/overlay_actions.h"
 #include "avatar_image.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
@@ -328,6 +329,7 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
                                  [&](const Toast& t) { return t.closing && now - t.closingAt > kToastFadeMs; }),
                   toasts_.end());
 
+    refix::GetRefixServices().imgui_context = ImGui::GetCurrentContext();
     if (viewport.x <= 0 || viewport.y <= 0) return;
     if (dialog_ != DialogKind::None) DrawDialog(viewport);
     else if (overlayOpen_) DrawOverlay(viewport);
@@ -335,6 +337,9 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
 
     if (hudMarketOpen_) DrawMarketGiveModal();
     if (hudMatchmakingOpen_) DrawMatchmakingToastWidget();
+    for (const auto& modal : refix::overlay::OverlayActionsRegistry::Get().GetModals()) {
+        modal.renderFn(viewport.x, viewport.y);
+    }
     // Keyboard/controller focus moved to another item this frame (never set by the mouse).
     if (ImGui::GetCurrentContext()->NavJustMovedToId != 0 && (overlayOpen_ || dialog_ != DialogKind::None))
         sound::Play(sound::Cue::Move);

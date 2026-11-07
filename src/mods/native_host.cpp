@@ -3,6 +3,8 @@
 
 #include <iostream>
 
+extern void ReFixLog(const char* fmt, ...);
+
 namespace refix::mods {
 
 NativeModInstance::NativeModInstance(const ModManifest& manifest, const std::string& dll_path)
@@ -61,6 +63,7 @@ bool NativeModInstance::Load(const void* host_api, std::string& out_error) {
         }
     }
 
+    ReFixLog("[NativeHost] Successfully loaded official native mod: %s", manifest_.id.c_str());
     std::cout << "[NativeHost] Successfully loaded official native mod: " << manifest_.id << std::endl;
     return true;
 }

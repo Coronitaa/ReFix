@@ -26,6 +26,8 @@ struct IGcCore {
     virtual uint64_t GetActiveSteamID() = 0;
     virtual uint32_t GetActiveAppID() = 0;
     virtual void RelayCacheToServer(uint64_t remote_steam_id) = 0;
+    virtual void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlot, const void* data, size_t size) = 0;
+    virtual void BroadcastMatchmakingReserve(const void* data, size_t size) = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -132,6 +134,7 @@ struct IEntitlements {
     virtual bool HasEntitlement(uint64_t steam_id, uint32_t entitlement_id) = 0;
     virtual void GrantEntitlement(uint64_t steam_id, uint32_t entitlement_id) = 0;
     virtual void PromptPurchase(uint32_t app_id, uint32_t item_id, const char* name, const char* description, bool requires_elevation, EntitlementCallbackFn callback) = 0;
+    virtual void AuthorizeMicroTxn(uint64_t order_id, bool authorized) = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -146,6 +149,8 @@ struct IRefixServices {
     IPanorama* panorama = nullptr;
     IOverlayActions* overlay = nullptr;
     IEntitlements* entitlements = nullptr;
+    void (*Log)(const char* fmt, ...) = nullptr;
+    void* imgui_context = nullptr;
 };
 
 // Singleton host access

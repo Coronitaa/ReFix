@@ -1,3 +1,4 @@
+#include "../unreal_steam_emu.h"
 #include "entitlements_store.h"
 #include "../overlay/refix_overlay.h"
 #include <windows.h>
@@ -77,6 +78,10 @@ void EntitlementsStore::PromptPurchase(uint32_t app_id, uint32_t item_id, const 
     ReFixOverlay::PromptPurchase(app_id, item_id, itemName, itemDesc, requires_elevation, [callback](bool approved) {
         if (callback) callback(approved);
     });
+}
+
+void EntitlementsStore::AuthorizeMicroTxn(uint64_t order_id, bool authorized) {
+    UnrealSteamEmu::AuthorizeMicroTxn(UnrealSteamEmu::GetAppID(), order_id, authorized);
 }
 
 } // namespace refix::entitlements

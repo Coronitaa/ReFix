@@ -20,6 +20,7 @@ public:
     virtual bool HasEntitlement(uint64_t steam_id, uint32_t entitlement_id) override;
     virtual void GrantEntitlement(uint64_t steam_id, uint32_t entitlement_id) override;
     virtual void PromptPurchase(uint32_t app_id, uint32_t item_id, const char* name, const char* description, bool requires_elevation, EntitlementCallbackFn callback) override;
+    virtual void AuthorizeMicroTxn(uint64_t order_id, bool authorized) override;
 
     bool Load(uint64_t steam_id);
     bool Save(uint64_t steam_id);

@@ -1,4 +1,6 @@
 #include "gc_core.h"
+#include "gc_relay.h"
+#include "../steam_gc_emu.h"
 #include "../lan_core/refix_lan_core.h"
 #include <cstring>
 #include <windows.h>
@@ -27,27 +29,21 @@ void GcCore::RegisterServerHandler(uint32_t msg_type, GcMessageHandlerFn fn) {
 }
 
 void GcCore::SendClient(uint32_t msg_type, const void* data, size_t size, bool is_protobuf) {
-    std::lock_guard<std::mutex> lock(m_mu);
-    GcMessage msg;
-    msg.type = is_protobuf ? (msg_type | kMsgProtobufFlag) : msg_type;
-    msg.isProtobuf = is_protobuf;
+    std::vector<uint8_t> body;
     if (size > 0 && data) {
         const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
-        msg.body.assign(bytes, bytes + size);
+        body.assign(bytes, bytes + size);
     }
-    m_clientQueue.push_back(std::move(msg));
+    ReFixGC::SendToClient(msg_type, body);
 }
 
 void GcCore::SendServer(uint32_t msg_type, const void* data, size_t size, bool is_protobuf) {
-    std::lock_guard<std::mutex> lock(m_mu);
-    GcMessage msg;
-    msg.type = is_protobuf ? (msg_type | kMsgProtobufFlag) : msg_type;
-    msg.isProtobuf = is_protobuf;
+    std::vector<uint8_t> body;
     if (size > 0 && data) {
         const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
-        msg.body.assign(bytes, bytes + size);
+        body.assign(bytes, bytes + size);
     }
-    m_serverQueue.push_back(std::move(msg));
+    ReFixGC::SendToGameServer(msg_type, body);
 }
 
 void GcCore::SendSOCacheSubscribed(uint64_t target_steam_id, const void* items, size_t count) {
@@ -68,6 +64,24 @@ uint32_t GcCore::GetActiveAppID() {
 
 void GcCore::RelayCacheToServer(uint64_t remote_steam_id) {
     // Multi-peer cache relay trigger
+}
+
+void GcCore::BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlot, const void* data, size_t size) {
+    std::vector<uint8_t> vec;
+    if (size > 0 && data) {
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
+        vec.assign(bytes, bytes + size);
+    }
+    refix::gc::BroadcastEquippedUpdate(itemId, newClass, newSlot, vec);
+}
+
+void GcCore::BroadcastMatchmakingReserve(const void* data, size_t size) {
+    std::vector<uint8_t> vec;
+    if (size > 0 && data) {
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
+        vec.assign(bytes, bytes + size);
+    }
+    refix::gc::BroadcastMatchmakingReserve(vec);
 }
 
 bool GcCore::DispatchClientMessage(uint32_t msgType, const uint8_t* pubData, size_t cubData) {

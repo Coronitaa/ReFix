@@ -9,6 +9,7 @@
 #endif
 
 #include "overlay_ui_mods.h"
+#include "game_actions/overlay_actions.h"
 #include "overlay_theme.h"
 #include "overlay_i18n.h"
 #include "overlay_app.h"
@@ -966,6 +967,29 @@ void DrawModsCard(ImVec2 pos, float width, float height) {
         height = GetModsCardHeight(width);
     }
     const float kCardPad = 12.0f; // unscaled points: BeginCard will call S(kCardPad) internally
+    const float padPx = ui::S(kCardPad);
+    const float availW = width - padPx * 2.0f;
+
+    auto regCards = refix::overlay::OverlayActionsRegistry::Get().GetCards();
+    if (!regCards.empty()) {
+        const auto& c = regCards[0];
+        ui::BeginCard(("##card_" + c.id).c_str(), pos, ImVec2(width, height), kCardPad);
+        ImGui::PushFont(ui::F().strong);
+        ui::TextColored(ui::color::Accent, ui::icon::Game);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(c.title.c_str());
+        ImGui::PopFont();
+
+        ImGui::PushFont(ui::F().caption);
+        ui::TextColored(ui::color::Muted, c.subtitle.c_str());
+        ImGui::PopFont();
+
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
+        c.renderFn(availW, height);
+        ui::EndCard();
+        return;
+    }
+
     ui::BeginCard("##modscard", pos, ImVec2(width, height), kCardPad);
 
     ImGui::PushFont(ui::F().strong);
@@ -980,8 +1004,6 @@ void DrawModsCard(ImVec2 pos, float width, float height) {
 
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
-    const float padPx = ui::S(kCardPad);
-    const float availW = width - padPx * 2.0f;
     const float btnH = ui::S(36.0f);
 
     const char* label0 = i18n::T("Market & Skins", "Mercado & Skins");

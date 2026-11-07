@@ -16,6 +16,7 @@
 #include "include/steam/isteamgamecoordinator.h"
 #include "steam_gc_emu.h"
 #include "gc/gc_relay.h"
+#include "gc/gc_core.h"
 #include "unreal_steam_emu.h"
 #include "overlay/refix_overlay.h"
 #include "csgo_item_defs.h"
@@ -1149,6 +1150,14 @@ public:
         }
 
         LogGCTrace(Role(), "in", msg, proto, body, bodySize);
+
+        if (m_gameServer) {
+            if (refix::gc::GcCore::Get().DispatchServerMessage(msg, body, bodySize))
+                return k_EGCResultOK;
+        } else {
+            if (refix::gc::GcCore::Get().DispatchClientMessage(msg, body, bodySize))
+                return k_EGCResultOK;
+        }
 
         if (!m_gameServer && msg == kMsgClientHello) {
             uint32_t version = ReFixGC::ParseHelloVersion(body, bodySize);
