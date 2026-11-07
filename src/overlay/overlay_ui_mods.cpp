@@ -464,12 +464,22 @@ void DrawMatchmakingToastWidget() {
                 uint64_t sId = refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId);
                 if (sId == 0) sId = refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(l.lobbyId);
                 if (sId != 0) {
+                    uint64_t ownerSteamId = 0;
+                    auto pOwner = refix::lan::ILanCore::Get().Peers().FindByPeerId(l.ownerPeerId);
+                    if (pOwner && pOwner->externalId.numericId != 0) {
+                        ownerSteamId = pOwner->externalId.numericId;
+                    } else {
+                        auto oIt = l.attributes.find("__steam_owner");
+                        if (oIt != l.attributes.end() && !oIt->second.asString.empty()) {
+                            try { ownerSteamId = std::stoull(oIt->second.asString); } catch (...) {}
+                        }
+                    }
+                    if (ownerSteamId == 0) continue; // P1.a: forbid peerId.low as SteamID fallback
                     net::RemotePlayer rp;
                     rp.appId = 730;
-                    rp.steamId = l.ownerPeerId.low;
+                    rp.steamId = ownerSteamId;
                     rp.lobbyId = sId;
                     App::Get().Join(rp);
-                    App::Get().ShowInfo("Matchmaking LAN", "Partida LAN encontrada en red local. Uniéndose...");
                     found = true;
                     App::Get().CloseMatchmakingHUD();
                     break;

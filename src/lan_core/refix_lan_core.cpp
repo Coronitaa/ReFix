@@ -1175,9 +1175,16 @@ public:
                         else if (!memInfo.endpoint.IsValid()) memInfo.endpoint = rec.hostEndpoint;
                         if (!m.displayName.empty()) memInfo.displayName = m.displayName;
                         memInfo.externalId.platform = ExternalPlatform::Steam;
-                        if (memInfo.externalId.numericId == 0 && m.peerId.low != 0) {
-                            memInfo.externalId.numericId = m.peerId.low;
-                            memInfo.externalId.stringId = std::to_string(m.peerId.low);
+                        if (memInfo.externalId.numericId == 0) {
+                            // R1 / P1.a: Forbid peerId.low as SteamID fallback. Request presence if endpoint valid.
+                            if (memInfo.endpoint.IsValid()) {
+                                ByteWriter q;
+                                q.WriteString(Scope());
+                                q.WritePeerId(m_identity.GetLocalPeerId());
+                                q.WriteString(m_identity.GetDisplayName());
+                                q.WriteEndpoint(m_transport.GetLocalDataEndpoint());
+                                m_transport.SendDiscoveryPacket(MsgType::DiscoveryQuery, memInfo.endpoint, q.Data(), q.Size());
+                            }
                         }
                         m_peers.RegisterOrUpdatePeer(memInfo);
                     }

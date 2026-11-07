@@ -438,8 +438,7 @@ std::vector<RemotePlayer> Players() {
     auto allPeers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
     for (const auto& p : allPeers) {
         uint64_t sid = p.externalId.numericId;
-        if (sid == 0) sid = p.peerId.low;
-        if (sid == 0 || sid == g_local.steamId) continue;
+        if (sid == 0 || sid == g_local.steamId) continue; // P1.a: forbid peerId.low as SteamID fallback
         if (g_players.count(sid) == 0) {
             RemotePlayer rp;
             rp.steamId = sid;

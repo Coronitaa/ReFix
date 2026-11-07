@@ -4637,9 +4637,9 @@ namespace UnrealSteamEmu {
                             try { return CSteamID(std::stoull(oIt2->second.asString)); } catch (...) {}
                         }
                     }
-                    if (m.peerId.low != 0) {
-                        return CSteamID(static_cast<uint32_t>(m.peerId.low & 0xFFFFFFFF), k_EUniversePublic, k_EAccountTypeIndividual);
-                    }
+                    // P1.a: If a peer has no externalId.numericId, member does not exist for Steam yet until known.
+                    // Forbid returning peerId.low as SteamID.
+                    return CSteamID();
                 }
             }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
