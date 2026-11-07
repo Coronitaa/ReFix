@@ -20,6 +20,8 @@ struct EconItem {
     float wear = 0.001f;
     uint32_t seed = 0;
     std::string customName;
+    uint32_t origin = 0;
+    uint32_t inventory = 0;
     std::vector<EquippedSlot> equipped;
 };
 
@@ -88,6 +90,8 @@ public:
             itm["paintKit"] = it.paintKit;
             itm["wear"] = it.wear;
             itm["seed"] = it.seed;
+            if (it.origin != 0) itm["origin"] = it.origin;
+            if (it.inventory != 0) itm["inventory"] = it.inventory;
             if (!it.customName.empty()) {
                 itm["customName"] = it.customName;
             }
@@ -137,6 +141,8 @@ public:
                 if (itmJson.contains("wear")) itm.wear = itmJson["wear"].get<float>();
                 if (itmJson.contains("seed")) itm.seed = itmJson["seed"].get<uint32_t>();
                 if (itmJson.contains("customName")) itm.customName = itmJson["customName"].get<std::string>();
+                if (itmJson.contains("origin")) itm.origin = itmJson["origin"].get<uint32_t>();
+                if (itmJson.contains("inventory")) itm.inventory = itmJson["inventory"].get<uint32_t>();
 
                 if (itm.wear <= 0.0f) itm.wear = 0.001f;
 
@@ -286,6 +292,26 @@ int main() {
     }
     assert(inv2.m_items.size() == 1004);
     std::cout << "  [+] 1000 IDs generated with zero collisions and strict monotonicity!\n";
+
+    // Test Case Unboxing Persistence (P2): origin = 8, inventory = (1 << 30) | 5
+    std::cout << "[*] Testing Case Unboxing Persistence (P2)...\n";
+    EconItem unboxed;
+    unboxed.id = inv2.GenerateNewItemId();
+    unboxed.defIndex = 4669; // Shattered Web weapon drop
+    unboxed.origin = 8;      // ItemOriginCrate
+    unboxed.inventory = (1 << 30) | 5; // UnacknowledgedFoundInCrate
+    inv2.m_items.push_back(unboxed);
+
+    std::string unboxJson = inv2.SaveToJson();
+    TestInventoryManager inv3;
+    inv3.m_accountId = 0x69393642;
+    inv3.LoadFromJson(unboxJson);
+
+    const auto& lastItem = inv3.m_items.back();
+    assert(lastItem.id == unboxed.id);
+    assert(lastItem.origin == 8);
+    assert(lastItem.inventory == ((1 << 30) | 5));
+    std::cout << "  [+] Unboxed item origin 8 and unacknowledged inventory flag (1<<30)|5 persisted perfectly!\n";
 
     std::cout << "\n====================================================\n";
     std::cout << "       ALL INVENTORY & ID TESTS PASSED (100% OK)\n";

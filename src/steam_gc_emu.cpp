@@ -20,6 +20,7 @@
 #include "overlay/refix_overlay.h"
 #include "csgo_item_defs.h"
 #include "csgo_schema.h"
+#include "source_main_thread_queue.h"
 
 namespace refix::overlay {
     void ExecuteEngineClientCommand(const char* cmd);
@@ -172,7 +173,18 @@ struct EconItem {
     float wear = 0.001f;
     uint32_t seed = 0;
     std::string customName;
+    uint32_t origin = 0;
+    uint32_t inventory = 0;
     std::vector<EquippedSlot> equipped;
+};
+
+struct UnlockCrateResult {
+    uint64_t awardedId = 0;
+    uint64_t crateId = 0;
+    uint64_t keyId = 0;
+    bool crateDestroyed = false;
+    bool keyDestroyed = false;
+    EconItem awardedItem;
 };
 
 struct EconCoupon {
@@ -398,9 +410,10 @@ public:
         return m_coupons;
     }
 
-    uint64_t UnlockCrate(uint64_t crateId, uint64_t keyId) {
+    UnlockCrateResult UnlockCrate(uint64_t crateId, uint64_t keyId) {
         EnsureLoaded();
         std::lock_guard<std::mutex> lock(m_mutex);
+        UnlockCrateResult res;
 
         // Find crate by item ID or defIndex
         auto itCrate = std::find_if(m_items.begin(), m_items.end(), [crateId](const EconItem& it) {
@@ -428,9 +441,10 @@ public:
                 if (itCrate != m_items.end()) break;
             }
         }
-        if (itCrate == m_items.end()) return 0;
+        if (itCrate == m_items.end()) return res;
 
         uint32_t crateDef = itCrate->defIndex;
+        res.crateId = itCrate->id;
 
         // If key was not found by exact ID, fallback search
         if (itKey == m_items.end()) {
@@ -449,14 +463,32 @@ public:
                 if (itKey != m_items.end()) break;
             }
         }
+
         if (itKey != m_items.end()) {
-            if (itKey->quantity > 1) itKey->quantity--;
-            else m_items.erase(itKey);
+            res.keyId = itKey->id;
+            if (itKey->quantity > 1) {
+                itKey->quantity--;
+                res.keyDestroyed = false;
+            } else {
+                m_items.erase(itKey);
+                res.keyDestroyed = true;
+            }
         }
 
-        // Consume crate
-        if (itCrate->quantity > 1) itCrate->quantity--;
-        else m_items.erase(itCrate);
+        // Re-find crate iterator if vector reallocation occurred or erased
+        itCrate = std::find_if(m_items.begin(), m_items.end(), [res](const EconItem& it) {
+            return it.id == res.crateId;
+        });
+
+        if (itCrate != m_items.end()) {
+            if (itCrate->quantity > 1) {
+                itCrate->quantity--;
+                res.crateDestroyed = false;
+            } else {
+                m_items.erase(itCrate);
+                res.crateDestroyed = true;
+            }
+        }
 
         // Roll authentic drop from collection
         uint32_t outDef = 0, outPaintKit = 0, outRarity = 0, outQuality = 4;
@@ -473,12 +505,30 @@ public:
         unboxed.paintKit = outPaintKit;
         unboxed.wear = outWear;
         unboxed.seed = outSeed;
+        unboxed.origin = 8; // ItemOriginCrate
+        unboxed.inventory = (1 << 30) | 5; // UnacknowledgedFoundInCrate
         m_items.push_back(unboxed);
 
+        res.awardedId = unboxed.id;
+        res.awardedItem = unboxed;
+
         SaveLocked();
-        ReFixLog("[GC] CSGOInventory: Unlocked crate %u! Awarded item %llu (def %u, pk %u, rarity %u, quality %u)",
-                 crateDef, (unsigned long long)unboxed.id, unboxed.defIndex, unboxed.paintKit, unboxed.rarity, unboxed.quality);
-        return unboxed.id;
+        ReFixLog("[GC] CSGOInventory: Unlocked crate %u! Awarded item %llu (def %u, pk %u, rarity %u, quality %u, origin %u, inv 0x%08X)",
+                 crateDef, (unsigned long long)unboxed.id, unboxed.defIndex, unboxed.paintKit, unboxed.rarity, unboxed.quality, unboxed.origin, unboxed.inventory);
+        return res;
+    }
+
+    bool SetItemPosition(uint64_t itemId, uint32_t newPos) {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = std::find_if(m_items.begin(), m_items.end(), [itemId](const EconItem& i) {
+            return i.id == itemId || (i.id & 0xFFFFFFFFULL) == (itemId & 0xFFFFFFFFULL);
+        });
+        if (it == m_items.end()) return false;
+        it->inventory = newPos;
+        SaveLocked();
+        ReFixLog("[GC] CSGOInventory: Acknowledged item %llu -> inventory position %u", (unsigned long long)it->id, newPos);
+        return true;
     }
 
     uint64_t AddItem(uint32_t defIndex, uint32_t count = 1, uint32_t quality = 4, uint32_t rarity = 0) {
@@ -609,6 +659,8 @@ private:
             itm["paintKit"] = it.paintKit;
             itm["wear"] = it.wear;
             itm["seed"] = it.seed;
+            if (it.origin != 0) itm["origin"] = it.origin;
+            if (it.inventory != 0) itm["inventory"] = it.inventory;
             if (!it.customName.empty()) {
                 itm["customName"] = it.customName;
             }
@@ -669,6 +721,8 @@ private:
                 if (itmJson.contains("wear") && itmJson["wear"].is_number()) itm.wear = itmJson["wear"].get<float>();
                 if (itmJson.contains("seed") && itmJson["seed"].is_number()) itm.seed = itmJson["seed"].get<uint32_t>();
                 if (itmJson.contains("customName") && itmJson["customName"].is_string()) itm.customName = itmJson["customName"].get<std::string>();
+                if (itmJson.contains("origin") && itmJson["origin"].is_number()) itm.origin = itmJson["origin"].get<uint32_t>();
+                if (itmJson.contains("inventory") && itmJson["inventory"].is_number()) itm.inventory = itmJson["inventory"].get<uint32_t>();
 
                 if (itm.wear <= 0.0f) itm.wear = 0.001f;
 
@@ -714,7 +768,8 @@ std::vector<uint8_t> SerializeEconItem(const EconItem& item, uint32_t accountId,
     std::vector<uint8_t> out;
     PutVarintField(out, 1, item.id);
     PutVarintField(out, 2, accountId);
-    PutVarintField(out, 3, pos);
+    uint32_t inv = (item.inventory != 0) ? item.inventory : pos;
+    PutVarintField(out, 3, inv);
     PutVarintField(out, 4, item.defIndex);
     PutVarintField(out, 5, item.quantity);
     PutVarintField(out, 6, 1); // level
@@ -725,7 +780,7 @@ std::vector<uint8_t> SerializeEconItem(const EconItem& item, uint32_t accountId,
     }
     PutVarintField(out, 7, quality);
     PutVarintField(out, 8, 0); // flags
-    PutVarintField(out, 9, 0); // origin
+    PutVarintField(out, 9, item.origin); // origin (e.g. 8 for crate drop)
     if (!item.customName.empty()) {
         PutStringField(out, 10, item.customName);
     }
@@ -1081,6 +1136,57 @@ public:
         } else if (msg == 9201) { // GetEventFavorites_Request
             std::vector<uint8_t> favResp;
             Reply(9203, favResp);
+        } else if (msg == 1077 /* kMsgGCSetItemPositions */) {
+            if (proto && body) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                while (p < end) {
+                    uint64_t tag = 0;
+                    if (!GetVarint(p, end, tag)) break;
+                    uint32_t f = (uint32_t)(tag >> 3);
+                    uint32_t w = tag & 7;
+                    if (f == 1 && w == 2) {
+                        uint64_t len = 0;
+                        if (!GetVarint(p, end, len) || (size_t)(end - p) < len) break;
+                        const uint8_t* subP = p;
+                        const uint8_t* subEnd = p + len;
+                        p += len;
+
+                        uint64_t itemId = 0;
+                        uint32_t newPos = 0;
+                        while (subP < subEnd) {
+                            uint64_t sTag = 0, sVal = 0;
+                            if (!GetVarint(subP, subEnd, sTag)) break;
+                            uint32_t sf = (uint32_t)(sTag >> 3);
+                            uint32_t sw = sTag & 7;
+                            if (sw == 0) {
+                                if (!GetVarint(subP, subEnd, sVal)) break;
+                                if (sf == 1 && itemId == 0) itemId = sVal;
+                                else if (sf == 2) newPos = (uint32_t)sVal;
+                                else if (sf == 3) itemId = sVal;
+                            } else if (sw == 1) { if (subEnd - subP < 8) break; subP += 8; }
+                            else if (sw == 5) { if (subEnd - subP < 4) break; subP += 4; }
+                            else if (sw == 2) {
+                                if (!GetVarint(subP, subEnd, sVal) || (size_t)(subEnd - subP) < sVal) break;
+                                subP += sVal;
+                            }
+                        }
+
+                        if (itemId != 0 && newPos != 0) {
+                            CSGOInventoryManager::Get().SetItemPosition(itemId, newPos);
+                        }
+                    } else if (w == 0) {
+                        uint64_t val = 0;
+                        if (!GetVarint(p, end, val)) break;
+                    } else if (w == 1) { if (end - p < 8) break; p += 8; }
+                    else if (w == 5) { if (end - p < 4) break; p += 4; }
+                    else if (w == 2) {
+                        uint64_t val = 0;
+                        if (!GetVarint(p, end, val) || (size_t)(end - p) < val) break;
+                        p += val;
+                    }
+                }
+            }
         } else if (msg == kMsgGCUnlockCrate) {
             // Unlock container (CS:GO sends non-proto 34-byte struct or proto)
             uint64_t crateId = 0, keyId = 0;
@@ -1111,44 +1217,90 @@ public:
                 }
             }
 
-            uint64_t awardedId = CSGOInventoryManager::Get().UnlockCrate(crateId, keyId);
+            UnlockCrateResult res = CSGOInventoryManager::Get().UnlockCrate(crateId, keyId);
 
-            if (awardedId != 0) {
-                // 1. Dispatch k_ESOMsg_Create (21) CMsgSOSingleObject directly to active SOCache
-                auto allItems = CSGOInventoryManager::Get().GetItems();
-                auto itAwarded = std::find_if(allItems.begin(), allItems.end(), [awardedId](const EconItem& i) {
-                    return i.id == awardedId;
-                });
-                if (itAwarded != allItems.end()) {
-                    uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
-                    uint32_t itemPos = (uint32_t)(std::distance(allItems.begin(), itAwarded) + 1);
-                    std::vector<uint8_t> itBytes = SerializeEconItem(*itAwarded, accountId, itemPos);
+            if (res.awardedId != 0) {
+                uint64_t localSteamId = UnrealSteamEmu::GetLocalSteamID();
+                uint32_t accountId = (uint32_t)(localSteamId & 0xFFFFFFFF);
+                static uint64_t s_soVersion = 200;
 
-                    std::vector<uint8_t> soid;
-                    PutVarintField(soid, 1, kSOTypeSteamId);
-                    PutVarintField(soid, 2, UnrealSteamEmu::GetLocalSteamID());
+                std::vector<uint8_t> soid;
+                PutVarintField(soid, 1, kSOTypeSteamId);
+                PutVarintField(soid, 2, localSteamId);
 
-                    static uint64_t s_soVersion = 100;
-                    std::vector<uint8_t> soSingle;
-                    PutVarintField(soSingle, 2, 1); // type_id = 1 (CSOEconItem)
-                    PutBytesField(soSingle, 3, itBytes);
-                    PutFixed64Field(soSingle, 4, ++s_soVersion);
-                    PutBytesField(soSingle, 5, soid);
-                    Reply(21 /* k_ESOMsg_Create */, soSingle);
+                // Step 1: Destroy (or Update) Crate
+                if (res.crateId != 0) {
+                    if (res.crateDestroyed) {
+                        std::vector<uint8_t> crateProto;
+                        PutVarintField(crateProto, 1, res.crateId);
+                        std::vector<uint8_t> soDestroyCrate;
+                        PutVarintField(soDestroyCrate, 2, 1); // type_id = 1 (CSOEconItem)
+                        PutBytesField(soDestroyCrate, 3, crateProto);
+                        PutFixed64Field(soDestroyCrate, 4, ++s_soVersion);
+                        PutBytesField(soDestroyCrate, 5, soid);
+                        Reply(23 /* k_ESOMsg_Destroy */, soDestroyCrate);
+                    } else {
+                        auto allItems = CSGOInventoryManager::Get().GetItems();
+                        auto itC = std::find_if(allItems.begin(), allItems.end(), [&](const EconItem& i) { return i.id == res.crateId; });
+                        if (itC != allItems.end()) {
+                            std::vector<uint8_t> itBytes = SerializeEconItem(*itC, accountId, 1);
+                            std::vector<uint8_t> soUpdateCrate;
+                            PutVarintField(soUpdateCrate, 2, 1);
+                            PutBytesField(soUpdateCrate, 3, itBytes);
+                            PutFixed64Field(soUpdateCrate, 4, ++s_soVersion);
+                            PutBytesField(soUpdateCrate, 5, soid);
+                            Reply(22 /* k_ESOMsg_Update */, soUpdateCrate);
+                        }
+                    }
                 }
 
-                // 3. Dispatch UnlockCrateResponse (1008)
-                std::vector<uint8_t> unlockResp;
-                PutVarintField(unlockResp, 1, 1); // 1 = k_EResultOK
-                PutVarintField(unlockResp, 2, awardedId);
-                Reply(kMsgGCUnlockCrateResponse, unlockResp);
+                // Step 2: Destroy (or Update) Key
+                if (res.keyId != 0 && res.keyId != res.crateId) {
+                    if (res.keyDestroyed) {
+                        std::vector<uint8_t> keyProto;
+                        PutVarintField(keyProto, 1, res.keyId);
+                        std::vector<uint8_t> soDestroyKey;
+                        PutVarintField(soDestroyKey, 2, 1); // type_id = 1
+                        PutBytesField(soDestroyKey, 3, keyProto);
+                        PutFixed64Field(soDestroyKey, 4, ++s_soVersion);
+                        PutBytesField(soDestroyKey, 5, soid);
+                        Reply(23 /* k_ESOMsg_Destroy */, soDestroyKey);
+                    } else {
+                        auto allItems = CSGOInventoryManager::Get().GetItems();
+                        auto itK = std::find_if(allItems.begin(), allItems.end(), [&](const EconItem& i) { return i.id == res.keyId; });
+                        if (itK != allItems.end()) {
+                            std::vector<uint8_t> itBytes = SerializeEconItem(*itK, accountId, 1);
+                            std::vector<uint8_t> soUpdateKey;
+                            PutVarintField(soUpdateKey, 2, 1);
+                            PutBytesField(soUpdateKey, 3, itBytes);
+                            PutFixed64Field(soUpdateKey, 4, ++s_soVersion);
+                            PutBytesField(soUpdateKey, 5, soid);
+                            Reply(22 /* k_ESOMsg_Update */, soUpdateKey);
+                        }
+                    }
+                }
 
-                // 4. Dispatch CMsgGCItemCustomizationNotification (EMsg 1090)
+                // Step 3: Create Awarded Item (k_ESOMsg_Create = 21)
+                std::vector<uint8_t> itBytes = SerializeEconItem(res.awardedItem, accountId, 1);
+                std::vector<uint8_t> soSingle;
+                PutVarintField(soSingle, 2, 1); // type_id = 1 (CSOEconItem)
+                PutBytesField(soSingle, 3, itBytes);
+                PutFixed64Field(soSingle, 4, ++s_soVersion);
+                PutBytesField(soSingle, 5, soid);
+                Reply(21 /* k_ESOMsg_Create */, soSingle);
+
+                // Step 4: Customization Notification (1090)
                 std::vector<uint8_t> notif;
-                PutVarintField(notif, 1, awardedId);
+                PutVarintField(notif, 1, res.awardedId);
                 PutVarintField(notif, 2, 1007 /* k_EGCItemCustomizationNotification_UnlockCrate */);
                 Reply(1090, notif);
-                refix::overlay::ExecuteEngineClientCommand("econ_clear_inventory_images");
+
+                // Step 5: Unlock Crate Response (1008) -> empty CMsgRequestInventoryRefresh
+                std::vector<uint8_t> unlockResp;
+                Reply(kMsgGCUnlockCrateResponse, unlockResp);
+
+                // Step 6: Thread-safe engine call (Rule R5)
+                refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
             }
         } else if (msg == kMsgGCStorePurchaseInit || msg == kMsgGCStorePurchaseInitAlt) {
             // Purchase keys or items -> Intercept with ReFix Overlay Purchase Listener!
@@ -1449,7 +1601,7 @@ extern "C" __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, u
             if (gc) {
                 gc->Reply(21 /* k_ESOMsg_Create */, soSingle);
             }
-            refix::overlay::ExecuteEngineClientCommand("econ_clear_inventory_images");
+            refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
         }
     }
 }

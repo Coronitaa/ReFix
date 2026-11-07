@@ -44,6 +44,7 @@
 #endif
 #include "refix_il2cpp.h"
 #endif
+#include "source_main_thread_queue.h"
 
 static bool EnsureOriginal();
 
@@ -5637,6 +5638,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (s_runCallbacksLogged++ < 3) {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
+    refix::source::MainThreadQueue::Drain();
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     if (provider) {
         provider->RunCallbacks();

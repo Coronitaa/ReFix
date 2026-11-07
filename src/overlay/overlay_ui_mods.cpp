@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include "../source_main_thread_queue.h"
 
 extern "C" void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed);
 
@@ -30,20 +31,7 @@ namespace refix::overlay {
 
 void ExecuteEngineClientCommand(const char* cmd) {
     if (!cmd || !*cmd) return;
-    HMODULE hEngine = GetModuleHandleA("engine.dll");
-    if (!hEngine) return;
-    typedef void* (*CreateInterfaceFn)(const char* pName, int* pReturnCode);
-    auto factory = (CreateInterfaceFn)GetProcAddress(hEngine, "CreateInterface");
-    if (!factory) return;
-    void* engineClient = factory("VEngineClient014", nullptr);
-    if (!engineClient) return;
-
-    typedef void(__thiscall* ExecuteClientCmdFn)(void*, const char*);
-    void** vtable = *(void***)engineClient;
-    if (vtable && vtable[108]) {
-        auto fn = (ExecuteClientCmdFn)vtable[108];
-        fn(engineClient, cmd);
-    }
+    refix::source::MainThreadQueue::ExecuteClientCmd(cmd);
 }
 
 static bool s_showCustomSettings = false;
