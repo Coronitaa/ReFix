@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.2.0" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.3.0" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -74,7 +74,7 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.2.0 - LAN / Online
+ReFix 2.3.0 - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.
@@ -93,7 +93,8 @@ ReFix LAN
 - Players on the same network find each other automatically.
 
 - In-game overlay (AutoDeploy asks, [Overlay] in ReFix.ini): the ReFix overlay (Shift+Tab, or the
-  Xbox / PS button of a controller), Steam's own overlay, or none. Overlay sounds: [Overlay] Sounds.
+  Xbox / PS button of a controller), Steam's own overlay, or none. The gear in the overlay opens its settings
+  (notifications, sounds, language, NVIDIA Reflex).
 - Debug logging is off ([Debug] EnableLog = false); turn it on only to report a problem.
 
 Game mods: when refix_mods\catalog.tsv has a mod for the game, AutoDeploy installs it into the

@@ -89,35 +89,41 @@ ImU32 Alpha(ImU32 c, float a) {
     return (c & ~IM_COL32_A_MASK) | ((ImU32)alpha << IM_COL32_A_SHIFT);
 }
 
+ImU32 Darken(ImU32 c, float k) {
+    const int r = (int)(((c >> IM_COL32_R_SHIFT) & 0xFF) * k), g = (int)(((c >> IM_COL32_G_SHIFT) & 0xFF) * k),
+              b = (int)(((c >> IM_COL32_B_SHIFT) & 0xFF) * k);
+    return IM_COL32(r, g, b, (c >> IM_COL32_A_SHIFT) & 0xFF);
+}
+
+// Buttons are drawn by hand so every state reads clearly: hover lifts the fill, pressing darkens it and
+// nudges the label down a pixel, and disabled gets its own flat surface with readable grey text instead of
+// ImGui's half-transparent fade (which made labels hard to read over a game). The keyboard/controller
+// focus ring is ImGui's nav cursor (accent). Labels are always centred and shortened with "…" when needed.
 bool StyledButton(const char* label, ImVec2 size, bool enabled, ImU32 fill, ImU32 hover, ImU32 ink, ImU32 border) {
-    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::ColorConvertU32ToFloat4(fill));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::ColorConvertU32ToFloat4(hover));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::ColorConvertU32ToFloat4(hover));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(ink));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImGui::ColorConvertU32ToFloat4(border));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, border ? 1.0f : 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(18), S(10)));
     ImGui::PushFont(F().strong);
-    ImGui::BeginDisabled(!enabled);
-    // ImGui centres a label only while it fits and otherwise left-aligns and cuts it: draw the frame with an
-    // invisible label and put the text on top ourselves, always centred and shortened with "…" when needed.
     const char* labelEnd = strstr(label, "##");
     std::string text(label, labelEnd ? (size_t)(labelEnd - label) : strlen(label));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
-    const bool clicked = ImGui::Button(label, size);
-    ImGui::PopStyleColor();
+    const ImVec2 natural = ImGui::CalcTextSize(text.c_str());
+    const ImVec2 sz(size.x > 0 ? size.x : natural.x + S(36), size.y > 0 ? size.y : natural.y + S(20));
+    const bool pressed = ImGui::InvisibleButton(label, sz, ImGuiButtonFlags_EnableNav) && enabled;
+    const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+    const bool held = enabled && ImGui::IsItemActive();
+    if (enabled && hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-    const float maxW = (std::max)(0.0f, mx.x - mn.x - S(12));
-    if (ImGui::CalcTextSize(text.c_str()).x > maxW) text = Ellipsize(text, maxW);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = S(10);
+    const ImU32 bg = !enabled ? IM_COL32(30, 35, 44, 255) : held ? Darken(hover, 0.82f) : hovered ? hover : fill;
+    dl->AddRectFilled(mn, mx, bg, r);
+    if (!enabled) dl->AddRect(mn, mx, IM_COL32(255, 255, 255, 14), r);
+    else if (border) dl->AddRect(mn, mx, hovered ? Alpha(color::Text, 0.22f) : border, r);
+    const float maxW = (std::max)(0.0f, mx.x - mn.x - S(16));
+    if (natural.x > maxW) text = Ellipsize(text, maxW);
     const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
-    const float alpha = enabled ? 1.0f : ImGui::GetStyle().DisabledAlpha;
-    ImGui::GetWindowDrawList()->AddText(ImVec2(std::round((mn.x + mx.x - ts.x) * 0.5f), std::round((mn.y + mx.y - ts.y) * 0.5f)),
-                                        Fade(ink, alpha), text.c_str());
-    ImGui::EndDisabled();
+    const float nudge = held ? 1.0f : 0.0f;
+    dl->AddText(ImVec2(std::round((mn.x + mx.x - ts.x) * 0.5f), std::round((mn.y + mx.y - ts.y) * 0.5f + nudge)),
+                enabled ? ink : color::Muted, text.c_str());
     ImGui::PopFont();
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor(5);
-    return Clicked(clicked && enabled);
+    return Clicked(pressed);
 }
 
 } // namespace
@@ -136,7 +142,7 @@ void BuildFonts(float scale) {
     if (!Exists(icons)) icons = FontPath("segmdl2.ttf");
     if (!Exists(icons)) icons.clear();
     g_fonts.body = AddFont(regular, icons, 16.0f * scale, 16.0f * scale);
-    g_fonts.caption = AddFont(regular, icons, 14.5f * scale, 14.0f * scale);
+    g_fonts.caption = AddFont(regular, icons, 15.0f * scale, 14.5f * scale);
     g_fonts.strong = AddFont(semibold, icons, 16.0f * scale, 16.0f * scale);
     g_fonts.heading = AddFont(semibold, icons, 20.0f * scale, 19.0f * scale);
     g_fonts.title = AddFont(semibold, icons, 28.0f * scale, 26.0f * scale);

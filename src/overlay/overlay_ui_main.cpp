@@ -20,13 +20,13 @@ namespace refix::overlay {
 namespace {
 
 constexpr ULONGLONG kToastFadeInMs = 200;
-constexpr ULONGLONG kInviteSentMs = 8000;
 constexpr float kMargin = 32.0f;
 constexpr float kTopBarHeight = 56.0f;
 constexpr float kRowHeight = 60.0f;
 constexpr float kRowGap = 6.0f;
 constexpr float kIconButton = 34.0f;
 constexpr float kTileHeight = 72.0f;
+constexpr float kAchievementsCardMin = 196.0f;   // header, progress and one recent row
 
 std::string Lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
@@ -42,8 +42,10 @@ bool Matches(const net::RemotePlayer& p, const char* filter) {
 // Real AppID with a public Steam page (0 = unknown, 480 = Spacewar, the emulator's fallback).
 bool HasStorePage(uint32_t appId) { return appId != 0 && appId != 480; }
 
-std::string StatusLine(const PlayerRow& r, uint64_t localLobby) {
+std::string StatusLine(const PlayerRow& r, uint64_t localLobby, InviteState invite) {
     char buf[128];
+    if (invite == InviteState::Fresh || invite == InviteState::Pending)
+        return i18n::T("Invited · waiting for them to join", "Invitado · esperando a que se una");
     if (!r.sameGame) return r.p.game.empty() ? i18n::T("In another game", "En otro juego") : r.p.game;
     if (!r.p.lobbyId) return i18n::T("In this game", "En este juego");
     if (r.p.lobbyId == localLobby) return i18n::T("In your lobby", "En tu sala");
@@ -106,11 +108,20 @@ void App::DrawOverlay(ImVec2 viewport) {
             DrawCommunity(ImVec2(m, leftY), leftW);
             leftY += ui::S(56 + 2 * kTileHeight + 10 + 40) + ui::S(20);
         }
+        // Left column, top to bottom: community, the game's mod card, achievements. The mod card yields room
+        // so the achievements stay visible (it scrolls); games without achievements show no card for them.
+        const bool hasAchievements = !achievements_.empty();
+        const float gap = ui::S(20);
+        const float achMin = hasAchievements ? ui::S(kAchievementsCardMin) : 0.0f;
         const float actH = GetModsCardHeight(leftW);  // 0 when the game has no card
         const float roomH = top + height - leftY;
         if (actH > 0.0f && roomH >= ui::S(120)) {
-            DrawModsCard(ImVec2(m, leftY), leftW, (std::min)(actH, roomH));  // scrolls rather than vanishing
+            const float modsH = (std::min)(roomH, (std::min)(actH, (std::max)(ui::S(160), roomH - (achMin > 0 ? achMin + gap : 0.0f))));
+            DrawModsCard(ImVec2(m, leftY), leftW, modsH);
+            leftY += modsH + gap;
         }
+        const float achH = top + height - leftY;
+        if (hasAchievements && achH >= ui::S(150)) DrawAchievementsCard(ImVec2(m, leftY), ImVec2(leftW, achH));
         const float px = m + leftW + ui::S(20);
         DrawPlayers(ImVec2(px, top), ImVec2(viewport.x - px - m, height), false);
     }
@@ -121,6 +132,8 @@ void App::DrawOverlay(ImVec2 viewport) {
     DrawEditorModal();
     DrawPurchaseModal(viewport);
     if (!inviteOnly_) DrawWebModal(viewport);
+    if (!inviteOnly_) DrawAchievementsModal(viewport);
+    if (!inviteOnly_) DrawSettingsModal(viewport);
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
     DrawToasts(viewport, false);
@@ -148,6 +161,9 @@ void App::DrawTopBar(ImVec2 viewport) {
     float x = viewport.x - m - ui::S(kIconButton) - ui::S(10);
     ImGui::SetCursorScreenPos(ImVec2(x, cy - ui::S(kIconButton) * 0.5f));
     if (ui::IconButton("close", ui::icon::Close, i18n::T("Close (Shift+Tab)", "Cerrar (Shift+Tab)"), ui::color::Text)) CloseOverlay();
+    x -= ui::S(kIconButton) + ui::S(8);
+    ImGui::SetCursorScreenPos(ImVec2(x, cy - ui::S(kIconButton) * 0.5f));
+    if (ui::IconButton("settings", ui::icon::Settings, i18n::T("Settings", "Ajustes"), ui::color::Text)) settingsRequested_ = true;
 
     const std::string name = ui::Ellipsize(LocalName(), ui::S(180));
     ImGui::PushFont(f.strong);
@@ -357,21 +373,37 @@ void App::DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle) {
     dl->AddCircleFilled(ImVec2(ac.x + r * 0.72f, ac.y + r * 0.72f), ui::S(4.5f), dot, 16);
 
     // Actions, right to left.
-    const ULONGLONG now = GetTickCount64();
-    auto inv = invitedAt_.find(p.steamId);
-    const bool invited = inv != invitedAt_.end() && now - inv->second < kInviteSentMs;
-    const bool alreadyWithMe = localLobby_ != 0 && p.lobbyId == localLobby_;
-    const bool canInvite = pickerStyle ? true : (!alreadyWithMe && (localLobby_ != 0 || !localConnect_.empty()));
+    const InviteState invite = InviteStateFor(row);
     float x = p1.x - ui::S(12);
     const float by = p0.y + (h - d) * 0.5f;
     if (pickerStyle) {
-        const ImVec2 bs(ui::S(112), ui::S(38));
+        const ImVec2 bs(ui::S(132), ui::S(38));
         x -= bs.x;
         ImGui::SetCursorScreenPos(ImVec2(x, p0.y + (h - bs.y) * 0.5f));
-        if (invited) {
-            ui::SecondaryButton(i18n::T("Sent", "Enviada"), bs, false);
-        } else if (ui::PrimaryButton(i18n::T("Invite", "Invitar"), bs)) {
-            Invite(p);
+        // Settled states are a plain status, not a dead button: nothing to press there.
+        auto status = [&](const char* text, ImU32 col) {
+            const std::string label = std::string(ui::icon::Check) + "  " + text;
+            const float lw = f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, 0, label.c_str()).x;
+            TextAt(dl, f.strong, ImVec2(x + bs.x - lw - ui::S(6), p0.y + (h - f.strong->FontSize) * 0.5f - ui::S(1)), col, label);
+        };
+        switch (invite) {
+        case InviteState::InLobby:
+            status(i18n::T("In the lobby", "En la sala"), ui::color::Accent);
+            break;
+        case InviteState::Fresh:
+            status(i18n::T("Sent", "Enviada"), ui::color::Invite);
+            break;
+        case InviteState::Pending:
+            if (ui::SecondaryButton(i18n::T("Invite again", "Reenviar"), bs)) Invite(p);
+            ui::Tooltip(i18n::T("Invited, not here yet", "Invitado, todavía no se unió"));
+            break;
+        case InviteState::NoLobby:
+            ui::PrimaryButton(i18n::T("Invite", "Invitar"), bs, false);
+            ui::Tooltip(i18n::T("Create or join a lobby first", "Primero crea o únete a una sala"));
+            break;
+        case InviteState::Ready:
+            if (ui::PrimaryButton(i18n::T("Invite", "Invitar"), bs)) Invite(p);
+            break;
         }
     } else {
         x -= d;
@@ -381,14 +413,27 @@ void App::DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle) {
                                         : i18n::T("Add to favourites", "Añadir a favoritos"),
                            row.favorite ? ui::color::Star : ui::color::Muted))
             ToggleFavorite(p);
-        if (canInvite) {
-            x -= d + ui::S(6);
-            ImGui::SetCursorScreenPos(ImVec2(x, by));
-            if (invited) {
-                ui::IconButton("inv", ui::icon::Check, i18n::T("Invite sent", "Invitación enviada"), ui::color::Accent, false);
-            } else if (ui::IconButton("inv", ui::icon::Invite, i18n::T("Invite to my lobby", "Invitar a mi sala"), ui::color::Invite)) {
+        x -= d + ui::S(6);
+        ImGui::SetCursorScreenPos(ImVec2(x, by));
+        switch (invite) {
+        case InviteState::InLobby:
+            ui::IconButton("inv", ui::icon::Check, i18n::T("Already in your lobby", "Ya está en tu sala"), ui::color::Accent, false);
+            break;
+        case InviteState::Fresh:
+            ui::IconButton("inv", ui::icon::Check, i18n::T("Invite sent", "Invitación enviada"), ui::color::Accent, false);
+            break;
+        case InviteState::Pending:
+            if (ui::IconButton("inv", ui::icon::Refresh, i18n::T("Invited, not here yet: invite again", "Invitado, todavía no se unió: reenviar"),
+                               ui::color::Invite))
                 Invite(p);
-            }
+            break;
+        case InviteState::NoLobby:
+            ui::IconButton("inv", ui::icon::Invite, i18n::T("Create or join a lobby to invite", "Crea o únete a una sala para invitar"),
+                           ui::color::Invite, false);
+            break;
+        case InviteState::Ready:
+            if (ui::IconButton("inv", ui::icon::Invite, i18n::T("Invite to my lobby", "Invitar a mi sala"), ui::color::Invite)) Invite(p);
+            break;
         }
         if (CanJoin(row, localLobby_)) {
             x -= d + ui::S(6);
@@ -403,13 +448,14 @@ void App::DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle) {
     const std::string name = ui::Ellipsize(p.name, tw);
     ImGui::PopFont();
     ImGui::PushFont(f.caption);
-    const std::string status = ui::Ellipsize(StatusLine(row, localLobby_), tw);
+    const std::string status = ui::Ellipsize(StatusLine(row, localLobby_, invite), tw);
     ImGui::PopFont();
     const float textH = f.strong->FontSize + ui::S(2) + f.caption->FontSize;
     const float ty = p0.y + (h - textH) * 0.5f - ui::S(1);
     TextAt(dl, f.strong, ImVec2(tx, ty), ui::color::Text, name);
-    TextAt(dl, f.caption, ImVec2(tx, ty + f.strong->FontSize + ui::S(2)), row.sameGame ? ui::color::InGame : ui::color::Muted,
-           status);
+    const bool waiting = invite == InviteState::Fresh || invite == InviteState::Pending;
+    TextAt(dl, f.caption, ImVec2(tx, ty + f.strong->FontSize + ui::S(2)),
+           waiting ? ui::color::Invite : row.sameGame ? ui::color::InGame : ui::color::Muted, status);
 
     ImGui::PopID();
     ImGui::SetCursorScreenPos(p0);
@@ -457,7 +503,7 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
     for (auto it = toasts_.rbegin(); it != toasts_.rend(); ++it, ++index) {
         Toast& t = *it;
         const bool invite = t.kind == Toast::Kind::Invite;
-        const float h = ToastHeight(invite);
+        const float h = ToastHeight(t.kind);
         float a = std::min(1.0f, (float)(now - t.born) / kToastFadeInMs);
         if (t.closing) a = std::min(a, 1.0f - std::min(1.0f, (float)(now - t.closingAt) / kToastFadeMs));
         const float slide = (1.0f - a) * ui::S(28);
@@ -467,9 +513,10 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
         ImGui::PushID(index);
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, a);
 
-        ui::Card(dl, p0, p1, ui::Fade(ui::color::PanelRaised, a), 14.0f);
-        dl->AddRectFilled(ImVec2(p0.x, p0.y + ui::S(14)), ImVec2(p0.x + ui::S(3), p1.y - ui::S(14)),
-                          ui::Fade(invite ? ui::color::Invite : ui::color::Accent, a), ui::S(2));
+        if (t.kind != Toast::Kind::Achievement) ui::Card(dl, p0, p1, ui::Fade(ui::color::PanelRaised, a), 14.0f);   // draws its own
+        if (t.kind != Toast::Kind::Achievement)
+            dl->AddRectFilled(ImVec2(p0.x, p0.y + ui::S(14)), ImVec2(p0.x + ui::S(3), p1.y - ui::S(14)),
+                              ui::Fade(invite ? ui::color::Invite : ui::color::Accent, a), ui::S(2));
         const float r = ui::S(22);
         const ImVec2 ac(p0.x + ui::S(18) + r, p0.y + (invite ? ui::S(18) + r : h * 0.5f));
         const float tx = ac.x + r + ui::S(14);
@@ -481,7 +528,9 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             dl->AddText(font, font->FontSize, ImVec2(tx, y), ui::Fade(col, a), s.c_str());
         };
 
-        if (t.kind == Toast::Kind::Welcome) {
+        if (t.kind == Toast::Kind::Achievement) {
+            DrawAchievementToast(dl, t, p0, p1, a);
+        } else if (t.kind == Toast::Kind::Welcome) {
             ui::DrawAvatar(dl, ac, r, active_ ? ProfileAvatar(*active_) : ui::AvatarRef{});
             const float y = ac.y - (f.strong->FontSize + ui::S(26)) * 0.5f;
             line(f.strong, y, ui::color::Text, LocalName());
@@ -508,7 +557,9 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             ImGui::SetCursorScreenPos(ImVec2(p1.x - ui::S(16) - bs.x * 2 - ui::S(8), p1.y - ui::S(14) - bs.y));
             if (ui::SecondaryButton(i18n::T("Ignore", "Ignorar"), bs) && !t.closing) { t.closing = true; t.closingAt = now; }
             ImGui::SameLine(0, ui::S(8));
-            if (ui::PrimaryButton(i18n::T("Join", "Unirse"), bs) && !t.closing) {
+            if (t.invite.lobbyId && t.invite.lobbyId == localLobby_) {
+                ui::PrimaryButton(i18n::T("In the lobby", "Ya en la sala"), bs, false);
+            } else if (ui::PrimaryButton(i18n::T("Join", "Unirse"), bs) && !t.closing) {
                 t.closing = true;
                 t.closingAt = now;
                 AcceptInvite(t.invite);

@@ -42,6 +42,10 @@ constexpr const char* Lock = "\xEE\x9C\xAE";         // E72E
 constexpr const char* Language = "\xEE\x9D\xBD";     // E775 globe/keyboard
 constexpr const char* Refresh = "\xEE\x9C\xAC";      // E72C
 constexpr const char* OpenExternal = "\xEE\xA2\xA7"; // E8A7 open in new window
+constexpr const char* Settings = "\xEE\x9C\x93";     // E713 gear
+constexpr const char* Bell = "\xEE\xAA\x8F";         // EA8F ringer
+constexpr const char* Volume = "\xEE\x9D\xA7";       // E767
+constexpr const char* Speed = "\xEE\xB1\x8A";        // EC4A speed high
 } // namespace icon
 
 namespace color {
@@ -67,7 +71,7 @@ constexpr ImU32 InGame = IM_COL32(90, 169, 255, 255);
 
 struct Fonts {
     ImFont* body = nullptr;      // 16 px
-    ImFont* caption = nullptr;   // 14.5 px
+    ImFont* caption = nullptr;   // 15 px
     ImFont* strong = nullptr;    // 16 px semibold
     ImFont* heading = nullptr;   // 20 px semibold
     ImFont* title = nullptr;     // 28 px semibold

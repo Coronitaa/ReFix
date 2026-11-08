@@ -1,6 +1,7 @@
 // State and screens of the ReFix LAN overlay. Everything here runs on the host thread except Post()
 // and the dialog wait, which the game threads use.
 #pragma once
+#include "achievements.h"
 #include "overlay_host.h"
 #include "overlay_theme.h"
 #include "presence_net.h"
@@ -18,9 +19,8 @@
 namespace refix::overlay {
 
 constexpr ULONGLONG kToastFadeMs = 260;
-constexpr float kToastWidth = 360.0f;
+constexpr float kToastWidth = 380.0f;
 constexpr float kToastGap = 10.0f;
-inline float ToastHeight(bool invite) { return ui::S(invite ? 128.0f : 84.0f); }
 
 // Temporary avatar of the profile editor and the serial that refreshes its preview (overlay_ui_profile.cpp).
 std::wstring EditorTempAvatarPath();
@@ -49,14 +49,35 @@ struct EditorState {
 };
 
 struct Toast {
-    enum class Kind { Welcome, Invite, Info } kind = Kind::Info;
+    enum class Kind { Welcome, Invite, Info, Achievement } kind = Kind::Info;
     std::string title;
     std::string body;
     net::Invite invite;
+    ach::Event achievement;          // Kind::Achievement: unlocked, or a progress update
     ULONGLONG born = 0;
     ULONGLONG life = 0;
     bool closing = false;
     ULONGLONG closingAt = 0;
+};
+
+inline float ToastHeight(Toast::Kind kind) {
+    return ui::S(kind == Toast::Kind::Invite ? 128.0f : kind == Toast::Kind::Achievement ? 92.0f : 84.0f);
+}
+
+// Invitation sent to a player: to which lobby (or connect string) and when.
+struct SentInvite {
+    ULONGLONG at = 0;
+    uint64_t lobby = 0;
+    std::string connect;
+};
+
+// What the invite button of a player shows.
+enum class InviteState {
+    Ready,      // can be invited
+    Fresh,      // invited a moment ago: "Sent"
+    Pending,    // invited, not here yet: can be invited again
+    InLobby,    // already in the lobby the invite would be for
+    NoLobby,    // nothing to invite to (no lobby, no connect string)
 };
 
 struct PlayerRow {
@@ -113,7 +134,7 @@ public:
     std::vector<Profile> profiles_;      // the profiles of this game
     std::vector<Profile> allProfiles_;   // every profile on the PC (unique SteamIDs, import from another game)
     std::vector<PlayerRow> rows_;
-    std::map<uint64_t, ULONGLONG> invitedAt_;
+    std::map<uint64_t, SentInvite> invitedAt_;
     uint64_t localLobby_ = 0;
     std::string localConnect_;
     std::wstring gameTitle_;
@@ -148,6 +169,17 @@ public:
     ui::AvatarRef EditorAvatar();
     std::string LocalName() const;
     const net::RemotePlayer* FindPlayer(uint64_t steamId) const;
+    InviteState InviteStateFor(const PlayerRow& row) const;
+
+    // Achievements of this game and profile (overlay_ui_achievements.cpp).
+    std::vector<ach::Entry> achievements_;
+    uint64_t achVersion_ = 0;
+    bool achModalOpen_ = false;
+    bool achModalRequested_ = false;
+    bool settingsOpen_ = false;
+    bool settingsRequested_ = false;
+    ULONGLONG settingsOpenedAt_ = 0;
+    ULONGLONG achModalOpenedAt_ = 0;
 
 private:
     App() = default;
@@ -166,6 +198,12 @@ private:
     void DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle);
     void DrawInvitePicker(ImVec2 viewport);
     void DrawToasts(ImVec2 viewport, bool ownWindow);
+    void PollAchievements();
+    void DrawAchievementsCard(ImVec2 pos, ImVec2 size);
+    void DrawAchievementsModal(ImVec2 viewport);
+    void DrawSettingsModal(ImVec2 viewport);   // overlay_ui_settings.cpp
+    void DrawAchievementToast(ImDrawList* dl, const Toast& t, ImVec2 p0, ImVec2 p1, float alpha);
+    ImTextureID AchievementIcon(const ach::Entry& e);
     void DrawProfileMenu();
     void DrawSwitchConfirm();
     void DrawDeleteConfirm();
@@ -195,6 +233,7 @@ private:
     std::optional<Profile> dialogResult_;
     std::deque<Toast> toasts_;
     bool welcomed_ = false;
+    ULONGLONG lastToastTick_ = 0;    // last frame, to pause notification timers while they cannot be seen
     ULONGLONG lastRefresh_ = 0;
     uint32_t avatarKey_ = 0;
     std::wstring avatarKeyFor_;

@@ -11,6 +11,7 @@
 #include "save_swap.h"
 #include "steam_overlay_block.h"
 #include "nvidia_reflex_block.h"
+#include "overlay_settings.h"
 #include "avatar_image.h"
 #include "presence_net.h"
 #include "../unreal_steam_emu.h"
@@ -92,7 +93,8 @@ void LoadConfig(const std::string& iniPath) {
     g_cfg.isolateSaves = read("IsolateSaves", true);
     g_cfg.sounds = read("Sounds", true);
     g_cfg.firstRunDialog = read("FirstRunDialog", false);
-    g_cfg.blockNvidiaReflex = read("BlockNvidiaReflex", true);
+    // The player's choice in the overlay settings (profiles.ini) wins over the game folder's ReFix.ini.
+    g_cfg.blockNvidiaReflex = settings::BlockReflexEarly(read("BlockNvidiaReflex", true));
     sound::SetEnabled(g_cfg.sounds);
 }
 
@@ -313,7 +315,10 @@ std::wstring InventoryFolder(uint32_t appId) {
 void Start() {
     if (g_started.exchange(true)) return;
     LoadConfig(FindIni());
-    if (g_cfg.blockNvidiaReflex) ArmNvidiaReflexBlock();
+    if (g_cfg.blockNvidiaReflex) {
+        ArmNvidiaReflexBlock();
+        PollNvidiaReflexHooks();   // outside DllMain: hook NVAPI now if the game already loaded it
+    }
     if (!Allowed()) return;
     std::optional<Profile> active;
     {

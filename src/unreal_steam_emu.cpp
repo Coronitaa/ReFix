@@ -75,6 +75,7 @@
 #include "include/steam/isteamapps.h"
 #include "include/steam/isteamuser.h"
 #include "overlay/refix_overlay.h"
+#include "overlay/achievements.h"
 #include "overlay/presence_net.h"
 #include "refix_mono.h"
 #include "generated/steam_emu_latest.h"
@@ -5260,159 +5261,32 @@ namespace UnrealSteamEmu {
             }();
             if (on) ReFixLog("[UserStats] %s(%s)", method, name ? name : "");
         }
-        std::map<std::string, int32_t> m_intStats;
-        std::map<std::string, float> m_floatStats;
-        std::map<std::string, uint32_t> m_achievements;
-        bool m_loaded = false;
-        bool m_dirty = false;
-        std::wstring m_lastStatsPath;
-        std::recursive_mutex m_statsMutex;
-
-        std::wstring StatsFilePath() const {
-            const std::wstring folder = ReFixOverlay::StatsFolder(g_appID);
-            if (folder.empty()) return L"";
-            return folder + L"\\stats.ini";
+        // Stats and achievements live in overlay/achievements.cpp (stats.ini of the profile's StatsFolder), with
+        // the Steam schema (names, descriptions, rarity) the overlay also shows.
+        // Strings handed to the game must outlive the call: interned here, never freed.
+        std::mutex m_strMu;
+        std::set<std::string> m_strings;
+        const char* Intern(const std::string& v) {
+            std::lock_guard<std::mutex> lock(m_strMu);
+            return m_strings.insert(v).first->c_str();
         }
-
-        void EnsureLoaded() {
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            const std::wstring path = StatsFilePath();
-            if (path.empty()) return;
-            if (m_loaded && path == m_lastStatsPath) return;
-            if (m_loaded && m_dirty) {
-                SaveStatsToDiskInternal();
-            }
-            LoadStatsFromDiskInternal();
-        }
-
-        void LoadStatsFromDiskInternal() {
-            m_intStats.clear();
-            m_floatStats.clear();
-            m_achievements.clear();
-            m_dirty = false;
-            m_loaded = true;
-
-            const std::wstring path = StatsFilePath();
-            m_lastStatsPath = path;
-            if (path.empty()) return;
-
-            FILE* f = nullptr;
-            if (_wfopen_s(&f, path.c_str(), L"r") != 0 || !f) {
-                return;
-            }
-
-            enum Section { None, IntStats, FloatStats, Achievements };
-            Section sec = None;
-            char lineBuf[512];
-            while (fgets(lineBuf, sizeof(lineBuf), f)) {
-                std::string line = lineBuf;
-                while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ' || line.back() == '\t')) {
-                    line.pop_back();
-                }
-                size_t start = line.find_first_not_of(" \t");
-                if (start == std::string::npos) continue;
-                if (line[start] == ';' || line[start] == '#') continue;
-
-                if (line[start] == '[') {
-                    size_t end = line.find(']', start);
-                    if (end != std::string::npos) {
-                        std::string s = line.substr(start + 1, end - start - 1);
-                        if (s == "IntStats") sec = IntStats;
-                        else if (s == "FloatStats") sec = FloatStats;
-                        else if (s == "Achievements") sec = Achievements;
-                        else sec = None;
-                    }
-                    continue;
-                }
-
-                size_t eq = line.find('=', start);
-                if (eq != std::string::npos) {
-                    std::string key = line.substr(start, eq - start);
-                    std::string val = line.substr(eq + 1);
-                    while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
-                    size_t vstart = val.find_first_not_of(" \t");
-                    if (vstart != std::string::npos) val = val.substr(vstart); else val.clear();
-                    while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
-
-                    if (sec == IntStats) {
-                        m_intStats[key] = (int32_t)std::strtol(val.c_str(), nullptr, 10);
-                    } else if (sec == FloatStats) {
-                        m_floatStats[key] = std::strtof(val.c_str(), nullptr);
-                    } else if (sec == Achievements) {
-                        uint32_t t = (uint32_t)std::strtoul(val.c_str(), nullptr, 10);
-                        m_achievements[key] = t ? t : (uint32_t)::time(NULL);
-                    }
-                }
-            }
-            fclose(f);
-            ReFixLog("[UserStats] Loaded stats from disk: %zu int, %zu float, %zu achievements from %ls",
-                     m_intStats.size(), m_floatStats.size(), m_achievements.size(), path.c_str());
-        }
-
-        void SaveStatsToDiskInternal() {
-            const std::wstring path = StatsFilePath();
-            if (path.empty()) return;
-
-            // Ensure parent directory exists
-            size_t slash = path.find_last_of(L"\\/");
-            if (slash != std::wstring::npos) {
-                std::wstring dir = path.substr(0, slash);
-                for (size_t i = 3; i <= dir.size(); ++i) {
-                    if (i == dir.size() || dir[i] == L'\\') {
-                        CreateDirectoryW(dir.substr(0, i).c_str(), nullptr);
-                    }
-                }
-            }
-
-            const std::wstring tmpPath = path + L".tmp";
-            FILE* f = nullptr;
-            if (_wfopen_s(&f, tmpPath.c_str(), L"w") != 0 || !f) {
-                ReFixLog("[UserStats] Failed to open stats tmp file for writing: %ls", tmpPath.c_str());
-                return;
-            }
-
-            fprintf(f, "[IntStats]\n");
-            for (const auto& pair : m_intStats) {
-                fprintf(f, "%s=%d\n", pair.first.c_str(), pair.second);
-            }
-
-            fprintf(f, "\n[FloatStats]\n");
-            for (const auto& pair : m_floatStats) {
-                fprintf(f, "%s=%f\n", pair.first.c_str(), pair.second);
-            }
-
-            fprintf(f, "\n[Achievements]\n");
-            for (const auto& pair : m_achievements) {
-                fprintf(f, "%s=%u\n", pair.first.c_str(), pair.second);
-            }
-
-            fclose(f);
-
-            if (!MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-                CopyFileW(tmpPath.c_str(), path.c_str(), FALSE);
-                DeleteFileW(tmpPath.c_str());
-            }
-
-            m_dirty = false;
-            ReFixLog("[UserStats] Saved stats to disk: %zu int, %zu float, %zu achievements to %ls",
-                     m_intStats.size(), m_floatStats.size(), m_achievements.size(), path.c_str());
+        void PostStored(const char* pchName, uint32 cur, uint32 max) {
+            UserAchievementStored_t resp = {};
+            resp.m_nGameID = g_appID;
+            resp.m_bGroupAchievement = false;
+            strcpy_s(resp.m_rgchAchievementName, sizeof(resp.m_rgchAchievementName), pchName);
+            resp.m_nCurProgress = cur;
+            resp.m_nMaxProgress = max;
+            PostCallback(UserAchievementStored_t::k_iCallback, &resp, sizeof(resp));
         }
 
     public:
         CSteamUserStatsEmu() = default;
-        ~CSteamUserStatsEmu() {
-            Flush();
-        }
+        ~CSteamUserStatsEmu() { Flush(); }
 
-        void Flush() {
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            if (m_dirty) {
-                SaveStatsToDiskInternal();
-            }
-        }
+        void Flush() { refix::overlay::ach::Flush(); }
 
         bool RequestCurrentStats() { TraceStats("RequestCurrentStats", nullptr);
-            EnsureLoaded();
             UserStatsReceived_t resp = {};
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
@@ -5423,117 +5297,44 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool GetStat(const char *pchName, int32 *pData) override { TraceStats("GetStat", pchName);
-            if (!pchName || !pData) return false;
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            auto it = m_intStats.find(pchName);
-            if (it != m_intStats.end()) { *pData = it->second; return true; }
-            *pData = 0;
-            return true;
+            return refix::overlay::ach::GetStat(pchName, (int32_t*)pData);
         }
-
         virtual bool GetStat(const char *pchName, float *pData) override { TraceStats("GetStat", pchName);
-            if (!pchName || !pData) return false;
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            auto it = m_floatStats.find(pchName);
-            if (it != m_floatStats.end()) { *pData = it->second; return true; }
-            *pData = 0.0f;
-            return true;
+            return refix::overlay::ach::GetStat(pchName, pData);
         }
-
         virtual bool SetStat(const char *pchName, int32 nData) override { TraceStats("SetStat", pchName);
-            if (!pchName) return false;
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            if (m_intStats[pchName] != nData) {
-                m_intStats[pchName] = nData;
-                m_dirty = true;
-                SaveStatsToDiskInternal();
-            }
-            return true;
+            return refix::overlay::ach::SetStat(pchName, (int32_t)nData);
         }
-
         virtual bool SetStat(const char *pchName, float fData) override { TraceStats("SetStat", pchName);
-            if (!pchName) return false;
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            if (m_floatStats[pchName] != fData) {
-                m_floatStats[pchName] = fData;
-                m_dirty = true;
-                SaveStatsToDiskInternal();
-            }
-            return true;
+            return refix::overlay::ach::SetStat(pchName, fData);
         }
 
         virtual bool UpdateAvgRateStat(const char *pchName, float flCountThisSession, double dSessionLength) override { TraceStats("UpdateAvgRateStat", pchName); return true; }
 
         virtual bool GetAchievement(const char *pchName, bool *pbAchieved) override { TraceStats("GetAchievement", pchName);
-            if (!pchName || !pbAchieved) return false;
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            *pbAchieved = (m_achievements.find(pchName) != m_achievements.end());
-            return true;
+            return refix::overlay::ach::GetAchievement(pchName, pbAchieved, nullptr);
         }
 
         virtual bool SetAchievement(const char *pchName) override { TraceStats("SetAchievement", pchName);
             if (!pchName) return false;
-            EnsureLoaded();
-            {
-                std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-                if (m_achievements.find(pchName) == m_achievements.end()) {
-                    m_achievements[pchName] = (uint32_t)::time(NULL);
-                    m_dirty = true;
-                    SaveStatsToDiskInternal();
-                }
-            }
-
-            UserAchievementStored_t resp = {};
-            resp.m_nGameID = g_appID;
-            resp.m_bGroupAchievement = false;
-            strcpy_s(resp.m_rgchAchievementName, sizeof(resp.m_rgchAchievementName), pchName);
-            resp.m_nCurProgress = 1;
-            resp.m_nMaxProgress = 1;
-            PostCallback(UserAchievementStored_t::k_iCallback, &resp, sizeof(resp));
-
-            ReFixLog("[UnrealSteam] SetAchievement: Unlocked '%s'", pchName);
+            if (refix::overlay::ach::SetAchievement(pchName)) ReFixLog("[UnrealSteam] SetAchievement: Unlocked '%s'", pchName);
+            PostStored(pchName, 0, 0);
             return true;
         }
 
         virtual bool ClearAchievement(const char *pchName) override { TraceStats("ClearAchievement", pchName);
-            if (pchName) {
-                EnsureLoaded();
-                std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-                auto it = m_achievements.find(pchName);
-                if (it != m_achievements.end()) {
-                    m_achievements.erase(it);
-                    m_dirty = true;
-                    SaveStatsToDiskInternal();
-                }
-            }
-            return true;
+            return refix::overlay::ach::ClearAchievement(pchName);
         }
 
         virtual bool GetAchievementAndUnlockTime(const char *pchName, bool *pbAchieved, uint32 *punUnlockTime) override { TraceStats("GetAchievementAndUnlockTime", pchName);
-            if (!pchName) return false;
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            auto it = m_achievements.find(pchName);
-            if (it != m_achievements.end()) {
-                if (pbAchieved) *pbAchieved = true;
-                if (punUnlockTime) *punUnlockTime = it->second ? it->second : (uint32_t)::time(NULL);
-                return true;
-            }
-            if (pbAchieved) *pbAchieved = false;
-            if (punUnlockTime) *punUnlockTime = 0;
+            uint32_t t = 0;
+            if (!refix::overlay::ach::GetAchievement(pchName, pbAchieved, &t)) return false;
+            if (punUnlockTime) *punUnlockTime = t;
             return true;
         }
 
         virtual bool StoreStats() override { TraceStats("StoreStats", nullptr);
-            {
-                std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-                SaveStatsToDiskInternal();
-            }
+            refix::overlay::ach::Store();
             UserStatsStored_t resp = {};
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
@@ -5543,26 +5344,20 @@ namespace UnrealSteamEmu {
         }
 
         virtual int GetAchievementIcon(const char *pchName) override { TraceStats("GetAchievementIcon", pchName); return 0; }
-        virtual const char *GetAchievementDisplayAttribute(const char *pchName, const char *pchKey) override { TraceStats("GetAchievementDisplayAttribute", pchName); return ""; }
-        virtual bool IndicateAchievementProgress(const char *pchName, uint32 nCurProgress, uint32 nMaxProgress) override { TraceStats("IndicateAchievementProgress", pchName); return true; }
-        virtual uint32 GetNumAchievements() override {
-            TraceStats("GetNumAchievements", nullptr);
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            return (uint32)m_achievements.size();
+        virtual const char *GetAchievementDisplayAttribute(const char *pchName, const char *pchKey) override { TraceStats("GetAchievementDisplayAttribute", pchName);
+            return Intern(refix::overlay::ach::Attribute(pchName, pchKey, g_language.c_str()));
         }
-        virtual const char *GetAchievementName(uint32 iAchievement) override {
-            TraceStats("GetAchievementName", nullptr);
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            if (iAchievement >= m_achievements.size()) return "";
-            auto it = m_achievements.begin();
-            std::advance(it, iAchievement);
-            return it->first.c_str();
+        virtual bool IndicateAchievementProgress(const char *pchName, uint32 nCurProgress, uint32 nMaxProgress) override { TraceStats("IndicateAchievementProgress", pchName);
+            if (!refix::overlay::ach::IndicateProgress(pchName, nCurProgress, nMaxProgress)) return false;
+            PostStored(pchName, nCurProgress, nMaxProgress);
+            return true;
+        }
+        virtual uint32 GetNumAchievements() override { TraceStats("GetNumAchievements", nullptr); return refix::overlay::ach::Count(); }
+        virtual const char *GetAchievementName(uint32 iAchievement) override { TraceStats("GetAchievementName", nullptr);
+            return Intern(refix::overlay::ach::NameAt(iAchievement));
         }
 
         virtual SteamAPICall_t RequestUserStats(CSteamID steamIDUser) override { TraceStats("RequestUserStats", nullptr);
-            EnsureLoaded();
             UserStatsReceived_t resp = {};
             resp.m_nGameID = g_appID;
             resp.m_eResult = k_EResultOK;
@@ -5578,13 +5373,7 @@ namespace UnrealSteamEmu {
             return GetAchievementAndUnlockTime(pchName, pbAchieved, punUnlockTime);
         }
         virtual bool ResetAllStats(bool bAchievementsToo) override { TraceStats("ResetAllStats", nullptr);
-            EnsureLoaded();
-            std::lock_guard<std::recursive_mutex> lock(m_statsMutex);
-            m_intStats.clear();
-            m_floatStats.clear();
-            if (bAchievementsToo) m_achievements.clear();
-            m_dirty = true;
-            SaveStatsToDiskInternal();
+            refix::overlay::ach::ResetAll(bAchievementsToo);
             return true;
         }
 
@@ -5608,14 +5397,20 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t RequestGlobalAchievementPercentages() override { TraceStats("RequestGlobalAchievementPercentages", nullptr); return 0; }
         virtual int GetMostAchievedAchievementInfo(char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved) override { TraceStats("GetMostAchievedAchievementInfo", nullptr); return -1; }
         virtual int GetNextMostAchievedAchievementInfo(int iIterator, char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved) override { TraceStats("GetNextMostAchievedAchievementInfo", nullptr); return -1; }
-        virtual bool GetAchievementAchievedPercent(const char *pchName, float *pflPercent) override { TraceStats("GetAchievementAchievedPercent", pchName); if (pflPercent) *pflPercent = 100.0f; return true; }
+        virtual bool GetAchievementAchievedPercent(const char *pchName, float *pflPercent) override { TraceStats("GetAchievementAchievedPercent", pchName); return refix::overlay::ach::Percent(pchName, pflPercent); }
         virtual SteamAPICall_t RequestGlobalStats(int nHistoryDays) override { TraceStats("RequestGlobalStats", nullptr); return 0; }
         virtual bool GetGlobalStat(const char *pchStatName, int64 *pData) override { TraceStats("GetGlobalStat", nullptr); return false; }
         virtual bool GetGlobalStat(const char *pchStatName, double *pData) override { TraceStats("GetGlobalStat", nullptr); return false; }
         virtual int32 GetGlobalStatHistory(const char *pchStatName, int64 *pData, uint32 cubData) override { TraceStats("GetGlobalStatHistory", nullptr); return 0; }
         virtual int32 GetGlobalStatHistory(const char *pchStatName, double *pData, uint32 cubData) override { TraceStats("GetGlobalStatHistory", nullptr); return 0; }
-        virtual bool GetAchievementProgressLimits(const char *pchName, int32 *pnMinProgress, int32 *pnMaxProgress) override { TraceStats("GetAchievementProgressLimits", pchName); if (pnMinProgress) *pnMinProgress = 0; if (pnMaxProgress) *pnMaxProgress = 100; return true; }
-        virtual bool GetAchievementProgressLimits(const char *pchName, float *pfMinProgress, float *pfMaxProgress) override { TraceStats("GetAchievementProgressLimits", pchName); if (pfMinProgress) *pfMinProgress = 0.0f; if (pfMaxProgress) *pfMaxProgress = 100.0f; return true; }
+        virtual bool GetAchievementProgressLimits(const char *pchName, int32 *pnMinProgress, int32 *pnMaxProgress) override { TraceStats("GetAchievementProgressLimits", pchName); return refix::overlay::ach::ProgressLimits(pchName, (int32_t*)pnMinProgress, (int32_t*)pnMaxProgress); }
+        virtual bool GetAchievementProgressLimits(const char *pchName, float *pfMinProgress, float *pfMaxProgress) override { TraceStats("GetAchievementProgressLimits", pchName);
+            int32_t lo = 0, hi = 0;
+            if (!refix::overlay::ach::ProgressLimits(pchName, &lo, &hi)) return false;
+            if (pfMinProgress) *pfMinProgress = (float)lo;
+            if (pfMaxProgress) *pfMaxProgress = (float)hi;
+            return true;
+        }
     };
     static CSteamUserStatsEmu g_steamUserStatsInstance;
     void FlushUserStats() {
