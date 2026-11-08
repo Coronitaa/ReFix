@@ -47,6 +47,7 @@
 #endif
 #include "source_main_thread_queue.h"
 #include "gc/lan_rooms.h"
+#include "csgo_operation_patch.h"
 #include "overlay/overlay_i18n.h"
 #include <atomic>
 
@@ -5306,6 +5307,7 @@ static void ReFixInitializePost(bool success) {
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
         ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
+        refix::csgo::ApplyOperationPatch(); // CS:GO only: later operation missions, before the game reads items_game
         CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
 #endif
     } else {

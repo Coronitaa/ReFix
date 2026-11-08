@@ -244,9 +244,17 @@ struct EconCoupon {
     uint32_t expirationDate = 0x7FFFFFFF;
 };
 
+struct OperationProgress {
+    uint32_t stars = 0;              // tier_unlocked: stars earned (reward track)
+    uint32_t missionsCompleted = 0;  // missions_completed
+    uint32_t activeMission = 0;      // quest id being played (0 = none)
+    uint32_t questPoints = 0;        // points earned on the active quest
+};
+
 struct Entitlements {
     bool prime = false;
     std::vector<uint32_t> operation_passes; // e.g. 8 for Shattered Web
+    std::map<uint32_t, OperationProgress> progress; // by season
 };
 
 class CSGOEntitlementsManager {
@@ -283,6 +291,17 @@ public:
             if (j.contains("prime") && j["prime"].is_boolean()) {
                 m_entitlements.prime = j["prime"].get<bool>();
             }
+            if (j.contains("operation_progress") && j["operation_progress"].is_object()) {
+                for (auto it = j["operation_progress"].begin(); it != j["operation_progress"].end(); ++it) {
+                    OperationProgress pr;
+                    const auto& v = it.value();
+                    if (v.contains("stars") && v["stars"].is_number()) pr.stars = v["stars"].get<uint32_t>();
+                    if (v.contains("missions") && v["missions"].is_number()) pr.missionsCompleted = v["missions"].get<uint32_t>();
+                    if (v.contains("active") && v["active"].is_number()) pr.activeMission = v["active"].get<uint32_t>();
+                    if (v.contains("points") && v["points"].is_number()) pr.questPoints = v["points"].get<uint32_t>();
+                    m_entitlements.progress[(uint32_t)strtoul(it.key().c_str(), nullptr, 10)] = pr;
+                }
+            }
             if (j.contains("operation_passes") && j["operation_passes"].is_array()) {
                 m_entitlements.operation_passes.clear();
                 for (const auto& elem : j["operation_passes"]) {
@@ -300,11 +319,29 @@ public:
             nlohmann::json j;
             j["prime"] = m_entitlements.prime;
             j["operation_passes"] = m_entitlements.operation_passes;
+            nlohmann::json prog = nlohmann::json::object();
+            for (const auto& kv : m_entitlements.progress)
+                prog[std::to_string(kv.first)] = { { "stars", kv.second.stars }, { "missions", kv.second.missionsCompleted },
+                                                   { "active", kv.second.activeMission }, { "points", kv.second.questPoints } };
+            j["operation_progress"] = prog;
             std::ofstream f(path, std::ios::binary | std::ios::trunc);
             if (f.is_open()) {
                 f << j.dump(2);
             }
         } catch (...) {}
+    }
+
+    OperationProgress GetProgress(uint32_t season) {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_entitlements.progress[season];
+    }
+
+    void SetProgress(uint32_t season, const OperationProgress& pr) {
+        EnsureLoaded();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_entitlements.progress[season] = pr;
+        SaveLocked();
     }
 
     bool IsPrime() {
@@ -387,10 +424,11 @@ std::vector<uint8_t> SerializePersonaDataPublic(bool prime) {
 std::vector<uint8_t> SerializeSeasonalOperation(uint32_t season) {
     std::vector<uint8_t> out;
     PutVarintField(out, 1, season); // season_value = 8 (Shattered Web)
-    // Every week of the operation is unlocked (no weekly drip on LAN): one tier per mission card of the build.
-    uint32_t weeks = refix::csgo::SchemaManager::Get().GetMissionCardCount(season);
-    PutVarintField(out, 2, weeks ? weeks : 1); // tier_unlocked
-    PutVarintField(out, 3, 1);      // premium_tiers = 1
+    OperationProgress pr = CSGOEntitlementsManager::Get().GetProgress(season);
+    PutVarintField(out, 2, pr.stars);              // tier_unlocked: stars earned, persisted per profile
+    PutVarintField(out, 3, 1);                     // premium_tiers = 1
+    if (pr.activeMission) PutVarintField(out, 4, pr.activeMission); // mission_id: quest being played
+    PutVarintField(out, 5, pr.missionsCompleted);  // missions_completed
     PutVarintField(out, 7, (uint32_t)::time(nullptr)); // season_pass_time
     return out;
 }
@@ -1227,6 +1265,9 @@ public:
 
         std::vector<uint8_t> resp;
         PutVarintField(resp, 1, accountId);
+        std::vector<uint8_t> globalStats;
+        PutVarintField(globalStats, 14, (uint32_t)::time(nullptr)); // rtime32_cur: the GC clock
+        PutBytesField(resp, 3, globalStats);
         PutVarintField(resp, 6, 0);       // vac_banned = 0 (clean!)
         PutBytesField(resp, 7, ranking);
         PutBytesField(resp, 8, commendation);
@@ -2379,6 +2420,9 @@ std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId) {
     std::vector<uint8_t> welcome;
     if (version) PutVarintField(welcome, 1, version);
     PutBytesField(welcome, 3, cache);
+    // The client derives the GC clock from this; without it the operation's weekly missions stay "revealed later"
+    // (weeks unlocked = weeks since the operation start at GC time + 1, capped at the card count).
+    PutVarintField(welcome, 7, (uint32_t)::time(nullptr)); // rtime32_gc_welcome_timestamp
     return welcome;
 }
 
