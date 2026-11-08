@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.1.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.1.1)
+[![Release](https://img.shields.io/badge/version-v2.2.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.2.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -15,7 +15,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 ## Install
 
-1. Download `ReFix_Release_v2.1.1.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
+1. Download `ReFix_Release_v2.2.0.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
    - `[1] ReFix Online via Steam` or `[2] ReFix LAN without Steam`
@@ -74,6 +74,12 @@ bash Uninstall_ReFix.sh "/path/to/game"                    # or bash AutoDeploy.
 ```
 
 For ReFix Online, launch the game from Steam with Proton so the Steam client is running. The script has only been tested with bash on Windows so far. If it fails on your distro, open an issue with the output.
+
+## Game mods
+
+Some games get a ReFix mod made for them (the first one is CS:GO 1.37: working inventory, cases, stickers, Operation Shattered Web missions, LAN server browser and rooms). AutoDeploy checks [`refix_mods/catalog.tsv`](refix_mods/catalog.tsv) and, when the game has a mod, installs it into the game's `refix_mods` folder: from the release zip, or downloaded from this repository and checked against its SHA-256. The uninstaller removes it and puts back any game file the mod changed.
+
+Writing a mod: see the [Mod SDK](docs/wiki/Mod-SDK.md).
 
 ## DLC unlocker
 

@@ -74,7 +74,7 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.1.1 - LAN / Online
+ReFix 2.2.0 - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.
@@ -95,6 +95,9 @@ ReFix LAN
 - In-game overlay (AutoDeploy asks, [Overlay] in ReFix.ini): the ReFix overlay (Shift+Tab, or the
   Xbox / PS button of a controller), Steam's own overlay, or none. Overlay sounds: [Overlay] Sounds.
 - Debug logging is off ([Debug] EnableLog = false); turn it on only to report a problem.
+
+Game mods: when refix_mods\catalog.tsv has a mod for the game, AutoDeploy installs it into the
+game's refix_mods folder (CS:GO 1.37 has one). The uninstaller removes it again.
 
 Uninstall_ReFix.bat (Windows) or Uninstall_ReFix.sh (Linux) restores the game's original files and gives the game this PC's own saves back.
 ReFix LAN profiles (and the saves each one keeps) stay in %APPDATA%\ReFix: every ReFix game of the PC
