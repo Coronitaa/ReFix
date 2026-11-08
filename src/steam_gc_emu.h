@@ -38,6 +38,8 @@ bool IsPrimeEnabled();
 void SetPrimeEnabled(bool enabled);
 bool HasOperationPass(uint32_t season);
 void ActivateOperationPass(uint32_t season, uint64_t passItemId = 0);
+// Adds a PlayerQuestData (match-end quest points from the game server) to the local player's operation progress.
+void ApplyQuestProgress(const uint8_t* data, size_t size);
 
 } // namespace ReFixGC
 

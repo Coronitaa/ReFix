@@ -326,6 +326,7 @@ public:
     std::unordered_map<std::string, SchemaKitInfo> m_stickerKits;     // by kit name
     std::unordered_map<std::string, SchemaKitInfo> m_musicKits;       // by kit name
     std::unordered_map<uint32_t, uint32_t> m_missionCards;            // season -> quest_mission_card count
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> m_questGoals; // quest id -> (points, stars)
 
     const SchemaItemInfo* ItemInfoByName(std::string_view name) const {
         for (const auto& pair : m_itemInfo) {
@@ -518,6 +519,13 @@ public:
         // 2a. Operation weeks: one "quest_mission_card" per week. The KeyValue reader merges repeated keys, so count
         // them in the raw text: seasonaloperations { "<season>" { "quest_mission_card" {...} ... } }.
         CountMissionCards(gamePath);
+        // Quest goals (the reader merges the repeated quest_definitions sections into one key)
+        if (const KeyValue* qd = root->GetSubkey("quest_definitions")) {
+            for (const KeyValue& q : qd->Subkeys()) {
+                uint32_t points = FromString<uint32_t>(q.GetString("points"));
+                if (points) m_questGoals[FromString<uint32_t>(q.Name())] = { points, FromString<uint32_t>(q.GetString("operational_points")) };
+            }
+        }
 
         // 2b. Sticker, graffiti and patch kits; music kits
         if (const KeyValue* skKey = root->GetSubkey("sticker_kits")) {
@@ -682,6 +690,14 @@ std::string SchemaManager::GetItemName(uint32_t defIndex) const {
     return it != m_defToWeaponName.end() ? it->second : std::string();
 }
 
+bool SchemaManager::GetQuestGoal(uint32_t questId, uint32_t& points, uint32_t& stars) const {
+    auto it = m_questGoals.find(questId);
+    if (it == m_questGoals.end()) return false;
+    points = it->second.first;
+    stars = it->second.second;
+    return true;
+}
+
 uint32_t SchemaManager::GetMissionCardCount(uint32_t season) const {
     auto it = m_missionCards.find(season);
     return it != m_missionCards.end() ? it->second : 0;
@@ -761,6 +777,7 @@ bool SchemaManager::Load() {
     }
 
     m_missionCards = m_impl->m_missionCards;
+    m_questGoals = m_impl->m_questGoals;
 
     // Populate lookup maps
     std::unordered_map<std::string, uint32_t> nameToDef;

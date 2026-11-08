@@ -27,7 +27,8 @@ enum class GCRelayMsgType : uint8_t {
     ResponseEquippedCache = 2,
     AckEquippedCache = 3,
     UpdateItemEquipped = 4,
-    MatchmakingReserve = 5
+    MatchmakingReserve = 5,
+    QuestProgress = 6
 };
 
 #pragma pack(push, 1)
@@ -169,6 +170,12 @@ void HandleRelayPacket(const refix::lan::PeerId& sender, const uint8_t* data, si
         ReFixLog("[GC] Injected remote player UpdateMultiple (26) for SteamID %llu into game server", hdr->steamId);
         break;
     }
+    case GCRelayMsgType::QuestProgress: {
+        if (hdr->steamId != UnrealSteamEmu::GetLocalSteamID()) break;
+        ReFixLog("[GC-Relay] Received match-end quest points from the host (%u bytes)", hdr->dataLen);
+        ReFixGC::ApplyQuestProgress(payload, hdr->dataLen);
+        break;
+    }
     case GCRelayMsgType::MatchmakingReserve: {
         ReFixLog("[GC-Relay] Received MatchmakingReserve from leader (%u bytes)", hdr->dataLen);
         std::vector<uint8_t> reserveBytes(payload, payload + hdr->dataLen);
@@ -239,6 +246,27 @@ void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
     }).detach();
+}
+
+void SendQuestProgress(uint64_t steamId, const std::vector<uint8_t>& playerQuestData) {
+    std::optional<refix::lan::PeerId> peerId = refix::lan::ILanCore::Get().Peers().FindBySteamId(steamId);
+    if (!peerId) {
+        for (const auto& p : refix::lan::ILanCore::Get().Peers().GetAllPeers())
+            if (p.externalId.numericId == steamId) { peerId = p.peerId; break; }
+    }
+    auto pInfo = peerId ? refix::lan::ILanCore::Get().Peers().FindByPeerId(*peerId) : std::nullopt;
+    if (!pInfo) {
+        ReFixLog("[GC-Relay] No LAN peer for SteamID %llu: its quest points are lost", (unsigned long long)steamId);
+        return;
+    }
+    std::vector<uint8_t> packet(sizeof(GCRelayHeader) + playerQuestData.size());
+    GCRelayHeader* hdr = reinterpret_cast<GCRelayHeader*>(packet.data());
+    hdr->magic = kGCRelayMagic;
+    hdr->msgType = static_cast<uint8_t>(GCRelayMsgType::QuestProgress);
+    hdr->steamId = steamId;
+    hdr->dataLen = (uint32_t)playerQuestData.size();
+    memcpy(packet.data() + sizeof(GCRelayHeader), playerQuestData.data(), playerQuestData.size());
+    refix::lan::ILanCore::Get().Transport().SendReliable(*peerId, pInfo->endpoint, kLanChannelGC, packet.data(), packet.size());
 }
 
 void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlot, const std::vector<uint8_t>& soUpdateBytes) {

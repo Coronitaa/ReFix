@@ -18,6 +18,8 @@ void ShutdownGCRelay();
 void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket);
 void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlot, const std::vector<uint8_t>& soUpdateBytes);
 void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes);
+// Host -> player: that player's match-end quest points (PlayerQuestData), applied by their own GC.
+void SendQuestProgress(uint64_t steamId, const std::vector<uint8_t>& playerQuestData);
 
 // Joins the match hosted by targetSteamId (or by any LAN player when 0) with "connect ip:port"; runs onNotFound
 // when nobody hosts one.

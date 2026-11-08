@@ -135,6 +135,8 @@ constexpr uint32_t kSOTypePersonaDataPublic = 2;
 constexpr uint32_t kSOTypeEquipSlot = 3;
 constexpr uint32_t kSOTypeGameAccountClient = 7;
 constexpr uint32_t kSOTypeSeasonalOperation = 40;
+constexpr uint32_t kSOTypeSeasonalOperationGS = 41;
+constexpr uint32_t kSOTypeQuestProgress = 46;
 constexpr uint32_t kSOTypeDefaultEquippedDefinitionInstanceClient = 43;
 constexpr uint32_t kSOTypeCoupon = 45;
 
@@ -177,6 +179,43 @@ bool GetVarint(const uint8_t*& p, const uint8_t* end, uint64_t& value) {
         if (!(b & 0x80)) return true;
     }
     return false;
+}
+
+// Walks a protobuf message, calling fn(fieldNumber, wireType, varintValue, bytes, bytesLen) per field; stops on
+// malformed input.
+template <typename Fn>
+static void WalkFields(const uint8_t* data, size_t size, Fn&& fn) {
+    const uint8_t* p = data;
+    const uint8_t* end = data + size;
+    uint64_t tag = 0, val = 0;
+    while (p < end && GetVarint(p, end, tag)) {
+        uint32_t wire = (uint32_t)(tag & 7);
+        if (wire == 0) {
+            if (!GetVarint(p, end, val)) return;
+            fn((uint32_t)(tag >> 3), wire, val, nullptr, 0);
+        } else if (wire == 2) {
+            if (!GetVarint(p, end, val) || val > (uint64_t)(end - p)) return;
+            fn((uint32_t)(tag >> 3), wire, 0, p, (size_t)val);
+            p += val;
+        } else if (wire == 1 && end - p >= 8) p += 8;
+        else if (wire == 5 && end - p >= 4) p += 4;
+        else return;
+    }
+}
+
+template <typename Fn>
+static void ForEachBytesField(const uint8_t* data, size_t size, uint32_t field, Fn&& fn) {
+    WalkFields(data, size, [&](uint32_t f, uint32_t wire, uint64_t, const uint8_t* b, size_t len) {
+        if (f == field && wire == 2) fn(b, len);
+    });
+}
+
+static uint64_t GetVarintFieldValue(const uint8_t* data, size_t size, uint32_t field) {
+    uint64_t out = 0;
+    WalkFields(data, size, [&](uint32_t f, uint32_t wire, uint64_t v, const uint8_t*, size_t) {
+        if (f == field && wire == 0) out = v;
+    });
+    return out;
 }
 
 static std::vector<uint8_t> BuildMatchmakingReserve(uint64_t serverId, uint32_t ip, uint16_t port, uint64_t reservationId, const std::string& mapName, uint32_t targetAccountId) {
@@ -247,8 +286,8 @@ struct EconCoupon {
 struct OperationProgress {
     uint32_t stars = 0;              // tier_unlocked: stars earned (reward track)
     uint32_t missionsCompleted = 0;  // missions_completed
-    uint32_t activeMission = 0;      // quest id being played (0 = none)
-    uint32_t questPoints = 0;        // points earned on the active quest
+    uint32_t activeMission = 0;      // mission card being played (0 = none)
+    std::map<uint32_t, uint32_t> questPoints;  // quest id -> points earned
 };
 
 struct Entitlements {
@@ -298,7 +337,9 @@ public:
                     if (v.contains("stars") && v["stars"].is_number()) pr.stars = v["stars"].get<uint32_t>();
                     if (v.contains("missions") && v["missions"].is_number()) pr.missionsCompleted = v["missions"].get<uint32_t>();
                     if (v.contains("active") && v["active"].is_number()) pr.activeMission = v["active"].get<uint32_t>();
-                    if (v.contains("points") && v["points"].is_number()) pr.questPoints = v["points"].get<uint32_t>();
+                    if (v.contains("quests") && v["quests"].is_object())
+                        for (auto q = v["quests"].begin(); q != v["quests"].end(); ++q)
+                            if (q.value().is_number()) pr.questPoints[(uint32_t)strtoul(q.key().c_str(), nullptr, 10)] = q.value().get<uint32_t>();
                     m_entitlements.progress[(uint32_t)strtoul(it.key().c_str(), nullptr, 10)] = pr;
                 }
             }
@@ -320,9 +361,12 @@ public:
             j["prime"] = m_entitlements.prime;
             j["operation_passes"] = m_entitlements.operation_passes;
             nlohmann::json prog = nlohmann::json::object();
-            for (const auto& kv : m_entitlements.progress)
+            for (const auto& kv : m_entitlements.progress) {
+                nlohmann::json quests = nlohmann::json::object();
+                for (const auto& q : kv.second.questPoints) quests[std::to_string(q.first)] = q.second;
                 prog[std::to_string(kv.first)] = { { "stars", kv.second.stars }, { "missions", kv.second.missionsCompleted },
-                                                   { "active", kv.second.activeMission }, { "points", kv.second.questPoints } };
+                                                   { "active", kv.second.activeMission }, { "quests", quests } };
+            }
             j["operation_progress"] = prog;
             std::ofstream f(path, std::ios::binary | std::ios::trunc);
             if (f.is_open()) {
@@ -431,6 +475,54 @@ std::vector<uint8_t> SerializeSeasonalOperation(uint32_t season) {
     PutVarintField(out, 5, pr.missionsCompleted);  // missions_completed
     PutVarintField(out, 7, (uint32_t)::time(nullptr)); // season_pass_time
     return out;
+}
+
+// SO type 41: the active mission card of an operation. The 2019 client finds it by season (field 1) and compares the
+// card id in field 4 (MissionsAPI.GetSeasonalOperationMissionCardActiveIdx). Empty when no card is active.
+std::vector<uint8_t> SerializeActiveMissionCard(uint32_t season) {
+    std::vector<uint8_t> out;
+    uint32_t card = CSGOEntitlementsManager::Get().GetProgress(season).activeMission;
+    if (!card) return out;
+    PutVarintField(out, 1, season);
+    PutVarintField(out, 4, card);
+    return out;
+}
+
+// Adds the type 41 objects of every owned pass to a CMsgSOCacheSubscribed.
+void AppendActiveMissionCards(std::vector<uint8_t>& cache, const std::vector<uint32_t>& passes) {
+    std::vector<uint8_t> type;
+    for (uint32_t s : passes) {
+        std::vector<uint8_t> card = SerializeActiveMissionCard(s);
+        if (!card.empty()) PutBytesField(type, 2, card);
+    }
+    if (type.empty()) return;
+    std::vector<uint8_t> sub;
+    PutVarintField(sub, 1, kSOTypeSeasonalOperationGS);
+    sub.insert(sub.end(), type.begin(), type.end());
+    PutBytesField(cache, 2, sub);
+}
+
+// CSOQuestProgress (type 46): { questid = 1, points_remaining = 2 }.
+std::vector<uint8_t> SerializeQuestProgress(uint32_t questId, uint32_t earned) {
+    uint32_t goal = 0, stars = 0;
+    refix::csgo::SchemaManager::Get().GetQuestGoal(questId, goal, stars);
+    std::vector<uint8_t> out;
+    PutVarintField(out, 1, questId);
+    PutVarintField(out, 2, goal > earned ? goal - earned : 0);
+    return out;
+}
+
+// Adds the type 46 objects (quests with progress) of every owned pass to a CMsgSOCacheSubscribed.
+void AppendQuestProgress(std::vector<uint8_t>& cache, const std::vector<uint32_t>& passes) {
+    std::vector<uint8_t> sub;
+    for (uint32_t s : passes)
+        for (const auto& q : CSGOEntitlementsManager::Get().GetProgress(s).questPoints)
+            PutBytesField(sub, 2, SerializeQuestProgress(q.first, q.second));
+    if (sub.empty()) return;
+    std::vector<uint8_t> type;
+    PutVarintField(type, 1, kSOTypeQuestProgress);
+    type.insert(type.end(), sub.begin(), sub.end());
+    PutBytesField(cache, 2, type);
 }
 
 class CSGOInventoryManager {
@@ -1333,6 +1425,18 @@ public:
             Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildEquippedCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
         } else if (m_gameServer && (msg == 27 || msg == 28)) { // k_ESOMsg_CacheSubscriptionCheck / Refresh
             Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildEquippedCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
+        } else if (m_gameServer && msg == 9136 && proto && body) {
+            // MatchEndRunRewardDrops { match_end_quest_data = 4 { player_quest_data = 1 [] { quester_account_id = 1 } } }:
+            // the host keeps its own points and relays everyone else's to their machine (progress lives per player).
+            uint32_t localAccount = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+            ForEachBytesField(body, bodySize, 4, [&](const uint8_t* qd, size_t qdLen) {
+                ForEachBytesField(qd, qdLen, 1, [&](const uint8_t* pqd, size_t pqdLen) {
+                    uint32_t account = (uint32_t)GetVarintFieldValue(pqd, pqdLen, 1);
+                    if (!account) return;
+                    if (account == localAccount) ReFixGC::ApplyQuestProgress(pqd, pqdLen);
+                    else refix::gc::SendQuestProgress(0x0110000100000000ULL | account, std::vector<uint8_t>(pqd, pqd + pqdLen));
+                });
+            });
         } else if (msg == kMsgGCCStrike15_v2_MatchmakingClient2GCHello) {
             uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
             Reply(kMsgGCCStrike15_v2_MatchmakingGC2ClientHello, BuildMatchmakingClientHello(accountId));
@@ -1855,6 +1959,45 @@ public:
                 // Step 6: Thread-safe engine call (Rule R5)
                 refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
             }
+        } else if (msg == 9165) { // ClientRequestNewMission { mission_id = 2 (mission card), campaign_id = 3 (season) }
+            uint32_t cardId = 0, season = 0;
+            if (proto && body) {
+                const uint8_t* p = body;
+                const uint8_t* end = body + bodySize;
+                uint64_t tag = 0, val = 0;
+                while (p < end && GetVarint(p, end, tag)) {
+                    if ((tag & 7) != 0 || !GetVarint(p, end, val)) break;
+                    if ((tag >> 3) == 2) cardId = (uint32_t)val;
+                    else if ((tag >> 3) == 3) season = (uint32_t)val;
+                }
+            }
+            if (season) {
+                OperationProgress pr = CSGOEntitlementsManager::Get().GetProgress(season);
+                pr.activeMission = cardId;  // the card Panorama shows as active (mission_id)
+                CSGOEntitlementsManager::Get().SetProgress(season, pr);
+                uint64_t sid = UnrealSteamEmu::GetLocalSteamID();
+                std::vector<uint8_t> soid;
+                PutVarintField(soid, 1, kSOTypeSteamId);
+                PutVarintField(soid, 2, sid);
+                static uint64_t s_missionSoVersion = 900;
+                std::vector<uint8_t> so;
+                PutVarintField(so, 2, kSOTypeSeasonalOperation);
+                PutBytesField(so, 3, SerializeSeasonalOperation(season));
+                PutFixed64Field(so, 4, ++s_missionSoVersion);
+                PutBytesField(so, 5, soid);
+                Reply(22 /* k_ESOMsg_Update */, so);
+                std::vector<uint8_t> soCard;
+                PutVarintField(soCard, 2, kSOTypeSeasonalOperationGS);
+                PutBytesField(soCard, 3, SerializeActiveMissionCard(season));
+                PutFixed64Field(soCard, 4, ++s_missionSoVersion);
+                PutBytesField(soCard, 5, soid);
+                Reply(21 /* k_ESOMsg_Create */, soCard);
+                std::vector<uint8_t> echo;
+                PutVarintField(echo, 2, cardId);
+                PutVarintField(echo, 3, season);
+                Reply(9165, echo);
+                ReFixLog("[GC] Operation %u: mission card %u is now active", season, cardId);
+            }
         } else if (msg == 9172) { // Client2GCRequestPrestigeCoin: "Get service medal" (check, then get/upgrade)
             uint32_t requestedDef = 0;
             if (proto && body) {
@@ -2314,6 +2457,55 @@ void SendToGameServer(uint32_t msg, const std::vector<uint8_t>& body) {
     }
 }
 
+void ApplyQuestProgress(const uint8_t* data, size_t size) {
+    auto& ent = CSGOEntitlementsManager::Get();
+    auto& schema = refix::csgo::SchemaManager::Get();
+    schema.Load();
+    uint32_t season = 0;
+    for (uint32_t s : ent.GetOperationPasses())
+        if (ent.GetProgress(s).activeMission) { season = s; break; }
+    if (!season) return;
+    OperationProgress pr = ent.GetProgress(season);
+    std::vector<std::pair<uint32_t, bool>> changed;  // quest id, newly created
+    // quest_item_data = 2 [] { quest_id = 1, quest_normal_points_earned = 2, quest_bonus_points_earned = 3 }
+    ForEachBytesField(data, size, 2, [&](const uint8_t* q, size_t qLen) {
+        uint32_t questId = (uint32_t)GetVarintFieldValue(q, qLen, 1);
+        int64_t earned = (int32_t)GetVarintFieldValue(q, qLen, 2) + (int64_t)(int32_t)GetVarintFieldValue(q, qLen, 3);
+        uint32_t goal = 0, stars = 0;
+        if (earned <= 0 || !schema.GetQuestGoal(questId, goal, stars)) return;  // unknown quest: peer data is untrusted
+        auto it = pr.questPoints.find(questId);
+        uint32_t before = it == pr.questPoints.end() ? 0 : it->second;
+        if (before >= goal) return;
+        uint32_t after = (uint32_t)std::min<int64_t>(goal, before + earned);
+        changed.push_back({ questId, it == pr.questPoints.end() });
+        pr.questPoints[questId] = after;
+        if (after >= goal) { ++pr.missionsCompleted; pr.stars += stars; }
+        ReFixLog("[GC] Operation %u quest %u: %u/%u points", season, questId, after, goal);
+    });
+    if (changed.empty()) return;
+    ent.SetProgress(season, pr);
+
+    uint64_t sid = UnrealSteamEmu::GetLocalSteamID();
+    std::vector<uint8_t> soid;
+    PutVarintField(soid, 1, kSOTypeSteamId);
+    PutVarintField(soid, 2, sid);
+    static uint64_t s_questSoVersion = 1000;
+    for (const auto& c : changed) {
+        std::vector<uint8_t> so;
+        PutVarintField(so, 2, kSOTypeQuestProgress);
+        PutBytesField(so, 3, SerializeQuestProgress(c.first, pr.questPoints[c.first]));
+        PutFixed64Field(so, 4, ++s_questSoVersion);
+        PutBytesField(so, 5, soid);
+        SendToClient(c.second ? 21 : 22, so);
+    }
+    std::vector<uint8_t> so;
+    PutVarintField(so, 2, kSOTypeSeasonalOperation);
+    PutBytesField(so, 3, SerializeSeasonalOperation(season));
+    PutFixed64Field(so, 4, ++s_questSoVersion);
+    PutBytesField(so, 5, soid);
+    SendToClient(22, so);
+}
+
 void SendToClient(uint32_t msg, const std::vector<uint8_t>& body) {
     CGameCoordinatorLan* gc = static_cast<CGameCoordinatorLan*>(Get(false));
     if (gc) {
@@ -2343,6 +2535,9 @@ std::vector<uint8_t> BuildEquippedCacheSubscribed(uint64_t steamId) {
     if (pos > 1) {
         PutBytesField(cache, 2, itemType); // objects = 2
     }
+    auto passes = CSGOEntitlementsManager::Get().GetOperationPasses();
+    AppendActiveMissionCards(cache, passes);
+    AppendQuestProgress(cache, passes);
     PutFixed64Field(cache, 3, 1);       // version = 3
     PutBytesField(cache, 4, owner);     // owner_soid = 4
     return cache;
@@ -2412,6 +2607,8 @@ std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId) {
     PutBytesField(cache, 2, personaType);
     PutBytesField(cache, 2, accountType);
     if (!passes.empty()) PutBytesField(cache, 2, seasonalType);
+    AppendActiveMissionCards(cache, passes);
+    AppendQuestProgress(cache, passes);
     if (!coupons.empty()) PutBytesField(cache, 2, couponType);
     PutFixed64Field(cache, 3, 1); // version
     PutBytesField(cache, 4, owner);
@@ -2494,6 +2691,8 @@ std::vector<uint8_t> BuildCacheSubscribed(uint64_t steamId) {
     PutBytesField(cache, 2, personaType);
     PutBytesField(cache, 2, accountType);
     if (!passes.empty()) PutBytesField(cache, 2, seasonalType);
+    AppendActiveMissionCards(cache, passes);
+    AppendQuestProgress(cache, passes);
     if (!coupons.empty()) PutBytesField(cache, 2, couponType);
     PutFixed64Field(cache, 3, 1); // version
     PutBytesField(cache, 4, owner);
