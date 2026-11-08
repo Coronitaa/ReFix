@@ -47,6 +47,7 @@
 #endif
 #include "source_main_thread_queue.h"
 #include "gc/lan_rooms.h"
+#include "overlay/overlay_i18n.h"
 #include <atomic>
 
 static bool EnsureOriginal();
@@ -3642,7 +3643,11 @@ static void* __fastcall Hooked_PanoramaRunScript(void* pThis, void* /*edx*/, voi
         }
         else if (strstr(pchPath, "mainmenu_play.js")) {
             ReFixLog("[PanoramaHook] Intercepting mainmenu_play.js execution (%zu bytes) - injecting ReFix LAN Play Menu", strlen(pchScript));
-            const std::string& playExt = refix::panorama::GetRefixPlayMenuScript();
+            std::string playExt = refix::panorama::GetRefixPlayMenuScript();
+            static const std::string kLabelToken = "__REFIX_LAN_SERVER_LABEL__";
+            size_t tok = playExt.find(kLabelToken);
+            if (tok != std::string::npos)
+                playExt.replace(tok, kLabelToken.size(), refix::overlay::i18n::Spanish() ? "SERVIDOR LAN" : "LAN SERVER");
             std::string modifiedScript = std::string(pchScript) + "\n;\n" + playExt;
             return g_orig_PanoramaRunScript(pThis, pPanel, modifiedScript.c_str(), pchPath, nLine, nParam5, bParam6, bParam7);
         }

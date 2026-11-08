@@ -8,6 +8,7 @@
 #endif
 
 #include "csgo_schema.h"
+#include <tuple>
 #include "keyvalue.h"
 #include <windows.h>
 #include <fstream>
@@ -262,6 +263,16 @@ struct SchemaPaintKitInfo {
     float m_maxFloat = 1.0f;
 };
 
+// sticker_kits (stickers, graffiti, patches) and music_definitions entries.
+struct SchemaKitInfo {
+    enum Kind { Sticker, Spray, Patch, Music };
+    uint32_t m_id = 0;
+    std::string m_token;   // display name token
+    std::string m_image;   // image_inventory-style path ("econ/stickers/...")
+    Rarity m_rarity = Rarity::Rare;
+    Kind m_kind = Sticker;
+};
+
 enum SchemaLootType {
     LootNoAttribute,
     LootPaintable,
@@ -312,6 +323,8 @@ public:
     std::unordered_map<std::string, SchemaLootList> m_lootLists;
     std::unordered_map<uint32_t, SchemaLootList> m_revolvingLootLists;
     std::set<std::pair<std::string, std::string>> m_paintedPairs; // (weaponName, paintKitName)
+    std::unordered_map<std::string, SchemaKitInfo> m_stickerKits;     // by kit name
+    std::unordered_map<std::string, SchemaKitInfo> m_musicKits;       // by kit name
 
     const SchemaItemInfo* ItemInfoByName(std::string_view name) const {
         for (const auto& pair : m_itemInfo) {
@@ -341,6 +354,22 @@ public:
         item.itemInfo = info;
         item.rarity = info->m_rarity;
         item.quality = info->m_quality;
+
+        if (!attributeName.empty()) {
+            std::string kit(attributeName);
+            bool stickerLike = itemName == "sticker" || itemName == "spray" || itemName == "spraypaint" || itemName == "patch";
+            if (stickerLike || itemName == "musickit") {
+                const auto& kits = stickerLike ? m_stickerKits : m_musicKits;
+                auto it = kits.find(kit);
+                if (it == kits.end()) return false;
+                item.type = itemName == "musickit" ? LootMusicKit
+                          : itemName == "sticker" ? LootSticker
+                          : itemName == "patch" ? LootPatch : LootSpray;
+                item.kitDefIndex = it->second.m_id;
+                item.rarity = it->second.m_rarity;
+                return true;
+            }
+        }
 
         if (attributeName.empty()) {
             item.type = LootNoAttribute;
@@ -456,6 +485,39 @@ public:
             }
         }
 
+        // 2b. Sticker, graffiti and patch kits; music kits
+        if (const KeyValue* skKey = root->GetSubkey("sticker_kits")) {
+            for (const KeyValue& sub : skKey->Subkeys()) {
+                std::string name(sub.GetString("name"));
+                if (name.empty() || name == "default") continue;
+                SchemaKitInfo kit;
+                kit.m_id = FromString<uint32_t>(sub.Name());
+                kit.m_token = std::string(sub.GetString("item_name"));
+                std::string_view rarity = sub.GetString("item_rarity");
+                if (!rarity.empty()) kit.m_rarity = ItemRarityFromString(rarity);
+                std::string_view patch = sub.GetString("patch_material");
+                std::string_view material = patch.empty() ? sub.GetString("sticker_material") : patch;
+                // Graffiti: "#SprayKit_*" tokens, and tournament team graffiti named "*_graffiti" with sticker tokens.
+                bool spray = kit.m_token.rfind("#SprayKit", 0) == 0 ||
+                             (name.size() > 9 && name.compare(name.size() - 9, 9, "_graffiti") == 0);
+                kit.m_kind = !patch.empty() ? SchemaKitInfo::Patch : spray ? SchemaKitInfo::Spray : SchemaKitInfo::Sticker;
+                if (!material.empty()) kit.m_image = std::string(patch.empty() ? "econ/stickers/" : "econ/patches/") + std::string(material);
+                if (kit.m_id) m_stickerKits[name] = kit;
+            }
+        }
+        if (const KeyValue* mdKey = root->GetSubkey("music_definitions")) {
+            for (const KeyValue& sub : mdKey->Subkeys()) {
+                std::string name(sub.GetString("name"));
+                if (name.empty()) continue;
+                SchemaKitInfo kit;
+                kit.m_id = FromString<uint32_t>(sub.Name());
+                kit.m_token = std::string(sub.GetString("loc_name"));
+                kit.m_image = std::string(sub.GetString("image_inventory"));
+                kit.m_kind = SchemaKitInfo::Music;
+                if (kit.m_id) m_musicKits[name] = kit;
+            }
+        }
+
         // 3. Items
         const KeyValue* itemsKey = root->GetSubkey("items");
         if (itemsKey) {
@@ -473,6 +535,9 @@ public:
         // 4. Client loot lists & painted pairs extraction
         const KeyValue* cllKey = root->GetSubkey("client_loot_lists");
         if (cllKey) {
+            // Create every list first: a list may name sub-lists defined further down (sticker capsules do),
+            // and unordered_map keeps element addresses stable for the sub-list pointers.
+            for (const KeyValue& sub : cllKey->Subkeys()) m_lootLists[std::string(sub.Name())];
             for (const KeyValue& sub : cllKey->Subkeys()) {
                 SchemaLootList list;
                 list.isUnusual = (sub.Name().find("unusual") != std::string_view::npos);
@@ -491,7 +556,7 @@ public:
                     }
 
                     auto subSearch = m_lootLists.find(std::string(en));
-                    if (subSearch != m_lootLists.end()) {
+                    if (subSearch != m_lootLists.end() && subSearch->first != sub.Name()) {
                         list.subLists.push_back(&subSearch->second);
                         continue;
                     }
@@ -502,7 +567,12 @@ public:
                         list.items.push_back(itm);
                     }
                 }
-                m_lootLists[std::string(sub.Name())] = std::move(list);
+                SchemaLootList& slot = m_lootLists[std::string(sub.Name())];
+                slot.items = std::move(list.items);
+                slot.subLists = std::move(list.subLists);
+                slot.willProduceStatTrak = list.willProduceStatTrak;
+                slot.isUnusual = list.isUnusual;
+                slot.allEntriesAsAdditionalDrops = list.allEntriesAsAdditionalDrops;
             }
         }
 
@@ -564,6 +634,13 @@ std::string SchemaManager::ResolveToken(const std::string& token) const {
     return key;
 }
 
+std::string SchemaManager::ResolveTokenEn(const std::string& token) const {
+    if (token.empty()) return "";
+    std::string key = token[0] == '#' ? token.substr(1) : token;
+    auto it = m_tokensEn.find(StringToLower(key));
+    return it != m_tokensEn.end() ? it->second : ResolveToken(token);
+}
+
 bool SchemaManager::Load() {
     if (m_loaded) return true;
 
@@ -574,6 +651,7 @@ bool SchemaManager::Load() {
 
     if (!englishPath.empty()) {
         LoadLanguageTokens(englishPath, m_tokens);
+        LoadLanguageTokens(englishPath, m_tokensEn);
     }
     if (!spanishPath.empty()) {
         LoadLanguageTokens(spanishPath, m_tokens);
@@ -644,6 +722,14 @@ bool SchemaManager::Load() {
 
     // Categorization helper
     auto determineCategory = [](const SchemaItemInfo& itm) -> std::string {
+        // Graffiti boxes share the sticker capsule prefab.
+        if (itm.m_name.rfind("crate_graffiti_pack", 0) == 0 || itm.m_name.rfind("crate_spray_pack", 0) == 0) return "Grafitis";
+        if (itm.m_prefab.find("sticker_capsule") != std::string::npos || itm.m_prefab.find("patch_capsule") != std::string::npos ||
+            itm.m_name.rfind("crate_sticker_pack", 0) == 0 || itm.m_name.rfind("crate_signature_pack", 0) == 0 ||
+            itm.m_name.rfind("crate_patch_pack", 0) == 0) {
+            return "Pegatinas y Parches";
+        }
+        if (itm.m_name.find("musickit") != std::string::npos && itm.m_supplyCrateSeries > 0) return "Música y Coleccionables";
         if (itm.m_supplyCrateSeries > 0 || itm.m_prefab.find("weapon_case") != std::string::npos || itm.m_prefab.find("supply_crate") != std::string::npos) {
             return "Cajas";
         }
@@ -725,6 +811,7 @@ bool SchemaManager::Load() {
         if (pkDisp.empty()) pkDisp = pk.m_name;
 
         mi.name = wpDisp + " | " + pkDisp;
+        mi.nameEn = ResolveTokenEn(wpItem.m_itemNameToken) + " | " + ResolveTokenEn(pk.m_descriptionTag);
         mi.category = determineCategory(wpItem);
 
         bool isUnusual = (mi.category == "Cuchillos" || mi.category == "Guantes");
@@ -740,6 +827,9 @@ bool SchemaManager::Load() {
         const SchemaItemInfo& itm = pair.second;
         if (itm.m_defIndex == 0) continue;
         if (itm.m_name.empty() || itm.m_name.find("test") != std::string::npos) continue;
+        if (itm.m_name == "sticker" || itm.m_name == "spray" || itm.m_name == "spraypaint" || itm.m_name == "patch" ||
+            itm.m_name == "musickit")
+            continue;  // listed per kit below
 
         std::string cat = determineCategory(itm);
 
@@ -765,10 +855,49 @@ bool SchemaManager::Load() {
         std::string nameDisp = ResolveToken(itm.m_itemNameToken);
         if (nameDisp.empty()) nameDisp = itm.m_name;
         mi.name = nameDisp;
+        mi.nameEn = itm.m_itemNameToken.empty() ? itm.m_name : ResolveTokenEn(itm.m_itemNameToken);
 
         m_marketItems.push_back(mi);
         catCounts[cat]++;
     }
+
+    // 2b. Every sticker, graffiti, patch and music kit, granted on its carrier item with the kit attribute
+    auto carrierName = [&](const char* name, const char* fallback) {
+        for (const auto& pair : m_impl->m_itemInfo)
+            if (pair.second.m_name == name) {
+                std::string d = ResolveToken(pair.second.m_itemNameToken);
+                std::string en = ResolveTokenEn(pair.second.m_itemNameToken);
+                return std::make_tuple(pair.first, d.empty() ? std::string(fallback) : d, en.empty() ? std::string(fallback) : en);
+            }
+        return std::make_tuple(0u, std::string(fallback), std::string(fallback));
+    };
+    auto addKits = [&](const std::unordered_map<std::string, SchemaKitInfo>& kits) {
+        auto sticker = carrierName("sticker", "Sticker"), spray = carrierName("spray", "Graffiti"),
+             patch = carrierName("patch", "Patch"), music = carrierName("musickit", "Music Kit");
+        for (const auto& pair : kits) {
+            const SchemaKitInfo& k = pair.second;
+            const auto& carrier = k.m_kind == SchemaKitInfo::Spray ? spray : k.m_kind == SchemaKitInfo::Patch ? patch
+                                : k.m_kind == SchemaKitInfo::Music ? music : sticker;
+            if (std::get<0>(carrier) == 0) continue;  // this build has no such carrier item
+            MarketItem mi;
+            mi.defIndex = std::get<0>(carrier);
+            if (k.m_kind == SchemaKitInfo::Music) mi.musicKit = k.m_id; else mi.stickerKit = k.m_id;
+            mi.quality = 4;
+            mi.rarity = FromEnum(k.m_rarity);
+            mi.imageInventory = k.m_image;
+            mi.weaponName = pair.first;
+            std::string disp = ResolveToken(k.m_token);
+            mi.name = std::get<1>(carrier) + " | " + (disp.empty() ? pair.first : disp);
+            std::string dispEn = ResolveTokenEn(k.m_token);
+            mi.nameEn = std::get<2>(carrier) + " | " + (dispEn.empty() ? pair.first : dispEn);
+            mi.category = k.m_kind == SchemaKitInfo::Music ? "Música y Coleccionables"
+                        : k.m_kind == SchemaKitInfo::Spray ? "Grafitis" : "Pegatinas y Parches";
+            m_marketItems.push_back(mi);
+            catCounts[mi.category]++;
+        }
+    };
+    addKits(m_impl->m_stickerKits);
+    addKits(m_impl->m_musicKits);
 
     // 3. Build CategoryInfo list
     m_categories.clear();
@@ -777,7 +906,7 @@ bool SchemaManager::Load() {
     const char* orderedCats[] = {
         "Rifles", "Pistolas", "Subfusiles", "Pesadas",
         "Cuchillos", "Guantes", "Agentes", "Cajas",
-        "Llaves", "Pases", "Pegatinas y Parches", "Música y Coleccionables"
+        "Llaves", "Pases", "Pegatinas y Parches", "Grafitis", "Música y Coleccionables"
     };
     for (const char* oc : orderedCats) {
         size_t cnt = catCounts[oc];
@@ -801,7 +930,8 @@ const CaseDropTable* SchemaManager::GetCaseDrops(uint32_t caseDefIndex) const {
     return nullptr;
 }
 
-bool SchemaManager::RollCaseDrop(uint32_t caseDefIndex, uint32_t& outDef, uint32_t& outPaintKit, uint32_t& outRarity, uint32_t& outQuality, float& outWear, uint32_t& outSeed) const {
+bool SchemaManager::RollCaseDrop(uint32_t caseDefIndex, CaseDrop& out) const {
+    out = CaseDrop();
     if (!m_loaded) {
         const_cast<SchemaManager*>(this)->Load();
     }
@@ -852,15 +982,19 @@ bool SchemaManager::RollCaseDrop(uint32_t caseDefIndex, uint32_t& outDef, uint32
                 statTrak = false;
             }
 
-            outDef = picked->itemInfo->m_defIndex;
-            outPaintKit = picked->kitDefIndex;
-            outRarity = FromEnum(picked->CaseRarity());
-            outQuality = statTrak ? (picked->quality == Quality::Unusual ? 3 : 9) : (picked->quality == Quality::Unusual ? 3 : 4);
-            outWear = RandFloat(picked->minFloat, picked->maxFloat);
-            outSeed = RandUint32(1, 999);
+            out.defIndex = picked->itemInfo->m_defIndex;
+            bool kit = picked->type == LootSticker || picked->type == LootSpray || picked->type == LootPatch;
+            out.paintKit = picked->type == LootPaintable ? picked->kitDefIndex : 0;
+            out.stickerKit = kit ? picked->kitDefIndex : 0;
+            out.musicKit = picked->type == LootMusicKit ? picked->kitDefIndex : 0;
+            if (kit || out.musicKit) statTrak = statTrak && out.musicKit != 0;  // only music kits come in StatTrak
+            out.rarity = FromEnum(picked->CaseRarity());
+            out.quality = statTrak ? (picked->quality == Quality::Unusual ? 3 : 9) : (picked->quality == Quality::Unusual ? 3 : 4);
+            out.wear = RandFloat(picked->minFloat, picked->maxFloat);
+            out.seed = RandUint32(1, 999);
 
             ReFixLog("[GC] SchemaManager: Rolled authentic drop def=%u paintKit=%u rarity=%u quality=%u wear=%.4f seed=%u",
-                     outDef, outPaintKit, outRarity, outQuality, outWear, outSeed);
+                     out.defIndex, out.paintKit, out.rarity, out.quality, out.wear, out.seed);
             return true;
         }
     }
@@ -869,21 +1003,21 @@ bool SchemaManager::RollCaseDrop(uint32_t caseDefIndex, uint32_t& outDef, uint32
     ReFixLog("[GC] SchemaManager: Falling back to universal specials for case %u", caseDefIndex);
     if (!m_universalSpecialKnives.empty()) {
         const auto& sp = m_universalSpecialKnives[RandUint32(0, (uint32_t)m_universalSpecialKnives.size() - 1)];
-        outDef = sp.defIndex;
-        outPaintKit = sp.paintKit;
-        outRarity = 7;
-        outQuality = (RandUint32(1, 10) == 1) ? 9 : 3;
-        outWear = RandFloat(0.001f, 0.38f);
-        outSeed = RandUint32(1, 999);
+        out.defIndex = sp.defIndex;
+        out.paintKit = sp.paintKit;
+        out.rarity = 7;
+        out.quality = (RandUint32(1, 10) == 1) ? 9 : 3;
+        out.wear = RandFloat(0.001f, 0.38f);
+        out.seed = RandUint32(1, 999);
         return true;
     }
 
-    outDef = 7; // AK-47
-    outPaintKit = 180; // Fire Serpent
-    outRarity = 6;
-    outQuality = 4;
-    outWear = 0.05f;
-    outSeed = 420;
+    out.defIndex = 7; // AK-47
+    out.paintKit = 180; // Fire Serpent
+    out.rarity = 6;
+    out.quality = 4;
+    out.wear = 0.05f;
+    out.seed = 420;
     return true;
 }
 

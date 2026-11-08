@@ -4,6 +4,7 @@
 #include "refix_overlay.h"
 #include "overlay_ui_mods.h"
 #include "overlay_app.h"
+#include "overlay_i18n.h"
 #include "overlay_sound.h"
 #include "overlay_text.h"
 #include "profile_store.h"
@@ -359,6 +360,17 @@ void ActivateWebPage(const char* url) {
 
     const std::wstring u = FromUtf8(url);
     App::Get().Post([u] { App::Get().OpenWeb(u); });
+}
+
+void ShowNotice(const char* title, const char* bodyEs, const char* bodyEn) {
+    if (!IsEnabled()) return;
+    std::string t = title ? title : "", es = bodyEs ? bodyEs : "", en = bodyEn ? bodyEn : "";
+    App::Get().Post([t, es, en] { App::Get().ShowInfo(t, i18n::T(en.c_str(), es.c_str())); });
+}
+
+void OpenLanServer() {
+    if (!IsEnabled()) return;
+    App::Get().Post([] { refix::overlay::OpenHostMatchModal(); });
 }
 
 void OpenMarketGiveMenu() {

@@ -35,7 +35,8 @@ struct CaseDropTable {
 
 struct MarketItem {
     uint32_t defIndex = 0;
-    std::string name;
+    std::string name;     // game-language name (Spanish tokens over English)
+    std::string nameEn;   // English name, for the overlay in English
     std::string category; // "Rifles", "Pistolas", "Subfusiles", "Pesadas", "Cuchillos", "Guantes", "Agentes", "Cajas", "Llaves", "Música y Coleccionables"
     uint32_t quality = 4;
     uint32_t rarity = 0;
@@ -47,8 +48,22 @@ struct MarketItem {
     std::string weaponName;
     std::string skinName;
     std::string imageInventory;
+    uint32_t stickerKit = 0;  // sticker / graffiti / patch kit ("sticker slot 0 id")
+    uint32_t musicKit = 0;    // music kit ("music id")
     std::string pattern;      // paint kit texture name (materials/.../customization/paints/*/<pattern>.vtf)
     int seasonAccess = -1;    // operation pass: the season it unlocks ("season access" attribute)
+};
+
+// One case/capsule roll: a skin (paintKit), a sticker/graffiti/patch (stickerKit) or a music kit (musicKit).
+struct CaseDrop {
+    uint32_t defIndex = 0;
+    uint32_t paintKit = 0;
+    uint32_t stickerKit = 0;
+    uint32_t musicKit = 0;
+    uint32_t rarity = 0;
+    uint32_t quality = 4;
+    float wear = 0.001f;
+    uint32_t seed = 0;
 };
 
 struct CategoryInfo {
@@ -64,7 +79,7 @@ public:
     bool IsLoaded() const { return m_loaded; }
 
     const CaseDropTable* GetCaseDrops(uint32_t caseDefIndex) const;
-    bool RollCaseDrop(uint32_t caseDefIndex, uint32_t& outDef, uint32_t& outPaintKit, uint32_t& outRarity, uint32_t& outQuality, float& outWear, uint32_t& outSeed) const;
+    bool RollCaseDrop(uint32_t caseDefIndex, CaseDrop& out) const;
 
     const std::vector<MarketItem>& GetMarketItems() const { return m_marketItems; }
     std::vector<MarketItem> GetMarketItemsByCategory(const std::string& category) const;
@@ -74,6 +89,7 @@ public:
     std::string GetWeaponDisplayName(uint32_t defIndex) const;
     std::string GetPaintKitDisplayName(uint32_t paintKit) const;
     std::string ResolveToken(const std::string& token) const;
+    std::string ResolveTokenEn(const std::string& token) const;  // English only
 
 private:
     SchemaManager();
@@ -92,6 +108,7 @@ private:
     std::vector<CategoryInfo> m_categories;
     std::vector<SkinDrop> m_universalSpecialKnives;
     std::unordered_map<std::string, std::string> m_tokens;
+    std::unordered_map<std::string, std::string> m_tokensEn;
 };
 
 } // namespace refix::csgo

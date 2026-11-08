@@ -42,6 +42,8 @@ void ActivateOperationPass(uint32_t season, uint64_t passItemId = 0);
 } // namespace ReFixGC
 
 extern "C" {
+// Sticker / graffiti / patch (stickerKit) or music kit (musicKit) on its carrier item (1209, 1348, 4609, 1314).
+__declspec(dllexport) void CSGO_GrantKitItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t stickerKit, uint32_t musicKit);
 __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, const char* customName = nullptr);
 __declspec(dllexport) bool CSGO_IsPrimeStatus();
 __declspec(dllexport) void CSGO_SetPrimeStatus(bool enabled);

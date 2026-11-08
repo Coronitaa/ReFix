@@ -85,6 +85,23 @@ std::string Lower(std::string s) {
     return s;
 }
 
+const std::string& DisplayName(const MarketItem& it) {
+    return i18n::Spanish() || it.nameEn.empty() ? it.name : it.nameEn;
+}
+
+// Schema categories are Spanish keys; show them in the overlay language.
+const char* CategoryLabel(const std::string& key) {
+    static const struct { const char* key; const char* en; } kNames[] = {
+        { "Todos", "All" }, { "Rifles", "Rifles" }, { "Pistolas", "Pistols" }, { "Subfusiles", "SMGs" },
+        { "Pesadas", "Heavy" }, { "Cuchillos", "Knives" }, { "Guantes", "Gloves" }, { "Agentes", "Agents" },
+        { "Cajas", "Cases" }, { "Llaves", "Keys" }, { "Pases", "Passes" }, { "Pegatinas y Parches", "Stickers & Patches" },
+        { "Música y Coleccionables", "Music & Collectibles" }, { "Grafitis", "Graffiti" },
+    };
+    for (const auto& n : kNames)
+        if (key == n.key) return i18n::T(n.en, n.key);
+    return key.c_str();
+}
+
 void SetStatus(const std::string& msg) {
     g_market.status = msg;
     g_market.statusUntil = GetTickCount64() + 3500;
@@ -99,7 +116,8 @@ void RefreshFiltered(refix::csgo::SchemaManager& schema) {
     std::string q = Lower(g_market.search);
     for (const MarketItem& it : schema.GetMarketItems()) {
         if (g_market.category != "Todos" && it.category != g_market.category) continue;
-        if (!q.empty() && Lower(it.name).find(q) == std::string::npos && Lower(it.weaponName).find(q) == std::string::npos)
+        if (!q.empty() && Lower(it.name).find(q) == std::string::npos && Lower(it.nameEn).find(q) == std::string::npos &&
+            Lower(it.weaponName).find(q) == std::string::npos)
             continue;
         g_market.filtered.push_back(it);
     }
@@ -118,8 +136,7 @@ void SelectItem(int idx) {
 // Rarity-tinted backdrop shared by cards and the detail preview.
 void ArtBackdrop(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 rarity, float rounding) {
     dl->AddRectFilled(a, b, ui::color::Row, rounding);
-    ImU32 top = ui::Fade(rarity, 0.05f), bottom = ui::Fade(rarity, 0.28f);
-    dl->AddRectFilledMultiColor(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, b.y - 1), top, top, bottom, bottom);
+    ui::GradientRect(dl, a, b, ui::Fade(rarity, 0.05f), ui::Fade(rarity, 0.28f), rounding);
 }
 
 void DrawCategoryRail(refix::csgo::SchemaManager& schema, float w, float h) {
@@ -155,7 +172,7 @@ void DrawCategoryRail(refix::csgo::SchemaManager& schema, float w, float h) {
     ui::TextColored(ui::color::Faint, i18n::T("CATEGORIES", "CATEGORÍAS"));
     ImGui::PopFont();
     for (const auto& c : schema.GetCategories())
-        if (c.name != "Pases") railItem(c.name.c_str(), c.name.c_str(), c.count, false);
+        if (c.name != "Pases") railItem(c.name.c_str(), CategoryLabel(c.name), c.count, false);
     ImGui::EndChild();
 }
 
@@ -175,9 +192,9 @@ void DrawItemCard(int idx, const MarketItem& it, float cw, float ch) {
     ImVec2 artMin(p.x + ui::S(6), p.y + ui::S(6)), artMax(p.x + cw - ui::S(6), p.y + ch * 0.62f);
     ArtBackdrop(dl, artMin, artMax, rc, ui::S(8));
     csgo_icons::DrawItemArt(dl, it, ImVec2(artMin.x + ui::S(6), artMin.y + ui::S(4)), ImVec2(artMax.x - ui::S(6), artMax.y - ui::S(4)), ui::S(8));
-    dl->AddRectFilled(ImVec2(artMin.x, artMax.y - ui::S(3)), artMax, rc, ui::S(2));
+    dl->AddRectFilled(ImVec2(artMin.x, artMax.y - ui::S(3)), artMax, rc, ui::S(8), ImDrawFlags_RoundCornersBottom);
 
-    std::string weapon = it.name, skin;
+    std::string weapon = DisplayName(it), skin;
     size_t bar = weapon.find(" | ");
     if (bar != std::string::npos) { skin = weapon.substr(bar + 3); weapon = weapon.substr(0, bar); }
     float tx = p.x + ui::S(10), ty = artMax.y + ui::S(6), tw = cw - ui::S(20);
@@ -238,7 +255,7 @@ void DrawDetail(float w, float h) {
     float artH = ui::S(180);
     ArtBackdrop(dl, p, ImVec2(p.x + w - ui::S(8), p.y + artH), rc, ui::S(12));
     csgo_icons::DrawItemArt(dl, it, ImVec2(p.x + ui::S(14), p.y + ui::S(10)), ImVec2(p.x + w - ui::S(22), p.y + artH - ui::S(10)), ui::S(12));
-    dl->AddRectFilled(ImVec2(p.x, p.y + artH - ui::S(4)), ImVec2(p.x + w - ui::S(8), p.y + artH), rc, ui::S(2));
+    dl->AddRectFilled(ImVec2(p.x, p.y + artH - ui::S(4)), ImVec2(p.x + w - ui::S(8), p.y + artH), rc, ui::S(12), ImDrawFlags_RoundCornersBottom);
     if (it.paintKit && !csgo_icons::HasRenderedSkin(it)) {
         ImGui::PushFont(ui::F().caption);
         dl->AddText(ImVec2(p.x + ui::S(10), p.y + ui::S(8)), ui::color::Muted, i18n::T("Paint pattern preview", "Vista del patrón de pintura"));
@@ -248,12 +265,12 @@ void DrawDetail(float w, float h) {
 
     ImGui::PushTextWrapPos(w - ui::S(12));
     ImGui::PushFont(ui::F().heading);
-    ImGui::TextUnformatted(it.name.c_str());
+    ImGui::TextUnformatted(DisplayName(it).c_str());
     ImGui::PopFont();
     ImGui::PopTextWrapPos();
     ui::TextColored(rc, RarityName(it.rarity));
     ImGui::SameLine();
-    ui::TextColored(ui::color::Faint, ("· " + it.category).c_str());
+    ui::TextColored(ui::color::Faint, (std::string("· ") + CategoryLabel(it.category)).c_str());
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
     float fullW = w - ui::S(12);
@@ -309,10 +326,13 @@ void DrawDetail(float w, float h) {
     ImGui::Dummy(ImVec2(0, ui::S(6)));
     if (ui::Clicked(ui::PrimaryButton(i18n::T("Add to inventory", "Añadir al inventario"), ImVec2(fullW, ui::S(40))))) {
         uint32_t quality = (g_market.statTrak && it.paintKit) ? 9 : it.quality;
-        CSGO_GrantItemToLocal(it.defIndex, (uint32_t)g_market.quantity, quality, it.rarity, it.paintKit, g_market.wear,
-                              (uint32_t)g_market.seed, g_market.nameTag[0] ? g_market.nameTag : nullptr);
+        if (it.stickerKit || it.musicKit)
+            CSGO_GrantKitItemToLocal(it.defIndex, (uint32_t)g_market.quantity, quality, it.rarity, it.stickerKit, it.musicKit);
+        else
+            CSGO_GrantItemToLocal(it.defIndex, (uint32_t)g_market.quantity, quality, it.rarity, it.paintKit, g_market.wear,
+                                  (uint32_t)g_market.seed, g_market.nameTag[0] ? g_market.nameTag : nullptr);
         char msg[160];
-        snprintf(msg, sizeof(msg), "%s %dx %s", i18n::T("Added", "Añadido"), g_market.quantity, it.name.c_str());
+        snprintf(msg, sizeof(msg), "%s %dx %s", i18n::T("Added", "Añadido"), g_market.quantity, DisplayName(it).c_str());
         SetStatus(msg);
     }
     if (GetTickCount64() < g_market.statusUntil) {
@@ -339,9 +359,9 @@ void DrawPassCard(const MarketItem& pass, float cw, float ch) {
     }
     ImGui::Dummy(ImVec2(0, artMax.y - p.y + ui::S(4)));
     ImGui::SetCursorScreenPos(ImVec2(p.x + ui::S(12), artMax.y + ui::S(6)));
-    ImGui::PushTextWrapPos(p.x + cw - ui::S(12));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cw - ui::S(24));  // window-local, like the cursor
     ImGui::PushFont(ui::F().strong);
-    ImGui::TextUnformatted(pass.name.c_str());
+    ImGui::TextUnformatted(DisplayName(pass).c_str());
     ImGui::PopFont();
     ImGui::PopTextWrapPos();
     ImGui::SetCursorScreenPos(ImVec2(p.x + ui::S(12), ImGui::GetCursorScreenPos().y));
@@ -354,7 +374,7 @@ void DrawPassCard(const MarketItem& pass, float cw, float ch) {
     } else if (ui::Clicked(ui::PrimaryButton(i18n::T("Activate pass", "Activar pase"), ImVec2(cw - ui::S(24), ui::S(32)),
                                              pass.seasonAccess >= 0))) {
         CSGO_ActivateOperationPass((uint32_t)pass.seasonAccess, 0);
-        SetStatus(std::string(i18n::T("Activated: ", "Activado: ")) + pass.name);
+        SetStatus(std::string(i18n::T("Activated: ", "Activado: ")) + DisplayName(pass));
     }
     ImGui::SetCursorScreenPos(p);
     ImGui::Dummy(ImVec2(cw, ch));
@@ -369,8 +389,7 @@ void DrawPrimeAndPasses(refix::csgo::SchemaManager& schema, float w, float h) {
     bool prime = CSGO_IsPrimeStatus();
     ImU32 pc = prime ? ui::color::Online : ui::color::Star;
     dl->AddRectFilled(p, ImVec2(p.x + w - ui::S(8), p.y + bannerH), ui::color::Panel, ui::S(14));
-    dl->AddRectFilledMultiColor(p, ImVec2(p.x + (w - ui::S(8)) * 0.5f, p.y + bannerH), ui::Fade(pc, 0.22f), ui::Fade(pc, 0.0f),
-                                ui::Fade(pc, 0.0f), ui::Fade(pc, 0.22f));
+    ui::GradientRect(dl, p, ImVec2(p.x + w - ui::S(8), p.y + bannerH), ui::Fade(pc, 0.22f), ui::Fade(pc, 0.0f), ui::S(14), true);
     ImGui::SetCursorScreenPos(ImVec2(p.x + ui::S(20), p.y + ui::S(16)));
     ImGui::BeginGroup();
     ImGui::PushFont(ui::F().heading);

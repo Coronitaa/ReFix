@@ -124,6 +124,9 @@ bool BeginCenteredModal(const char* id, float width);
 // Small upper-case muted heading, with an optional count ("FAVORITOS Â· 2").
 void SectionLabel(const char* text, int count = -1);
 ImU32 Fade(ImU32 col, float alpha);
+// Rounded rectangle filled with a vertical (or horizontal) gradient, alpha included; unlike
+// ImDrawList::AddRectFilledMultiColor it keeps the rounded corners.
+void GradientRect(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 from, ImU32 to, float rounding, bool horizontal = false);
 std::string Ellipsize(const std::string& text, float maxWidth);
 
 } // namespace refix::overlay::ui

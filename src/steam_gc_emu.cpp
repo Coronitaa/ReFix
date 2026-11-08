@@ -219,6 +219,8 @@ struct EconItem {
     uint32_t paintKit = 0;
     float wear = 0.001f;
     uint32_t seed = 0;
+    uint32_t stickerKit = 0;   // sticker / graffiti / patch: attribute 113 "sticker slot 0 id"
+    uint32_t musicKit = 0;     // music kit: attribute 166 "music id"
     std::string customName;
     uint32_t origin = 0;
     uint32_t inventory = 0;
@@ -687,20 +689,20 @@ public:
         }
 
         // Roll authentic drop from collection
-        uint32_t outDef = 0, outPaintKit = 0, outRarity = 0, outQuality = 4;
-        float outWear = 0.001f;
-        uint32_t outSeed = 420;
-        refix::csgo::SchemaManager::Get().RollCaseDrop(crateDef, outDef, outPaintKit, outRarity, outQuality, outWear, outSeed);
+        refix::csgo::CaseDrop drop;
+        refix::csgo::SchemaManager::Get().RollCaseDrop(crateDef, drop);
 
         EconItem unboxed;
         unboxed.id = GenerateNewItemId();
-        unboxed.defIndex = outDef;
+        unboxed.defIndex = drop.defIndex;
         unboxed.quantity = 1;
-        unboxed.quality = outQuality;
-        unboxed.rarity = outRarity;
-        unboxed.paintKit = outPaintKit;
-        unboxed.wear = outWear;
-        unboxed.seed = outSeed;
+        unboxed.quality = drop.quality;
+        unboxed.rarity = drop.rarity;
+        unboxed.paintKit = drop.paintKit;
+        unboxed.stickerKit = drop.stickerKit;  // sticker capsules give stickers, music kit boxes music kits
+        unboxed.musicKit = drop.musicKit;
+        unboxed.wear = drop.wear;
+        unboxed.seed = drop.seed;
         unboxed.origin = 8; // ItemOriginCrate
         unboxed.inventory = (1 << 30) | 5; // UnacknowledgedFoundInCrate
         m_items.push_back(unboxed);
@@ -709,8 +711,9 @@ public:
         res.awardedItem = unboxed;
 
         SaveLocked();
-        ReFixLog("[GC] CSGOInventory: Unlocked crate %u! Awarded item %llu (def %u, pk %u, rarity %u, quality %u, origin %u, inv 0x%08X)",
-                 crateDef, (unsigned long long)unboxed.id, unboxed.defIndex, unboxed.paintKit, unboxed.rarity, unboxed.quality, unboxed.origin, unboxed.inventory);
+        ReFixLog("[GC] CSGOInventory: Unlocked crate %u! Awarded item %llu (def %u, pk %u, sticker %u, music %u, rarity %u, quality %u, origin %u, inv 0x%08X)",
+                 crateDef, (unsigned long long)unboxed.id, unboxed.defIndex, unboxed.paintKit, unboxed.stickerKit, unboxed.musicKit,
+                 unboxed.rarity, unboxed.quality, unboxed.origin, unboxed.inventory);
         return res;
     }
 
@@ -733,7 +736,7 @@ public:
         uint64_t accountId = (UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
 
         auto it = std::find_if(m_items.begin(), m_items.end(), [defIndex](const EconItem& it) {
-            return it.defIndex == defIndex && it.paintKit == 0;
+            return it.defIndex == defIndex && it.paintKit == 0 && it.stickerKit == 0 && it.musicKit == 0;
         });
         if (it != m_items.end()) {
             it->quantity += count;
@@ -780,14 +783,16 @@ public:
         return true;
     }
 
-    uint64_t AddItemWithAttributes(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, uint32_t origin = 0, uint32_t inventory = 0, const std::string& customName = "") {
+    uint64_t AddItemWithAttributes(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, uint32_t origin = 0, uint32_t inventory = 0, const std::string& customName = "",
+                                   uint32_t stickerKit = 0, uint32_t musicKit = 0) {
         EnsureLoaded();
         std::lock_guard<std::mutex> lock(m_mutex);
         uint64_t accountId = (UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
 
-        if (paintKit == 0 && origin == 0 && inventory == 0 && customName.empty()) {
+        if (paintKit == 0 && stickerKit == 0 && musicKit == 0 && origin == 0 && inventory == 0 && customName.empty()) {
             auto it = std::find_if(m_items.begin(), m_items.end(), [defIndex](const EconItem& it) {
-                return it.defIndex == defIndex && it.paintKit == 0 && it.origin == 0 && it.inventory == 0 && it.customName.empty();
+                return it.defIndex == defIndex && it.paintKit == 0 && it.stickerKit == 0 && it.musicKit == 0 && it.origin == 0 &&
+                       it.inventory == 0 && it.customName.empty();
             });
             if (it != m_items.end()) {
                 it->quantity += count;
@@ -806,6 +811,8 @@ public:
         itm.wear = wear > 0.0f ? wear : 0.001f;
         itm.seed = seed > 0 ? seed : (rand() % 999 + 1);
         itm.customName = customName;
+        itm.stickerKit = stickerKit;
+        itm.musicKit = musicKit;
         itm.origin = origin;
         itm.inventory = inventory;
         m_items.push_back(itm);
@@ -885,6 +892,8 @@ private:
             itm["paintKit"] = it.paintKit;
             itm["wear"] = it.wear;
             itm["seed"] = it.seed;
+            if (it.stickerKit != 0) itm["stickerKit"] = it.stickerKit;
+            if (it.musicKit != 0) itm["musicKit"] = it.musicKit;
             if (it.origin != 0) itm["origin"] = it.origin;
             if (it.inventory != 0) itm["inventory"] = it.inventory;
             if (!it.customName.empty()) {
@@ -947,6 +956,8 @@ private:
                 if (itmJson.contains("wear") && itmJson["wear"].is_number()) itm.wear = itmJson["wear"].get<float>();
                 if (itmJson.contains("seed") && itmJson["seed"].is_number()) itm.seed = itmJson["seed"].get<uint32_t>();
                 if (itmJson.contains("customName") && itmJson["customName"].is_string()) itm.customName = itmJson["customName"].get<std::string>();
+                if (itmJson.contains("stickerKit") && itmJson["stickerKit"].is_number()) itm.stickerKit = itmJson["stickerKit"].get<uint32_t>();
+                if (itmJson.contains("musicKit") && itmJson["musicKit"].is_number()) itm.musicKit = itmJson["musicKit"].get<uint32_t>();
                 if (itmJson.contains("origin") && itmJson["origin"].is_number()) itm.origin = itmJson["origin"].get<uint32_t>();
                 if (itmJson.contains("inventory") && itmJson["inventory"].is_number()) itm.inventory = itmJson["inventory"].get<uint32_t>();
 
@@ -1042,6 +1053,9 @@ std::vector<uint8_t> SerializeEconItem(const EconItem& item, uint32_t accountId,
             PutAttribute(out, 81, (uint32_t)0);                              // kill eater score type
         }
     }
+
+    if (item.stickerKit) PutAttribute(out, 113, item.stickerKit); // sticker slot 0 id
+    if (item.musicKit) PutAttribute(out, 166, item.musicKit);     // music id
 
     // Contains equipped state - ALWAYS emit field 17 so Panorama properly updates equipped vs unequipped states
     PutVarintField(out, 17, 1); // contains_equipped_state_v1 = true
@@ -1181,8 +1195,15 @@ public:
             Reply(9104, updateResp);
 
             // "Host match" hosts right away; "Start" joins a match another player hosts on the LAN, else hosts one.
+            // Start joins an open LAN match; hosting is the "LAN server" button (refix://host kept for older scripts).
             if (ReFixGC::ConsumeHostRequest()) ReFixGC::HostLanMatch();
-            else refix::gc::FindLanMatch(0, [] { ReFixGC::HostLanMatch(); });
+            else refix::gc::FindLanMatch(0, [] {
+                std::vector<uint8_t> idle;
+                PutVarintField(idle, 1, 0); // MatchmakingGC2ClientUpdate: matchmaking = 0 (search over)
+                ReFixGC::SendToClient(9104, idle);
+                ReFixOverlay::ShowNotice("CS:GO LAN", "No hay partidas LAN abiertas. Hostea una con Servidor LAN.",
+                                         "No open LAN matches. Host one with LAN server.");
+            });
         } else if (msg == 9102) { // MatchmakingStop
             std::vector<uint8_t> idle;
             PutVarintField(idle, 1, 0);
@@ -2408,18 +2429,20 @@ __declspec(dllexport) void CSGO_SetHostConfig(const char* json) {
     if (json) ReFixGC::SetHostConfigJson(json);
 }
 
-__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, const char* customName) {
-    std::string cname = customName ? customName : "";
-    refix::source::MainThreadQueue::Enqueue([defIndex, count, quality, rarity, paintKit, wear, seed, cname]() {
+static void GrantToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear,
+                         uint32_t seed, const std::string& cname, uint32_t stickerKit, uint32_t musicKit) {
+    refix::source::MainThreadQueue::Enqueue([defIndex, count, quality, rarity, paintKit, wear, seed, cname, stickerKit, musicKit]() {
         uint32_t safeCount = (std::max)(1u, (std::min)(count, 100u));
-        bool isIndividual = (paintKit > 0 || !cname.empty() || (defIndex >= 500 && defIndex <= 530) || (defIndex >= 5027 && defIndex <= 5035));
+        bool isIndividual = (paintKit > 0 || stickerKit > 0 || musicKit > 0 || !cname.empty() || (defIndex >= 500 && defIndex <= 530) ||
+                             (defIndex >= 5027 && defIndex <= 5035));
 
         uint32_t iterations = isIndividual ? safeCount : 1;
         uint32_t singleQty = isIndividual ? 1 : safeCount;
 
         for (uint32_t n = 0; n < iterations; n++) {
             uint32_t itemSeed = (seed > 0) ? seed : (rand() % 999 + 1);
-            uint64_t id = CSGOInventoryManager::Get().AddItemWithAttributes(defIndex, singleQty, quality, rarity, paintKit, wear, itemSeed, 0, 0, cname);
+            uint64_t id = CSGOInventoryManager::Get().AddItemWithAttributes(defIndex, singleQty, quality, rarity, paintKit, wear, itemSeed, 0, 0, cname,
+                                                                            stickerKit, musicKit);
             if (id != 0) {
                 auto allItems = CSGOInventoryManager::Get().GetItems();
                 auto itGranted = std::find_if(allItems.begin(), allItems.end(), [id](const EconItem& i) { return i.id == id; });
@@ -2447,6 +2470,14 @@ __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t cou
         }
         refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
     });
+}
+
+__declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t paintKit, float wear, uint32_t seed, const char* customName) {
+    GrantToLocal(defIndex, count, quality, rarity, paintKit, wear, seed, customName ? customName : "", 0, 0);
+}
+
+__declspec(dllexport) void CSGO_GrantKitItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t stickerKit, uint32_t musicKit) {
+    GrantToLocal(defIndex, count, quality, rarity, 0, 0.0f, 0, "", stickerKit, musicKit);
 }
 
 }

@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <vector>
 #include "../overlay_host.h"
+#include "../overlay_theme.h"
 #include "../avatar_image.h"
 #include "../../csgo_schema.h"
 
@@ -398,8 +399,7 @@ void DrawItemArt(ImDrawList* dl, const refix::csgo::MarketItem& item, ImVec2 min
         if (it != Index().paints.end()) {
             if (ImTextureID sw = Load(it->second, true)) {
                 dl->AddImageRounded(sw, min, max, ImVec2(0.1f, 0.1f), ImVec2(0.9f, 0.9f), IM_COL32(255, 255, 255, 150), rounding);
-                dl->AddRectFilledMultiColor(min, max, IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 150),
-                                            IM_COL32(0, 0, 0, 150));
+                ui::GradientRect(dl, min, max, IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 150), rounding);
             }
         }
     }

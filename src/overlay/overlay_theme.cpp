@@ -8,6 +8,8 @@
 #include <windows.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <string>
 
 namespace refix::overlay::ui {
 
@@ -97,7 +99,20 @@ bool StyledButton(const char* label, ImVec2 size, bool enabled, ImU32 fill, ImU3
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(18), S(10)));
     ImGui::PushFont(F().strong);
     ImGui::BeginDisabled(!enabled);
+    // ImGui centres a label only while it fits and otherwise left-aligns and cuts it: draw the frame with an
+    // invisible label and put the text on top ourselves, always centred and shortened with "…" when needed.
+    const char* labelEnd = strstr(label, "##");
+    std::string text(label, labelEnd ? (size_t)(labelEnd - label) : strlen(label));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
     const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor();
+    const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+    const float maxW = (std::max)(0.0f, mx.x - mn.x - S(12));
+    if (ImGui::CalcTextSize(text.c_str()).x > maxW) text = Ellipsize(text, maxW);
+    const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+    const float alpha = enabled ? 1.0f : ImGui::GetStyle().DisabledAlpha;
+    ImGui::GetWindowDrawList()->AddText(ImVec2(std::round((mn.x + mx.x - ts.x) * 0.5f), std::round((mn.y + mx.y - ts.y) * 0.5f)),
+                                        Fade(ink, alpha), text.c_str());
     ImGui::EndDisabled();
     ImGui::PopFont();
     ImGui::PopStyleVar(2);
@@ -362,6 +377,21 @@ void SectionLabel(const char* text, int count) {
 }
 
 ImU32 Fade(ImU32 col, float alpha) { return Alpha(col, std::clamp(alpha, 0.0f, 1.0f)); }
+
+void GradientRect(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 from, ImU32 to, float rounding, bool horizontal) {
+    const int first = dl->VtxBuffer.Size;
+    dl->AddRectFilled(min, max, IM_COL32_WHITE, rounding);
+    const float span = horizontal ? max.x - min.x : max.y - min.y;
+    if (span <= 0.0f) return;
+    const ImVec4 a = ImGui::ColorConvertU32ToFloat4(from), b = ImGui::ColorConvertU32ToFloat4(to);
+    for (int i = first; i < dl->VtxBuffer.Size; ++i) {
+        ImDrawVert& v = dl->VtxBuffer[i];
+        const float t = std::clamp(((horizontal ? v.pos.x - min.x : v.pos.y - min.y)) / span, 0.0f, 1.0f);
+        const float alpha = ((v.col >> IM_COL32_A_SHIFT) & 0xFF) / 255.0f;  // keeps the anti-aliased fringe
+        v.col = ImGui::ColorConvertFloat4ToU32(ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t,
+                                                      (a.w + (b.w - a.w) * t) * alpha));
+    }
+}
 
 std::string Ellipsize(const std::string& text, float maxWidth) {
     if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) return text;

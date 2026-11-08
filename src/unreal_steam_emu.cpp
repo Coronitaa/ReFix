@@ -3722,6 +3722,10 @@ namespace UnrealSteamEmu {
         virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
             ReFixLog("[UnrealSteam] ActivateGameOverlayToWebPage('%s')", pchURL ? pchURL : "");
             // The CS:GO play menu's "Host match" button passes its settings as refix://host/<url-encoded JSON>.
+            if (pchURL && strcmp(pchURL, "refix://server") == 0) {  // play menu "LAN server" button
+                ReFixOverlay::OpenLanServer();
+                return;
+            }
             static const char kHostPrefix[] = "refix://host/";
             if (pchURL && strncmp(pchURL, kHostPrefix, sizeof(kHostPrefix) - 1) == 0) {
                 std::string json;
