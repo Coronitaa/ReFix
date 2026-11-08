@@ -184,7 +184,7 @@ bool WasmSandbox::LoadBytecode(const std::vector<uint8_t>& wasm_bytecode, std::s
 
     // Link host imports
     m3_LinkRawFunctionEx(module_, "env", "refix_log", "v(iii)", Host_refix_log, this);
-    m3_LinkRawFunctionEx(module_, "env", "refix_get_time_ms", "i()", Host_refix_get_time_ms, this);
+    m3_LinkRawFunctionEx(module_, "env", "refix_get_time_ms", "I()", Host_refix_get_time_ms, this);
     m3_LinkRawFunctionEx(module_, "env", "refix_storage_read", "i(iiii)", Host_refix_storage_read, this);
     m3_LinkRawFunctionEx(module_, "env", "refix_storage_write", "i(iiii)", Host_refix_storage_write, this);
 
