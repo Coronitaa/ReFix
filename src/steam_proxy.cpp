@@ -7163,7 +7163,7 @@ static void InitializeLanForwardTable() {
         if (!name) continue;
         g_steamProcs[i] = LookupLanExport(name);
     }
-    ReFixLog("InitializeLanForwardTable: Forward table hardened for LAN (zero-crash fallback installed)");
+    ReFixLog("InitializeLanForwardTable: LAN forward table ready (missing exports return safe defaults)");
 }
 
 // =============================================================================

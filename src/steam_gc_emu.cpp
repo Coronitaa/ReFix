@@ -1730,9 +1730,7 @@ public:
             PutBytesField(soMult, 6, soid);              // owner_soid = 6
             Reply(26 /* k_ESOMsg_UpdateMultiple */, soMult);
             refix::gc::BroadcastEquippedUpdate(itemId, newClass, newSlot, soMult);
-            // CRITICAL: DO NOT send kMsgClientWelcome here!
-            // Sending kMsgClientWelcome destroys all CEconItem pointers in Panorama JS heap,
-            // causing immediate 0xC0000005 access violation crash!
+            // No ClientWelcome here: it frees every CEconItem Panorama holds and the game crashes (0xC0000005).
         } else if (msg == 9156) { // Client2GCEconPreviewDataBlockRequest (Inspect item)
             uint64_t param_s = 0, param_a = 0;
             if (body && bodySize > 0) {
@@ -1885,7 +1883,7 @@ public:
                 PutVarintField(soid, 1, kSOTypeSteamId);
                 PutVarintField(soid, 2, localSteamId);
 
-                // Step 1: Destroy (or Update) Crate
+                // Destroy (or Update) Crate
                 if (res.crateId != 0) {
                     if (res.crateDestroyed) {
                         std::vector<uint8_t> crateProto;
@@ -1911,7 +1909,7 @@ public:
                     }
                 }
 
-                // Step 2: Destroy (or Update) Key
+                // Destroy (or Update) Key
                 if (res.keyId != 0 && res.keyId != res.crateId) {
                     if (res.keyDestroyed) {
                         std::vector<uint8_t> keyProto;
@@ -1937,7 +1935,7 @@ public:
                     }
                 }
 
-                // Step 3: Create Awarded Item (k_ESOMsg_Create = 21)
+                // Create Awarded Item (k_ESOMsg_Create = 21)
                 std::vector<uint8_t> itBytes = SerializeEconItem(res.awardedItem, accountId, 1);
                 std::vector<uint8_t> soSingle;
                 PutVarintField(soSingle, 2, 1); // type_id = 1 (CSOEconItem)
@@ -1946,17 +1944,17 @@ public:
                 PutBytesField(soSingle, 5, soid);
                 Reply(21 /* k_ESOMsg_Create */, soSingle);
 
-                // Step 4: Customization Notification (1090)
+                // Customization Notification (1090)
                 std::vector<uint8_t> notif;
                 PutVarintField(notif, 1, res.awardedId);
                 PutVarintField(notif, 2, 1007 /* k_EGCItemCustomizationNotification_UnlockCrate */);
                 Reply(1090, notif);
 
-                // Step 5: Unlock Crate Response (1008) -> empty CMsgRequestInventoryRefresh
+                // Unlock Crate Response (1008) -> empty CMsgRequestInventoryRefresh
                 std::vector<uint8_t> unlockResp;
                 Reply(kMsgGCUnlockCrateResponse, unlockResp);
 
-                // Step 6: Thread-safe engine call (Rule R5)
+                // Thread-safe engine call (Rule R5)
                 refix::source::MainThreadQueue::ExecuteClientCmd("econ_clear_inventory_images");
             }
         } else if (msg == 9165) { // ClientRequestNewMission { mission_id = 2 (mission card), campaign_id = 3 (season) }
@@ -2525,7 +2523,7 @@ std::vector<uint8_t> BuildEquippedCacheSubscribed(uint64_t steamId) {
     PutVarintField(itemType, 1, 1); // type_id = 1 (CSOEconItem)
     uint32_t pos = 1;
     for (const auto& it : items) {
-        if (it.equipped.empty()) continue; // ONLY EQUIPPED ITEMS!
+        if (it.equipped.empty()) continue; // the server only needs what the player wears
         std::vector<uint8_t> itBytes = SerializeEconItem(it, accountId, pos++);
         PutBytesField(itemType, 2, itBytes);
         if (pos > 64) break; // Maximum 64 items
@@ -2756,7 +2754,7 @@ void ActivateOperationPass(uint32_t season, uint64_t passItemId) {
 
         static uint64_t s_passSoVersion = 800;
 
-        // Step 1: Destroy or consume the pass item if provided
+        // Destroy or consume the pass item if provided
         if (passItemId != 0) {
             bool destroyed = false;
             EconItem consumed;
@@ -2782,7 +2780,7 @@ void ActivateOperationPass(uint32_t season, uint64_t passItemId) {
             }
         }
 
-        // Step 2: Grant Operation Coin (defIndex 4550) if not present
+        // Grant Operation Coin (defIndex 4550) if not present
         auto allItems = CSGOInventoryManager::Get().GetItems();
         auto itCoin = std::find_if(allItems.begin(), allItems.end(), [](const EconItem& i) { return i.defIndex == 4550; });
         uint64_t coinId = 0;
@@ -2809,7 +2807,7 @@ void ActivateOperationPass(uint32_t season, uint64_t passItemId) {
             }
         }
 
-        // Step 3: Create CSOAccountSeasonalOperation (type 40)
+        // Create CSOAccountSeasonalOperation (type 40)
         std::vector<uint8_t> seasonObj = SerializeSeasonalOperation(season);
         std::vector<uint8_t> soSeasonal;
         PutVarintField(soSeasonal, 2, kSOTypeSeasonalOperation); // type_id = 40 (CSOAccountSeasonalOperation)

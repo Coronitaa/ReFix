@@ -11,7 +11,7 @@ analysis/
 *.exp
 *.lib
 *.log
-!docs/refix-lan/evidence/**
+
 __pycache__/
 *.tmp
 *.bak
@@ -60,3 +60,8 @@ build_x86_lan/
 bin/*_test_tmp/
 !src/webview2/x64/WebView2LoaderStatic.lib
 !src/webview2/x86/WebView2LoaderStatic.lib
+
+# Test binaries and runtime output of the games
+bin/test_*.exe
+ReFix_Inventory.json
+ReFix_gc_*.log
