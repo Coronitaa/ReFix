@@ -52,6 +52,14 @@ IDCompositionDevice* g_dcomp = nullptr;
 IDCompositionTarget* g_target = nullptr;
 IDCompositionVisual* g_visual = nullptr;
 UINT g_width = 0, g_height = 0;
+// Wine/Proton has no DirectComposition: there the frame is drawn off screen and shown through a layered
+// window (UpdateLayeredWindow). [Overlay] Composition = false forces this path on Windows too.
+bool g_layered = false;
+ID3D11Texture2D* g_offscreen = nullptr;
+ID3D11Texture2D* g_staging = nullptr;
+HDC g_memDC = nullptr;
+HBITMAP g_dib = nullptr;
+void* g_dibBits = nullptr;
 Mode g_mode = Mode::Hidden;
 bool g_deviceLost = false;
 std::map<std::string, TextureEntry> g_textures;
@@ -116,7 +124,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+void ReleaseLayeredSurface() {
+    SafeRelease(g_offscreen);
+    SafeRelease(g_staging);
+    if (g_dib) { DeleteObject(g_dib); g_dib = nullptr; g_dibBits = nullptr; }
+    if (g_memDC) { DeleteDC(g_memDC); g_memDC = nullptr; }
+}
+
+bool CreateLayeredSurface(UINT w, UINT h) {
+    ReleaseLayeredSurface();
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_offscreen))) return false;
+    td.BindFlags = 0;
+    td.Usage = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_staging))) return false;
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = (LONG)w;
+    bi.bmiHeader.biHeight = -(LONG)h;  // top-down, like the texture
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    g_memDC = CreateCompatibleDC(nullptr);
+    g_dib = CreateDIBSection(g_memDC, &bi, DIB_RGB_COLORS, &g_dibBits, nullptr, 0);
+    if (!g_dib) return false;
+    SelectObject(g_memDC, g_dib);
+    return true;
+}
+
+// The frame is premultiplied BGRA already (drawn over a transparent clear), which is what ULW_ALPHA wants.
+HRESULT PresentLayered() {
+    g_ctx->CopyResource(g_staging, g_offscreen);
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    const HRESULT hr = g_ctx->Map(g_staging, 0, D3D11_MAP_READ, 0, &m);
+    if (FAILED(hr)) return hr;
+    for (UINT y = 0; y < g_height; ++y)
+        memcpy((uint8_t*)g_dibBits + (size_t)y * g_width * 4, (const uint8_t*)m.pData + (size_t)y * m.RowPitch, (size_t)g_width * 4);
+    g_ctx->Unmap(g_staging, 0);
+    SIZE size{ (LONG)g_width, (LONG)g_height };
+    POINT src{ 0, 0 };
+    BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_hwnd, nullptr, nullptr, &size, g_memDC, &src, 0, &blend, ULW_ALPHA);
+    return S_OK;
+}
+
+HRESULT PresentFrame(UINT syncInterval) {
+    return g_layered ? PresentLayered() : g_swap->Present(syncInterval, 0);
+}
+
+LONG_PTR BaseExStyle() { return g_layered ? WS_EX_LAYERED : WS_EX_NOREDIRECTIONBITMAP; }
+
 void CreateRenderTarget() {
+    if (g_layered) {
+        g_device->CreateRenderTargetView(g_offscreen, nullptr, &g_rtv);
+        return;
+    }
     ID3D11Texture2D* back = nullptr;
     if (SUCCEEDED(g_swap->GetBuffer(0, IID_PPV_ARGS(&back)))) {
         g_device->CreateRenderTargetView(back, nullptr, &g_rtv);
@@ -150,7 +219,8 @@ bool CreateDeviceAndSurface(UINT w, UINT h) {
     sd.Scaling = DXGI_SCALING_STRETCH;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-    hr = factory ? factory->CreateSwapChainForComposition(g_device, &sd, nullptr, &g_swap) : E_FAIL;
+    const bool composition = GetPrivateProfileIntA("Overlay", "Composition", 1, ".\\ReFix.ini") != 0;
+    hr = !composition ? E_NOTIMPL : factory ? factory->CreateSwapChainForComposition(g_device, &sd, nullptr, &g_swap) : E_FAIL;
     if (SUCCEEDED(hr)) hr = DCompositionCreateDevice(dxgiDevice, IID_PPV_ARGS(&g_dcomp));
     // Not topmost: child windows (the overlay browser) are drawn above the ImGui visual.
     if (SUCCEEDED(hr)) hr = g_dcomp->CreateTargetForHwnd(g_hwnd, FALSE, &g_target);
@@ -161,14 +231,23 @@ bool CreateDeviceAndSurface(UINT w, UINT h) {
     SafeRelease(factory);
     SafeRelease(adapter);
     SafeRelease(dxgiDevice);
-    if (FAILED(hr)) { ReFixLog("[Overlay] DirectComposition setup failed 0x%08X", (unsigned)hr); return false; }
+    if (FAILED(hr)) {
+        ReFixLog("[Overlay] DirectComposition unavailable (0x%08X); drawing through a layered window", (unsigned)hr);
+        SafeRelease(g_visual);
+        SafeRelease(g_target);
+        SafeRelease(g_dcomp);
+        SafeRelease(g_swap);
+        g_layered = true;
+        if (!CreateLayeredSurface(w, h)) { ReFixLog("[Overlay] Layered window surface failed"); return false; }
+        SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, (GetWindowLongPtrW(g_hwnd, GWL_EXSTYLE) & ~WS_EX_NOREDIRECTIONBITMAP) | WS_EX_LAYERED);
+    }
     g_width = w;
     g_height = h;
     CreateRenderTarget();
     if (g_rtv && g_ctx) {
         const float clear[4] = { 0, 0, 0, 0 };
         g_ctx->ClearRenderTargetView(g_rtv, clear);
-        g_swap->Present(0, 0);
+        PresentFrame(0);
     }
     return true;
 }
@@ -178,7 +257,8 @@ void ResizeSurface(UINT w, UINT h) {
     h = std::max<UINT>(h, 8);
     if (w == g_width && h == g_height) return;
     SafeRelease(g_rtv);
-    const HRESULT hr = g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    const HRESULT hr = g_layered ? (CreateLayeredSurface(w, h) ? S_OK : E_FAIL)
+                                 : g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     g_width = w;
     g_height = h;
     if (FAILED(hr)) g_deviceLost = true;   // recreated before the next frame
@@ -187,7 +267,7 @@ void ResizeSurface(UINT w, UINT h) {
         if (g_rtv && g_ctx) {
             const float clear[4] = { 0, 0, 0, 0 };
             g_ctx->ClearRenderTargetView(g_rtv, clear);
-            g_swap->Present(0, 0);
+            PresentFrame(0);
         }
     }
 }
@@ -326,7 +406,7 @@ void BecomeChild(HWND game) {
     if (g_childOf == game) return;
     // SetParent's documentation: set WS_CHILD before parenting a former top-level window.
     SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_CHILD);
-    SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOPARENTNOTIFY);
+    SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, BaseExStyle() | WS_EX_NOPARENTNOTIFY);
     SetParent(g_hwnd, game);
     g_childOf = game;
     SuspendGameRawInput();
@@ -348,7 +428,7 @@ void BecomePopup() {
 }
 
 void SetStyles(Mode m) {
-    LONG_PTR ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST;
+    LONG_PTR ex = BaseExStyle() | WS_EX_TOPMOST;
     ex |= (m == Mode::Toast ? (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) : WS_EX_TOOLWINDOW);
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
 }
@@ -502,7 +582,7 @@ void Render(const GameWindow& gw, const pad::State& padState) {
     g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    const HRESULT hr = g_swap->Present(1, 0);
+    const HRESULT hr = PresentFrame(1);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) g_deviceLost = true;
 }
 
@@ -516,6 +596,7 @@ bool RecreateDevice() {
     for (auto& [key, t] : g_textures) SafeRelease(t.srv);
     g_textures.clear();
     SafeRelease(g_rtv);
+    ReleaseLayeredSurface();
     SafeRelease(g_visual);
     SafeRelease(g_target);
     SafeRelease(g_dcomp);
