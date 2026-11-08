@@ -12,6 +12,8 @@
 #include "../imgui/imgui_internal.h"
 #include "save_swap.h"
 #include "refix_overlay.h"
+#include "overlay_settings.h"
+#include "nvidia_reflex_block.h"
 #include "../source_main_thread_queue.h"
 
 #include "../include/steam/steam_api.h"
@@ -29,6 +31,8 @@ constexpr ULONGLONG kRefreshMs = 300;
 constexpr ULONGLONG kWelcomeMs = 6500;
 constexpr ULONGLONG kInviteToastMs = 20000;
 constexpr ULONGLONG kInfoToastMs = 4500;
+constexpr ULONGLONG kInviteFreshMs = 8000;      // "Sent", then the invite can be sent again
+constexpr ULONGLONG kInvitePendingMs = 60000;   // after this a player who did not come counts as not invited
 
 std::string Lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
@@ -106,6 +110,7 @@ void App::Begin(uint32_t appId, std::optional<Profile> active) {
         appId_ = appId;
         active_ = active;
         ReloadProfiles();
+        if (!settings::Get().uiSounds) sound::SetEnabled(false);   // the player muted them in the settings
         started_ = true;
     });
     if (!host::Start(this)) return;
@@ -125,7 +130,7 @@ host::Mode App::DesiredMode() {
 
 ImVec2 App::ToastSize() {
     float h = 0;
-    for (const Toast& t : toasts_) h += ToastHeight(t.kind == Toast::Kind::Invite) + ui::S(kToastGap);
+    for (const Toast& t : toasts_) h += ToastHeight(t.kind) + ui::S(kToastGap);
     return ImVec2(ui::S(kToastWidth) + ui::S(16), std::max(h, ui::S(kToastGap)) + ui::S(12));
 }
 
@@ -141,6 +146,8 @@ void App::OnHotkey() {
 }
 
 void App::OnModeChanged(host::Mode from, host::Mode to) {
+    // NVIDIA Reflex paces the game's frames in a way that left the overlay flickering or see-through.
+    SetReflexPausedForOverlay(to == host::Mode::Overlay && settings::Get().blockReflex);
     if (to == host::Mode::Overlay) PostOverlayActivated(true);
     else if (from == host::Mode::Overlay) PostOverlayActivated(false);
 }
@@ -268,6 +275,7 @@ void App::PollInvites() {
     for (const net::Invite& inv : net::TakeInvites()) {
         const net::RemotePlayer* from = FindPlayer(inv.from);
         const std::string who = from ? from->name : i18n::T("A player", "Un jugador");
+        const bool showToast = settings::Get().inviteToasts;   // the game gets the invite either way
         if (inv.appId != appId_) {
             ShowInfo(who + i18n::T(" invited you", " te invita"), i18n::T("to a match of another game.", "a una partida de otro juego."));
             continue;
@@ -279,6 +287,7 @@ void App::PollInvites() {
             cb.m_ulGameID = appId_;
             UnrealSteamEmu::PostCallback(LobbyInvite_t::k_iCallback, &cb, sizeof(cb));
         }
+        if (!showToast) continue;
         Toast t;
         t.kind = Toast::Kind::Invite;
         t.title = who;
@@ -293,6 +302,8 @@ void App::PollInvites() {
 }
 
 void App::ShowInfo(const std::string& title, const std::string& body) {
+    // Feedback to something done in the open overlay always shows; notices while playing follow the setting.
+    if (!overlayOpen_ && !settings::Get().otherToasts) return;
     Toast t;
     t.kind = Toast::Kind::Info;
     t.title = title;
@@ -311,17 +322,31 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
     if (started_) {
         Refresh(game);
         PollInvites();
+        PollAchievements();
+        PollNvidiaReflexHooks();
         if (!welcomed_ && game.hwnd && game.foreground) {
             welcomed_ = true;
-            Toast t;
-            t.kind = Toast::Kind::Welcome;
-            t.born = now;
-            t.life = kWelcomeMs;
-            toasts_.push_back(std::move(t));
+            if (settings::Get().welcomeToast) {
+                Toast t;
+                t.kind = Toast::Kind::Welcome;
+                t.born = now;
+                t.life = kWelcomeMs;
+                toasts_.push_back(std::move(t));
+            }
         }
     }
+    // A notification's time only runs while it can be seen (game in front or overlay open): one that arrives
+    // while the game is in the background still gets its full time on screen.
+    const bool toastsVisible = overlayOpen_ || game.foreground;
+    if (!toastsVisible && lastToastTick_ && now > lastToastTick_) {
+        for (Toast& t : toasts_) {
+            if (!t.closing) t.born += now - lastToastTick_;
+        }
+    }
+    lastToastTick_ = now;
     for (Toast& t : toasts_) {
-        if (!t.closing && now - t.born > t.life) { t.closing = true; t.closingAt = now; }
+        // Notifications posted later in this frame have born > now: unsigned "now - born" would wrap and close them.
+        if (!t.closing && now > t.born && now - t.born > t.life) { t.closing = true; t.closingAt = now; }
     }
     while (!toasts_.empty() && toasts_.front().closing && now - toasts_.front().closingAt > kToastFadeMs)
         toasts_.pop_front();
@@ -380,6 +405,19 @@ void App::Join(const net::RemotePlayer& p) {
     CloseOverlay();
 }
 
+InviteState App::InviteStateFor(const PlayerRow& row) const {
+    const uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
+    const std::string& connect = inviteOnly_ && !inviteConnect_.empty() ? inviteConnect_ : localConnect_;
+    if (lobby != 0 && row.p.lobbyId == lobby) return InviteState::InLobby;
+    if (lobby == 0 && connect.empty()) return InviteState::NoLobby;
+    auto it = invitedAt_.find(row.p.steamId);
+    // An invite to an earlier lobby does not count for this one.
+    if (it == invitedAt_.end() || it->second.lobby != lobby || it->second.connect != connect) return InviteState::Ready;
+    const ULONGLONG age = GetTickCount64() - it->second.at;
+    if (age < kInviteFreshMs) return InviteState::Fresh;
+    return age < kInvitePendingMs ? InviteState::Pending : InviteState::Ready;
+}
+
 void App::Invite(const net::RemotePlayer& p) {
     uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
     if (lobby == 0) {
@@ -387,7 +425,15 @@ void App::Invite(const net::RemotePlayer& p) {
         localLobby_ = lobby;
     }
     const std::string connect = inviteOnly_ && !inviteConnect_.empty() ? inviteConnect_ : localConnect_;
-    if (net::SendInvite(p.steamId, lobby, connect)) invitedAt_[p.steamId] = GetTickCount64();
+    if (lobby == 0 && connect.empty()) return;
+    if (lobby != 0 && p.lobbyId == lobby) return;   // already there
+    if (net::SendInvite(p.steamId, lobby, connect)) {
+        invitedAt_[p.steamId] = SentInvite{ GetTickCount64(), lobby, connect };
+    } else {
+        sound::Play(sound::Cue::Denied);
+        ShowInfo(i18n::T("Could not send the invite", "No se pudo enviar la invitación"),
+                 i18n::T("The player is no longer on the LAN.", "El jugador ya no está en la LAN."));
+    }
 }
 
 void App::ToggleFavorite(const net::RemotePlayer& p) {

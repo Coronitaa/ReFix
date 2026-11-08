@@ -328,7 +328,7 @@ void ScanGameWindow() {
 // window on a 4K monitor gets small text, a 4K game big text), the monitor otherwise. 1080 px -> 1.2,
 // so text stays readable over a game; steps of 0.05 keep font atlas rebuilds rare.
 constexpr float kScaleAt1080 = 1.2f;
-constexpr float kMinScale = 0.8f;
+constexpr float kMinScale = 0.9f;   // below this captions drop under ~13 px
 constexpr float kMaxScale = 3.0f;
 
 float ScaleFor(const GameWindow* gw) {

@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.2.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.2.0)
+[![Release](https://img.shields.io/badge/version-v2.3.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.3.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -15,7 +15,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 ## Install
 
-1. Download `ReFix_Release_v2.2.0.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
+1. Download `ReFix_Release_v2.3.0.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
    - `[1] ReFix Online via Steam` or `[2] ReFix LAN without Steam`
@@ -50,10 +50,12 @@ To update ReFix in a game, run the new `AutoDeploy` on it again.
 Press **Shift+Tab**, or the Xbox / PS button of a controller.
 
 - See who on the network is playing, join their match or invite them. Invites show up as a notification in the other player's game.
+- Steam achievements: a notice with the icon and rarity when you unlock one, your recent ones, and the full list with progress. Saved per profile, in English and Spanish.
+- Settings (the gear): turn each kind of notification and sound on or off, change the language, and the NVIDIA Reflex option below.
 - The game's Store, Community, Guides, Workshop and News pages open inside the overlay. They need the WebView2 Runtime (included in Windows 11); without it they open in your browser.
 - Works with Xbox and XInput controllers, DualShock 4 and DualSense, in English and Spanish.
 - Draws over borderless and fullscreen-window games. Games in exclusive fullscreen minimise while it is open.
-- Nothing in the game or in Windows is patched or hooked.
+- Nothing in the game or in Windows is patched or hooked, except NVIDIA Reflex: it is paused while the overlay is open, so the overlay does not flicker or turn see-through (Settings, or `BlockNvidiaReflex = false`, turns this off).
 
 ### Profiles
 
@@ -106,6 +108,7 @@ SteamId =
 Enabled = true             ; ReFix overlay
 BlockSteamOverlay = true   ; keep Steam's overlay out of the game
 Sounds = true
+BlockNvidiaReflex = true   ; pause NVIDIA Reflex while the overlay is open
 IsolateSaves = true        ; each profile keeps its own saves
 
 [Steam]

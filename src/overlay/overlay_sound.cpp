@@ -64,6 +64,21 @@ const std::vector<int16_t>& Samples(Cue cue) {
     static const std::vector<int16_t> move = Render({ { 0.00f, 0.025f, 1568, 1568, 0.025f } });
     static const std::vector<int16_t> notify = Render({ { 0.00f, 0.35f, 784, 784, 0.09f }, { 0.09f, 0.45f, 1175, 1175, 0.07f } });
     static const std::vector<int16_t> denied = Render({ { 0.00f, 0.14f, 330, 294, 0.08f } });
+    // Achievement chimes: notes of one major chord (C E G), soft attack, long bell-like tails, quieter than
+    // the game. Each tier adds a note and a little length; only the rarest reach the high octave.
+    static const std::vector<int16_t> achProgress = Render({ { 0.00f, 0.14f, 1318, 1318, 0.035f }, { 0.05f, 0.16f, 1976, 1976, 0.02f } });
+    static const std::vector<int16_t> achCommon = Render({ { 0.00f, 0.38f, 784, 784, 0.055f }, { 0.09f, 0.50f, 1046, 1046, 0.05f } });
+    static const std::vector<int16_t> achUncommon = Render({ { 0.00f, 0.38f, 784, 784, 0.05f }, { 0.08f, 0.45f, 1046, 1046, 0.05f },
+                                                             { 0.16f, 0.60f, 1318, 1318, 0.045f } });
+    static const std::vector<int16_t> achRare = Render({ { 0.00f, 0.40f, 659, 659, 0.05f }, { 0.08f, 0.45f, 784, 784, 0.05f },
+                                                         { 0.16f, 0.50f, 1046, 1046, 0.045f }, { 0.24f, 0.75f, 1318, 1318, 0.045f } });
+    static const std::vector<int16_t> achVeryRare = Render({ { 0.00f, 0.45f, 523, 523, 0.05f }, { 0.08f, 0.50f, 659, 659, 0.045f },
+                                                             { 0.16f, 0.55f, 784, 784, 0.045f }, { 0.24f, 0.60f, 1046, 1046, 0.045f },
+                                                             { 0.34f, 0.90f, 1568, 1568, 0.035f } });
+    static const std::vector<int16_t> achUltraRare = Render({ { 0.00f, 0.50f, 523, 523, 0.05f }, { 0.07f, 0.55f, 659, 659, 0.045f },
+                                                              { 0.14f, 0.60f, 784, 784, 0.045f }, { 0.21f, 0.65f, 1046, 1046, 0.045f },
+                                                              { 0.30f, 0.80f, 1318, 1318, 0.04f }, { 0.40f, 1.10f, 2093, 2093, 0.025f },
+                                                              { 0.40f, 1.10f, 1568, 1568, 0.03f } });
     switch (cue) {
     case Cue::Open: return open;
     case Cue::Close: return close;
@@ -71,6 +86,12 @@ const std::vector<int16_t>& Samples(Cue cue) {
     case Cue::Move: return move;
     case Cue::Notify: return notify;
     case Cue::Denied: return denied;
+    case Cue::AchievementProgress: return achProgress;
+    case Cue::AchievementCommon: return achCommon;
+    case Cue::AchievementUncommon: return achUncommon;
+    case Cue::AchievementRare: return achRare;
+    case Cue::AchievementVeryRare: return achVeryRare;
+    case Cue::AchievementUltraRare: return achUltraRare;
     }
     return select;
 }
@@ -105,7 +126,9 @@ bool EnsureDevice() {
 void SetEnabled(bool enabled) { g_enabled = enabled; }
 
 void Play(Cue cue) {
-    if (!g_enabled) return;
+    // Achievement chimes have their own setting (checked by the caller); the rest follow the interface sounds.
+    const bool achievement = cue >= Cue::AchievementProgress;
+    if (!g_enabled && !achievement) return;
     if (cue == Cue::Move) {
         const ULONGLONG now = GetTickCount64();
         if (now - g_lastMove < kMoveGapMs) return;   // holding a direction must not buzz
