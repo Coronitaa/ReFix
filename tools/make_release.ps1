@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.1.1" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.2.0" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -40,7 +40,11 @@ function Copy-Into([string]$relative) {
 }
 
 # Entry points
-foreach ($f in "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "Uninstall_ReFix.sh", "ReFix.ini", "LICENSE") { Copy-Into $f }
+foreach ($f in "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "Uninstall_ReFix.sh", "DLC_Unlocker.bat", "ReFix.ini", "LICENSE") { Copy-Into $f }
+
+# Game mods AutoDeploy installs from the catalog without downloading them
+Get-ChildItem -LiteralPath (Join-Path $repo "refix_mods") -File | Where-Object { $_.Extension -in ".tsv", ".rfmod" } |
+    ForEach-Object { Copy-Into ("refix_mods\" + $_.Name) }
 
 # Deploy scripts and the small helpers they call
 Get-ChildItem -LiteralPath $bin -File | Where-Object {

@@ -45,6 +45,67 @@ ask_game_dir() {
     printf '%s' "$picked"
 }
 
+# ---------------------------------------------------------------- game mods
+# Mods made for one game (refix_mods/catalog.tsv) go to <exe folder>/refix_mods, where ReFix loads them.
+MODS_URL="${REFIX_MODS_URL:-https://raw.githubusercontent.com/Coronitaa/ReFix/main/refix_mods}"
+
+fetch() {   # fetch <url> <file>
+    if command -v curl >/dev/null 2>&1; then curl -fsSL --max-time 120 -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then wget -q -T 120 -O "$2" "$1"
+    else return 1; fi
+}
+
+sha256_of() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+install_mods() {
+    local catalog="$ROOT/refix_mods/catalog.tsv" tmp="" id product exe mfile mtext file sum exe_path exe_dir dest src
+    if [ ! -f "$catalog" ]; then
+        tmp="$(mktemp)"
+        fetch "$MODS_URL/catalog.tsv" "$tmp" || { rm -f "$tmp"; info "Mod catalog not reachable; no game mods installed"; return 0; }
+        catalog="$tmp"
+    fi
+    while IFS=$'\t' read -r id product exe mfile mtext file sum; do
+        sum="${sum%$'\r'}"
+        case "$id" in ''|'#'*) continue ;; esac
+        [ "$product" = any ] || [ "$product" = "$MODE" ] || continue
+        exe_path="$(find "$GAME_DIR" -maxdepth 3 -type f -iname "$exe" -print -quit 2>/dev/null)"
+        [ -n "$exe_path" ] || continue
+        exe_dir="$(dirname "$exe_path")"
+        if [ -n "$mfile" ] && ! grep -qaF "$mtext" "$exe_dir/$mfile" 2>/dev/null; then continue; fi
+        dest="$exe_dir/refix_mods"
+        mkdir -p "$dest"
+        src="$ROOT/refix_mods/$file"
+        if [ -f "$src" ]; then cp -f "$src" "$dest/$file.part"
+        elif ! fetch "$MODS_URL/$file" "$dest/$file.part"; then
+            rm -f "$dest/$file.part"; warn "Could not download the $id mod"; continue
+        fi
+        if [ "$(sha256_of "$dest/$file.part")" != "$sum" ]; then
+            rm -f "$dest/$file.part"; warn "The $id package does not match the catalog; not installed"; continue
+        fi
+        mv -f "$dest/$file.part" "$dest/$file"
+        grep -qxF "$file" "$dest/.refix_installed" 2>/dev/null || printf '%s\n' "$file" >> "$dest/.refix_installed"
+        ok "Installed the $id mod in $dest"
+        break
+    done < "$catalog"
+    [ -z "$tmp" ] || rm -f "$tmp"
+    return 0
+}
+
+uninstall_mods() {
+    local list d f
+    while IFS= read -r list; do
+        d="$(dirname "$list")"
+        while IFS= read -r f; do f="${f%$'\r'}"; [ -n "$f" ] && rm -f "$d/$f"; done < "$list"
+        rm -f "$list"
+        rmdir "$d" 2>/dev/null || true
+        ok "Removed the game mods ReFix installed in $d"
+    done < <(find "$GAME_DIR" -type f -name .refix_installed 2>/dev/null)
+    # Game files a mod changed keep their original as <file>.refix_orig.
+    while IFS= read -r f; do
+        mv -f "$f" "${f%.refix_orig}" && ok "Restored ${f%.refix_orig}"
+    done < <(find "$GAME_DIR" -type f -name '*.refix_orig' 2>/dev/null)
+}
+
 # ---------------------------------------------------------------- uninstall
 restore_one() {   # restore_one <dir> <backup name> <live name>
     local dir="$1" backup="$2" live="$3"
@@ -140,6 +201,7 @@ restore_saves() {
 uninstall() {
     info "Restoring the game's original files in $GAME_DIR"
     restore_saves
+    uninstall_mods
     while IFS= read -r d; do
         restore_one "$d" steam_api64_original.dll steam_api64.dll
         restore_one "$d" steam_api64_valve.dll steam_api64.dll
@@ -396,6 +458,7 @@ deploy_steam_x86
 deploy_eos
 clean_online_winmm
 write_ini
+install_mods
 
 echo
 ok "ReFix $MODE is installed in $GAME_NAME."

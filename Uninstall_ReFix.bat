@@ -148,6 +148,17 @@ for /f "delims=" %%F in ('dir /s /b "%TARGET_DIR%\winmm.dll" "%TARGET_DIR%\winht
     echo [OK] Removed ReFix file: %%F
 )
 
+:: 7b. Game mods ReFix installed (listed in refix_mods\.refix_installed) and game files they changed (*.refix_orig)
+for /f "delims=" %%L in ('dir /s /b /a-d "%TARGET_DIR%\.refix_installed" 2^>nul') do (
+    for /f "usebackq delims=" %%M in ("%%L") do if exist "%%~dpL%%M" del /f /q "%%~dpL%%M"
+    del /f /q "%%L"
+    rd "%%~dpL" 2>nul
+    echo [OK] Removed the game mods ReFix installed in %%~dpL
+)
+for /f "delims=" %%O in ('dir /s /b /a-d "%TARGET_DIR%\*.refix_orig" 2^>nul') do (
+    move /y "%%O" "%%~dpnO" >nul && echo [OK] Restored %%~dpnO
+)
+
 :: 7. Remove ReFix directories recursively (steam_settings, saves, BepInEx)
 for /d /r "%TARGET_DIR%" %%D in (steam_settings saves BepInEx) do (
     if exist "%%D" (

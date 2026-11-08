@@ -2361,6 +2361,62 @@ function Verify-ReFixDeployment {
     }
 }
 
+# ============================================================
+# Game mods: refix_mods\catalog.tsv lists mods made for one game; the first row that matches is installed
+# into <exe folder>\refix_mods, where ReFix loads it. The package comes from the release folder or is
+# downloaded from the repository, and must match the catalog's SHA-256.
+# ============================================================
+function Install-GameMods {
+    $modsUrl = if ($env:REFIX_MODS_URL) { $env:REFIX_MODS_URL } else { "https://raw.githubusercontent.com/Coronitaa/ReFix/main/refix_mods" }
+    $localMods = Join-Path (Split-Path -Parent $BinDir) "refix_mods"
+    $catalogPath = Join-Path $localMods "catalog.tsv"
+    try {
+        $lines = if (Test-Path -LiteralPath $catalogPath) { Get-Content -LiteralPath $catalogPath }
+                 else { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri "$modsUrl/catalog.tsv").Content -split "`n" }
+    } catch {
+        Write-Host "  [*] Mod catalog not reachable; no game mods installed" -ForegroundColor DarkGray
+        return
+    }
+    foreach ($line in $lines) {
+        $line = $line.TrimEnd("`r")
+        if ($line -eq "" -or $line.StartsWith("#")) { continue }
+        $c = $line -split "`t"
+        if ($c.Count -lt 7) { continue }
+        $id, $product, $exe, $matchFile, $matchText, $file, $sum = $c[0..6]
+        if ($product -ne "any" -and $product -ne $productName) { continue }
+        $exeItem = Get-ChildItem -LiteralPath $TargetDir -Filter $exe -Recurse -Depth 2 -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $exeItem) { continue }
+        if ($matchFile) {
+            $mf = Join-Path $exeItem.DirectoryName $matchFile
+            if (-not (Test-Path -LiteralPath $mf) -or -not (Select-String -LiteralPath $mf -SimpleMatch -Pattern $matchText -Quiet)) { continue }
+        }
+        $dest = Join-Path $exeItem.DirectoryName "refix_mods"
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $part = Join-Path $dest "$file.part"
+        try {
+            $src = Join-Path $localMods $file
+            if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $part -Force }
+            else { Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -Uri "$modsUrl/$file" -OutFile $part }
+        } catch {
+            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+            Write-Host "  [WARN] Could not download the $id mod: $_" -ForegroundColor Yellow
+            continue
+        }
+        if ((Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash -ne $sum.ToUpperInvariant()) {
+            Remove-Item -LiteralPath $part -Force
+            Write-Host "  [WARN] The $id package does not match the catalog; not installed" -ForegroundColor Yellow
+            continue
+        }
+        Move-Item -LiteralPath $part -Destination (Join-Path $dest $file) -Force
+        $marker = Join-Path $dest ".refix_installed"
+        if (-not ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker) -contains $file)) { Add-Content -LiteralPath $marker -Value $file }
+        Write-Host "  [OK] Installed the $id mod in $dest" -ForegroundColor Green
+        return
+    }
+}
+
+Install-GameMods
+
 $verifySuccess = Verify-ReFixDeployment `
     -TargetDir $TargetDir `
     -ExeDir $ExeDir `
