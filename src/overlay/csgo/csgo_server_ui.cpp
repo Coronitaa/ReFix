@@ -20,16 +20,30 @@ namespace refix::overlay {
 
 namespace {
 
-struct ModeOption { const char* id; const char* en; const char* es; int defaultSlots; int defaultRounds; };
+// Every mode of gamemodes.txt that runs on a listen server. War Games are game_type 5 plus the skirmish id of
+// items_game "skirmish_modes"; the server applies that mode's own config. mapPrefix: maps the mode needs.
+struct ModeOption { const char* id; const char* en; const char* es; int defaultSlots; int defaultRounds; int skirmish; const char* mapPrefix; };
 const ModeOption kModes[] = {
-    { "competitive", "Competitive", "Competitivo", 10, 30 },
-    { "casual", "Casual", "Casual", 20, 15 },
-    { "scrimcomp2v2", "Wingman", "Compañero", 4, 16 },
-    { "deathmatch", "Deathmatch", "Deathmatch", 16, 1 },
-    { "gungameprogressive", "Arms Race", "Carrera armamentística", 12, 1 },
-    { "gungametrbomb", "Demolition", "Demolición", 10, 20 },
-    { "survival", "Danger Zone", "Zona de peligro", 16, 1 },  // game_type 6, dz_* maps
+    { "competitive", "Competitive", "Competitivo", 10, 30, 0, nullptr },
+    { "casual", "Casual", "Casual", 20, 15, 0, nullptr },
+    { "scrimcomp2v2", "Wingman", "Compañero", 4, 16, 0, nullptr },
+    { "scrimcomp5v5", "Weapons Expert", "Experto en armas", 10, 30, 0, nullptr },
+    { "deathmatch", "Deathmatch", "Deathmatch", 16, 1, 0, nullptr },
+    { "gungameprogressive", "Arms Race", "Carrera armamentística", 12, 1, 0, nullptr },
+    { "gungametrbomb", "Demolition", "Demolición", 10, 20, 0, nullptr },
+    { "survival", "Danger Zone", "Zona de peligro", 16, 1, 0, "dz_" },
+    { "cooperative", "Guardian", "Guardián", 2, 1, 0, nullptr },
+    { "coopmission", "Co-op Strike", "Ataque cooperativo", 2, 1, 0, "coop_" },
+    { "skirmish", "Flying Scoutsman", "Explorador volador", 16, 15, 3, nullptr },
+    { "skirmish", "Stab Stab Zap", "Apuñala, apuñala, zap", 16, 15, 1, nullptr },
+    { "skirmish", "Trigger Discipline", "Disciplina de gatillo", 16, 15, 4, nullptr },
+    { "skirmish", "Headshots", "Disparos en la cabeza", 16, 1, 6, nullptr },
+    { "skirmish", "Hunter-Gatherers", "Cazadores-recolectores", 16, 1, 7, nullptr },
+    { "skirmish", "Heavy Assault Suit", "Traje de asalto pesado", 16, 15, 8, nullptr },
 };
+
+// Maps only one mode can run (Danger Zone, Co-op Strike).
+bool IsModeOnlyMap(const std::string& m) { return m.rfind("dz_", 0) == 0 || m.rfind("coop_", 0) == 0; }
 constexpr int kModeCount = (int)(sizeof(kModes) / sizeof(kModes[0]));
 
 struct ServerState {
@@ -53,10 +67,10 @@ struct ServerState {
 ServerState g_server;
 
 int MapGroupRank(const std::string& m) {
-    static const char* kPrefixes[] = { "de_", "cs_", "ar_", "dz_", "gd_" };
-    for (int i = 0; i < 5; ++i)
+    static const char* kPrefixes[] = { "de_", "cs_", "ar_", "dz_", "gd_", "coop_" };
+    for (int i = 0; i < 6; ++i)
         if (m.rfind(kPrefixes[i], 0) == 0) return i;
-    return 5;
+    return 6;
 }
 
 void LoadMaps() {
@@ -103,8 +117,8 @@ void DrawMapList(float w, float h) {
     ImGui::BeginChild("##srv_maplist", ImVec2(0, 0), false);
     std::string filter = g_server.mapFilter;
     int lastRank = -1;
-    static const char* kGroupEs[] = { "Desactivación", "Rehenes", "Carrera armamentística", "Zona de peligro", "Guardián", "Otros" };
-    static const char* kGroupEn[] = { "Defusal", "Hostage", "Arms Race", "Danger Zone", "Guardian", "Other" };
+    static const char* kGroupEs[] = { "Desactivación", "Rehenes", "Carrera armamentística", "Zona de peligro", "Guardián", "Ataque cooperativo", "Otros" };
+    static const char* kGroupEn[] = { "Defusal", "Hostage", "Arms Race", "Danger Zone", "Guardian", "Co-op Strike", "Other" };
     for (const std::string& m : g_server.maps) {
         if (!filter.empty() && m.find(filter) == std::string::npos) continue;
         int rank = MapGroupRank(m);
@@ -147,8 +161,12 @@ void DrawSettings(float w, float h) {
     float fw = w - ui::S(12);
     ui::SectionLabel(i18n::T("Game mode", "Modo de juego"));
     float modeW = (fw - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
-    for (int i = 0; i < kModeCount; ++i) {
-        if (i % 3) ImGui::SameLine();
+    for (int i = 0, col = 0; i < kModeCount; ++i, ++col) {
+        if (kModes[i].skirmish && !kModes[i - 1].skirmish) {
+            Label(i18n::T("WAR GAMES", "JUEGOS DE GUERRA"));
+            col = 0;
+        }
+        if (col % 3) ImGui::SameLine();
         ImGui::PushID(i);
         const char* label = i18n::T(kModes[i].en, kModes[i].es);
         bool clicked = g_server.mode == i ? ui::PrimaryButton(label, ImVec2(modeW, ui::S(32)))
@@ -158,11 +176,13 @@ void DrawSettings(float w, float h) {
             g_server.mode = i;
             g_server.slots = kModes[i].defaultSlots;
             g_server.maxRounds = kModes[i].defaultRounds;
-            // Danger Zone only runs on dz_ maps, and dz_ maps only in Danger Zone.
-            bool dzMode = std::string(kModes[i].id) == "survival", dzMap = g_server.map.rfind("dz_", 0) == 0;
-            if (dzMode != dzMap) {
+            // Danger Zone and Co-op Strike only run on their own maps, and those maps only in that mode.
+            auto fits = [&](const std::string& m) {
+                return kModes[i].mapPrefix ? m.rfind(kModes[i].mapPrefix, 0) == 0 : !IsModeOnlyMap(m);
+            };
+            if (!fits(g_server.map)) {
                 for (const std::string& m : g_server.maps)
-                    if ((m.rfind("dz_", 0) == 0) == dzMode) { g_server.map = m; break; }
+                    if (fits(m)) { g_server.map = m; break; }
             }
         }
     }
@@ -221,7 +241,8 @@ void DrawSettings(float w, float h) {
 
 void HostNow() {
     nlohmann::json cfg = {
-        { "map", g_server.map }, { "mode", kModes[g_server.mode].id }, { "maxplayers", g_server.slots },
+        { "map", g_server.map }, { "mode", kModes[g_server.mode].id }, { "skirmish", kModes[g_server.mode].skirmish },
+        { "maxplayers", g_server.slots },
         { "maxrounds", g_server.maxRounds }, { "roundtime", g_server.roundTime }, { "startmoney", g_server.startMoney },
         { "maxmoney", g_server.maxMoney }, { "friendlyfire", g_server.friendlyFire ? 1 : 0 }, { "bot_quota", g_server.bots },
         { "bot_difficulty", g_server.botDifficulty }, { "sv_cheats", g_server.cheats ? 1 : 0 },

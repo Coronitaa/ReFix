@@ -2405,6 +2405,8 @@ void HostLanMatch() {
         { "casual", 0, 0 }, { "competitive", 0, 1 }, { "scrimcomp2v2", 0, 2 }, { "wingman", 0, 2 },
         { "gungameprogressive", 1, 0 }, { "armsrace", 1, 0 }, { "gungametrbomb", 1, 1 }, { "demolition", 1, 1 },
         { "deathmatch", 1, 2 }, { "survival", 6, 0 }, { "dangerzone", 6, 0 },
+        { "scrimcomp5v5", 0, 3 }, { "weaponsexpert", 0, 3 }, { "cooperative", 4, 0 }, { "guardian", 4, 0 },
+        { "coopmission", 4, 1 }, { "skirmish", 5, 0 }, { "wargames", 5, 0 },
     };
     std::string modeName = str("mode", "competitive");
     int gameType = 0, gameMode = 1;
@@ -2422,11 +2424,12 @@ void HostLanMatch() {
     // ("connect-lan-only"); with 1 it only requires a private-network client address.
     char cmd[768];
     snprintf(cmd, sizeof(cmd),
-             "sv_lan 1; maxplayers %d; game_type %d; game_mode %d; mp_maxrounds %d; mp_roundtime %.2f; "
+             "sv_lan 1; maxplayers %d; game_type %d; game_mode %d; sv_skirmish_id %d; mp_maxrounds %d; mp_roundtime %.2f; "
              "mp_roundtime_defuse %.2f; mp_roundtime_hostage %.2f; mp_buytime %d; mp_startmoney %d; mp_maxmoney %d; "
              "mp_friendlyfire %d; bot_quota %d; bot_difficulty %d; sv_cheats %d; mp_overtime_enable %d; "
              "mp_limitteams %d; sv_password \"%s\"; map %s",
-             (int)num("maxplayers", 10), gameType, gameMode, (int)num("maxrounds", 30), num("roundtime", 1.92),
+             (int)num("maxplayers", 10), gameType, gameMode, gameType == 5 ? (int)num("skirmish", 3) : 0,
+             (int)num("maxrounds", 30), num("roundtime", 1.92),
              num("roundtime", 1.92), num("roundtime", 1.92), (int)num("buytime", 20), (int)num("startmoney", 800),
              (int)num("maxmoney", 16000), (int)num("friendlyfire", 0), (int)num("bot_quota", 10),
              (int)num("bot_difficulty", 1), (int)num("sv_cheats", 0), (int)num("overtime", 0),
