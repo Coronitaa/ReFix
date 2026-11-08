@@ -127,6 +127,9 @@ public:
     virtual bool SetLobbyData(std::string_view lobbyId, std::string_view key, const AttributeValue& value) = 0;
     virtual bool DeleteLobbyData(std::string_view lobbyId, std::string_view key) = 0;
     virtual bool SetMemberData(std::string_view lobbyId, std::string_view key, const AttributeValue& value) = 0;
+    virtual bool SetMaxMembers(std::string_view lobbyId, uint32_t maxMembers) = 0;
+    virtual bool SetJoinable(std::string_view lobbyId, bool joinable) = 0;
+    virtual bool SetPermission(std::string_view lobbyId, LobbyPermissionLevel permission) = 0;
 
     virtual bool RequestJoin(std::string_view lobbyId) = 0;
     virtual bool LeaveLobby(std::string_view lobbyId) = 0;

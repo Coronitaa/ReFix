@@ -55,7 +55,7 @@ static void EnsureOrigLoaded() {
         size_t slash = dllDir.find_last_of("\\/");
         if (slash != std::string::npos) dllDir = dllDir.substr(0, slash + 1);
 
-        std::string candidate = dllDir + "steam_api_o.dll";
+        std::string candidate = dllDir + "steam_api_original.dll";
         g_hOrig = LoadLibraryA(candidate.c_str());
         if (g_hOrig) {
             LogMsg("Loaded orig DLL next to proxy: %s", candidate.c_str());
@@ -70,7 +70,7 @@ static void EnsureOrigLoaded() {
     size_t lastSlash = exeDir.find_last_of("\\/");
     if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash + 1);
 
-    std::string oPath = exeDir + "steam_api_o.dll";
+    std::string oPath = exeDir + "steam_api_original.dll";
     g_hOrig = LoadLibraryA(oPath.c_str());
     if (g_hOrig) {
         LogMsg("Loaded orig DLL next to exe: %s", oPath.c_str());
@@ -78,11 +78,11 @@ static void EnsureOrigLoaded() {
     }
 
     // 3. Fallback to standard DLL search
-    g_hOrig = LoadLibraryA("steam_api_o.dll");
+    g_hOrig = LoadLibraryA("steam_api_original.dll");
     if (g_hOrig) {
-        LogMsg("Loaded orig DLL from search path: steam_api_o.dll");
+        LogMsg("Loaded orig DLL from search path: steam_api_original.dll");
     } else {
-        LogMsg("ERROR: Failed to load steam_api_o.dll (LastError=%lu)", GetLastError());
+        LogMsg("ERROR: Failed to load steam_api_original.dll (LastError=%lu)", GetLastError());
     }
 }
 

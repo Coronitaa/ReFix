@@ -52,6 +52,14 @@ IDCompositionDevice* g_dcomp = nullptr;
 IDCompositionTarget* g_target = nullptr;
 IDCompositionVisual* g_visual = nullptr;
 UINT g_width = 0, g_height = 0;
+// Wine/Proton has no DirectComposition: there the frame is drawn off screen and shown through a layered
+// window (UpdateLayeredWindow). [Overlay] Composition = false forces this path on Windows too.
+bool g_layered = false;
+ID3D11Texture2D* g_offscreen = nullptr;
+ID3D11Texture2D* g_staging = nullptr;
+HDC g_memDC = nullptr;
+HBITMAP g_dib = nullptr;
+void* g_dibBits = nullptr;
 Mode g_mode = Mode::Hidden;
 bool g_deviceLost = false;
 std::map<std::string, TextureEntry> g_textures;
@@ -99,6 +107,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DEVICECHANGE:
         pad::DeviceChanged();
         break;
+    case WM_SETCURSOR:
+        if (g_mode == Mode::Overlay || g_mode == Mode::Dialog) {
+            SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+            return TRUE;
+        }
+        break;
+    case WM_ERASEBKGND:
+        return 1;
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_KEYMENU) return 0;
         break;
@@ -108,7 +124,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+void ReleaseLayeredSurface() {
+    SafeRelease(g_offscreen);
+    SafeRelease(g_staging);
+    if (g_dib) { DeleteObject(g_dib); g_dib = nullptr; g_dibBits = nullptr; }
+    if (g_memDC) { DeleteDC(g_memDC); g_memDC = nullptr; }
+}
+
+bool CreateLayeredSurface(UINT w, UINT h) {
+    ReleaseLayeredSurface();
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_offscreen))) return false;
+    td.BindFlags = 0;
+    td.Usage = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_staging))) return false;
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = (LONG)w;
+    bi.bmiHeader.biHeight = -(LONG)h;  // top-down, like the texture
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    g_memDC = CreateCompatibleDC(nullptr);
+    g_dib = CreateDIBSection(g_memDC, &bi, DIB_RGB_COLORS, &g_dibBits, nullptr, 0);
+    if (!g_dib) return false;
+    SelectObject(g_memDC, g_dib);
+    return true;
+}
+
+// The frame is premultiplied BGRA already (drawn over a transparent clear), which is what ULW_ALPHA wants.
+HRESULT PresentLayered() {
+    g_ctx->CopyResource(g_staging, g_offscreen);
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    const HRESULT hr = g_ctx->Map(g_staging, 0, D3D11_MAP_READ, 0, &m);
+    if (FAILED(hr)) return hr;
+    for (UINT y = 0; y < g_height; ++y)
+        memcpy((uint8_t*)g_dibBits + (size_t)y * g_width * 4, (const uint8_t*)m.pData + (size_t)y * m.RowPitch, (size_t)g_width * 4);
+    g_ctx->Unmap(g_staging, 0);
+    SIZE size{ (LONG)g_width, (LONG)g_height };
+    POINT src{ 0, 0 };
+    BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_hwnd, nullptr, nullptr, &size, g_memDC, &src, 0, &blend, ULW_ALPHA);
+    return S_OK;
+}
+
+HRESULT PresentFrame(UINT syncInterval) {
+    return g_layered ? PresentLayered() : g_swap->Present(syncInterval, 0);
+}
+
+LONG_PTR BaseExStyle() { return g_layered ? WS_EX_LAYERED : WS_EX_NOREDIRECTIONBITMAP; }
+
 void CreateRenderTarget() {
+    if (g_layered) {
+        g_device->CreateRenderTargetView(g_offscreen, nullptr, &g_rtv);
+        return;
+    }
     ID3D11Texture2D* back = nullptr;
     if (SUCCEEDED(g_swap->GetBuffer(0, IID_PPV_ARGS(&back)))) {
         g_device->CreateRenderTargetView(back, nullptr, &g_rtv);
@@ -142,7 +219,8 @@ bool CreateDeviceAndSurface(UINT w, UINT h) {
     sd.Scaling = DXGI_SCALING_STRETCH;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-    hr = factory ? factory->CreateSwapChainForComposition(g_device, &sd, nullptr, &g_swap) : E_FAIL;
+    const bool composition = GetPrivateProfileIntA("Overlay", "Composition", 1, ".\\ReFix.ini") != 0;
+    hr = !composition ? E_NOTIMPL : factory ? factory->CreateSwapChainForComposition(g_device, &sd, nullptr, &g_swap) : E_FAIL;
     if (SUCCEEDED(hr)) hr = DCompositionCreateDevice(dxgiDevice, IID_PPV_ARGS(&g_dcomp));
     // Not topmost: child windows (the overlay browser) are drawn above the ImGui visual.
     if (SUCCEEDED(hr)) hr = g_dcomp->CreateTargetForHwnd(g_hwnd, FALSE, &g_target);
@@ -153,10 +231,24 @@ bool CreateDeviceAndSurface(UINT w, UINT h) {
     SafeRelease(factory);
     SafeRelease(adapter);
     SafeRelease(dxgiDevice);
-    if (FAILED(hr)) { ReFixLog("[Overlay] DirectComposition setup failed 0x%08X", (unsigned)hr); return false; }
+    if (FAILED(hr)) {
+        ReFixLog("[Overlay] DirectComposition unavailable (0x%08X); drawing through a layered window", (unsigned)hr);
+        SafeRelease(g_visual);
+        SafeRelease(g_target);
+        SafeRelease(g_dcomp);
+        SafeRelease(g_swap);
+        g_layered = true;
+        if (!CreateLayeredSurface(w, h)) { ReFixLog("[Overlay] Layered window surface failed"); return false; }
+        SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, (GetWindowLongPtrW(g_hwnd, GWL_EXSTYLE) & ~WS_EX_NOREDIRECTIONBITMAP) | WS_EX_LAYERED);
+    }
     g_width = w;
     g_height = h;
     CreateRenderTarget();
+    if (g_rtv && g_ctx) {
+        const float clear[4] = { 0, 0, 0, 0 };
+        g_ctx->ClearRenderTargetView(g_rtv, clear);
+        PresentFrame(0);
+    }
     return true;
 }
 
@@ -165,11 +257,19 @@ void ResizeSurface(UINT w, UINT h) {
     h = std::max<UINT>(h, 8);
     if (w == g_width && h == g_height) return;
     SafeRelease(g_rtv);
-    const HRESULT hr = g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    const HRESULT hr = g_layered ? (CreateLayeredSurface(w, h) ? S_OK : E_FAIL)
+                                 : g_swap->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     g_width = w;
     g_height = h;
     if (FAILED(hr)) g_deviceLost = true;   // recreated before the next frame
-    else CreateRenderTarget();
+    else {
+        CreateRenderTarget();
+        if (g_rtv && g_ctx) {
+            const float clear[4] = { 0, 0, 0, 0 };
+            g_ctx->ClearRenderTargetView(g_rtv, clear);
+            PresentFrame(0);
+        }
+    }
 }
 
 BOOL CALLBACK FindGameWindow(HWND w, LPARAM lp) {
@@ -232,6 +332,13 @@ constexpr float kMinScale = 0.8f;
 constexpr float kMaxScale = 3.0f;
 
 float ScaleFor(const GameWindow* gw) {
+    char scaleBuf[32] = {};
+    if (GetPrivateProfileStringA("Overlay", "Scale", "", scaleBuf, sizeof(scaleBuf), ".\\ReFix.ini") > 0) {
+        float customScale = (float)atof(scaleBuf);
+        if (customScale >= 0.5f && customScale <= 4.0f) {
+            return customScale;
+        }
+    }
     float h = 0;
     if (gw && gw->hwnd && !gw->minimized) h = (float)(gw->client.bottom - gw->client.top);
     if (h < 240) {
@@ -253,16 +360,9 @@ float ScaleFor(const GameWindow* gw) {
 HWND g_childOf = nullptr;
 
 bool CanHostAsChild(const GameWindow& gw) {
-    const char* why = nullptr;
-    if (!gw.hwnd || !IsWindow(gw.hwnd)) why = "no game window";
-    else if (gw.minimized || IsIconic(gw.hwnd)) why = "game window minimised";
-    else {
-        QUERY_USER_NOTIFICATION_STATE state{};
-        if (SUCCEEDED(SHQueryUserNotificationState(&state)) && state == QUNS_RUNNING_D3D_FULL_SCREEN)
-            why = "the game is in exclusive Direct3D fullscreen";
-    }
-    if (why) ReFixLog("[Overlay] Shift+Tab overlay as a popup window: %s", why);
-    return why == nullptr;
+    // Top-level topmost popup avoids DirectComposition visual tree invalidation,
+    // coordinate mismatch with window borders, and cross-thread mouse input latency.
+    return false;
 }
 
 // The game keeps the activation while the overlay is its child, so its raw input (camera, movement,
@@ -305,8 +405,8 @@ void ResumeGameRawInput() {
 void BecomeChild(HWND game) {
     if (g_childOf == game) return;
     // SetParent's documentation: set WS_CHILD before parenting a former top-level window.
-    SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_CHILD | WS_CLIPSIBLINGS);
-    SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOPARENTNOTIFY);
+    SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_CHILD);
+    SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, BaseExStyle() | WS_EX_NOPARENTNOTIFY);
     SetParent(g_hwnd, game);
     g_childOf = game;
     SuspendGameRawInput();
@@ -328,7 +428,7 @@ void BecomePopup() {
 }
 
 void SetStyles(Mode m) {
-    LONG_PTR ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST;
+    LONG_PTR ex = BaseExStyle() | WS_EX_TOPMOST;
     ex |= (m == Mode::Toast ? (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) : WS_EX_TOOLWINDOW);
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
 }
@@ -392,14 +492,18 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     if (m == Mode::Hidden) return;
     const RECT r = TargetRect(m, gw);
     static RECT placed{};
+    ResizeSurface((UINT)(r.right - r.left), (UINT)(r.bottom - r.top));
     static Mode placedMode = Mode::Hidden;
-    if (!EqualRect(&r, &placed) || placedMode != m || !IsWindowVisible(g_hwnd)) {
+    static HWND placedChildOf = nullptr;
+
+    if (!EqualRect(&r, &placed) || placedMode != m || placedChildOf != g_childOf || !IsWindowVisible(g_hwnd)) {
         const UINT flags = SWP_FRAMECHANGED | (m == Mode::Toast ? SWP_NOACTIVATE : 0) | SWP_SHOWWINDOW;
         SetWindowPos(g_hwnd, g_childOf ? HWND_TOP : HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
         placed = r;
         placedMode = m;
+        placedChildOf = g_childOf;
     }
-    ResizeSurface((UINT)(r.right - r.left), (UINT)(r.bottom - r.top));
+
     if (g_childOf) {
         // The parent and this thread share an input queue now, so SetFocus works across threads.
         if (GetFocus() != g_hwnd) {
@@ -415,13 +519,18 @@ void ApplyMode(Mode m, const GameWindow& gw) {
 // Games that capture the mouse (cursor locked to the window centre, hidden) would leave the overlay without
 // a usable pointer: free the clip each frame and let ImGui draw its own cursor while the OS one is hidden.
 void FreeMouseForOverlay() {
-    RECT clip{}, screen{ GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0 };
-    screen.right = screen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    screen.bottom = screen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    if (GetClipCursor(&clip) && !EqualRect(&clip, &screen)) ClipCursor(nullptr);
-    CURSORINFO ci{ sizeof(ci) };
-    const bool osCursorShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
-    ImGui::GetIO().MouseDrawCursor = !osCursorShown;
+    static DWORD s_lastFree = 0;
+    DWORD now = GetTickCount();
+    if (now - s_lastFree > 100) {
+        s_lastFree = now;
+        RECT clip{}, screen{ GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0 };
+        screen.right = screen.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        screen.bottom = screen.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (GetClipCursor(&clip) && !EqualRect(&clip, &screen)) ClipCursor(nullptr);
+    }
+    while (ShowCursor(TRUE) < 0);
+    SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+    ImGui::GetIO().MouseDrawCursor = false;
 }
 
 // Controller state into ImGui's gamepad keys (navigation: A/Cross activates, B/Circle goes back).
@@ -473,7 +582,7 @@ void Render(const GameWindow& gw, const pad::State& padState) {
     g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
     g_ctx->ClearRenderTargetView(g_rtv, clear);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    const HRESULT hr = g_swap->Present(1, 0);
+    const HRESULT hr = PresentFrame(1);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) g_deviceLost = true;
 }
 
@@ -487,6 +596,7 @@ bool RecreateDevice() {
     for (auto& [key, t] : g_textures) SafeRelease(t.srv);
     g_textures.clear();
     SafeRelease(g_rtv);
+    ReleaseLayeredSurface();
     SafeRelease(g_visual);
     SafeRelease(g_target);
     SafeRelease(g_dcomp);
@@ -511,8 +621,8 @@ bool InitThread() {
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
     g_hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kClassName, L"ReFix LAN",
-                             WS_POPUP, 0, 0, 64, 64, nullptr, nullptr, wc.hInstance, nullptr);
-    if (!g_hwnd || !CreateDeviceAndSurface(64, 64)) return false;
+                             WS_POPUP, 0, 0, std::max(64, GetSystemMetrics(SM_CXSCREEN)), std::max(64, GetSystemMetrics(SM_CYSCREEN)), nullptr, nullptr, wc.hInstance, nullptr);
+    if (!g_hwnd || !CreateDeviceAndSurface((UINT)std::max(64, GetSystemMetrics(SM_CXSCREEN)), (UINT)std::max(64, GetSystemMetrics(SM_CYSCREEN)))) return false;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -553,7 +663,7 @@ DWORD WINAPI HostThread(LPVOID) {
         }
         if (g_wantHotkeyHook && PollHotkey()) g_hotkeyPending = true;
         const ULONGLONG now = GetTickCount64();
-        if (now - lastScan >= kGameScanMs || g_mode == Mode::Overlay || g_mode == Mode::Toast || g_mode == Mode::Dialog) {
+        if (now - lastScan >= kGameScanMs) {
             ScanGameWindow();
             lastScan = now;
         }
@@ -591,6 +701,7 @@ DWORD WINAPI HostThread(LPVOID) {
             return 0;
         }
         Render(gw, padState);
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 2, QS_ALLINPUT);
     }
 }
 

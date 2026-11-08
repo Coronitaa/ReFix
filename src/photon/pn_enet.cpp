@@ -14,8 +14,8 @@ constexpr size_t kMtu = 1200;               // client default MTU
 constexpr size_t kMaxPayload = 1100;        // per command, leaves room for headers
 constexpr size_t kVerifyConnectPayload = 32;
 constexpr uint32_t kResendMs = 300;
-constexpr int kMaxSends = 40;               // ~12 s of retransmissions before giving up
-constexpr uint32_t kTimeoutMs = 15000;
+constexpr int kMaxSends = 100;              // extended retransmissions before giving up
+constexpr uint32_t kTimeoutMs = 45000;
 
 int32_t BE32(const uint8_t* p) { return (int32_t)((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]); }
 void PutBE32(std::string& s, int32_t v) {

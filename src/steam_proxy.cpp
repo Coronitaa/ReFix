@@ -1,3 +1,4 @@
+#include "panorama/refix_play_menu_js.h"
 // =============================================================================
 // ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
 // =============================================================================
@@ -39,7 +40,16 @@
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
 #include "overlay/refix_overlay.h"
+#if REFIX_LAN_EDITION
+#include "mods/mod_host.h"
 #endif
+#include "refix_il2cpp.h"
+#endif
+#include "source_main_thread_queue.h"
+#include "gc/lan_rooms.h"
+#include "csgo_operation_patch.h"
+#include "overlay/overlay_i18n.h"
+#include <atomic>
 
 static bool EnsureOriginal();
 
@@ -1914,6 +1924,30 @@ static void LoadConfig() {
     g_enableLogAllowed = g_config.enableLog;
     g_config.enableConsole = ReadBool("Debug", "EnableConsole", false);
     g_config.enableServerBrowser = ReadBool("Debug", "EnableServerBrowser", true);
+
+    // [Mods]
+    char modsEnabledStr[64] = "true";
+    ReadString("Mods", "Enabled", "true", modsEnabledStr, sizeof(modsEnabledStr));
+    bool modsEnabled = (_stricmp(modsEnabledStr, "true") == 0 || strcmp(modsEnabledStr, "1") == 0);
+
+    char modsDevModeStr[64] = "false";
+    ReadString("Mods", "DevMode", "false", modsDevModeStr, sizeof(modsDevModeStr));
+    bool modsDevMode = (_stricmp(modsDevModeStr, "true") == 0 || strcmp(modsDevModeStr, "1") == 0);
+
+    char modsDirBuf[MAX_PATH] = "";
+    ReadString("Mods", "ModsDirectory", "", modsDirBuf, sizeof(modsDirBuf));
+
+#if REFIX_LAN_EDITION
+    if (modsEnabled) {
+        std::string modsDir = modsDirBuf[0] != '\0' ? modsDirBuf : (GetExeDir() + "refix_mods");
+        refix::mods::ModHost::GetInstance().Initialize(modsDir, modsDevMode);
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::Boot);
+        refix::mods::ModHost::GetInstance().DiscoverAndLoad();
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PreRefix);
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PostRefix);
+        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::EngineReady);
+    }
+#endif
 }
 
 void ReFixLog(const char* fmt, ...) {
@@ -1957,8 +1991,9 @@ void ReFixLog(const char* fmt, ...) {
         sprintf_s(tag, "[pid=%lu tid=%lu mod=%p %s] ", GetCurrentProcessId(), GetCurrentThreadId(), (void*)self, modPath);
     }
     char head[96];
-    int hn = sprintf_s(head, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [steam_api64] ",
-                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    int hn = sprintf_s(head, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%lu] ",
+                       st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                       GetCurrentProcessId());
     std::string line(head, hn > 0 ? static_cast<size_t>(hn) : 0);
     line += tag;
     line += buf;
@@ -3569,6 +3604,137 @@ static DWORD WINAPI ConsoleHotkeyThread(LPVOID) {
     return 0;
 }
 
+// =============================================================================
+// CS:GO Panorama UI Hook (Fixes mainmenu.js ItemInfo reference error & enables Right Sidebar)
+// =============================================================================
+typedef void* (__thiscall *FnPanoramaRunScript)(void* pThis, void* pPanel, const char* pchScript, const char* pchPath, int nLine, int nParam5, int bParam6, int bParam7);
+static FnPanoramaRunScript g_orig_PanoramaRunScript = nullptr;
+
+static const std::string& GetInjectedBundle() {
+    static const std::string s_stubs =
+        "var CharacterAnims=CharacterAnims||{PlayAnimsOnPanel:function(){}};\n"
+        "var ItemInfo=ItemInfo||{GetOrUpdateVanityCharacterSettings:function(){return{activity:'',arrModifiers:[]};}};\n"
+        "var LicenseUtil=LicenseUtil||{GetCurrentLicense:function(){return 'purchased';}};\n";
+    return s_stubs;
+}
+
+static void* __fastcall Hooked_PanoramaRunScript(void* pThis, void* /*edx*/, void* pPanel, const char* pchScript, const char* pchPath, int nLine, int nParam5, int bParam6, int bParam7)
+{
+    if (pchPath && pchScript) {
+        if (strstr(pchPath, "mainmenu.js") && !strstr(pchPath, "mainmenu_play.js")) {
+            ReFixLog("[PanoramaHook] Intercepting mainmenu.js execution (%zu bytes)", strlen(pchScript));
+            std::string script = pchScript;
+
+            const std::string& bundle = GetInjectedBundle();
+
+            auto replaceAll = [](std::string& str, const std::string& from, const std::string& to) {
+                size_t start_pos = 0;
+                while((start_pos = str.find(from, start_pos)) != std::string::npos) {
+                    str.replace(start_pos, from.length(), to);
+                    start_pos += to.length();
+                }
+            };
+
+            replaceAll(script, "MainMenu.InitVanity();", "try{MainMenu.InitVanity();}catch(e){$.Msg('InitVanity err: '+e);}");
+            replaceAll(script, "MainMenu.InitFriendsList();", "try{MainMenu.InitFriendsList();}catch(e){$.Msg('InitFriendsList err: '+e);}");
+            replaceAll(script, "MainMenu.InitNewsAndStore();", "try{MainMenu.InitNewsAndStore();}catch(e){$.Msg('InitNewsAndStore err: '+e);}");
+
+            std::string modifiedScript = bundle + script;
+            return g_orig_PanoramaRunScript(pThis, pPanel, modifiedScript.c_str(), pchPath, nLine, nParam5, bParam6, bParam7);
+        }
+        else if (strstr(pchPath, "mainmenu_play.js")) {
+            ReFixLog("[PanoramaHook] Intercepting mainmenu_play.js execution (%zu bytes) - injecting ReFix LAN Play Menu", strlen(pchScript));
+            std::string playExt = refix::panorama::GetRefixPlayMenuScript();
+            static const std::string kLabelToken = "__REFIX_LAN_SERVER_LABEL__";
+            size_t tok = playExt.find(kLabelToken);
+            if (tok != std::string::npos)
+                playExt.replace(tok, kLabelToken.size(), refix::overlay::i18n::Spanish() ? "SERVIDOR LAN" : "LAN SERVER");
+            std::string modifiedScript = std::string(pchScript) + "\n;\n" + playExt;
+            return g_orig_PanoramaRunScript(pThis, pPanel, modifiedScript.c_str(), pchPath, nLine, nParam5, bParam6, bParam7);
+        }
+    }
+    return g_orig_PanoramaRunScript(pThis, pPanel, pchScript, pchPath, nLine, nParam5, bParam6, bParam7);
+}
+
+// Version-independent lookup: CUIEngine::RunScript pushes its VPROF label "CUIEngine::RunScript (compile+run)".
+// Find the instruction that references the string and walk back to the function prologue (55 8B EC) that follows
+// int3/nop padding. Falls back to the 2019 byte pattern when the label is missing.
+static void* FindPanoramaRunScriptByAnchor(uint8_t* base, size_t size) {
+    static const char kLabel[] = "CUIEngine::RunScript (compile+run)";
+    uint8_t* str = nullptr;
+    for (size_t i = 0; i + sizeof(kLabel) <= size; ++i)
+        if (base[i] == 'C' && memcmp(base + i, kLabel, sizeof(kLabel)) == 0) { str = base + i; break; }
+    if (!str) return nullptr;
+    uint32_t va = (uint32_t)(uintptr_t)str;
+    // Only code references count (data tables also hold the pointer), and only the stack-aligned prologue
+    // (55 8B EC 83 E4 F8) of the 8-argument RunScript the hook is written for: other shapes are left alone.
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + ((PIMAGE_DOS_HEADER)base)->e_lfanew);
+    PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s, ++sec) {
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        uint8_t* begin = base + sec->VirtualAddress;
+        uint8_t* end = begin + (std::min<size_t>)(sec->Misc.VirtualSize, size - sec->VirtualAddress);
+        for (uint8_t* ref = begin + 1; ref + 4 <= end; ++ref) {
+            if (memcmp(ref, &va, 4) != 0) continue;
+            for (uint8_t* p = ref; p > ref - 0x200 && p > begin + 1; --p) {
+                // The first padding boundary is the start of the referencing function: never walk past it into
+                // a neighbour (e.g. when RunScript is already patched by MinHook and no longer starts with 55).
+                if (p[-1] != 0xCC && p[-1] != 0x90 && p[-1] != 0xC3) continue;
+                if (p[0] == 0x55 && p[1] == 0x8B && p[2] == 0xEC && p[3] == 0x83 && p[4] == 0xE4 && p[5] == 0xF8) {
+                    ReFixLog("[PanoramaHook] RunScript located through its VPROF label at %p", p);
+                    return p;
+                }
+                if (p[-1] == 0xCC && p[-2] == 0xCC) break;
+            }
+        }
+    }
+    return nullptr;
+}
+
+static DWORD WINAPI Source_PanoramaHookThread(LPVOID) {
+    // Initialisation runs several times per process: hook once, never re-scan a patched panorama.dll.
+    static std::atomic<bool> s_started{ false };
+    if (s_started.exchange(true)) return 0;
+    HMODULE hPan = NULL;
+    for (int i = 0; i < 200; ++i) {
+        hPan = GetModuleHandleA("panorama.dll");
+        if (hPan) break;
+        Sleep(50);
+    }
+    if (!hPan) return 0;
+
+    ReFixLog("[PanoramaHook] Found panorama.dll at %p", hPan);
+
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hPan;
+    if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+        PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((uint8_t*)hPan + dos->e_lfanew);
+        if (nt->Signature == IMAGE_NT_SIGNATURE) {
+            uint8_t* base = (uint8_t*)hPan;
+            size_t size = nt->OptionalHeader.SizeOfImage;
+            const uint8_t pat[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0x74, 0x01 };
+            void* found = FindPanoramaRunScriptByAnchor(base, size);
+            for (size_t i = 0; !found && i + sizeof(pat) <= size; ++i)
+                if (memcmp(base + i, pat, sizeof(pat)) == 0) found = base + i;
+            if (found) {
+                {
+                    void* target = found;
+                    ReFixLog("[PanoramaHook] Located RunScript at %p", target);
+                    MH_Initialize();
+                    if (MH_CreateHook(target, (void*)&Hooked_PanoramaRunScript, (void**)&g_orig_PanoramaRunScript) == MH_OK) {
+                        MH_EnableHook(target);
+                        ReFixLog("[PanoramaHook] Hooked Panorama RunScript successfully!");
+                    } else {
+                        ReFixLog("[PanoramaHook] Failed to hook RunScript");
+                    }
+                }
+            } else {
+                ReFixLog("[PanoramaHook] RunScript not found in this panorama.dll build");
+            }
+        }
+    }
+    return 0;
+}
+
 static void StartConsoleHotkeyMonitor() {
     CreateThread(NULL, 0, ConsoleHotkeyThread, NULL, 0, NULL);
 }
@@ -5140,6 +5306,9 @@ static void ReFixInitializePost(bool success) {
 #if REFIX_LAN_EDITION
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
+        ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
+        refix::csgo::ApplyOperationPatch(); // CS:GO only: later operation missions, before the game reads items_game
+        CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
@@ -5498,6 +5667,8 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (s_runCallbacksLogged++ < 3) {
         ReFixLog("SteamAPI_RunCallbacks called (frame=%d)", s_runCallbacksLogged);
     }
+    refix::source::MainThreadQueue::Drain();
+    refix::rooms::Tick();
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     if (provider) {
         provider->RunCallbacks();
@@ -5505,6 +5676,9 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
         DispatchRelayCallbacks();
         DispatchPendingAuthCallbacks();
+#if REFIX_LAN_EDITION
+        ReFixIL2CPP::Update();
+#endif
     }
     if (s_runCallbacksLogged <= 3) {
         ReFixLog("SteamAPI_RunCallbacks: done");
@@ -5529,6 +5703,9 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
         UnrealSteamEmu::ManualDispatch_RunFrame(hSteamPipe);
     }
     DispatchPendingAuthCallbacks();
+#if REFIX_LAN_EDITION
+    ReFixIL2CPP::Update();
+#endif
 }
 
 static std::atomic<bool> s_lastManualCallbackWasSynthetic{ false };
@@ -5688,6 +5865,9 @@ static void SafeBackendShutdown() {
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+#if REFIX_LAN_EDITION
+    ReFixIL2CPP::Shutdown();
+#endif
     UnrealSteamEmu::FlushUserStats();
     SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
@@ -6504,6 +6684,7 @@ extern "C" __declspec(dllexport) void SteamGameServer_RunCallbacks() {
 
 extern "C" __declspec(dllexport) void SteamGameServer_Shutdown() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
+        UnrealSteamEmu::SetLocalPresence("refix:server", ""); // the listen server is gone: stop advertising it
         UnrealSteamEmu::Shutdown();
         return;
     }
@@ -6982,7 +7163,7 @@ static void InitializeLanForwardTable() {
         if (!name) continue;
         g_steamProcs[i] = LookupLanExport(name);
     }
-    ReFixLog("InitializeLanForwardTable: Forward table hardened for LAN (zero-crash fallback installed)");
+    ReFixLog("InitializeLanForwardTable: LAN forward table ready (missing exports return safe defaults)");
 }
 
 // =============================================================================
@@ -7133,6 +7314,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
             SteamP2PHook::Uninstall();
+#if REFIX_LAN_EDITION
+            refix::mods::ModHost::GetInstance().Shutdown();
+#endif
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary
             // during DLL_PROCESS_DETACH. Calling COM/FreeLibrary in DllMain violates loader lock
             // and causes crashes on process exit. OS cleans up process memory safely.

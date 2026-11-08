@@ -5,6 +5,10 @@
 #include "refix_pa_backend.h"
 #include "refix_pa_relay.h"
 #include "minhook/MinHook.h"
+#include "overlay/overlay_text.h"
+#include "overlay/save_swap.h"
+#include "overlay/refix_overlay.h"
+#include "unreal_steam_emu.h"
 #include <cstdio>
 #include <atomic>
 #include <string>
@@ -105,6 +109,81 @@ static fn_P2PRoomUtils_IsP2PMode_t g_orig_P2PRoomUtils_IsP2PMode = nullptr;
 
 typedef void (*fn_WallBreaker_Awake_t)(void* self, void* method);
 static fn_WallBreaker_Awake_t g_orig_WallBreaker_Awake = nullptr;
+
+typedef void* (*fn_Application_get_persistentDataPath_t)(void* method);
+static fn_Application_get_persistentDataPath_t g_orig_Application_get_persistentDataPath = nullptr;
+
+typedef void (*fn_Application_get_persistentDataPath_Injected_t)(void** outString);
+static fn_Application_get_persistentDataPath_Injected_t g_orig_Application_get_persistentDataPath_Injected = nullptr;
+
+typedef void* (*fn_Application_get_persistentDataPath_icall_t)();
+static fn_Application_get_persistentDataPath_icall_t g_orig_Application_get_persistentDataPath_icall = nullptr;
+
+static std::string s_lastProfileId;
+static std::string s_isolatedDataPath;
+static std::mutex s_isolatedDataPathMutex;
+
+static std::string GetIsolatedPathUtf8() {
+    std::lock_guard<std::mutex> lock(s_isolatedDataPathMutex);
+    std::wstring currentProfile = ReFixOverlay::ActiveProfileId();
+    std::string curId = refix::overlay::ToUtf8(currentProfile);
+    if (!s_isolatedDataPath.empty() && curId == s_lastProfileId) {
+        return s_isolatedDataPath;
+    }
+    s_lastProfileId = curId;
+    std::wstring wpath = refix::overlay::saves::GetActiveSaveDir();
+    if (!wpath.empty()) {
+        s_isolatedDataPath = refix::overlay::ToUtf8(wpath);
+        ReFixLog("[IL2CPP] Redirecting Application.persistentDataPath for profile '%s' -> %s", curId.c_str(), s_isolatedDataPath.c_str());
+    }
+    return s_isolatedDataPath;
+}
+
+typedef void* (*fn_GenericLocalStorageSystem_GetPathForSave_t)(void* self, void* saveName, void* method);
+static fn_GenericLocalStorageSystem_GetPathForSave_t g_orig_GetPathForSave = nullptr;
+
+static void* Hooked_GenericLocalStorageSystem_GetPathForSave(void* self, void* saveName, void* method) {
+    std::string iso = GetIsolatedPathUtf8();
+    if (!iso.empty() && saveName && g_pfn_string_new) {
+        std::string steamDir = iso + "\\Steam";
+        std::wstring wSteam = refix::overlay::FromUtf8(steamDir);
+        CreateDirectoryW(wSteam.c_str(), nullptr);
+        std::string name = ReFixIL2CPPScene::StringToUtf8(saveName);
+        std::string fullPath = steamDir + "\\" + name;
+        if (fullPath.size() < 5 || fullPath.substr(fullPath.size() - 5) != ".data") {
+            fullPath += ".data";
+        }
+        return g_pfn_string_new(fullPath.c_str());
+    }
+    return g_orig_GetPathForSave ? g_orig_GetPathForSave(self, saveName, method) : nullptr;
+}
+
+static void* Hooked_Application_get_persistentDataPath(void* method) {
+    std::string path = GetIsolatedPathUtf8();
+    if (!path.empty() && g_pfn_string_new) {
+        return g_pfn_string_new(path.c_str());
+    }
+    return g_orig_Application_get_persistentDataPath ? g_orig_Application_get_persistentDataPath(method) : nullptr;
+}
+
+static void Hooked_Application_get_persistentDataPath_Injected(void** outString) {
+    std::string path = GetIsolatedPathUtf8();
+    if (!path.empty() && g_pfn_string_new && outString) {
+        *outString = g_pfn_string_new(path.c_str());
+        return;
+    }
+    if (g_orig_Application_get_persistentDataPath_Injected) {
+        g_orig_Application_get_persistentDataPath_Injected(outString);
+    }
+}
+
+static void* Hooked_Application_get_persistentDataPath_icall() {
+    std::string path = GetIsolatedPathUtf8();
+    if (!path.empty() && g_pfn_string_new) {
+        return g_pfn_string_new(path.c_str());
+    }
+    return g_orig_Application_get_persistentDataPath_icall ? g_orig_Application_get_persistentDataPath_icall() : nullptr;
+}
 
 // Same register layout works for static (method) and instance (self, method) getters on x64.
 typedef bool (*fn_Bridge_GetBool_t)(void* selfOrMethod, void* method);
@@ -352,7 +431,7 @@ static bool ActivateP2PModeInternal() {
     // The game's built-in fake room data is only needed when no local backend serves the room operations
     // (createRoom/describeRoom/listRoom). Set the field directly: SwitchP2PFakeData() toggles, so calling
     // it on every activation (startup + transition) would flip it back.
-    bool useFakeData = !ReadIniBool("P2P", "LocalBackend", false); // same default as refix_pa_backend.cpp
+    bool useFakeData = (ReFixPABackend::Port() == 0);
     if (ReFixIL2CPPScene::SetStaticFieldValue(klassUtils, "useFakeData", &useFakeData)) {
         ReFixLog("[IL2CPP] P2PRoomUtils.useFakeData set to %s", useFakeData ? "true" : "false");
     }
@@ -1077,8 +1156,79 @@ static bool Hooked_P2PRoomUtils_IsP2PMode(void* method) {
     return true;
 }
 
+// Hooked PlayerReportingService - bypass ban check HTTP calls for PlaySide / generic games
+typedef bool (*fn_PlayerReporting_ShouldSkipReportingHttp_t)(void* settings, void* method);
+static fn_PlayerReporting_ShouldSkipReportingHttp_t g_orig_PlayerReporting_ShouldSkipReportingHttp = nullptr;
+static bool Hooked_PlayerReporting_ShouldSkipReportingHttp(void* settings, void* method) {
+    ReFixLog("[IL2CPP] PlayerReportingService.ShouldSkipReportingHttp intercepted -> returning true (bypassing ban check HTTP)");
+    return true;
+}
+
+typedef bool (*fn_PlayerReporting_CanUseReportingApi_t)(void* method);
+static fn_PlayerReporting_CanUseReportingApi_t g_orig_PlayerReporting_CanUseReportingApi = nullptr;
+static bool Hooked_PlayerReporting_CanUseReportingApi(void* method) {
+    ReFixLog("[IL2CPP] PlayerReportingService.CanUseReportingApi intercepted -> returning false");
+    return false;
+}
+
 // Hooked SelectServerPaneUi.OnApplyButtonClick
 // When user clicks Confirmar/Apply, DO NOT call official AWS connection. Route straight to P2P!
+
+typedef void* (*fn_NetworkRunner_StartGame_t)(void* self, void* args, void* method);
+static fn_NetworkRunner_StartGame_t g_orig_NetworkRunner_StartGame = nullptr;
+
+static void* Hooked_NetworkRunner_StartGame(void* self, void* args, void* method) {
+    if (args) {
+        int32_t* pGameMode = reinterpret_cast<int32_t*>(args);
+        int32_t originalMode = *pGameMode;
+
+        if (ReadIniBool("Fusion", "ForceHost", false)) {
+            bool isLobbyOwner = true;
+            uint64_t activeLobby = UnrealSteamEmu::GetActiveLobbyID();
+            if (activeLobby != 0) {
+                uint64_t owner = UnrealSteamEmu::Matchmaking_GetLobbyOwner(activeLobby);
+                uint64_t selfId = UnrealSteamEmu::GetLocalSteamID();
+                isLobbyOwner = (owner == 0 || owner == selfId);
+            }
+            if (isLobbyOwner) {
+                *pGameMode = 4; // Host
+                ReFixLog("[Fusion IL2CPP] Overriding StartGameArgs.GameMode from %d to Host (4)", originalMode);
+            } else {
+                *pGameMode = 5; // Client
+                ReFixLog("[Fusion IL2CPP] Overriding StartGameArgs.GameMode from %d to Client (5)", originalMode);
+            }
+        } else {
+            ReFixLog("[Fusion IL2CPP] NetworkRunner.StartGame invoked with GameMode %d", originalMode);
+        }
+    }
+    return g_orig_NetworkRunner_StartGame ? g_orig_NetworkRunner_StartGame(self, args, method) : nullptr;
+}
+
+typedef void (*fn_AuthenticationValues_set_AuthType_t)(void* self, uint8_t value, void* method);
+static fn_AuthenticationValues_set_AuthType_t g_orig_AuthenticationValues_set_AuthType = nullptr;
+
+static void Hooked_AuthenticationValues_set_AuthType(void* self, uint8_t value, void* method) {
+    if (ReadIniBool("Photon", "ForceAnonymous", true)) {
+        value = 255; // CustomAuthenticationType.None
+    }
+    if (g_orig_AuthenticationValues_set_AuthType) {
+        g_orig_AuthenticationValues_set_AuthType(self, value, method);
+    }
+}
+
+typedef void (*fn_ApplyAuthenticationTicketParameters_t)(void* self, void* arg1, void* arg2, void* method);
+static fn_ApplyAuthenticationTicketParameters_t g_orig_ApplyAuthenticationTicketParameters = nullptr;
+
+static void Hooked_ApplyAuthenticationTicketParameters(void* self, void* arg1, void* arg2, void* method) {
+    if (ReadIniBool("Photon", "BypassTicket", true)) {
+        ReFixLog("[Photon IL2CPP] Bypassing ApplyAuthenticationTicketParameters for anonymous LAN handshake");
+        return;
+    }
+    if (g_orig_ApplyAuthenticationTicketParameters) {
+        g_orig_ApplyAuthenticationTicketParameters(self, arg1, arg2, method);
+    }
+}
+
 static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
     if (self) g_pSelectServerPaneUiInstance.store(self);
     ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnApplyButtonClick (Confirm) clicked! <<<");
@@ -1228,6 +1378,117 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
 
     // 1. Immediately activate native P2P mode at startup
     ActivateP2PModeInternal();
+
+    // Hook UnityEngine.Application.get_persistentDataPath for save data isolation
+    void* klassApp = FindClassAcrossImages("UnityEngine", "Application");
+    if (klassApp) {
+        void* methodPDP = g_pfn_class_get_method_from_name(klassApp, "get_persistentDataPath", 0);
+        if (methodPDP) {
+            void* pCode = ResolveRealCodePointer(*(void**)methodPDP);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_Application_get_persistentDataPath, (void**)&g_orig_Application_get_persistentDataPath) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked UnityEngine.Application.get_persistentDataPath at %p", pCode);
+            }
+        }
+    }
+
+    typedef void* (*fn_il2cpp_resolve_icall)(const char* name);
+    auto pfn_resolve_icall = (fn_il2cpp_resolve_icall)GetProcAddress(hGA, "il2cpp_resolve_icall");
+    if (pfn_resolve_icall) {
+        void* pIcallInjected = pfn_resolve_icall("UnityEngine.Application::get_persistentDataPath_Injected");
+        if (pIcallInjected) {
+            void* pReal = ResolveRealCodePointer(pIcallInjected);
+            if (pReal && MH_CreateHook(pReal, (void*)Hooked_Application_get_persistentDataPath_Injected, (void**)&g_orig_Application_get_persistentDataPath_Injected) == MH_OK) {
+                MH_EnableHook(pReal);
+                ReFixLog("[IL2CPP] Hooked icall get_persistentDataPath_Injected at %p", pReal);
+            }
+        }
+        void* pIcall = pfn_resolve_icall("UnityEngine.Application::get_persistentDataPath");
+        if (pIcall) {
+            void* pReal = ResolveRealCodePointer(pIcall);
+            if (pReal && MH_CreateHook(pReal, (void*)Hooked_Application_get_persistentDataPath_icall, (void**)&g_orig_Application_get_persistentDataPath_icall) == MH_OK) {
+                MH_EnableHook(pReal);
+                ReFixLog("[IL2CPP] Hooked icall get_persistentDataPath at %p", pReal);
+            }
+        }
+    }
+
+    // Hook GenericLocalStorageSystem for Dumb Ways to Build save isolation
+    void* klassGenSave = FindClassAcrossImages("Unity.PlatformToolkit", "GenericLocalStorageSystem");
+    if (!klassGenSave) klassGenSave = FindClassAcrossImages("", "GenericLocalStorageSystem");
+    if (klassGenSave) {
+        void* mGetPath = g_pfn_class_get_method_from_name(klassGenSave, "GetPathForSave", 1);
+        if (mGetPath) {
+            void* pCode = ResolveRealCodePointer(*(void**)mGetPath);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_GenericLocalStorageSystem_GetPathForSave, (void**)&g_orig_GetPathForSave) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked GenericLocalStorageSystem.GetPathForSave at %p", pCode);
+            }
+        }
+    }
+
+    // Hook PlayerReportingService for PlaySide / generic ban check bypass
+    void* klassReporting = FindClassAcrossImages("PlaySide.Platform", "PlayerReportingService");
+    if (!klassReporting) klassReporting = FindClassAcrossImages("", "PlayerReportingService");
+    if (klassReporting) {
+        void* methodShouldSkip = g_pfn_class_get_method_from_name(klassReporting, "ShouldSkipReportingHttp", 1);
+        if (methodShouldSkip) {
+            void* pCode = ResolveRealCodePointer(*(void**)methodShouldSkip);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_PlayerReporting_ShouldSkipReportingHttp, (void**)&g_orig_PlayerReporting_ShouldSkipReportingHttp) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked PlayerReportingService.ShouldSkipReportingHttp at %p", pCode);
+            }
+        }
+        void* methodCanUse = g_pfn_class_get_method_from_name(klassReporting, "CanUseReportingApi", 0);
+        if (methodCanUse) {
+            void* pCode = ResolveRealCodePointer(*(void**)methodCanUse);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_PlayerReporting_CanUseReportingApi, (void**)&g_orig_PlayerReporting_CanUseReportingApi) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked PlayerReportingService.CanUseReportingApi at %p", pCode);
+            }
+        }
+    }
+
+    // Hook Fusion NetworkRunner.StartGame for optional generic HostMode forcing
+    void* klassRunner = FindClassAcrossImages("Fusion", "NetworkRunner");
+    if (klassRunner) {
+        void* mStartGame = g_pfn_class_get_method_from_name(klassRunner, "StartGame", 1);
+        if (mStartGame) {
+            void* pCode = ResolveRealCodePointer(*(void**)mStartGame);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_NetworkRunner_StartGame, (void**)&g_orig_NetworkRunner_StartGame) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked Fusion.NetworkRunner.StartGame at %p", pCode);
+            }
+        }
+    }
+
+    // Hook Photon / Fusion AuthenticationValues.set_AuthType for anonymous auth
+    void* klassAuth = FindClassAcrossImages("Photon.Realtime", "AuthenticationValues");
+    if (!klassAuth) klassAuth = FindClassAcrossImages("Fusion.Photon.Realtime", "AuthenticationValues");
+    if (klassAuth) {
+        void* mSetAuth = g_pfn_class_get_method_from_name(klassAuth, "set_AuthType", 1);
+        if (mSetAuth) {
+            void* pCode = ResolveRealCodePointer(*(void**)mSetAuth);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_AuthenticationValues_set_AuthType, (void**)&g_orig_AuthenticationValues_set_AuthType) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked AuthenticationValues.set_AuthType at %p", pCode);
+            }
+        }
+    }
+
+    // Hook ApplyAuthenticationTicketParameters if present in game assembly
+    void* klassNetService = FindClassAcrossImages("FS.Network", "NetworkService");
+    if (klassNetService) {
+        void* mApplyTicket = g_pfn_class_get_method_from_name(klassNetService, "ApplyAuthenticationTicketParameters", 2);
+        if (!mApplyTicket) mApplyTicket = g_pfn_class_get_method_from_name(klassNetService, "ApplyAuthenticationTicketParameters", 1);
+        if (mApplyTicket) {
+            void* pCode = ResolveRealCodePointer(*(void**)mApplyTicket);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_ApplyAuthenticationTicketParameters, (void**)&g_orig_ApplyAuthenticationTicketParameters) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked NetworkService.ApplyAuthenticationTicketParameters at %p", pCode);
+            }
+        }
+    }
 
     // 2. Hook P2PRoomUtils.IsP2PMode (param_count = 0)
     void* klassUtils = FindClassAcrossImages("Recreate.Scripts.Network.P2PRoom", "P2PRoomUtils");

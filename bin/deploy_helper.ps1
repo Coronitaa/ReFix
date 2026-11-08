@@ -202,14 +202,13 @@ function Detect-UNAE-Topology {
 
     $usesPhoton = $hasPhotonRealtime -or $hasPhoton3Unity -or $hasPhotonVoice -or $hasPhotonFusion -or $il2cppPUN -or $il2cppFusion
 
-    # Topologia B: Multiplexado Hibrido (Fusion + nanosockets, Mirror + EOS WebRTC)
-    # Se prioriza sobre Topologia C para evitar que juegos hibridos con voz auxiliar
-    # (como Dumb Ways to Build) sean erróneamente clasificados como Cloud Relay estricto.
+    # Topology B: hybrid (Fusion + nanosockets, Mirror + EOS WebRTC). Checked before topology C so that
+    # hybrid games with an auxiliary voice channel (Dumb Ways to Build) are not taken for pure cloud relay.
     if ($hasPhotonFusion -or $il2cppFusion -or $hasNanosockets -or $hasMirror -or $hasKcp -or $hasEOS) {
         $port = if ($hasNanosockets -or $hasPhotonFusion -or $il2cppFusion) { "27015" } else { "7777" }
         return @{
             Topology = "TopologyB"
-            Name = "Topologia B: Multiplexado Hibrido (EOS P2P / Mirror / Fusion)"
+            Name = "Topology B: hybrid (EOS P2P / Mirror / Fusion)"
             Transport = "WAN: Steam SDR P2P (AppID 480) / LAN: Sockets Directos (Hold Buffer)"
             Color = "Cyan"
             DirectP2PAllowed = $true
@@ -219,7 +218,7 @@ function Detect-UNAE-Topology {
     } elseif ($hasPhotonRealtime -or $hasPhoton3Unity -or $il2cppPUN -or $hasPhotonVoice) {
         return @{
             Topology = "TopologyC"
-            Name = "Topologia C: Cloud-Relay Estricto (PUN 2 / Photon Voice)"
+            Name = "Topology C: cloud relay (PUN 2 / Photon Voice)"
             Transport = "Tier 4 Photon Cloud Relay (DRPI Preservacion Dinamica)"
             Color = "Yellow"
             DirectP2PAllowed = $false
@@ -229,7 +228,7 @@ function Detect-UNAE-Topology {
     } else {
         return @{
             Topology = "TopologyA"
-            Name = "Topologia A: Sockets Directos (P2P Puro / LAN / SDR)"
+            Name = "Topology A: direct sockets (P2P / LAN / Steam relay)"
             Transport = "Tier 1 LAN Autonoma / Tier 2 WAN Steam SDR P2P"
             Color = "Green"
             DirectP2PAllowed = $true
@@ -240,7 +239,7 @@ function Detect-UNAE-Topology {
 }
 
 # ------------------------------------------------------------
-# Helper: Unified ReFix.ini Generator (UNAE v3.0 Specification)
+# Writes ReFix.ini, keeping the values a previous install or the user set
 # ------------------------------------------------------------
 function Generate-UNAE-ReFixIni {
     param(
@@ -311,7 +310,7 @@ function Generate-UNAE-ReFixIni {
 
     $iniContent = @"
 ; =============================================================================
-; ReFix Universal Network Arbitration Engine (UNAE) Configuration
+; ReFix network configuration
 ; =============================================================================
 
 [Game]
@@ -319,27 +318,27 @@ GameName=$($P.GameName)
 EngineType=$($P.EngineType)
 
 [Network]
-; Modo global de arbitraje:
-;   auto         - Deteccion automatica de capacidades, topologia y cascada inteligente (Recomendado).
-;   force_p2p    - Fuerza transporte P2P directo (Tier 1 LAN / Tier 2 SDR). Falla si el juego requiere cloud relay.
-;   force_relay  - Salta P2P directo y enruta inmediatamente a traves de nubes de relevo (EOS / Photon).
-;   force_lan    - Aisla la conectividad a la subred local (Tier 1 exclusivo, sin salidas a Internet).
-;   offline      - Desactiva toda actividad de red externa; emulacion local absoluta.
+; Network mode:
+;   auto         - ReFix picks the transport from what the game uses (recommended).
+;   force_p2p    - Direct P2P only (LAN or Steam relay). Fails when the game needs a cloud relay.
+;   force_relay  - Skips direct P2P and goes through the cloud relays (EOS / Photon).
+;   force_lan    - Local network only, nothing goes to the Internet.
+;   offline      - No network traffic outside this PC.
 Mode = $arbMode
 
-; Puerto base de escucha y descubrimiento UDP para Re:Goldberg y UNAE LAN (Default: 47584)
+; UDP port for LAN discovery (default 47584)
 DiscoveryPort = $existingDiscoveryPort
 
-; Grupo de multidifusion IPv4 para descubrimiento sin configuracion en la misma subred
+; IPv4 multicast group used to find players on the same subnet
 DiscoveryGroup = 239.255.71.84
 
-; Tiempo de espera de respuesta de hosts locales en LAN antes de evaluar WAN (milisegundos)
+; How long to wait for LAN hosts before trying the Internet (ms)
 LanProbeTimeoutMs = 2500
 
-; IPs de difusion adicionales para VPNs (Radmin, Hamachi, ZeroTier) separadas por comas
+; Extra broadcast addresses for VPNs (Radmin, Hamachi, ZeroTier), comma separated
 CustomBroadcasts = $customBroadcasts
 
-; Registro detallado del motor de arbitraje en ReFix.log (solo para diagnostico)
+; Detailed network decisions in ReFix.log (diagnostics only)
 VerboseArbitrationLog = false
 
 
@@ -347,26 +346,26 @@ VerboseArbitrationLog = false
 ; Direct P2P & Valve Steam Datagram Relay (SDR) Tunneling
 ; =============================================================================
 [P2P]
-; Habilita los hooks de intercepcion sobre ws2_32.dll (sendto, recvfrom, connect, select, bind)
+; Hooks the game's sockets (sendto, recvfrom, connect, select, bind) to carry them over Steam P2P
 EnableWinsockHooks = true
 
-; Enruta paquetes UDP de juegos a traves del tunel ISteamNetworking SDR de Valve (AppID 480)
+; Sends the game's UDP packets through Valve's Steam relay (AppID 480)
 EnableSteamSDR = true
 
-; Permite la retransmision por servidores mundiales de Valve si no hay conexion P2P directa
+; Uses Valve relay servers when a direct P2P connection is not possible
 AllowRelay = true
 
-; Puerto UDP principal de la sesion de juego (Default: 7777 para Unreal/Mirror, 27015 para Fusion)
+; Main UDP port of the game session (7777 for Unreal/Mirror, 27015 for Fusion)
 P2PPort = $existingP2PPort
 
-; Falla al instante las conexiones TCP 443/80 a la nube (evita congelamientos de 16s sin internet).
-; Solo en modos offline/LAN: en modo online bloquearia EOS, PlayFab y otros backends oficiales.
+; Fails cloud TCP connections (443/80) at once, so the game does not hang 16 s without Internet.
+; Only for LAN/offline: online it would block EOS, PlayFab and other official services.
 FastCloudFail = $fastCloudFail
 
-; Tiempo de espera de negociacion de sesion P2P antes de activar fallback (milisegundos)
+; How long a P2P session may take to connect before falling back (ms)
 PeerHandshakeTimeoutMs = 5000
 
-; Maximo porcentaje de perdida de paquetes tolerable antes de transicionar de Tier (Default: 40)
+; Packet loss (%) tolerated before switching transport (default 40)
 MaxPacketLossTolerance = 40
 
 
@@ -374,28 +373,28 @@ MaxPacketLossTolerance = 40
 ; Photon Ecosystem & Cloud Relay Configuration (PUN 2, Realtime & Fusion)
 ; =============================================================================
 [Photon]
-; Proveedor de backend para el ecosistema Photon:
-;   ReFixCloud      - Infraestructura gestionada/local ReFix (Cero costo, alto rendimiento).
-;   OfficialPhoton  - Conexion a la nube publica de Photon Engine (Requiere AppIDs validos).
-;   CustomPhoton    - Servidores privados self-hosted (Photon Server / Luxon).
+; Photon backend:
+;   ReFixCloud      - ReFix's own Photon emulator over Steam P2P (no Photon account needed).
+;   OfficialPhoton  - The real Photon Cloud (needs valid AppIDs).
+;   CustomPhoton    - A self-hosted Photon Server.
 Backend = $photonBackend
 
-; Clave de Aplicacion desacoplada para Photon Realtime y PUN 2 (Sincronizacion de juego y salas)
+; Photon Realtime / PUN 2 AppID
 AppIdRealtime = $appIdRealtime
 
-; Clave de Aplicacion desacoplada para Photon Fusion (Tick simulation / Prediccion de estado)
+; Photon Fusion AppID
 AppIdFusion = $appIdFusion
 
-; Gestion de Regiones:
-;   dynamic - Preserva fielmente la region seleccionada por el usuario en la UI del juego (Recomendado).
-;   auto    - Realiza sondeo de ping y conecta automaticamente a la region de menor latencia.
-;   fixed   - Fuerza estaticamente la region definida en DefaultRegion, bloqueando la UI del juego.
+; Region handling:
+;   dynamic - Keeps the region the player picks in the game (recommended).
+;   auto    - Pings the regions and joins the fastest one.
+;   fixed   - Always uses DefaultRegion and ignores the game's choice.
 RegionMode = dynamic
 
-; Region por defecto o de contingencia (sa, us, usw, use, eu, asia, jp, ru)
+; Default or fallback region (sa, us, usw, use, eu, asia, jp, ru)
 DefaultRegion = $defRegion
 
-; Preserva la seleccion de region del jugador en interfaces como Phasmophobia y R.E.P.O.
+; Keeps the player's region choice in games such as Phasmophobia and R.E.P.O.
 PreserveGameUiRegion = true
 
 
@@ -403,21 +402,21 @@ PreserveGameUiRegion = true
 ; Positional Audio & Voice Communications Subsystem
 ; =============================================================================
 [Voice]
-; Backend de transmision de voz:
-;   PhotonVoice - Utiliza el canal desacoplado Photon Voice 2 (Opus 24-48kHz).
-;   EOSRTC      - Utiliza las salas de voz WebRTC de Epic Online Services.
-;   SteamVoice  - Utiliza la API ISteamUser::GetVoice de Steamworks.
-;   Disabled    - Desactiva el subsistema de comunicaciones por voz.
+; Voice backend:
+;   PhotonVoice - Photon Voice 2.
+;   EOSRTC      - Epic Online Services voice rooms.
+;   SteamVoice  - Steamworks ISteamUser::GetVoice.
+;   Disabled    - No voice.
 Backend = PhotonVoice
 
-; Clave de Aplicacion desacoplada exclusiva para Photon Voice 2
-; NOTA CRITICA: No reutilizar la misma clave de AppIdRealtime para evitar agotar el limite de CCU.
+; Photon Voice 2 AppID
+; Use a different key than AppIdRealtime, or both share one CCU limit.
 AppIdVoice = $appIdVoice
 
-; Tasa de muestreo de audio / Bitrate de voz (en bps, Default: 32000)
+; Voice bitrate in bps (default 32000)
 Bitrate = 32000
 
-; Activa la intercepcion de atenuacion espacial 3D segun la distancia entre avatares
+; Lowers voice volume with the distance between players
 EnableProximityVoice = true
 
 
@@ -457,7 +456,7 @@ BlockSteamOverlay = $(if ($OverlayMode -eq "steam") { "false" } else { "true" })
 Sounds = true
 ; Each profile keeps its own Steam Cloud files and the game's known save folder (Unreal SaveGames, Unity LocalLow).
 IsolateSaves = true
-; FirstRunDialog: false = el juego inicia directamente sin interrupciones a pantalla completa
+; FirstRunDialog: false = the game starts straight away, without the first-run dialog
 FirstRunDialog = false
 
 [Matchmaking]
@@ -559,8 +558,8 @@ Write-Host "[2/6] Processing steam_api DLL instances (x64 + x86) & UNAE Network 
 $unaeTopology = Detect-UNAE-Topology -TargetDir $TargetDir
 Write-Host ""
 Write-Host " ============================================================" -ForegroundColor DarkGray
-Write-Host " [UNAE Engine] Clasificacion de Topologia de Red:" -ForegroundColor Cyan
-Write-Host "   -> Topologia Detectada: $($unaeTopology.Name)" -ForegroundColor $($unaeTopology.Color)
+Write-Host " Network topology:" -ForegroundColor Cyan
+Write-Host "   -> $($unaeTopology.Name)" -ForegroundColor $($unaeTopology.Color)
 Write-Host "   -> Transporte Optimo:   $($unaeTopology.Transport)" -ForegroundColor White
 Write-Host "   -> Direct P2P Allowed:  $($unaeTopology.DirectP2PAllowed)" -ForegroundColor $(if ($unaeTopology.DirectP2PAllowed) { "Green" } else { "Yellow" })
 Write-Host "   -> Puerto Asignado:     $($unaeTopology.P2PPort)" -ForegroundColor Cyan
@@ -638,7 +637,7 @@ foreach ($dll32 in $steamDlls32) {
     if ($pluginDirs32 -notcontains $dll32.DirectoryName) { $pluginDirs32 += $dll32.DirectoryName }
 }
 
-# Also pick up dirs that only have steam_api_o.dll or steam_api_valve.dll (already-deployed x86)
+# Also pick up dirs that only have steam_api_valve.dll (already-deployed x86)
 $valveDlls32 = Get-ChildItem -LiteralPath $TargetDir -Filter "steam_api_valve.dll" -Recurse -ErrorAction SilentlyContinue
 foreach ($v32 in $valveDlls32) {
     if ($pluginDirs32 -notcontains $v32.DirectoryName) { $pluginDirs32 += $v32.DirectoryName }
@@ -754,19 +753,20 @@ switch ($OnlineMode) {
             $proxyPath32 = Join-Path $ProductBinDir "x86\steam_api.dll"
             if (Test-Path -LiteralPath $proxyPath32) {
                 foreach ($dir32 in $pluginDirs32) {
-                    $valvePath32 = Join-Path $dir32 "steam_api_o.dll"
                     $steamPath32 = Join-Path $dir32 "steam_api.dll"
                     $origPath32  = Join-Path $dir32 "steam_api_original.dll"
-
-                    if (Test-Path -LiteralPath $origPath32) {
-                        Copy-Item -LiteralPath $origPath32 -Destination $valvePath32 -Force
-                        Write-Host "  [OK] Restored genuine Valve x86 steam_api.dll -> steam_api_o.dll in $dir32" -ForegroundColor Green
-                    } elseif (Test-Path -LiteralPath $steamPath32) {
+                    # The x86 proxy forwards to steam_api_original.dll: that is the only backup kept.
+                    $legacyPath32 = Join-Path $dir32 "steam_api_o.dll"
+                    if ((-not (Test-Path -LiteralPath $origPath32)) -and (Test-Path -LiteralPath $legacyPath32)) {
+                        Rename-Item -LiteralPath $legacyPath32 -NewName "steam_api_original.dll" -Force
+                    } elseif (Test-Path -LiteralPath $legacyPath32) {
+                        Remove-Item -LiteralPath $legacyPath32 -Force
+                    }
+                    if ((-not (Test-Path -LiteralPath $origPath32)) -and (Test-Path -LiteralPath $steamPath32)) {
                         $isAlreadyProxy = ((Get-Item -LiteralPath $steamPath32).Length -eq (Get-Item -LiteralPath $proxyPath32).Length)
-                        if ((-not (Test-Path -LiteralPath $valvePath32)) -and (-not $isAlreadyProxy)) {
-                            Copy-Item -LiteralPath $steamPath32 -Destination $origPath32 -Force
-                            Rename-Item -LiteralPath $steamPath32 -NewName "steam_api_o.dll" -Force
-                            Write-Host "  [OK] Backed up original x86 steam_api.dll -> steam_api_o.dll in $dir32" -ForegroundColor Green
+                        if (-not $isAlreadyProxy) {
+                            Move-Item -LiteralPath $steamPath32 -Destination $origPath32 -Force
+                            Write-Host "  [OK] Backed up original x86 steam_api.dll -> steam_api_original.dll in $dir32" -ForegroundColor Green
                         }
                     }
                     try {
@@ -1546,86 +1546,6 @@ if ($EngineType -eq "Unity") {
         }
     }
 
-    # ------------------------------------------------------------
-    # Photon Fusion / IL2CPP Authentication Bypass Patch
-    # For Dumb Ways to Build: force AuthType = CustomAuthenticationType.None (255)
-    # and suppress Steam ticket injection so Photon connects anonymously without 403 / AUT-004
-    # ------------------------------------------------------------
-    $gameAssemblyPath = Join-Path $TargetDir "GameAssembly.dll"
-    if (Test-Path $gameAssemblyPath) {
-        try {
-            $gaBytes = [System.IO.File]::ReadAllBytes($gameAssemblyPath)
-            $offset1 = 0xB12CF0
-            $offset2 = 0xB12FC0
-            $offsetAuth = 0xB13737
-            $offsetVoiceAuth = 0xB13A27
-            $modified = $false
-
-            if ($gaBytes.Length -gt ($offsetVoiceAuth + 10)) {
-                $gaBackup = "$gameAssemblyPath.original"
-                if (-not (Test-Path $gaBackup)) {
-                    Copy-Item -Path $gameAssemblyPath -Destination $gaBackup -Force
-                    Write-Host "  [OK] Preserved original GameAssembly.dll -> GameAssembly.dll.original" -ForegroundColor Green
-                }
-
-                # 1. Neutralize ApplyAuthenticationTicketParameters -> ret (0xC3)
-                if ($gaBytes[$offset1] -eq 0x48 -and $gaBytes[$offset1 + 1] -eq 0x89) {
-                    $gaBytes[$offset1] = [byte]0xC3
-                    $modified = $true
-                }
-                if ($gaBytes[$offset2] -eq 0x48 -and $gaBytes[$offset2 + 1] -eq 0x89) {
-                    $gaBytes[$offset2] = [byte]0xC3
-                    $modified = $true
-                }
-
-                # 2. Force AuthType = CustomAuthenticationType.None (0xFF / 255) in CreateAuthenticationValues
-                # Pattern: b0 01 eb 02 32 c0 88 43 10 -> b0 ff eb 02 b0 ff 88 43 10
-                if ($gaBytes[$offsetAuth] -eq 0xB0) {
-                    $gaBytes[$offsetAuth + 1] = [byte]0xFF
-                    $gaBytes[$offsetAuth + 4] = [byte]0xB0
-                    $gaBytes[$offsetAuth + 5] = [byte]0xFF
-                    $modified = $true
-                }
-
-                # 3. Force AuthType = CustomAuthenticationType.None (0xFF / 255) in CreateVoiceAuthenticationValues
-                if ($gaBytes[$offsetVoiceAuth] -eq 0xB0) {
-                    $gaBytes[$offsetVoiceAuth + 1] = [byte]0xFF
-                    $gaBytes[$offsetVoiceAuth + 4] = [byte]0xB0
-                    $gaBytes[$offsetVoiceAuth + 5] = [byte]0xFF
-                    $modified = $true
-                }
-
-                # 4. Phasmophobia Unity Services Steam Linking Bypass:
-                # Suppress AttemptLinkWithSteamAsync exception so failed Spacewar (AppID 480) Steam link
-                # falls through to the existing anonymous Unity session without crashing during splash.
-                if ($GameName -match "Phasmophobia" -or $TargetDir -match "Phasmophobia" -or $ExeDir -match "Phasmophobia") {
-                    $phasmPat = [byte[]]@(0x45, 0x84, 0xE4, 0x0F, 0x84, 0x8A, 0x00, 0x00, 0x00, 0x33, 0xC0)
-                    for ($idx = 0x4000000; $idx -lt [math]::Min($gaBytes.Length - 12, 0x5500000); $idx++) {
-                        $pMatch = $true
-                        for ($k = 0; $k -lt $phasmPat.Length; $k++) {
-                            if ($gaBytes[$idx + $k] -ne $phasmPat[$k]) { $pMatch = $false; break }
-                        }
-                        if ($pMatch) {
-                            for ($k = 3; $k -le 8; $k++) {
-                                $gaBytes[$idx + $k] = [byte]0x90
-                            }
-                            $modified = $true
-                            Write-Host "  [SUCCESS] Patched Phasmophobia GameAssembly.dll: Suppressed AttemptLinkWithSteamAsync exception at 0x$([System.Convert]::ToString($idx + 3, 16))" -ForegroundColor Green
-                            break
-                        }
-                    }
-                }
-
-                if ($modified) {
-                    [System.IO.File]::WriteAllBytes($gameAssemblyPath, $gaBytes)
-                    Write-Host "  [SUCCESS] Patched GameAssembly.dll: AuthType -> None (0xFF) & Ticket -> ret (Anonymous Photon Handshake)" -ForegroundColor Green
-                }
-            }
-        } catch {
-            Write-Host "  [NOTICE] Error inspecting GameAssembly.dll: $_" -ForegroundColor Yellow
-        }
-    }
-
     # For Mono games, apply Mono.Cecil patches across Managed assemblies
     $managedDir = Join-Path $TargetDir "*_Data\Managed"
     $managedFolders = Get-Item -Path $managedDir -ErrorAction SilentlyContinue
@@ -2376,10 +2296,9 @@ function Verify-ReFixDeployment {
                 Write-Host "  [VERIFY OK] x86 steam_api.dll proxy verified in $pDir32 ($dllSize32 bytes)" -ForegroundColor Green
             }
 
-            $bk32a = Join-Path $pDir32 "steam_api_o.dll"
             $bk32b = Join-Path $pDir32 "steam_api_original.dll"
             $bk32c = Join-Path $pDir32 "steam_api_valve.dll"
-            if ((-not (Test-Path -LiteralPath $bk32a)) -and (-not (Test-Path -LiteralPath $bk32b)) -and (-not (Test-Path -LiteralPath $bk32c))) {
+            if ((-not (Test-Path -LiteralPath $bk32b)) -and (-not (Test-Path -LiteralPath $bk32c))) {
                 $errors += "Mandatory x86 backup DLL missing in $pDir32"
             } else {
                 Write-Host "  [VERIFY OK] x86 backup DLL verified in $pDir32" -ForegroundColor Green
@@ -2441,6 +2360,62 @@ function Verify-ReFixDeployment {
         return $true
     }
 }
+
+# ============================================================
+# Game mods: refix_mods\catalog.tsv lists mods made for one game; the first row that matches is installed
+# into <exe folder>\refix_mods, where ReFix loads it. The package comes from the release folder or is
+# downloaded from the repository, and must match the catalog's SHA-256.
+# ============================================================
+function Install-GameMods {
+    $modsUrl = if ($env:REFIX_MODS_URL) { $env:REFIX_MODS_URL } else { "https://raw.githubusercontent.com/Coronitaa/ReFix/main/refix_mods" }
+    $localMods = Join-Path (Split-Path -Parent $BinDir) "refix_mods"
+    $catalogPath = Join-Path $localMods "catalog.tsv"
+    try {
+        $lines = if (Test-Path -LiteralPath $catalogPath) { Get-Content -LiteralPath $catalogPath }
+                 else { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -Uri "$modsUrl/catalog.tsv").Content -split "`n" }
+    } catch {
+        Write-Host "  [*] Mod catalog not reachable; no game mods installed" -ForegroundColor DarkGray
+        return
+    }
+    foreach ($line in $lines) {
+        $line = $line.TrimEnd("`r")
+        if ($line -eq "" -or $line.StartsWith("#")) { continue }
+        $c = $line -split "`t"
+        if ($c.Count -lt 7) { continue }
+        $id, $product, $exe, $matchFile, $matchText, $file, $sum = $c[0..6]
+        if ($product -ne "any" -and $product -ne $productName) { continue }
+        $exeItem = Get-ChildItem -LiteralPath $TargetDir -Filter $exe -Recurse -Depth 2 -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $exeItem) { continue }
+        if ($matchFile) {
+            $mf = Join-Path $exeItem.DirectoryName $matchFile
+            if (-not (Test-Path -LiteralPath $mf) -or -not (Select-String -LiteralPath $mf -SimpleMatch -Pattern $matchText -Quiet)) { continue }
+        }
+        $dest = Join-Path $exeItem.DirectoryName "refix_mods"
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $part = Join-Path $dest "$file.part"
+        try {
+            $src = Join-Path $localMods $file
+            if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $part -Force }
+            else { Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -Uri "$modsUrl/$file" -OutFile $part }
+        } catch {
+            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+            Write-Host "  [WARN] Could not download the $id mod: $_" -ForegroundColor Yellow
+            continue
+        }
+        if ((Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash -ne $sum.ToUpperInvariant()) {
+            Remove-Item -LiteralPath $part -Force
+            Write-Host "  [WARN] The $id package does not match the catalog; not installed" -ForegroundColor Yellow
+            continue
+        }
+        Move-Item -LiteralPath $part -Destination (Join-Path $dest $file) -Force
+        $marker = Join-Path $dest ".refix_installed"
+        if (-not ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker) -contains $file)) { Add-Content -LiteralPath $marker -Value $file }
+        Write-Host "  [OK] Installed the $id mod in $dest" -ForegroundColor Green
+        return
+    }
+}
+
+Install-GameMods
 
 $verifySuccess = Verify-ReFixDeployment `
     -TargetDir $TargetDir `

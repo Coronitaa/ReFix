@@ -287,6 +287,9 @@ std::wstring CloudRoot(const std::wstring& id, uint32_t appId) {
 std::wstring StatsRoot(const std::wstring& id, uint32_t appId) {
     return ProfileDir(id) + L"\\Stats\\" + std::to_wstring(appId);
 }
+std::wstring InventoryRoot(const std::wstring& id, uint32_t appId) {
+    return ProfileDir(id) + L"\\Inventory\\" + std::to_wstring(appId);
+}
 
 std::optional<Profile> Load(const std::wstring& id) {
     if (!IsValidId(id)) return std::nullopt;
@@ -390,6 +393,9 @@ std::wstring GuestCloudRoot(uint32_t appId) {
 }
 std::wstring GuestStatsRoot(uint32_t appId) {
     return GuestRoot() + L"\\Guest-" + std::to_wstring(GetCurrentProcessId()) + L"\\Stats\\" + std::to_wstring(appId);
+}
+std::wstring GuestInventoryRoot(uint32_t appId) {
+    return GuestRoot() + L"\\Guest-" + std::to_wstring(GetCurrentProcessId()) + L"\\Inventory\\" + std::to_wstring(appId);
 }
 
 void CleanupGuestFolders() {

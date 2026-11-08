@@ -99,6 +99,13 @@ public:
     void AcceptInvite(const net::Invite& inv);
     bool DeleteProfile(const std::wstring& id);   // false when it is in use somewhere
     void ShowInfo(const std::string& title, const std::string& body);
+    void OpenMarketHUD() { hudMarketOpen_ = true; }
+    void CloseMarketHUD() { hudMarketOpen_ = false; }
+    void OpenMatchmakingHUD() { hudMatchmakingOpen_ = true; }
+    void CloseMatchmakingHUD() { hudMatchmakingOpen_ = false; }
+    bool IsMarketHUDOpen() const { return hudMarketOpen_; }
+    bool IsMatchmakingHUDOpen() const { return hudMatchmakingOpen_; }
+    bool IsOverlayOpen() const { return overlayOpen_; }
 
     // Data for the screens.
     uint32_t appId_ = 0;
@@ -121,6 +128,20 @@ public:
     char filter_[64] = {};
     ImVec2 chipMin_{}, chipMax_{};
     bool popupOpenLastFrame_ = false;   // profile chip in the top bar (anchors its menu)
+
+    struct PendingPurchase {
+        bool active = false;
+        uint32_t appId = 0;
+        uint64_t orderId = 0;
+        std::string itemName;
+        std::string itemDesc;
+        bool isMicroTxn = false;
+        std::function<void(bool)> onComplete;
+    };
+    PendingPurchase pendingPurchase_;
+    void OpenPurchasePrompt(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete = nullptr);
+    void DrawPurchaseModal(ImVec2 viewport);
+    void ExecutePurchase(bool authorized);
 
     ui::AvatarRef ProfileAvatar(const Profile& p);
     ui::AvatarRef PlayerAvatar(const net::RemotePlayer& p);
@@ -166,6 +187,8 @@ private:
     std::vector<std::function<void()>> posts_;
     bool started_ = false;
     bool overlayOpen_ = false;
+    bool hudMarketOpen_ = false;
+    bool hudMatchmakingOpen_ = false;
     DialogKind dialog_ = DialogKind::None;
     bool dialogEditing_ = false;
     HANDLE dialogDone_ = nullptr;

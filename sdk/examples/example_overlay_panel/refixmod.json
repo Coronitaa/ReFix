@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "com.refix.example.overlaypanel",
+  "name": "Example Overlay Panel Mod",
+  "version": "1.0.0",
+  "author": "ReFix Community",
+  "entrypoint": "main.wasm",
+  "execution_tier": "sandboxed",
+  "phase": "PostRefix",
+  "priority": 0,
+  "target_games": [
+    { "app_id": 480, "exe_name": "Game.exe", "engine": "native" }
+  ],
+  "capabilities": [
+    "log",
+    "overlay.panel",
+    "config",
+    "storage"
+  ]
+}

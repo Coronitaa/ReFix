@@ -2,12 +2,15 @@
 #define NOMINMAX
 #endif
 #include "refix_overlay.h"
+#include "overlay_ui_mods.h"
 #include "overlay_app.h"
+#include "overlay_i18n.h"
 #include "overlay_sound.h"
 #include "overlay_text.h"
 #include "profile_store.h"
 #include "save_swap.h"
 #include "steam_overlay_block.h"
+#include "nvidia_reflex_block.h"
 #include "avatar_image.h"
 #include "presence_net.h"
 #include "../unreal_steam_emu.h"
@@ -37,6 +40,7 @@ struct Config {
     bool isolateSaves = true;
     bool sounds = true;
     bool firstRunDialog = false;
+    bool blockNvidiaReflex = true;
 };
 
 Config g_cfg;
@@ -88,6 +92,7 @@ void LoadConfig(const std::string& iniPath) {
     g_cfg.isolateSaves = read("IsolateSaves", true);
     g_cfg.sounds = read("Sounds", true);
     g_cfg.firstRunDialog = read("FirstRunDialog", false);
+    g_cfg.blockNvidiaReflex = read("BlockNvidiaReflex", true);
     sound::SetEnabled(g_cfg.sounds);
 }
 
@@ -184,8 +189,8 @@ void ArmEarly() {
     LoadConfig(FindIni());
     // Independent of the ReFix overlay: Enabled=false + BlockSteamOverlay=true means no overlay at all,
     // Enabled=false + BlockSteamOverlay=false lets Steam's own overlay draw.
-    if (!g_cfg.blockSteamOverlay) return;
-    ArmSteamOverlayBlock();
+    if (g_cfg.blockSteamOverlay) ArmSteamOverlayBlock();
+    if (g_cfg.blockNvidiaReflex) ArmNvidiaReflexBlock();
 }
 
 void WaitForRestartParent() {
@@ -270,6 +275,11 @@ std::wstring CloudFolder(uint32_t appId) {
     return g_cloudFolder;
 }
 
+std::wstring ActiveProfileId() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_active ? g_active->id : std::wstring();
+}
+
 std::wstring StatsFolder(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_mu);
     std::wstring folder;
@@ -285,9 +295,25 @@ std::wstring StatsFolder(uint32_t appId) {
     return folder;
 }
 
+std::wstring InventoryFolder(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    std::wstring folder;
+    if (g_active) {
+        folder = g_active->guest ? profiles::GuestInventoryRoot(appId) : profiles::InventoryRoot(g_active->id, appId);
+    } else {
+        folder = profiles::RootDir() + L"\\Saves\\_pc\\Inventory\\" + std::to_wstring(appId);
+    }
+    for (size_t i = 3; i <= folder.size(); ++i) {
+        if (i == folder.size() || folder[i] == L'\\')
+            CreateDirectoryW(folder.substr(0, i).c_str(), nullptr);
+    }
+    return folder;
+}
+
 void Start() {
     if (g_started.exchange(true)) return;
     LoadConfig(FindIni());
+    if (g_cfg.blockNvidiaReflex) ArmNvidiaReflexBlock();
     if (!Allowed()) return;
     std::optional<Profile> active;
     {
@@ -309,6 +335,10 @@ void ActivateOverlay(const char* dialog) {
         App::Get().Post([lobby] { App::Get().OpenOverlay(true, lobby); });
         return;
     }
+    if (_stricmp(d.c_str(), "Community") == 0 || _stricmp(d.c_str(), "Market") == 0) {
+        OpenMarketGiveMenu();
+        return;
+    }
     App::Get().Post([] { App::Get().OpenOverlay(); });
 }
 
@@ -323,14 +353,53 @@ void ActivateOverlayToUser(const char* dialog, uint64_t steamId) {
 
 void ActivateWebPage(const char* url) {
     if (!IsEnabled() || !url) return;
+    if (strstr(url, "market") || strstr(url, "community") || strstr(url, "give")) {
+        OpenMarketGiveMenu();
+        return;
+    }
+
     const std::wstring u = FromUtf8(url);
     App::Get().Post([u] { App::Get().OpenWeb(u); });
 }
 
+void ShowNotice(const char* title, const char* bodyEs, const char* bodyEn) {
+    if (!IsEnabled()) return;
+    std::string t = title ? title : "", es = bodyEs ? bodyEs : "", en = bodyEn ? bodyEn : "";
+    App::Get().Post([t, es, en] { App::Get().ShowInfo(t, i18n::T(en.c_str(), es.c_str())); });
+}
+
+void OpenLanServer() {
+    if (!IsEnabled()) return;
+    App::Get().Post([] { refix::overlay::OpenHostMatchModal(); });
+}
+
+void OpenMarketGiveMenu() {
+    if (!IsEnabled()) return;
+    App::Get().Post([] {
+        App::Get().OpenOverlay();
+        refix::overlay::OpenMarketGiveMenu();
+    });
+}
+
+void OpenMatchmakerModal() {
+    if (!IsEnabled()) return;
+    App::Get().Post([] {
+        App::Get().OpenOverlay();
+        refix::overlay::OpenHostMatchModal();
+    });
+}
+
 void ActivateStore(uint32_t appId) {
     if (!IsEnabled() || appId == 0) return;
-    const std::wstring u = L"https://store.steampowered.com/app/" + std::to_wstring(appId) + L"/";
-    App::Get().Post([u] { App::Get().OpenWeb(u); });
+    PromptPurchase(appId, 0, "", "", false);
+}
+
+void PromptPurchase(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete) {
+    if (!IsEnabled()) return;
+    ReFixLog("[Overlay] PromptPurchase requested: appId=%u, orderId=%llu, item='%s'", appId, (unsigned long long)orderId, itemName.c_str());
+    App::Get().Post([appId, orderId, itemName, itemDesc, isMicroTxn, onComplete] {
+        App::Get().OpenPurchasePrompt(appId, orderId, itemName, itemDesc, isMicroTxn, onComplete);
+    });
 }
 
 void ActivateInviteDialog(uint64_t lobbyId, const char* connect) {

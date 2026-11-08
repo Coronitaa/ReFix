@@ -1,0 +1,11 @@
+[package]
+name = "refix-mod-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Safe Rust bindings for building ReFix sandboxed WebAssembly mods"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]

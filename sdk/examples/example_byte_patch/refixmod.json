@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "com.refix.example.bytepatch",
+  "name": "Example Byte Patch Mod",
+  "version": "1.0.0",
+  "author": "ReFix Community",
+  "entrypoint": "main.wasm",
+  "execution_tier": "sandboxed",
+  "phase": "GameInit",
+  "priority": 0,
+  "target_games": [
+    { "app_id": 480, "exe_name": "Game.exe", "engine": "unity_il2cpp" }
+  ],
+  "capabilities": [
+    "log",
+    "patch.declarative"
+  ],
+  "resource_limits": {
+    "max_memory_mb": 16,
+    "watchdog_timeout_ms": 15,
+    "max_hooks": 4,
+    "storage_quota_kb": 256
+  }
+}

@@ -1,5 +1,6 @@
 # Build output and temp directories
 build/
+build_csgo_mod/
 deploy/
 pre_release/
 *.zip
@@ -10,6 +11,8 @@ analysis/
 *.exp
 *.lib
 *.log
+
+__pycache__/
 *.tmp
 *.bak
 
@@ -36,6 +39,7 @@ Desktop.ini
 *.pfx
 *.p12
 *.key
+*.priv
 *.cer
 *.crt
 sign_dlls.ps1
@@ -56,3 +60,9 @@ build_x86_lan/
 bin/*_test_tmp/
 !src/webview2/x64/WebView2LoaderStatic.lib
 !src/webview2/x86/WebView2LoaderStatic.lib
+
+# Test binaries and runtime output of the games
+bin/test_*.exe
+ReFix_Inventory.json
+ReFix_gc_*.log
+bin/steam_api64_test.dll

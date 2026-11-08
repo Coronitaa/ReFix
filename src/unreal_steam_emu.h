@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <utility>
 
 class CCallbackBase;
 
@@ -62,6 +64,10 @@ namespace UnrealSteamEmu {
     int32_t GameServer_GetHSteamUser();
 
     uint64_t GetLocalSteamID();
+    // Rich presence of LAN peers that have `key` set, and the local value of a ReFix presence key.
+    std::vector<std::pair<uint64_t, std::string>> PeersWithPresence(const char* key);
+    void SetLocalPresence(const char* key, const char* value);
+    std::string GetLocalPresence(const char* key);
     uint64_t GetActiveLobbyID(); // lobby the local user is in (0 when none)
     void AdoptAppId(uint32_t appId);
     const char* GetPersonaName();
@@ -196,6 +202,19 @@ namespace UnrealSteamEmu {
 
     // Lobby sync notification with EOS
     void NotifyEOSLobby(uint64_t lobbyID);
+
+    // Store, DLC & Microtransactions
+    void UnlockDLC(uint32_t dlcId);
+    bool IsDLCUnlocked(uint32_t dlcId);
+    void AuthorizeMicroTxn(uint32_t appId, uint64_t orderId, bool bAuthorized);
+
+    // Rich Presence helpers
+    bool SetRichPresence(const char* pchKey, const char* pchValue);
+    void ClearRichPresence();
+    const char* GetFriendRichPresence(uint64_t steamIDFriend, const char* pchKey);
+    int GetFriendRichPresenceKeyCount(uint64_t steamIDFriend);
+    const char* GetFriendRichPresenceKeyByIndex(uint64_t steamIDFriend, int iKey);
+    std::vector<std::pair<uint64_t, std::string>> GetAllFriendsWithRichPresence(const char* pchKey);
 
     // Network isolation runtime verification
     uint64_t GetBlockedEgressCount();

@@ -64,6 +64,7 @@
 #include "include/steam/isteamunifiedmessages.h"
 
 #include "unreal_steam_emu.h"
+#include "gc/gc_relay.h"
 #include "unreal_detect.h"
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
@@ -71,7 +72,11 @@
 #include "lan_core/refix_lan_core.h"
 #include "steam_lobby_mapping.h"
 #include "steam_p2p_hook.h"
+#include "include/steam/isteamapps.h"
+#include "include/steam/isteamuser.h"
 #include "overlay/refix_overlay.h"
+#include "overlay/presence_net.h"
+#include "refix_mono.h"
 #include "generated/steam_emu_latest.h"
 
 class CCallbackMgr {
@@ -960,7 +965,7 @@ namespace UnrealSteamEmu {
     // Centralized 1:1 bidirectional lobby mapping is managed by refix::steam::SteamLobbyRegistry
 
     struct PendingJoin {
-        SteamAPICall_t callHandle = 0;
+        std::vector<SteamAPICall_t> callHandles;
         uint64_t steamLobbyId = 0;
         std::string coreLobbyId;
         std::chrono::steady_clock::time_point requestTime;
@@ -1027,11 +1032,13 @@ namespace UnrealSteamEmu {
 
     static bool SendLobbyChat(uint64_t lobbyId, const void* data, int len) {
         if (!data || len <= 0) return false;
-        std::vector<uint8_t> wire(sizeof(uint32_t) + sizeof(uint64_t) + 1 + (size_t)len);
+        // Wire packet: [magic 4B][lobbyId 8B][senderSteamId 8B][type 1B][data...]
+        std::vector<uint8_t> wire(sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint64_t) + 1 + (size_t)len);
         memcpy(wire.data(), &kLobbyChatMagic, sizeof(uint32_t));
         memcpy(wire.data() + 4, &lobbyId, sizeof(uint64_t));
-        wire[12] = (uint8_t)k_EChatEntryTypeChatMsg;
-        memcpy(wire.data() + 13, data, (size_t)len);
+        memcpy(wire.data() + 12, &g_localSteamID, sizeof(uint64_t));
+        wire[20] = (uint8_t)k_EChatEntryTypeChatMsg;
+        memcpy(wire.data() + 21, data, (size_t)len);
 
         auto& core = refix::lan::ILanCore::Get();
         const std::string coreLobbyId = GetCoreLobbyId(lobbyId);
@@ -1061,7 +1068,33 @@ namespace UnrealSteamEmu {
         if (magic != kLobbyChatMagic) return false;
         uint64_t lobbyId = 0;
         memcpy(&lobbyId, payload.data() + 4, sizeof(lobbyId));
-        DeliverLobbyChat(lobbyId, sender, payload[12], payload.data() + 13, payload.size() - 13);
+
+        uint64_t senderSteamId = sender;
+        uint8_t entryType = 0;
+        const uint8_t* msgData = nullptr;
+        size_t msgLen = 0;
+
+        if (payload.size() >= 21) {
+            uint64_t embeddedSender = 0;
+            memcpy(&embeddedSender, payload.data() + 12, sizeof(embeddedSender));
+            if (embeddedSender != 0) {
+                senderSteamId = embeddedSender;
+            }
+            entryType = payload[20];
+            msgData = payload.data() + 21;
+            msgLen = payload.size() - 21;
+        } else {
+            entryType = payload[12];
+            msgData = payload.data() + 13;
+            msgLen = payload.size() - 13;
+        }
+
+        if (senderSteamId == 0) {
+            ReFixLog("[UnrealSteam] ReceiveLobbyChat: senderSteamId unknown, skipping message for lobby %llu", lobbyId);
+            return true;
+        }
+
+        DeliverLobbyChat(lobbyId, senderSteamId, entryType, msgData, msgLen);
         return true;
     }
 
@@ -1132,7 +1165,7 @@ namespace UnrealSteamEmu {
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             for (auto it = g_pendingSearches.begin(); it != g_pendingSearches.end(); ) {
-                if (forceAll || std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 50) {
+                if (forceAll || std::chrono::duration_cast<std::chrono::milliseconds>(now - it->startTime).count() >= 400) {
                     readySearches.push_back(*it);
                     it = g_pendingSearches.erase(it);
                 } else {
@@ -2269,6 +2302,11 @@ namespace UnrealSteamEmu {
 
                         if (hdr->msgType == 1 && pLen > 0) { // Ping with persona name
                             peer.personaName.assign((char*)payload, pLen);
+                            // Notify game that LAN friend is online with persona name
+                            PersonaStateChange_t change = {};
+                            change.m_ulSteamID = hdr->senderID;
+                            change.m_nChangeFlags = k_EPersonaChangeName | k_EPersonaChangeStatus | k_EPersonaChangeRelationshipChanged;
+                            PostCallback(PersonaStateChange_t::k_iCallback, &change, sizeof(change));
                         } else if (hdr->msgType == 2 && pLen > 0) { // Lobby Announcement
                             std::string meta((char*)payload, pLen);
                             std::stringstream ss(meta);
@@ -2864,7 +2902,7 @@ namespace UnrealSteamEmu {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             for (auto it = g_pendingJoins.begin(); it != g_pendingJoins.end(); ) {
                 if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.requestTime).count() > 5000) {
-                    uint64_t callHandle = it->second.callHandle;
+                    auto callHandles = it->second.callHandles;
                     uint64_t sId = it->second.steamLobbyId;
                     it = g_pendingJoins.erase(it);
 
@@ -2875,13 +2913,15 @@ namespace UnrealSteamEmu {
                     resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseError;
 
                     PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                    if (callHandle != 0) {
-                        auto itCR = g_callResultMap.find(callHandle);
-                        if (itCR != g_callResultMap.end()) {
-                            itCR->second.failed = true;
-                            itCR->second.completed = false;
-                            itCR->second.triggerTime = now;
-                            itCR->second.data.assign((const uint8_t*)&resp, (const uint8_t*)&resp + sizeof(resp));
+                    for (uint64_t callHandle : callHandles) {
+                        if (callHandle != 0) {
+                            auto itCR = g_callResultMap.find(callHandle);
+                            if (itCR != g_callResultMap.end()) {
+                                itCR->second.failed = true;
+                                itCR->second.completed = false;
+                                itCR->second.triggerTime = now;
+                                itCR->second.data.assign((const uint8_t*)&resp, (const uint8_t*)&resp + sizeof(resp));
+                            }
                         }
                     }
                     ReFixLog("[UnrealSteam] JoinLobby timed out for lobby %llu", sId);
@@ -3007,6 +3047,12 @@ namespace UnrealSteamEmu {
         }
         for (auto& item : cbToDispatch) {
             item.pCallback->Run(item.data.data());
+        }
+
+        // For listen servers (client + server in the same process), drain server callbacks
+        // so server.dll receives GCMessageAvailable_t and establishes its GC session.
+        if (!g_serverCallbacks.empty()) {
+            GameServer_RunCallbacks();
         }
     }
 
@@ -3226,6 +3272,7 @@ namespace UnrealSteamEmu {
             PostCallback(ValidateAuthTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
 
             ReFixLog("[UnrealSteam] BeginAuthSession: Accepted session for SteamID %llu", steamID.ConvertToUint64());
+            refix::gc::OnGameServerClientAuth(steamID.ConvertToUint64(), 1);
             return k_EBeginAuthSessionResultOK;
         }
 
@@ -3352,7 +3399,15 @@ namespace UnrealSteamEmu {
 
         // Slot 14 in ISteamUser021: BeginAuthSession!
         virtual EBeginAuthSessionResult BeginAuthSession(const void *pAuthTicket, int cbAuthTicket, CSteamID steamID) override {
-            return g_steamUserInstance.BeginAuthSession(pAuthTicket, cbAuthTicket, steamID);
+            ValidateAuthTicketResponse_t resp = {};
+            resp.m_SteamID = steamID;
+            resp.m_eAuthSessionResponse = k_EAuthSessionResponseOK;
+            resp.m_OwnerSteamID = steamID;
+            PostGameServerCallback(ValidateAuthTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
+            PostCallback(ValidateAuthTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
+
+            ReFixLog("[UnrealSteam] GameServer BeginAuthSession: Accepted session for SteamID %llu", steamID.ConvertToUint64());
+            return k_EBeginAuthSessionResultOK;
         }
 
         // Slot 15 in ISteamUser021: EndAuthSession!
@@ -3395,6 +3450,7 @@ namespace UnrealSteamEmu {
     class CSteamFriendsEmu : public ISteamFriends017 {
     private:
         std::map<std::string, std::string> m_richPresence;
+        std::map<uint64_t, std::map<std::string, std::string>> m_peerRichPresence;
         std::mutex m_richPresenceMu;
     public:
         virtual const char *GetPersonaName() override {
@@ -3432,21 +3488,43 @@ namespace UnrealSteamEmu {
 
         // Every LAN peer is an immediate friend and nothing else: queries for blocked/ignored/requesting
         // users get no one (Lethal Company refused to join a host it found in GetFriendCount(Blocked)).
-        static bool CountsLanPeers(int iFriendFlags) { return (iFriendFlags & k_EFriendFlagImmediate) != 0; }
+        static bool CountsLanPeers(int iFriendFlags) {
+            if (iFriendFlags & (k_EFriendFlagBlocked | k_EFriendFlagIgnored | k_EFriendFlagIgnoredFriend)) {
+                if (!(iFriendFlags & (k_EFriendFlagImmediate | k_EFriendFlagAll))) return false;
+            }
+            return true;
+        }
+
+        static std::vector<uint64_t> GetCurrentFriendList() {
+            std::set<uint64_t> uniqueSids;
+            if (g_transportMode.load() == TransportMode::Canonical) {
+                auto peers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+                for (const auto& p : peers) {
+                    uint64_t sid = p.externalId.numericId;
+                    if (sid != 0 && sid != g_localSteamID) {
+                        uniqueSids.insert(sid);
+                    }
+                }
+            }
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            for (const auto& kv : g_peers) {
+                if (kv.first != 0 && kv.first != g_localSteamID) {
+                    uniqueSids.insert(kv.first);
+                }
+            }
+            return std::vector<uint64_t>(uniqueSids.begin(), uniqueSids.end());
+        }
 
         virtual int GetFriendCount(int iFriendFlags) override {
             if (!CountsLanPeers(iFriendFlags)) return 0;
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            return (int)g_peers.size();
+            return (int)GetCurrentFriendList().size();
         }
 
         virtual CSteamID GetFriendByIndex(int iFriend, int iFriendFlags) override {
             if (!CountsLanPeers(iFriendFlags)) return CSteamID();
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            if (iFriend >= 0 && iFriend < (int)g_peers.size()) {
-                auto it = g_peers.begin();
-                std::advance(it, iFriend);
-                return CSteamID(it->first);
+            auto list = GetCurrentFriendList();
+            if (iFriend >= 0 && iFriend < (int)list.size()) {
+                return CSteamID(list[iFriend]);
             }
             return CSteamID();
         }
@@ -3502,7 +3580,7 @@ namespace UnrealSteamEmu {
                     }
                     for (const auto& mem : lob.members) {
                         auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(mem.peerId);
-                        if ((pInfo && pInfo->externalId.numericId == targetSid) || mem.peerId.low == targetSid) {
+                        if (pInfo && pInfo->externalId.numericId == targetSid) {
                             if (!mem.displayName.empty()) {
                                 thread_local char nameBuf[128];
                                 strncpy_s(nameBuf, sizeof(nameBuf), mem.displayName.c_str(), _TRUNCATE);
@@ -3541,20 +3619,75 @@ namespace UnrealSteamEmu {
         virtual bool GetFriendGamePlayed(CSteamID steamIDFriend, FriendGameInfo_t *pFriendGameInfo) override {
             if (!pFriendGameInfo) return false;
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_peers.find(steamIDFriend.ConvertToUint64());
-            if (it != g_peers.end() && it->second.port != 0) {
+            uint64_t friendSid = steamIDFriend.ConvertToUint64();
+            auto it = g_peers.find(friendSid);
+            uint32_t peerIp = 0;
+            uint16_t peerPort = 27015;
+            bool foundPeer = false;
+
+            if (it != g_peers.end()) {
+                peerIp = it->second.ip;
+                peerPort = it->second.port != 0 ? it->second.port : 27015;
+                foundPeer = true;
+            } else if (g_transportMode.load() == TransportMode::Canonical) {
+                auto pid = refix::lan::ILanCore::Get().Peers().FindBySteamId(friendSid);
+                if (pid) {
+                    auto pinfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*pid);
+                    if (pinfo) {
+                        peerIp = pinfo->endpoint.ipv4;
+                        peerPort = pinfo->endpoint.port != 0 ? pinfo->endpoint.port : 27015;
+                        foundPeer = true;
+                    }
+                }
+            }
+
+            if (foundPeer) {
                 pFriendGameInfo->m_gameID = CGameID(g_appID);
-                pFriendGameInfo->m_unGameIP = it->second.ip;
-                pFriendGameInfo->m_usGamePort = it->second.port;
-                pFriendGameInfo->m_usQueryPort = it->second.port;
-                pFriendGameInfo->m_steamIDLobby = CSteamID(g_activeLobbyID.load());
+                pFriendGameInfo->m_unGameIP = peerIp;
+                pFriendGameInfo->m_usGamePort = peerPort;
+                pFriendGameInfo->m_usQueryPort = peerPort;
+
+                uint64_t friendLobbyId = 0;
+                for (const auto& rp : ::refix::overlay::net::Players()) {
+                    if (rp.steamId == friendSid && rp.lobbyId != 0) {
+                        friendLobbyId = rp.lobbyId;
+                        break;
+                    }
+                }
+                if (friendLobbyId == 0) {
+                    auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                    for (const auto& l : allLobbies) {
+                        auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(l.ownerPeerId);
+                        bool isMember = (pInfo && pInfo->externalId.numericId == friendSid);
+                        if (!isMember) {
+                            for (const auto& m : l.members) {
+                                auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(m.peerId);
+                                if (mInfo && mInfo->externalId.numericId == friendSid) {
+                                    isMember = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (isMember) {
+                            uint64_t sId = refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId);
+                            if (sId == 0) sId = refix::steam::ComputeLobbySteamID(l.lobbyId);
+                            friendLobbyId = sId;
+                            break;
+                        }
+                    }
+                }
+                if (friendLobbyId == 0 && friendSid == g_localSteamID) {
+                    friendLobbyId = g_activeLobbyID.load();
+                }
+
+                pFriendGameInfo->m_steamIDLobby = CSteamID(friendLobbyId);
                 return true;
             }
             return false;
         }
 
         virtual const char *GetFriendPersonaNameHistory(CSteamID steamIDFriend, int iPersonaName) override { return ""; }
-        virtual int GetFriendSteamLevel(CSteamID steamIDFriend) override { return 10; }
+        virtual int GetFriendSteamLevel(CSteamID steamIDFriend) override { return 40; }
         virtual const char *GetPlayerNickname(CSteamID steamIDPlayer) override { return nullptr; }
 
         virtual int GetFriendsGroupCount() override { return 0; }
@@ -3576,14 +3709,52 @@ namespace UnrealSteamEmu {
         virtual bool IsUserInSource(CSteamID steamIDUser, CSteamID steamIDSource) override { return false; }
 
         virtual void SetInGameVoiceSpeaking(CSteamID steamIDUser, bool bSpeaking) override {}
-        virtual void ActivateGameOverlay(const char *pchDialog) override { ReFixOverlay::ActivateOverlay(pchDialog); }
+        virtual void ActivateGameOverlay(const char *pchDialog) override {
+            if (pchDialog && (_stricmp(pchDialog, "community") == 0 || _stricmp(pchDialog, "market") == 0)) {
+                ReFixOverlay::OpenMarketGiveMenu();
+            } else {
+                ReFixOverlay::ActivateOverlay(pchDialog);
+            }
+        }
         virtual void ActivateGameOverlayToUser(const char *pchDialog, CSteamID steamID) override {
             ReFixOverlay::ActivateOverlayToUser(pchDialog, steamID.ConvertToUint64());
         }
         virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
+            ReFixLog("[UnrealSteam] ActivateGameOverlayToWebPage('%s')", pchURL ? pchURL : "");
+            // The CS:GO play menu's "Host match" button passes its settings as refix://host/<url-encoded JSON>.
+            if (pchURL && strcmp(pchURL, "refix://server") == 0) {  // play menu "LAN server" button
+                ReFixOverlay::OpenLanServer();
+                return;
+            }
+            static const char kHostPrefix[] = "refix://host/";
+            if (pchURL && strncmp(pchURL, kHostPrefix, sizeof(kHostPrefix) - 1) == 0) {
+                std::string json;
+                for (const char* p = pchURL + sizeof(kHostPrefix) - 1; *p; ++p) {
+                    if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+                        char hex[3] = { p[1], p[2], 0 };
+                        json += (char)strtol(hex, nullptr, 16);
+                        p += 2;
+                    } else {
+                        json += *p;
+                    }
+                }
+                ReFixGC::SetHostConfigJson(json);
+                ReFixGC::RequestHostOnNextStart();
+                return;
+            }
+            if (pchURL) {
+                if (strstr(pchURL, "market") || strstr(pchURL, "community") || strstr(pchURL, "give")) {
+                    ReFixOverlay::OpenMarketGiveMenu();
+                    return;
+                }
+
+            }
             ReFixOverlay::ActivateWebPage(pchURL);
         }
-        virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override { ReFixOverlay::ActivateStore(nAppID); }
+        virtual void ActivateGameOverlayToStore(AppId_t nAppID, EOverlayToStoreFlag eFlag) override {
+            ReFixLog("[UnrealSteam] ActivateGameOverlayToStore: nAppID=%u", (uint32_t)nAppID);
+            ReFixOverlay::PromptPurchase((uint32_t)nAppID, 0, "", "", false);
+        }
         virtual void SetPlayedWith(CSteamID steamIDUserPlayedWith) override {}
         virtual void ActivateGameOverlayInviteDialog(CSteamID steamIDLobby) override {
             ReFixOverlay::ActivateInviteDialog(steamIDLobby.ConvertToUint64(), nullptr);
@@ -3607,21 +3778,235 @@ namespace UnrealSteamEmu {
 
         virtual uint32 GetUserRestrictions() override { return 0; }
 
-        virtual bool SetRichPresence(const char *pchKey, const char *pchValue) override {
-            if (!pchKey) return false;
-            std::lock_guard<std::mutex> lock(m_richPresenceMu);
-            if (pchValue && pchValue[0] != '\0') {
-                m_richPresence[pchKey] = pchValue;
-            } else {
-                m_richPresence.erase(pchKey);
+        static constexpr uint8_t kRichPresenceChannel = 247;
+        static constexpr uint32_t kRichPresenceMagic = 0x50535052; // "RPSP"
+        enum class RichPresenceOp : uint8_t {
+            SetKey = 1,
+            ClearAll = 2,
+            FullSync = 3,
+            RequestSync = 4
+        };
+
+        void BroadcastPresenceSetKey(const std::string& key, const std::string& val) {
+            if (g_transportMode.load() != TransportMode::Canonical) return;
+            auto& core = refix::lan::ILanCore::Get();
+            uint16_t kLen = (uint16_t)key.size();
+            uint16_t vLen = (uint16_t)val.size();
+            std::vector<uint8_t> wire(4 + 1 + 2 + kLen + 2 + vLen);
+            uint8_t* p = wire.data();
+            memcpy(p, &kRichPresenceMagic, 4); p += 4;
+            *p++ = (uint8_t)RichPresenceOp::SetKey;
+            memcpy(p, &kLen, 2); p += 2;
+            if (kLen) { memcpy(p, key.data(), kLen); p += kLen; }
+            memcpy(p, &vLen, 2); p += 2;
+            if (vLen) { memcpy(p, val.data(), vLen); p += vLen; }
+
+            const auto self = core.Identity().GetLocalPeerId();
+            for (const auto& peer : core.Peers().GetAllPeers()) {
+                if (peer.peerId == self) continue;
+                if (peer.endpoint.IsValid()) {
+                    core.Transport().SendReliable(peer.peerId, peer.endpoint, kRichPresenceChannel, wire.data(), wire.size());
+                }
             }
-            ReFixLog("[UnrealSteam] SetRichPresence: '%s' = '%s'", pchKey, pchValue ? pchValue : "");
+        }
+
+        void BroadcastPresenceClear() {
+            if (g_transportMode.load() != TransportMode::Canonical) return;
+            auto& core = refix::lan::ILanCore::Get();
+            std::vector<uint8_t> wire(5);
+            memcpy(wire.data(), &kRichPresenceMagic, 4);
+            wire[4] = (uint8_t)RichPresenceOp::ClearAll;
+
+            const auto self = core.Identity().GetLocalPeerId();
+            for (const auto& peer : core.Peers().GetAllPeers()) {
+                if (peer.peerId == self) continue;
+                if (peer.endpoint.IsValid()) {
+                    core.Transport().SendReliable(peer.peerId, peer.endpoint, kRichPresenceChannel, wire.data(), wire.size());
+                }
+            }
+        }
+
+        void SendPresenceFullSync(const refix::lan::PeerId& targetPeerId, const refix::lan::LanEndpoint& targetEndpoint) {
+            if (g_transportMode.load() != TransportMode::Canonical || !targetEndpoint.IsValid()) return;
+            auto& core = refix::lan::ILanCore::Get();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            std::vector<uint8_t> wire;
+            wire.resize(4 + 1 + 2);
+            memcpy(wire.data(), &kRichPresenceMagic, 4);
+            wire[4] = (uint8_t)RichPresenceOp::FullSync;
+            uint16_t count = (uint16_t)m_richPresence.size();
+            memcpy(wire.data() + 5, &count, 2);
+
+            for (const auto& kv : m_richPresence) {
+                uint16_t kLen = (uint16_t)kv.first.size();
+                uint16_t vLen = (uint16_t)kv.second.size();
+                size_t offset = wire.size();
+                wire.resize(offset + 2 + kLen + 2 + vLen);
+                uint8_t* p = wire.data() + offset;
+                memcpy(p, &kLen, 2); p += 2;
+                if (kLen) { memcpy(p, kv.first.data(), kLen); p += kLen; }
+                memcpy(p, &vLen, 2); p += 2;
+                if (vLen) { memcpy(p, kv.second.data(), vLen); p += vLen; }
+            }
+            core.Transport().SendReliable(targetPeerId, targetEndpoint, kRichPresenceChannel, wire.data(), wire.size());
+        }
+
+        void SendPresenceRequestSync(const refix::lan::PeerId& targetPeerId, const refix::lan::LanEndpoint& targetEndpoint) {
+            if (g_transportMode.load() != TransportMode::Canonical || !targetEndpoint.IsValid()) return;
+            auto& core = refix::lan::ILanCore::Get();
+            std::vector<uint8_t> wire(5);
+            memcpy(wire.data(), &kRichPresenceMagic, 4);
+            wire[4] = (uint8_t)RichPresenceOp::RequestSync;
+            core.Transport().SendReliable(targetPeerId, targetEndpoint, kRichPresenceChannel, wire.data(), wire.size());
+        }
+
+        void SendPresenceRequestSyncBySteamId(uint64_t targetSteamId) {
+            if (g_transportMode.load() != TransportMode::Canonical) return;
+            auto& core = refix::lan::ILanCore::Get();
+            auto pidOpt = core.Peers().FindBySteamId(targetSteamId);
+            if (!pidOpt) return;
+            auto pInfo = core.Peers().FindByPeerId(*pidOpt);
+            if (!pInfo || !pInfo->endpoint.IsValid()) return;
+            SendPresenceRequestSync(*pidOpt, pInfo->endpoint);
+        }
+
+        void HandleReceiveRichPresence(uint64_t senderSteamId, const uint8_t* data, size_t len) {
+            if (!data || len < 5 || senderSteamId == 0 || senderSteamId == g_localSteamID) return;
+            uint32_t magic = 0;
+            memcpy(&magic, data, 4);
+            if (magic != kRichPresenceMagic) return;
+            uint8_t op = data[4];
+            const uint8_t* p = data + 5;
+            size_t remaining = len - 5;
+
+            if (op == (uint8_t)RichPresenceOp::SetKey) {
+                if (remaining < 4) return;
+                uint16_t kLen = 0;
+                memcpy(&kLen, p, 2); p += 2; remaining -= 2;
+                if (remaining < kLen) return;
+                std::string key((const char*)p, kLen); p += kLen; remaining -= kLen;
+                if (remaining < 2) return;
+                uint16_t vLen = 0;
+                memcpy(&vLen, p, 2); p += 2; remaining -= 2;
+                if (remaining < vLen) return;
+                std::string val((const char*)p, vLen);
+
+                {
+                    std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                    if (!val.empty()) {
+                        m_peerRichPresence[senderSteamId][key] = val;
+                    } else {
+                        m_peerRichPresence[senderSteamId].erase(key);
+                    }
+                }
+                ReFixLog("[UnrealSteam] Peer %llu RichPresence: '%s' = '%s'", senderSteamId, key.c_str(), val.c_str());
+
+                FriendRichPresenceUpdate_t update = {};
+                update.m_steamIDFriend = CSteamID(senderSteamId);
+                update.m_nAppID = g_appID;
+                PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+            } else if (op == (uint8_t)RichPresenceOp::ClearAll) {
+                {
+                    std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                    m_peerRichPresence[senderSteamId].clear();
+                }
+                ReFixLog("[UnrealSteam] Peer %llu RichPresence: CLEARED", senderSteamId);
+
+                FriendRichPresenceUpdate_t update = {};
+                update.m_steamIDFriend = CSteamID(senderSteamId);
+                update.m_nAppID = g_appID;
+                PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+            } else if (op == (uint8_t)RichPresenceOp::FullSync) {
+                if (remaining < 2) return;
+                uint16_t count = 0;
+                memcpy(&count, p, 2); p += 2; remaining -= 2;
+                std::map<std::string, std::string> peerMap;
+                for (uint16_t i = 0; i < count; i++) {
+                    if (remaining < 2) break;
+                    uint16_t kLen = 0;
+                    memcpy(&kLen, p, 2); p += 2; remaining -= 2;
+                    if (remaining < kLen) break;
+                    std::string key((const char*)p, kLen); p += kLen; remaining -= kLen;
+                    if (remaining < 2) break;
+                    uint16_t vLen = 0;
+                    memcpy(&vLen, p, 2); p += 2; remaining -= 2;
+                    if (remaining < vLen) break;
+                    std::string val((const char*)p, vLen); p += vLen; remaining -= vLen;
+                    peerMap[key] = val;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                    m_peerRichPresence[senderSteamId] = std::move(peerMap);
+                }
+                ReFixLog("[UnrealSteam] Peer %llu RichPresence FullSync (%u entries)", senderSteamId, count);
+
+                FriendRichPresenceUpdate_t update = {};
+                update.m_steamIDFriend = CSteamID(senderSteamId);
+                update.m_nAppID = g_appID;
+                PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+            } else if (op == (uint8_t)RichPresenceOp::RequestSync) {
+                auto& core = refix::lan::ILanCore::Get();
+                auto pidOpt = core.Peers().FindBySteamId(senderSteamId);
+                if (pidOpt) {
+                    auto pInfo = core.Peers().FindByPeerId(*pidOpt);
+                    if (pInfo && pInfo->endpoint.IsValid()) {
+                        SendPresenceFullSync(*pidOpt, pInfo->endpoint);
+                    }
+                }
+            }
+        }
+
+        virtual bool SetRichPresence(const char *pchKey, const char *pchValue) override {
+            if (!pchKey || pchKey[0] == '\0') return false;
+            std::string key = pchKey;
+            std::string val = (pchValue ? pchValue : "");
+            {
+                std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                if (!val.empty()) {
+                    m_richPresence[key] = val;
+                } else {
+                    m_richPresence.erase(key);
+                }
+            }
+            ReFixLog("[UnrealSteam] SetRichPresence: '%s' = '%s'", key.c_str(), val.c_str());
+
+            BroadcastPresenceSetKey(key, val);
+
+            FriendRichPresenceUpdate_t update = {};
+            update.m_steamIDFriend = CSteamID(g_localSteamID);
+            update.m_nAppID = g_appID;
+            PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
             return true;
         }
 
         virtual void ClearRichPresence() override {
+            std::map<std::string, std::string> kept; // ReFix's own "refix:" keys survive the game clearing its presence
+            {
+                std::lock_guard<std::mutex> lock(m_richPresenceMu);
+                for (const auto& kv : m_richPresence)
+                    if (kv.first.rfind("refix:", 0) == 0) kept.insert(kv);
+                m_richPresence = kept;
+            }
+            ReFixLog("[UnrealSteam] ClearRichPresence called");
+
+            BroadcastPresenceClear();
+            for (const auto& kv : kept) BroadcastPresenceSetKey(kv.first, kv.second);
+
+            FriendRichPresenceUpdate_t update = {};
+            update.m_steamIDFriend = CSteamID(g_localSteamID);
+            update.m_nAppID = g_appID;
+            PostCallback(FriendRichPresenceUpdate_t::k_iCallback, &update, sizeof(update));
+        }
+
+        // Peers whose rich presence has pchKey set, with its value.
+        std::vector<std::pair<uint64_t, std::string>> PeersWithPresence(const char *pchKey) {
+            std::vector<std::pair<uint64_t, std::string>> out;
             std::lock_guard<std::mutex> lock(m_richPresenceMu);
-            m_richPresence.clear();
+            for (const auto& peer : m_peerRichPresence) {
+                auto it = peer.second.find(pchKey);
+                if (it != peer.second.end() && !it->second.empty()) out.emplace_back(peer.first, it->second);
+            }
+            return out;
         }
 
         // Copy of a local rich presence value, safe from other threads (the overlay).
@@ -3632,30 +4017,85 @@ namespace UnrealSteamEmu {
         }
 
         virtual const char *GetFriendRichPresence(CSteamID steamIDFriend, const char *pchKey) override {
-            if (steamIDFriend.ConvertToUint64() == g_localSteamID) {
-                auto it = m_richPresence.find(pchKey ? pchKey : "");
-                if (it != m_richPresence.end()) return it->second.c_str();
+            if (!pchKey) return "";
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            if (sid == g_localSteamID) {
+                auto it = m_richPresence.find(pchKey);
+                if (it != m_richPresence.end()) {
+                    thread_local static std::string s_val;
+                    s_val = it->second;
+                    return s_val.c_str();
+                }
+            } else {
+                auto pIt = m_peerRichPresence.find(sid);
+                if (pIt != m_peerRichPresence.end()) {
+                    auto kIt = pIt->second.find(pchKey);
+                    if (kIt != pIt->second.end()) {
+                        thread_local static std::string s_val;
+                        s_val = kIt->second;
+                        return s_val.c_str();
+                    }
+                }
             }
             return "";
         }
 
         virtual int GetFriendRichPresenceKeyCount(CSteamID steamIDFriend) override {
-            if (steamIDFriend.ConvertToUint64() == g_localSteamID) {
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            if (sid == g_localSteamID) {
                 return (int)m_richPresence.size();
+            } else {
+                auto pIt = m_peerRichPresence.find(sid);
+                if (pIt != m_peerRichPresence.end()) return (int)pIt->second.size();
             }
             return 0;
         }
 
         virtual const char *GetFriendRichPresenceKeyByIndex(CSteamID steamIDFriend, int iKey) override {
-            if (steamIDFriend.ConvertToUint64() == g_localSteamID && iKey >= 0 && iKey < (int)m_richPresence.size()) {
-                auto it = m_richPresence.begin();
-                std::advance(it, iKey);
-                return it->first.c_str();
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            if (sid == g_localSteamID) {
+                if (iKey >= 0 && iKey < (int)m_richPresence.size()) {
+                    auto it = m_richPresence.begin();
+                    std::advance(it, iKey);
+                    thread_local static std::string s_key;
+                    s_key = it->first;
+                    return s_key.c_str();
+                }
+            } else {
+                auto pIt = m_peerRichPresence.find(sid);
+                if (pIt != m_peerRichPresence.end() && iKey >= 0 && iKey < (int)pIt->second.size()) {
+                    auto it = pIt->second.begin();
+                    std::advance(it, iKey);
+                    thread_local static std::string s_key;
+                    s_key = it->first;
+                    return s_key.c_str();
+                }
             }
             return "";
         }
 
-        virtual void RequestFriendRichPresence(CSteamID steamIDFriend) override {}
+        virtual void RequestFriendRichPresence(CSteamID steamIDFriend) override {
+            uint64_t sid = steamIDFriend.ConvertToUint64();
+            if (sid == 0 || sid == g_localSteamID) return;
+            SendPresenceRequestSyncBySteamId(sid);
+        }
+
+        std::vector<std::pair<uint64_t, std::string>> GetAllFriendsWithRichPresence(const char* pchKey) {
+            std::vector<std::pair<uint64_t, std::string>> results;
+            if (!pchKey || pchKey[0] == '\0') return results;
+            std::lock_guard<std::mutex> lock(m_richPresenceMu);
+            for (const auto& peerPair : m_peerRichPresence) {
+                if (peerPair.first == g_localSteamID) continue;
+                auto it = peerPair.second.find(pchKey);
+                if (it != peerPair.second.end() && !it->second.empty()) {
+                    results.emplace_back(peerPair.first, it->second);
+                }
+            }
+            return results;
+        }
 
         virtual bool InviteUserToGame(CSteamID steamIDFriend, const char *pchConnectString) override {
             ReFixLog("[UnrealSteam] InviteUserToGame: steamID=%llu, connect='%s'", steamIDFriend.ConvertToUint64(), pchConnectString ? pchConnectString : "");
@@ -3704,6 +4144,27 @@ namespace UnrealSteamEmu {
         virtual uint32 GetProfileItemPropertyUint(CSteamID steamID, ECommunityProfileItemType itemType, ECommunityProfileItemProperty prop) override { return 0; }
     };
     static CSteamFriendsEmu g_steamFriendsInstance;
+
+    // A listen server started here: publish "refix:server" = "ip:port" so LAN players can find and join it.
+    static void PublishLocalServer(uint16_t port) {
+        uint32_t ip = refix::lan::ResolveLocalIpv4();
+        char addr[32];
+        snprintf(addr, sizeof(addr), "%u.%u.%u.%u:%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+                 port ? port : 27015);
+        g_steamFriendsInstance.SetRichPresence("refix:server", addr);
+    }
+
+    std::vector<std::pair<uint64_t, std::string>> PeersWithPresence(const char* key) {
+        return g_steamFriendsInstance.PeersWithPresence(key);
+    }
+
+    void SetLocalPresence(const char* key, const char* value) {
+        g_steamFriendsInstance.SetRichPresence(key, value);
+    }
+
+    std::string GetLocalPresence(const char* key) {
+        return g_steamFriendsInstance.LocalRichPresence(key);
+    }
 
     // --- ISteamFriends018 (ABI without SetPersonaName in vtable slot 1) ---
     class CSteamFriends018Emu : public ISteamFriends {
@@ -3965,8 +4426,9 @@ namespace UnrealSteamEmu {
         }
 
         virtual SteamAPICall_t CreateLobby(ELobbyType eLobbyType, int cMaxMembers) override {
+            uint32_t initialSlots = (cMaxMembers > 1) ? (uint32_t)cMaxMembers : 10;
             std::string coreLobbyId = refix::lan::ILanCore::Get().Lobby().CreateLobby(
-                cMaxMembers, refix::lan::LobbyPermissionLevel::PublicAdvertised);
+                initialSlots, refix::lan::LobbyPermissionLevel::PublicAdvertised);
             if (coreLobbyId.empty()) {
                 LobbyCreated_t crResp = {};
                 crResp.m_eResult = k_EResultFail;
@@ -4022,6 +4484,7 @@ namespace UnrealSteamEmu {
             // as on Steam. Unreal's OnlineSubsystemSteam rejected every LAN lobby that carried extra untyped keys
             // (HostAddress, SERVER_IP...), so GRAIN ROT's public server list stayed empty.
             refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "__server_ip", refix::lan::AttributeValue(localIpStr));
+            refix::lan::ILanCore::Get().Lobby().SetJoinable(coreLobbyId, true);
 
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -4050,6 +4513,13 @@ namespace UnrealSteamEmu {
             cbResp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseSuccess;
             PostCallback(LobbyEnter_t::k_iCallback, &cbResp, sizeof(cbResp));
 
+            LobbyChatUpdate_t cu = {};
+            cu.m_ulSteamIDLobby = lID;
+            cu.m_ulSteamIDUserChanged = g_localSteamID;
+            cu.m_ulSteamIDMakingChange = g_localSteamID;
+            cu.m_rgfChatMemberStateChange = 0x0001; // k_EChatMemberStateChangeEntered
+            PostCallback(LobbyChatUpdate_t::k_iCallback, &cu, sizeof(cu));
+
             ReFixLog("[UnrealSteam] CreateLobby: Created Lobby %llu (coreId='%s', max=%d, owner=%llu, hCall=%llu)",
                      lID, coreLobbyId.c_str(), cMaxMembers, g_localSteamID, hCall);
             return hCall;
@@ -4057,18 +4527,16 @@ namespace UnrealSteamEmu {
 
         virtual SteamAPICall_t JoinLobby(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
-            std::string coreLobbyId = GetCoreLobbyId(lID);
 
-            if (coreLobbyId.empty()) {
-                auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
-                for (const auto& l : allLobbies) {
-                    if (refix::steam::ComputeLobbySteamID(l.lobbyId) == lID ||
-                        refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId) == lID) {
-                        coreLobbyId = l.lobbyId;
-                        refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
-                        break;
-                    }
-                }
+            // 1. If already in or hosting this lobby, immediately report successful entry
+            if (g_activeLobbyID.load() == lID && lID != 0) {
+                LobbyEnter_t resp = {};
+                resp.m_ulSteamIDLobby = lID;
+                resp.m_rgfChatPermissions = 0xFFFFFFFF;
+                resp.m_bLocked = false;
+                resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseSuccess;
+                PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
+                return PostCallResult(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
             }
 
             bool isLocalHost = false;
@@ -4091,7 +4559,32 @@ namespace UnrealSteamEmu {
                 return PostCallResult(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
             }
 
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (coreLobbyId.empty()) {
+                refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
+                // Brief poll (up to 300ms) for UDP announcement to resolve
+                for (int attempt = 0; attempt < 15; ++attempt) {
+                    auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                    for (const auto& l : allLobbies) {
+                        if (refix::steam::ComputeLobbySteamID(l.lobbyId) == lID ||
+                            refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(l.lobbyId) == lID) {
+                            coreLobbyId = l.lobbyId;
+                            refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
+                            break;
+                        }
+                    }
+                    if (!coreLobbyId.empty()) break;
+                    if (attempt == 14 && !allLobbies.empty()) {
+                        coreLobbyId = allLobbies[0].lobbyId;
+                        refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(coreLobbyId, lID);
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+            }
+
             uint64_t hCall = 0;
+            bool needSendReq = false;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 hCall = ++g_nextAPICall;
@@ -4103,18 +4596,26 @@ namespace UnrealSteamEmu {
                 item.triggerTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
                 g_callResultMap[hCall] = item;
 
-                PendingJoin pj;
-                pj.callHandle = hCall;
-                pj.steamLobbyId = lID;
-                pj.coreLobbyId = coreLobbyId;
-                pj.requestTime = std::chrono::steady_clock::now();
                 if (!coreLobbyId.empty()) {
+                    auto itPJ = g_pendingJoins.find(coreLobbyId);
+                    if (itPJ != g_pendingJoins.end()) {
+                        itPJ->second.callHandles.push_back(hCall);
+                        ReFixLog("[UnrealSteam] JoinLobby: Coalesced join request for lobby %llu (coreId='%s', hCall=%llu)",
+                                 lID, coreLobbyId.c_str(), hCall);
+                        return hCall;
+                    }
+                    PendingJoin pj;
+                    pj.callHandles.push_back(hCall);
+                    pj.steamLobbyId = lID;
+                    pj.coreLobbyId = coreLobbyId;
+                    pj.requestTime = std::chrono::steady_clock::now();
                     g_pendingJoins[coreLobbyId] = pj;
+                    needSendReq = true;
                 }
             }
 
             bool sentReq = false;
-            if (!coreLobbyId.empty()) {
+            if (needSendReq && !coreLobbyId.empty()) {
                 sentReq = refix::lan::ILanCore::Get().Lobby().RequestJoin(coreLobbyId);
             }
 
@@ -4199,9 +4700,9 @@ namespace UnrealSteamEmu {
                             try { return CSteamID(std::stoull(oIt2->second.asString)); } catch (...) {}
                         }
                     }
-                    if (m.peerId.low != 0) {
-                        return CSteamID(static_cast<uint32_t>(m.peerId.low & 0xFFFFFFFF), k_EUniversePublic, k_EAccountTypeIndividual);
-                    }
+                    // P1.a: If a peer has no externalId.numericId, member does not exist for Steam yet until known.
+                    // Forbid returning peerId.low as SteamID.
+                    return CSteamID();
                 }
             }
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -4503,7 +5004,18 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool SetLobbyMemberLimit(CSteamID steamIDLobby, int cMaxMembers) override {
-            g_lobbies[steamIDLobby.ConvertToUint64()].maxMembers = cMaxMembers;
+            uint64_t lID = steamIDLobby.ConvertToUint64();
+            int effectiveLimit = (cMaxMembers >= 10) ? cMaxMembers : 10;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                g_lobbies[lID].maxMembers = effectiveLimit;
+            }
+            std::string coreId = GetCoreLobbyId(lID);
+            if (!coreId.empty()) {
+                refix::lan::ILanCore::Get().Lobby().SetMaxMembers(coreId, (uint32_t)effectiveLimit);
+            }
+            ReFixLog("[UnrealSteam] SetLobbyMemberLimit: Lobby %llu (coreId='%s') maxMembers set to %d (requested %d)",
+                     lID, coreId.c_str(), effectiveLimit, cMaxMembers);
             return true;
         }
 
@@ -4521,7 +5033,12 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool SetLobbyJoinable(CSteamID steamIDLobby, bool bLobbyJoinable) override {
-            g_lobbies[steamIDLobby.ConvertToUint64()].joinable = bLobbyJoinable;
+            uint64_t lID = steamIDLobby.ConvertToUint64();
+            g_lobbies[lID].joinable = bLobbyJoinable;
+            std::string coreLobbyId = GetCoreLobbyId(lID);
+            if (!coreLobbyId.empty()) {
+                refix::lan::ILanCore::Get().Lobby().SetJoinable(coreLobbyId, bLobbyJoinable);
+            }
             return true;
         }
 
@@ -4590,37 +5107,140 @@ namespace UnrealSteamEmu {
 
     // --- ISteamMatchmakingServers ---
     class CSteamMatchmakingServersEmu : public ISteamMatchmakingServers {
+    private:
+        struct ServerQuery {
+            HServerListRequest handle = 0;
+            AppId_t appId = 0;
+            ISteamMatchmakingServerListResponse* response = nullptr;
+            std::vector<gameserveritem_t> servers;
+        };
+        std::map<HServerListRequest, ServerQuery> m_queries;
+        std::recursive_mutex m_queryMutex;
+        uint64_t m_nextHandle = 100;
+
+        HServerListRequest StartServerListQuery(AppId_t iApp, ISteamMatchmakingServerListResponse* pResponse) {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            HServerListRequest hReq = (HServerListRequest)(++m_nextHandle);
+            ServerQuery q;
+            q.handle = hReq;
+            q.appId = iApp ? iApp : g_appID;
+            q.response = pResponse;
+
+            // 1. Collect from ILanCore known lobbies
+            try {
+                auto lobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                for (const auto& lob : lobbies) {
+                    gameserveritem_t s;
+                    s.m_nAppID = q.appId;
+                    s.m_NetAdr.Init(0x7F000001, 27016, 27015);
+                    std::string sName = lob.lobbyId;
+                    auto itOwner = lob.attributes.find("__steam_owner");
+                    if (itOwner != lob.attributes.end() && !itOwner->second.asString.empty()) {
+                        uint64_t ownerId = strtoull(itOwner->second.asString.c_str(), nullptr, 10);
+                        if (ownerId) s.m_steamID = CSteamID(ownerId);
+                    }
+                    auto itName = lob.attributes.find("name");
+                    if (itName != lob.attributes.end() && !itName->second.asString.empty()) {
+                        sName = itName->second.asString;
+                    }
+                    s.SetName(sName.c_str());
+                    s.m_nPlayers = (int)lob.members.size();
+                    s.m_nMaxPlayers = (int)lob.maxMembers;
+                    s.m_nPing = 15;
+                    s.m_bHadSuccessfulResponse = true;
+                    s.m_bDoNotRefresh = false;
+                    q.servers.push_back(s);
+                }
+            } catch (...) {}
+
+            // 2. Collect from friends rich presence (Party Animals / generic LAN rooms)
+            int friendCount = g_steamFriendsInstance.GetFriendCount(k_EFriendFlagImmediate);
+            for (int i = 0; i < friendCount; i++) {
+                CSteamID fid = g_steamFriendsInstance.GetFriendByIndex(i, k_EFriendFlagImmediate);
+                const char* val = g_steamFriendsInstance.GetFriendRichPresence(fid, "refix_pa_room");
+                if (val && *val) {
+                    bool found = false;
+                    for (const auto& existing : q.servers) {
+                        if (existing.m_steamID == fid) { found = true; break; }
+                    }
+                    if (!found) {
+                        gameserveritem_t s;
+                        s.m_nAppID = q.appId;
+                        s.m_NetAdr.Init(0x7F000001, 27016, 27015);
+                        s.m_steamID = fid;
+                        s.SetName(val);
+                        s.m_nPlayers = 1;
+                        s.m_nMaxPlayers = 8;
+                        s.m_nPing = 20;
+                        s.m_bHadSuccessfulResponse = true;
+                        s.m_bDoNotRefresh = false;
+                        q.servers.push_back(s);
+                    }
+                }
+            }
+
+            m_queries[hReq] = q;
+
+            if (pResponse) {
+                std::thread([this, hReq, pResponse]() {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+                    auto it = m_queries.find(hReq);
+                    if (it == m_queries.end() || it->second.response != pResponse) return;
+                    for (size_t i = 0; i < it->second.servers.size(); i++) {
+                        pResponse->ServerResponded(hReq, (int)i);
+                    }
+                    pResponse->RefreshComplete(hReq, it->second.servers.empty() ?
+                        EMatchMakingServerResponse::eNoServersListedOnMasterServer :
+                        EMatchMakingServerResponse::eServerResponded);
+                }).detach();
+            }
+
+            ReFixLog("[UnrealSteam] MatchmakingServers query %p completed: %zu server(s) reported", (void*)hReq, q.servers.size());
+            return hReq;
+        }
+
     public:
         virtual HServerListRequest RequestInternetServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)1, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)1;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestLANServerList(AppId_t iApp, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)2, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)2;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestFriendsServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)3, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)3;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestFavoritesServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)4, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)4;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestHistoryServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)5, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)5;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
         virtual HServerListRequest RequestSpectatorServerList(AppId_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32 nFilters, ISteamMatchmakingServerListResponse *pRequestServersResponse) override {
-            if (pRequestServersResponse) pRequestServersResponse->RefreshComplete((HServerListRequest)6, EMatchMakingServerResponse::eServerResponded);
-            return (HServerListRequest)6;
+            return StartServerListQuery(iApp, pRequestServersResponse);
         }
-        virtual void ReleaseRequest(HServerListRequest hServerListRequest) override {}
-        virtual gameserveritem_t *GetServerDetails(HServerListRequest hRequest, int iServer) override { return nullptr; }
-        virtual void CancelQuery(HServerListRequest hRequest) override {}
+        virtual void ReleaseRequest(HServerListRequest hServerListRequest) override {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            m_queries.erase(hServerListRequest);
+        }
+        virtual gameserveritem_t *GetServerDetails(HServerListRequest hRequest, int iServer) override {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            auto it = m_queries.find(hRequest);
+            if (it != m_queries.end() && iServer >= 0 && iServer < (int)it->second.servers.size()) {
+                return &it->second.servers[iServer];
+            }
+            return nullptr;
+        }
+        virtual void CancelQuery(HServerListRequest hRequest) override {
+            ReleaseRequest(hRequest);
+        }
         virtual void RefreshQuery(HServerListRequest hRequest) override {}
         virtual bool IsRefreshing(HServerListRequest hRequest) override { return false; }
-        virtual int GetServerCount(HServerListRequest hRequest) override { return 0; }
+        virtual int GetServerCount(HServerListRequest hRequest) override {
+            std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
+            auto it = m_queries.find(hRequest);
+            return (it != m_queries.end()) ? (int)it->second.servers.size() : 0;
+        }
         virtual void RefreshServer(HServerListRequest hRequest, int iServer) override {}
         virtual HServerQuery PingServer(uint32 unIP, uint16 usPort, ISteamMatchmakingPingResponse *pRequestServersResponse) override { return 1; }
         virtual HServerQuery PlayerDetails(uint32 unIP, uint16 usPort, ISteamMatchmakingPlayersResponse *pRequestServersResponse) override { return 1; }
@@ -5018,6 +5638,19 @@ namespace UnrealSteamEmu {
         }
         virtual bool BIsSubscribedApp(AppId_t appID) override { return true; }
         virtual bool BIsDlcInstalled(AppId_t appID) override {
+            if (appID == 948680) {
+                static int s_hasNsfw = -1;
+                if (s_hasNsfw == -1) {
+                    char path[MAX_PATH];
+                    GetModuleFileNameA(NULL, path, MAX_PATH);
+                    char* slash = strrchr(path, '\\');
+                    if (slash) *slash = '\0';
+                    strcat_s(path, sizeof(path), "\\CrushCrush_Data\\StreamingAssets\\Windows\\cassie\\cassie_nsfw_bdfb642e7c9baee4aa5eee02b2b18c88");
+                    s_hasNsfw = (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+                    ReFixLog("[UnrealSteam] NSFW DLC asset check: installed=%d", s_hasNsfw);
+                }
+                if (!s_hasNsfw) return false;
+            }
             if (g_bypassLicenseCheck) return true;
             return (g_unlockedDLCs.find(appID) != g_unlockedDLCs.end());
         }
@@ -6339,26 +6972,199 @@ namespace UnrealSteamEmu {
     };
     static CSteamRemoteStorageEmu g_steamRemoteStorageInstance;
 
-    // --- ISteamUGC ---
+    // --- ISteamUGC (Generic Workshop & Local Content Provider) ---
+    struct LocalUGCItem {
+        PublishedFileId_t id = 0;
+        std::string title;
+        std::string description;
+        std::string folder;
+        std::string previewFile;
+        uint64_t fileSize = 0;
+        uint32_t timestamp = 0;
+    };
+
     class CSteamUGCEmu : public ISteamUGC {
+    private:
+        std::mutex m_ugcMutex;
+        std::map<PublishedFileId_t, LocalUGCItem> m_items;
+        std::map<UGCQueryHandle_t, std::vector<PublishedFileId_t>> m_queries;
+        UGCQueryHandle_t m_nextQuery = 1;
+        bool m_scanned = false;
+
+        void EnsureScanned() {
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            if (m_scanned) return;
+            m_scanned = true;
+
+            wchar_t exePath[MAX_PATH] = {};
+            GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+            std::wstring baseDir = exePath;
+            size_t slash = baseDir.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) baseDir = baseDir.substr(0, slash);
+
+            std::vector<std::wstring> scanPaths = {
+                baseDir + L"\\maps\\workshop",
+                baseDir + L"\\workshop\\content\\" + std::to_wstring(g_appID),
+                baseDir + L"\\..\\workshop\\content\\" + std::to_wstring(g_appID)
+            };
+
+            for (const auto& sp : scanPaths) {
+                WIN32_FIND_DATAW fd;
+                HANDLE hFind = FindFirstFileW((sp + L"\\*").c_str(), &fd);
+                if (hFind == INVALID_HANDLE_VALUE) continue;
+                do {
+                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                    PublishedFileId_t fileId = _wcstoui64(fd.cFileName, nullptr, 10);
+                    if (fileId == 0) continue;
+
+                    LocalUGCItem item;
+                    item.id = fileId;
+                    std::wstring itemDir = sp + L"\\" + fd.cFileName;
+                    char utf8Dir[MAX_PATH * 2] = {};
+                    WideCharToMultiByte(CP_UTF8, 0, itemDir.c_str(), -1, utf8Dir, sizeof(utf8Dir), nullptr, nullptr);
+                    item.folder = utf8Dir;
+
+                    // Search for .bsp or file inside
+                    WIN32_FIND_DATAW fInner;
+                    HANDLE hInner = FindFirstFileW((itemDir + L"\\*").c_str(), &fInner);
+                    if (hInner != INVALID_HANDLE_VALUE) {
+                        do {
+                            std::wstring fn = fInner.cFileName;
+                            if (fn.size() > 4 && fn.substr(fn.size() - 4) == L".bsp") {
+                                char utf8Title[MAX_PATH] = {}; WideCharToMultiByte(CP_UTF8, 0, fn.substr(0, fn.size() - 4).c_str(), -1, utf8Title, sizeof(utf8Title), nullptr, nullptr); item.title = utf8Title;
+                                item.fileSize = ((uint64_t)fInner.nFileSizeHigh << 32) | fInner.nFileSizeLow;
+                                item.timestamp = fInner.ftLastWriteTime.dwLowDateTime;
+                            } else if (fn.find(L"thumb") != std::wstring::npos && fn.find(L".jpg") != std::wstring::npos) {
+                                std::wstring pvw = itemDir + L"\\" + fn;
+                                char utf8Pvw[MAX_PATH * 2] = {};
+                                WideCharToMultiByte(CP_UTF8, 0, pvw.c_str(), -1, utf8Pvw, sizeof(utf8Pvw), nullptr, nullptr);
+                                item.previewFile = utf8Pvw;
+                            }
+                        } while (FindNextFileW(hInner, &fInner));
+                        FindClose(hInner);
+                    }
+                    if (item.title.empty()) {
+                        char idBuf[64];
+                        sprintf_s(idBuf, "%llu", (unsigned long long)fileId);
+                        item.title = std::string("Workshop Item ") + idBuf;
+                    }
+                    item.description = item.title;
+                    m_items[fileId] = item;
+                } while (FindNextFileW(hFind, &fd));
+                FindClose(hFind);
+            }
+
+            if (!m_items.empty()) {
+                std::vector<std::wstring> subFiles = {
+                    baseDir + L"\\subscribed_file_ids.txt"
+                };
+                for (const auto& sf : subFiles) {
+                    std::ofstream ofs(sf, std::ios::binary | std::ios::trunc);
+                    if (ofs.is_open()) {
+                        for (const auto& [id, itm] : m_items) {
+                            ofs << id << "\n";
+                        }
+                    }
+                }
+            }
+            ReFixLog("[UnrealSteam] CSteamUGCEmu: Scanned %zu local workshop items", m_items.size());
+        }
+
     public:
-        virtual UGCQueryHandle_t CreateQueryUserUGCRequest(AccountID_t unAccountID, EUserUGCList eListType, EUGCMatchingUGCType eMatchingUGCType, EUserUGCListSortOrder eSortOrder, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override { return 1; }
-        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override { return 1; }
-        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, const char *pchCursor) override { return 1; }
-        virtual UGCQueryHandle_t CreateQueryUGCDetailsRequest(PublishedFileId_t *pvecPublishedFileID, uint32 unNumPublishedFileIDs) override { return 1; }
+        virtual UGCQueryHandle_t CreateQueryUserUGCRequest(AccountID_t unAccountID, EUserUGCList eListType, EUGCMatchingUGCType eMatchingUGCType, EUserUGCListSortOrder eSortOrder, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            for (const auto& [id, itm] : m_items) q.push_back(id);
+            return h;
+        }
+        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            for (const auto& [id, itm] : m_items) q.push_back(id);
+            return h;
+        }
+        virtual UGCQueryHandle_t CreateQueryAllUGCRequest(EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, const char *pchCursor) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            for (const auto& [id, itm] : m_items) q.push_back(id);
+            return h;
+        }
+        virtual UGCQueryHandle_t CreateQueryUGCDetailsRequest(PublishedFileId_t *pvecPublishedFileID, uint32 unNumPublishedFileIDs) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            UGCQueryHandle_t h = ++m_nextQuery;
+            auto& q = m_queries[h];
+            if (pvecPublishedFileID) {
+                for (uint32 i = 0; i < unNumPublishedFileIDs; ++i) q.push_back(pvecPublishedFileID[i]);
+            }
+            return h;
+        }
         virtual SteamAPICall_t SendQueryUGCRequest(UGCQueryHandle_t handle) override {
+            EnsureScanned();
             SteamUGCQueryCompleted_t resp = {};
             resp.m_handle = handle;
             resp.m_eResult = k_EResultOK;
-            resp.m_unNumResultsReturned = 0;
-            resp.m_unTotalMatchingResults = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_ugcMutex);
+                auto it = m_queries.find(handle);
+                if (it != m_queries.end()) {
+                    resp.m_unNumResultsReturned = (uint32)it->second.size();
+                    resp.m_unTotalMatchingResults = resp.m_unNumResultsReturned;
+                }
+            }
             return PostCallResult(SteamUGCQueryCompleted_t::k_iCallback, &resp, sizeof(resp));
         }
-        virtual bool GetQueryUGCResult(UGCQueryHandle_t handle, uint32 index, SteamUGCDetails_t *pDetails) override { return false; }
+        virtual bool GetQueryUGCResult(UGCQueryHandle_t handle, uint32 index, SteamUGCDetails_t *pDetails) override {
+            if (!pDetails) return false;
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            auto itQ = m_queries.find(handle);
+            if (itQ == m_queries.end() || index >= itQ->second.size()) return false;
+            PublishedFileId_t fileId = itQ->second[index];
+            auto itItem = m_items.find(fileId);
+            if (itItem == m_items.end()) return false;
+
+            const auto& itm = itItem->second;
+            memset(pDetails, 0, sizeof(*pDetails));
+            pDetails->m_nPublishedFileId = itm.id;
+            pDetails->m_eResult = k_EResultOK;
+            pDetails->m_eFileType = k_EWorkshopFileTypeCommunity;
+            pDetails->m_nCreatorAppID = g_appID;
+            pDetails->m_nConsumerAppID = g_appID;
+            strncpy_s(pDetails->m_rgchTitle, itm.title.c_str(), _TRUNCATE);
+            strncpy_s(pDetails->m_rgchDescription, itm.description.c_str(), _TRUNCATE);
+            pDetails->m_ulSteamIDOwner = g_localSteamID;
+            pDetails->m_rtimeCreated = itm.timestamp;
+            pDetails->m_rtimeUpdated = itm.timestamp;
+            pDetails->m_eVisibility = k_ERemoteStoragePublishedFileVisibilityPublic;
+            pDetails->m_bAcceptedForUse = true;
+            strncpy_s(pDetails->m_rgchTags, "map", _TRUNCATE);
+            pDetails->m_nFileSize = (int32)std::min<uint64_t>(itm.fileSize, 0x7FFFFFFF);
+            pDetails->m_unVotesUp = 100;
+            pDetails->m_flScore = 5.0f;
+            return true;
+        }
         virtual uint32 GetQueryUGCNumTags(UGCQueryHandle_t handle, uint32 index) override { return 0; }
         virtual bool GetQueryUGCTag(UGCQueryHandle_t handle, uint32 index, uint32 indexTag, char* pchValue, uint32 cchValueSize) override { return false; }
         virtual bool GetQueryUGCTagDisplayName(UGCQueryHandle_t handle, uint32 index, uint32 indexTag, char* pchValue, uint32 cchValueSize) override { return false; }
-        virtual bool GetQueryUGCPreviewURL(UGCQueryHandle_t handle, uint32 index, char *pchURL, uint32 cchURLSize) override { return false; }
+        virtual bool GetQueryUGCPreviewURL(UGCQueryHandle_t handle, uint32 index, char *pchURL, uint32 cchURLSize) override {
+            if (!pchURL || cchURLSize == 0) return false;
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            auto itQ = m_queries.find(handle);
+            if (itQ == m_queries.end() || index >= itQ->second.size()) return false;
+            auto itItem = m_items.find(itQ->second[index]);
+            if (itItem == m_items.end() || itItem->second.previewFile.empty()) return false;
+            strncpy_s(pchURL, cchURLSize, itItem->second.previewFile.c_str(), _TRUNCATE);
+            return true;
+        }
         virtual bool GetQueryUGCMetadata(UGCQueryHandle_t handle, uint32 index, char *pchMetadata, uint32 cchMetadatasize) override { return false; }
         virtual bool GetQueryUGCChildren(UGCQueryHandle_t handle, uint32 index, PublishedFileId_t* pvecPublishedFileID, uint32 cMaxEntries) override { return false; }
         virtual bool GetQueryUGCStatistic(UGCQueryHandle_t handle, uint32 index, EItemStatistic eStatType, uint64 *pStatValue) override { return false; }
@@ -6425,10 +7231,42 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t RemoveItemFromFavorites(AppId_t nAppId, PublishedFileId_t nPublishedFileId) override { return 0; }
         virtual SteamAPICall_t SubscribeItem(PublishedFileId_t nPublishedFileId) override { return 0; }
         virtual SteamAPICall_t UnsubscribeItem(PublishedFileId_t nPublishedFileId) override { return 0; }
-        virtual uint32 GetNumSubscribedItems(bool bIncludeLocallyDisabled = false) override { return 0; }
-        virtual uint32 GetSubscribedItems(PublishedFileId_t *pvecPublishedFileID, uint32 cMaxEntries, bool bIncludeLocallyDisabled = false) override { return 0; }
-        virtual uint32 GetItemState(PublishedFileId_t nPublishedFileId) override { return k_EItemStateNone; }
-        virtual bool GetItemInstallInfo(PublishedFileId_t nPublishedFileId, uint64 *punSizeOnDisk, char *pchFolder, uint32 cchFolderBufferSize, uint32 *punTimeStamp) override { return false; }
+        virtual uint32 GetNumSubscribedItems(bool bIncludeLocallyDisabled = false) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            return (uint32)m_items.size();
+        }
+        virtual uint32 GetSubscribedItems(PublishedFileId_t *pvecPublishedFileID, uint32 cMaxEntries, bool bIncludeLocallyDisabled = false) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            uint32 copied = 0;
+            for (const auto& [id, itm] : m_items) {
+                if (copied >= cMaxEntries) break;
+                if (pvecPublishedFileID) pvecPublishedFileID[copied] = id;
+                copied++;
+            }
+            return copied;
+        }
+        virtual uint32 GetItemState(PublishedFileId_t nPublishedFileId) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            if (m_items.find(nPublishedFileId) != m_items.end()) {
+                return 1 | 4; // k_EItemStateSubscribed | k_EItemStateInstalled
+            }
+            return k_EItemStateNone;
+        }
+        virtual bool GetItemInstallInfo(PublishedFileId_t nPublishedFileId, uint64 *punSizeOnDisk, char *pchFolder, uint32 cchFolderBufferSize, uint32 *punTimeStamp) override {
+            EnsureScanned();
+            std::lock_guard<std::mutex> lock(m_ugcMutex);
+            auto it = m_items.find(nPublishedFileId);
+            if (it == m_items.end()) return false;
+            if (punSizeOnDisk) *punSizeOnDisk = it->second.fileSize;
+            if (punTimeStamp) *punTimeStamp = it->second.timestamp;
+            if (pchFolder && cchFolderBufferSize > 0) {
+                strncpy_s(pchFolder, cchFolderBufferSize, it->second.folder.c_str(), _TRUNCATE);
+            }
+            return true;
+        }
         virtual bool GetItemDownloadInfo(PublishedFileId_t nPublishedFileId, uint64 *punBytesDownloaded, uint64 *punBytesTotal) override { return false; }
         virtual bool DownloadItem(PublishedFileId_t nPublishedFileId, bool bHighPriority) override { return false; }
         virtual bool BInitWorkshopForGameServer(DepotId_t unWorkshopDepotID, const char *pszFolder) override { return true; }
@@ -6458,6 +7296,7 @@ namespace UnrealSteamEmu {
     public:
         virtual bool InitGameServer(uint32 unIP, uint16 usGamePort, uint16 usQueryPort, uint32 unFlags, AppId_t nGameAppId, const char *pchVersion) override {
             ReFixLog("[UnrealSteam] InitGameServer: port=%u, queryPort=%u, appID=%u", usGamePort, usQueryPort, nGameAppId);
+            PublishLocalServer(usGamePort);
             return true;
         }
         virtual void SetProduct(const char *pszProduct) override {}
@@ -6521,6 +7360,7 @@ namespace UnrealSteamEmu {
             g_callbackQueue.push_back(item);
 
             ReFixLog("[UnrealSteam] SendUserConnectAndAuthenticate: Approved client %llu", clientID.ConvertToUint64());
+            refix::gc::OnGameServerClientAuth(clientID.ConvertToUint64(), 1);
             return true;
         }
 
@@ -7093,6 +7933,28 @@ namespace UnrealSteamEmu {
     };
     static CSteamUnifiedMessagesEmu g_steamUnifiedMessagesInstance;
 
+    // --- ISteamGameStats001 (Source 1 / CS:GO SteamAPIContext requirement) ---
+    class CSteamGameStatsEmu : public ISteamGameStats {
+    public:
+        virtual SteamAPICall_t GetNewSession(int8 nAccountType, uint64 ulAccountID, int32 nAppID, RTime32 rtTimeStarted) override { return 0; }
+        virtual SteamAPICall_t EndSession(uint64 ulSessionID, RTime32 rtTimeEnded, int nReasonCode) override { return 0; }
+        virtual EResult AddSessionAttributeInt(uint64 ulSessionID, const char* pstrName, int32 nData) override { return k_EResultOK; }
+        virtual EResult AddSessionAttributeString(uint64 ulSessionID, const char* pstrName, const char *pstrData) override { return k_EResultOK; }
+        virtual EResult AddSessionAttributeFloat(uint64 ulSessionID, const char* pstrName, float fData) override { return k_EResultOK; }
+
+        virtual EResult AddNewRow(uint64 *pulRowID, uint64 ulSessionID, const char *pstrTableName) override { if (pulRowID) *pulRowID = 1; return k_EResultOK; }
+        virtual EResult CommitRow(uint64 ulRowID) override { return k_EResultOK; }
+        virtual EResult CommitOutstandingRows(uint64 ulSessionID) override { return k_EResultOK; }
+        virtual EResult AddRowAttributeInt(uint64 ulRowID, const char *pstrName, int32 nData) override { return k_EResultOK; }
+        virtual EResult AddRowAtributeString(uint64 ulRowID, const char *pstrName, const char *pstrData) override { return k_EResultOK; }
+        virtual EResult AddRowAttributeFloat(uint64 ulRowID, const char *pstrName, float fData) override { return k_EResultOK; }
+
+        virtual EResult AddSessionAttributeInt64(uint64 ulSessionID, const char *pstrName, int64 llData) override { return k_EResultOK; }
+        virtual EResult AddRowAttributeInt64(uint64 ulRowID, const char *pstrName, int64 llData) override { return k_EResultOK; }
+    };
+    static CSteamGameStatsEmu g_steamGameStatsInstance;
+
+
     // --- ISteamParentalSettings ---
     class CSteamParentalSettingsEmu : public ISteamParentalSettings {
     public:
@@ -7469,6 +8331,8 @@ namespace UnrealSteamEmu {
             return ReFixGC::Get(false);
         if (strstr(pchVersion, "STEAMUNIFIEDMESSAGES") || strstr(pchVersion, "SteamUnifiedMessages"))
             return &g_steamUnifiedMessagesInstance;
+        if (strstr(pchVersion, "SteamGameStats") || strstr(pchVersion, "STEAMGAMESTATS"))
+            return &g_steamGameStatsInstance;
 
         ReFixLog("[UnrealSteam] Warning: Unrecognized interface '%s'", pchVersion);
         return nullptr;
@@ -7488,6 +8352,8 @@ namespace UnrealSteamEmu {
     }
 
     void* FindOrCreateGameServerInterface(int32_t hUser, const char* pszVersion) {
+        if (pszVersion && (strstr(pszVersion, "SteamGameCoordinator") || strstr(pszVersion, "STEAMGAMECOORDINATOR")))
+            return ReFixGC::Get(true);
         return GetGenericInterface(pszVersion);
     }
 
@@ -7537,6 +8403,7 @@ namespace UnrealSteamEmu {
         if (g_transportMode.load() == TransportMode::Canonical) {
             refix::lan::ILanCore::Get().SetAppScope("Steam_" + std::to_string(appId));
             refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
+            refix::gc::InitializeGCRelay();
         }
         ReFixLog("[UnrealSteam] Adopted AppID %u (was %u): LAN discovery scope updated", appId, previous);
     }
@@ -7687,6 +8554,52 @@ namespace UnrealSteamEmu {
         }
     }
 
+    void UnlockDLC(uint32_t dlcId) {
+        if (dlcId == 0) return;
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+            g_unlockedDLCs.insert(dlcId);
+        }
+        ReFixLog("[UnrealSteam] DLC %u unlocked locally", dlcId);
+        DlcInstalled_t dlc = {};
+        dlc.m_nAppID = dlcId;
+        PostCallback(DlcInstalled_t::k_iCallback, &dlc, sizeof(dlc));
+    }
+
+    bool IsDLCUnlocked(uint32_t dlcId) {
+        if (g_bypassLicenseCheck) return true;
+        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+        return g_unlockedDLCs.find(dlcId) != g_unlockedDLCs.end();
+    }
+
+    void AuthorizeMicroTxn(uint32_t appId, uint64_t orderId, bool bAuthorized) {
+        MicroTxnAuthorizationResponse_t resp = {};
+        resp.m_unAppID = appId ? appId : g_appID;
+        resp.m_ulOrderID = orderId;
+        resp.m_bAuthorized = bAuthorized ? 1 : 0;
+        ReFixLog("[UnrealSteam] MicroTxn auth: appId=%u, orderId=%llu, authorized=%d", resp.m_unAppID, (unsigned long long)orderId, (int)resp.m_bAuthorized);
+        PostCallback(MicroTxnAuthorizationResponse_t::k_iCallback, &resp, sizeof(resp));
+    }
+
+    bool SetRichPresence(const char* pchKey, const char* pchValue) {
+        return g_steamFriendsInstance.SetRichPresence(pchKey, pchValue);
+    }
+    void ClearRichPresence() {
+        g_steamFriendsInstance.ClearRichPresence();
+    }
+    const char* GetFriendRichPresence(uint64_t steamIDFriend, const char* pchKey) {
+        return g_steamFriendsInstance.GetFriendRichPresence(CSteamID(steamIDFriend), pchKey);
+    }
+    int GetFriendRichPresenceKeyCount(uint64_t steamIDFriend) {
+        return g_steamFriendsInstance.GetFriendRichPresenceKeyCount(CSteamID(steamIDFriend));
+    }
+    const char* GetFriendRichPresenceKeyByIndex(uint64_t steamIDFriend, int iKey) {
+        return g_steamFriendsInstance.GetFriendRichPresenceKeyByIndex(CSteamID(steamIDFriend), iKey);
+    }
+    std::vector<std::pair<uint64_t, std::string>> GetAllFriendsWithRichPresence(const char* pchKey) {
+        return g_steamFriendsInstance.GetAllFriendsWithRichPresence(pchKey);
+    }
+
     uint64_t Matchmaking_CreateLobby(int eLobbyType, int cMaxMembers) {
         return g_steamMatchmakingInstance.CreateLobby((ELobbyType)eLobbyType, cMaxMembers);
     }
@@ -7827,6 +8740,62 @@ namespace UnrealSteamEmu {
         return g_steamNetworkingInstance.CloseP2PSessionWithUser(CSteamID(steamIDRemote));
     }
 
+
+    static void PatchEngineSecurityChecks() {
+        std::thread([]() {
+            bool enginePatched = false;
+            bool clientPatched = false;
+
+            for (int attempt = 0; attempt < 120; ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                if (!enginePatched) {
+                    HMODULE hEngine = GetModuleHandleW(L"engine.dll");
+                    if (hEngine) {
+                        uint8_t* base = (uint8_t*)hEngine;
+                        PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hEngine;
+                        if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(base + dos->e_lfanew);
+                            if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                                size_t size = nt->OptionalHeader.SizeOfImage;
+                                for (size_t i = 0; i + 32 < size; ++i) {
+                                    if (base[i] == 0x56 && base[i+1] == 0x8b && base[i+7] == 0xff && base[i+8] == 0xd6 && base[i+9] == 0x68) {
+                                        const char* pArg = *(const char**)(base + i + 10);
+                                        if (pArg && !IsBadReadPtr(pArg, 9) && strcmp(pArg, "-insecure") == 0) {
+                                            DWORD oldProt;
+                                            if (VirtualProtect(base + i, 8, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                                base[i] = 0xB0;     // mov al, 1
+                                                base[i + 1] = 0x01;
+                                                base[i + 2] = 0xC3; // ret
+                                                VirtualProtect(base + i, 8, oldProt, &oldProt);
+                                                ReFixLog("[SourceEngine] Successfully patched IsClientSecure at %p", base + i);
+                                            }
+                                            for (size_t k = i; k < i + 120 && k + 5 < size; ++k) {
+                                                if (base[k] == 0xA0) {
+                                                    uint8_t* pFlag = *(uint8_t**)(base + k + 1);
+                                                    if (pFlag && VirtualProtect(pFlag, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                                                        *pFlag = 1;
+                                                        VirtualProtect(pFlag, 1, oldProt, &oldProt);
+                                                        ReFixLog("[SourceEngine] Initialized bSecure flag at %p to 1", pFlag);
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                            enginePatched = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (enginePatched) break;
+            }
+        }).detach();
+    }
+
     bool Initialize() {
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -7871,6 +8840,7 @@ namespace UnrealSteamEmu {
                 (ep.ipv4 >> 24) & 0xFF, (ep.ipv4 >> 16) & 0xFF, (ep.ipv4 >> 8) & 0xFF, ep.ipv4 & 0xFF,
                 ep.port, core.Transport().GetDiscoveryPort());
             core.Identity().SetDisplayName(g_personaName);
+            refix::gc::InitializeGCRelay();
 
         // Bind local SteamID
         refix::lan::PeerId localPeer = core.Identity().GetLocalPeerId();
@@ -7916,6 +8886,14 @@ namespace UnrealSteamEmu {
                 SteamP2PHook::RegisterPeer(sid, pInfo->endpoint.ipv4, pInfo->endpoint.port);
                 ReFixLog("[UnrealSteam] LanCore PeerDiscovered: steamID=%llu (%s) at %s",
                          sid, pInfo->displayName.c_str(), pInfo->endpoint.ToString().c_str());
+
+                g_steamFriendsInstance.SendPresenceRequestSync(ev.peerId, pInfo->endpoint);
+                g_steamFriendsInstance.SendPresenceFullSync(ev.peerId, pInfo->endpoint);
+
+                PersonaStateChange_t change = {};
+                change.m_ulSteamID = sid;
+                change.m_nChangeFlags = k_EPersonaChangeName | k_EPersonaChangeStatus | k_EPersonaChangeRelationshipChanged;
+                PostCallback(PersonaStateChange_t::k_iCallback, &change, sizeof(change));
 
                 // Check for persona name collision across LAN
                 if (_stricmp(pInfo->displayName.c_str(), g_personaName.c_str()) == 0 && g_localSteamID > sid) {
@@ -8064,6 +9042,66 @@ namespace UnrealSteamEmu {
             PostCallback(LobbyDataUpdate_t::k_iCallback, &dataUpd, sizeof(dataUpd));
         });
 
+                core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyUpdated, [](const refix::lan::LanEvent& ev) {
+            uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
+            if (steamLobbyId == 0) return;
+
+            auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(ev.lobbyId);
+            if (!rec) return;
+
+            uint32_t prevGsIp = 0;
+            uint16_t prevGsPort = 0;
+            uint64_t prevGsId = 0;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(steamLobbyId);
+                if (it != g_lobbies.end()) {
+                    prevGsIp = it->second.gameServerIP;
+                    prevGsPort = it->second.gameServerPort;
+                    prevGsId = it->second.gameServerSteamID;
+                    for (const auto& [k, v] : rec->attributes) {
+                        it->second.data[k] = v.asString;
+                    }
+                    auto itIp = rec->attributes.find("__gs_ip");
+                    if (itIp != rec->attributes.end() && !itIp->second.asString.empty()) {
+                        it->second.gameServerIP = (uint32_t)_strtoui64(itIp->second.asString.c_str(), nullptr, 10);
+                    }
+                    auto itPort = rec->attributes.find("__gs_port");
+                    if (itPort != rec->attributes.end() && !itPort->second.asString.empty()) {
+                        it->second.gameServerPort = (uint16_t)std::strtoul(itPort->second.asString.c_str(), nullptr, 10);
+                    }
+                    auto itId = rec->attributes.find("__gs_id");
+                    if (itId != rec->attributes.end() && !itId->second.asString.empty()) {
+                        it->second.gameServerSteamID = _strtoui64(itId->second.asString.c_str(), nullptr, 10);
+                    }
+                }
+            }
+
+            LobbyDataUpdate_t dataUpd = {};
+            dataUpd.m_ulSteamIDLobby = steamLobbyId;
+            dataUpd.m_ulSteamIDMember = steamLobbyId;
+            dataUpd.m_bSuccess = 1;
+            PostCallback(LobbyDataUpdate_t::k_iCallback, &dataUpd, sizeof(dataUpd));
+
+            // Check if game server endpoint changed or was announced
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(steamLobbyId);
+                if (it != g_lobbies.end() && (it->second.gameServerPort != 0 || it->second.gameServerSteamID != 0)) {
+                    if (it->second.gameServerIP != prevGsIp || it->second.gameServerPort != prevGsPort || it->second.gameServerSteamID != prevGsId) {
+                        LobbyGameCreated_t lgc = {};
+                        lgc.m_ulSteamIDLobby = steamLobbyId;
+                        lgc.m_ulSteamIDGameServer = it->second.gameServerSteamID;
+                        lgc.m_unIP = it->second.gameServerIP;
+                        lgc.m_usPort = it->second.gameServerPort;
+                        PostCallback(LobbyGameCreated_t::k_iCallback, &lgc, sizeof(lgc));
+                        ReFixLog("[UnrealSteam] LanCore LobbyUpdated: GameServer connected! IP=%u port=%u serverSteamID=%llu",
+                                 lgc.m_unIP, lgc.m_usPort, lgc.m_ulSteamIDGameServer);
+                    }
+                }
+            }
+        });
+
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::MemberJoined, [](const refix::lan::LanEvent& ev) {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
             if (steamLobbyId == 0) return;
@@ -8072,8 +9110,6 @@ namespace UnrealSteamEmu {
             auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (mInfo && mInfo->externalId.numericId != 0) {
                 memberSteamId = mInfo->externalId.numericId;
-            } else if (ev.peerId.low != 0) {
-                memberSteamId = ev.peerId.low;
             }
 
             if (memberSteamId != 0) {
@@ -8108,8 +9144,6 @@ namespace UnrealSteamEmu {
             auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (mInfo && mInfo->externalId.numericId != 0) {
                 memberSteamId = mInfo->externalId.numericId;
-            } else if (ev.peerId.low != 0) {
-                memberSteamId = ev.peerId.low;
             }
 
             if (memberSteamId != 0) {
@@ -8133,12 +9167,12 @@ namespace UnrealSteamEmu {
 
         core.Callbacks().Subscribe(refix::lan::LanEvent::Type::LobbyJoinResult, [](const refix::lan::LanEvent& ev) {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
-            SteamAPICall_t callHandle = 0;
+            std::vector<SteamAPICall_t> callHandles;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 auto it = g_pendingJoins.find(ev.lobbyId);
                 if (it != g_pendingJoins.end()) {
-                    callHandle = it->second.callHandle;
+                    callHandles = it->second.callHandles;
                     g_pendingJoins.erase(it);
                 }
             }
@@ -8153,8 +9187,8 @@ namespace UnrealSteamEmu {
                 resp.m_bLocked = false;
                 resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseError;
                 PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                if (callHandle != 0) {
-                    CompleteCallResult(callHandle, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
+                for (uint64_t ch : callHandles) {
+                    if (ch != 0) CompleteCallResult(ch, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
                 }
                 return;
             }
@@ -8189,8 +9223,6 @@ namespace UnrealSteamEmu {
                             lob.owner = ownerInfo->externalId.numericId;
                         } else if (ownerSteamId != 0) {
                             lob.owner = ownerSteamId;
-                        } else if (rec->ownerPeerId.low != 0) {
-                            lob.owner = rec->ownerPeerId.low;
                         }
 
                         lob.members.clear();
@@ -8199,10 +9231,6 @@ namespace UnrealSteamEmu {
                             if (mInfo && mInfo->externalId.numericId != 0) {
                                 if (std::find(lob.members.begin(), lob.members.end(), mInfo->externalId.numericId) == lob.members.end()) {
                                     lob.members.push_back(mInfo->externalId.numericId);
-                                }
-                            } else if (m.peerId.low != 0) {
-                                if (std::find(lob.members.begin(), lob.members.end(), m.peerId.low) == lob.members.end()) {
-                                    lob.members.push_back(m.peerId.low);
                                 }
                             }
                         }
@@ -8217,8 +9245,8 @@ namespace UnrealSteamEmu {
                     }
                 }
                 PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                if (callHandle != 0) {
-                    CompleteCallResult(callHandle, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), false);
+                for (uint64_t ch : callHandles) {
+                    if (ch != 0) CompleteCallResult(ch, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), false);
                 }
 
                 LobbyDataUpdate_t dataUpd = {};
@@ -8254,8 +9282,8 @@ namespace UnrealSteamEmu {
                     resp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseDoesntExist;
                 }
                 PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
-                if (callHandle != 0) {
-                    CompleteCallResult(callHandle, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
+                for (uint64_t ch : callHandles) {
+                    if (ch != 0) CompleteCallResult(ch, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), true);
                 }
                 ReFixLog("[UnrealSteam] LanCore LobbyJoinResult: Join REJECTED for lobby %llu (coreId='%s', code=%u)",
                          steamLobbyId, ev.lobbyId.c_str(), ev.joinResponseCode);
@@ -8267,8 +9295,6 @@ namespace UnrealSteamEmu {
             auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
             if (pInfo && pInfo->externalId.numericId != 0) {
                 senderSteamId = pInfo->externalId.numericId;
-            } else {
-                senderSteamId = ev.peerId.low != 0 ? ev.peerId.low : ev.peerId.high;
             }
 
             if (ev.channel == 250 || (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == k_nRfxsMagic)) {
@@ -8301,6 +9327,14 @@ namespace UnrealSteamEmu {
                     }
                 }
                 ProcessRfxsPacket(senderSteamId, ev.payload.data(), ev.payload.size());
+                return;
+            }
+            if (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == refix::gc::kGCRelayMagicValue) {
+                refix::gc::HandleRelayPacket(ev.peerId, ev.payload.data(), ev.payload.size());
+                return;
+            }
+            if (ev.channel == CSteamFriendsEmu::kRichPresenceChannel || (ev.payload.size() >= 4 && *(const uint32_t*)ev.payload.data() == CSteamFriendsEmu::kRichPresenceMagic)) {
+                g_steamFriendsInstance.HandleReceiveRichPresence(senderSteamId, ev.payload.data(), ev.payload.size());
                 return;
             }
             if (ReceiveLobbyChat(senderSteamId, ev.channel, ev.payload)) return;
@@ -8341,10 +9375,16 @@ namespace UnrealSteamEmu {
 
         if (g_transportMode.load() == TransportMode::Canonical) StartLanPump();
         g_contextCounter.fetch_add(1);
+        PatchEngineSecurityChecks();
 
-        // Queue SteamServersConnected_t on startup (outside state lock)
+        // Queue SteamServersConnected_t and PersonaStateChange_t on startup
         SteamServersConnected_t conn = {};
         PostCallback(SteamServersConnected_t::k_iCallback, &conn, sizeof(conn), 0.01);
+
+        PersonaStateChange_t localChange = {};
+        localChange.m_ulSteamID = g_localSteamID;
+        localChange.m_nChangeFlags = k_EPersonaChangeName | k_EPersonaChangeStatus;
+        PostCallback(PersonaStateChange_t::k_iCallback, &localChange, sizeof(localChange), 0.05);
 
         // Since SDK 1.61 Steam delivers the local user's stats by itself after init (RequestCurrentStats is gone),
         // and Unreal 5.x waits for this UserStatsReceived_t before it treats stats/achievements as ready
@@ -8366,6 +9406,8 @@ namespace UnrealSteamEmu {
         ReFixLog("  Transport Mode: %s", g_transportMode.load() == TransportMode::Canonical ? "Canonical (ILanCore)" : "Legacy UDP Fallback");
         ReFixLog("  UDP Listen Port: %u | Language: '%s'", g_listenPort, g_language.c_str());
         ReFixLog("=================================================================");
+
+        ReFixMono_Init();
 
         return true;
     }
@@ -8455,7 +9497,9 @@ namespace UnrealSteamEmu {
     bool GameServer_Init(uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort, int eServerMode, const char* pchVersionString) {
         ReFixLog("[UnrealSteam] GameServer_Init: IP=%u, GamePort=%u, QueryPort=%u, Mode=%d, Ver=%s",
                  unIP, usGamePort, usQueryPort, eServerMode, pchVersionString ? pchVersionString : "null");
-        return Initialize();
+        bool ok = Initialize();
+        PublishLocalServer(usGamePort);
+        return ok;
     }
 
     bool GameServer_InitSafe() {

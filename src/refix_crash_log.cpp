@@ -18,7 +18,7 @@ constexpr int kMaxFrames = 24;
 
 std::atomic<int> g_logged{ 0 };
 HMODULE g_self = nullptr;
-bool g_logForeign = false; // REFIX_CRASH_ALL=1: also log faults outside ReFix (vtable mismatches crash in the game)
+bool g_logForeign = true;
 
 bool IsFatal(DWORD code) {
     switch (code) {

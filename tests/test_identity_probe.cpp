@@ -24,6 +24,9 @@ int main() {
     if (slash) *(slash + 1) = '\0';
     char dllPath[MAX_PATH] = { 0 };
     snprintf(dllPath, sizeof(dllPath), "%ssteam_api64.dll", exePath);
+    if (GetFileAttributesA(dllPath) == INVALID_FILE_ATTRIBUTES) {
+        snprintf(dllPath, sizeof(dllPath), "%slan\\steam_api64.dll", exePath);
+    }
 
     HMODULE h = LoadLibraryA(dllPath);
     if (!h) { printf("ERROR=LoadLibrary %lu\n", GetLastError()); return 2; }

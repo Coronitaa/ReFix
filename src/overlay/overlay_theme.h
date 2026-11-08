@@ -1,4 +1,4 @@
-﻿// Look of the ReFix LAN overlay: fonts, colours, icons and the small widgets every screen shares.
+// Look of the ReFix LAN overlay: fonts, colours, icons and the small widgets every screen shares.
 #pragma once
 #include "../imgui/imgui.h"
 #include <cstdint>
@@ -45,7 +45,7 @@ constexpr const char* OpenExternal = "\xEE\xA2\xA7"; // E8A7 open in new window
 } // namespace icon
 
 namespace color {
-constexpr ImU32 Backdrop = IM_COL32(6, 9, 14, 196);
+constexpr ImU32 Backdrop = IM_COL32(6, 9, 14, 235);
 constexpr ImU32 BackdropSolid = IM_COL32(8, 11, 16, 250);
 constexpr ImU32 Panel = IM_COL32(18, 22, 29, 242);
 constexpr ImU32 PanelRaised = IM_COL32(26, 31, 40, 255);
@@ -76,6 +76,12 @@ struct Fonts {
 };
 
 Fonts& F();
+// DPI Scaling Convention:
+// - ui::S(px) scales a point/pixel dimension by g_fonts.scale.
+// - RULE: Either the caller scales, or the callee scales - NEVER both.
+//   * BeginCard(id, pos, size, padding): 'padding' is unscaled points (e.g. 12.0f, 20.0f);
+//     BeginCard calls ui::S(padding) internally. Do NOT pass ui::S(12.0f) to BeginCard.
+//   * Widget sizes (ImVec2) passed to Button, Dummy, etc. must be scaled by caller via ui::S().
 float S(float px);               // scaled pixels
 void BuildFonts(float scale);    // rebuilds the atlas; call before NewFrame
 void ApplyStyle(float scale);
@@ -114,9 +120,13 @@ void TextColored(ImU32 col, const char* text);
 // Child window drawn as a Card at screen `pos`; the content area is inset by `padding` (unscaled px).
 void BeginCard(const char* id, ImVec2 pos, ImVec2 size, float padding = 20.0f);
 void EndCard();
+bool BeginCenteredModal(const char* id, float width);
 // Small upper-case muted heading, with an optional count ("FAVORITOS Â· 2").
 void SectionLabel(const char* text, int count = -1);
 ImU32 Fade(ImU32 col, float alpha);
+// Rounded rectangle filled with a vertical (or horizontal) gradient, alpha included; unlike
+// ImDrawList::AddRectFilledMultiColor it keeps the rounded corners.
+void GradientRect(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 from, ImU32 to, float rounding, bool horizontal = false);
 std::string Ellipsize(const std::string& text, float maxWidth);
 
 } // namespace refix::overlay::ui

@@ -17,6 +17,7 @@
 #include <deque>
 #include <mutex>
 #include <vector>
+#include <map>
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -36,9 +37,21 @@ std::mutex g_inboxMutex;
 std::deque<Inbound> g_inbox;
 std::atomic<bool> g_attached{ false };
 
+std::mutex g_idCacheMutex;
+std::map<refix::lan::PeerId, uint64_t> g_peerToSteam;
+std::map<uint64_t, refix::lan::PeerId> g_steamToPeer;
+
 uint64_t SteamIdOf(const refix::lan::PeerId& peer) {
     auto info = refix::lan::ILanCore::Get().Peers().FindByPeerId(peer);
-    return info ? info->externalId.numericId : 0;
+    if (info && info->externalId.numericId != 0) {
+        std::lock_guard<std::mutex> lock(g_idCacheMutex);
+        g_peerToSteam[peer] = info->externalId.numericId;
+        g_steamToPeer[info->externalId.numericId] = peer;
+        return info->externalId.numericId;
+    }
+    std::lock_guard<std::mutex> lock(g_idCacheMutex);
+    auto it = g_peerToSteam.find(peer);
+    return it != g_peerToSteam.end() ? it->second : 0;
 }
 
 // Installs the channel handler once the LAN emulator is up (LanCore is initialized with it).
@@ -64,9 +77,21 @@ uint64_t LocalSteamID() {
     return EnsureAttached() ? UnrealSteamEmu::GetLocalSteamID() : 0;
 }
 
-bool SetRichPresence(const char*, const std::string&) { return true; }
+bool SetRichPresence(const char* key, const std::string& value) {
+    if (!EnsureAttached()) return false;
+    return UnrealSteamEmu::SetRichPresence(key, value.c_str());
+}
 
-std::vector<FriendPresence> FriendsWithRichPresence(const char*) { return {}; }
+std::vector<FriendPresence> FriendsWithRichPresence(const char* key) {
+    std::vector<FriendPresence> result;
+    if (!EnsureAttached()) return result;
+    auto pairs = UnrealSteamEmu::GetAllFriendsWithRichPresence(key);
+    result.reserve(pairs.size());
+    for (const auto& p : pairs) {
+        result.push_back({ p.first, p.second });
+    }
+    return result;
+}
 
 std::vector<uint64_t> FriendSteamIDs() {
     std::vector<uint64_t> ids;
@@ -81,7 +106,11 @@ std::vector<uint64_t> FriendSteamIDs() {
 
 void ServiceMainThread() {}
 
-std::string FriendRichPresence(uint64_t, const char*) { return {}; }
+std::string FriendRichPresence(uint64_t steamID, const char* key) {
+    if (!EnsureAttached()) return {};
+    const char* val = UnrealSteamEmu::GetFriendRichPresence(steamID, key);
+    return val ? val : "";
+}
 
 uint64_t LobbyOwner(uint64_t lobbyId) {
     return lobbyId && EnsureAttached() ? UnrealSteamEmu::Matchmaking_GetLobbyOwner(lobbyId) : 0;
@@ -95,11 +124,14 @@ bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int, bool re
     if (!data || !size || !EnsureAttached()) return false;
     auto& core = refix::lan::ILanCore::Get();
     auto peerId = core.Peers().FindBySteamId(steamID);
+    if (!peerId) {
+        std::lock_guard<std::mutex> lock(g_idCacheMutex);
+        auto it = g_steamToPeer.find(steamID);
+        if (it != g_steamToPeer.end()) peerId = it->second;
+    }
     if (!peerId) return false;
     auto peer = core.Peers().FindByPeerId(*peerId);
     if (!peer || !peer->endpoint.IsValid()) return false;
-    // Photon datagrams reach 1200 bytes (+ envelope), above LanCore's single-datagram limit: those go reliable,
-    // which fragments. Photon's own transport already tolerates the reordering against unreliable ones.
     if (reliable || size > refix::lan::REFIX_MAX_UNRELIABLE_PAYLOAD)
         return core.Transport().SendReliable(*peerId, peer->endpoint, kPhotonLanChannel, data, size);
     return core.Transport().SendUnreliable(peer->endpoint, kPhotonLanChannel, data, size);

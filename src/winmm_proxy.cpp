@@ -533,6 +533,23 @@ static void LoadAndApplyConfig() {
     GetPrivateProfileStringA("Steam", "DLCs", "", dlcs, sizeof(dlcs), iniPath.c_str());
     if (dlcs[0] != '\0') SetEnvironmentVariableA("REFIX_DLC_LIST", dlcs);
 
+    // Deactivate NVIDIA Reflex overlay for games starting with our overlay
+    char blockReflexStr[64] = "true";
+    GetPrivateProfileStringA("Overlay", "BlockNvidiaReflex", "true", blockReflexStr, sizeof(blockReflexStr), iniPath.c_str());
+    bool blockReflex = (_stricmp(blockReflexStr, "true") == 0 || strcmp(blockReflexStr, "1") == 0);
+    if (enableOverlay && blockReflex) {
+        SetEnvironmentVariableA("NV_LOWLATENCY_FLASH_INDICATOR", "0");
+        SetEnvironmentVariableA("NV_LOW_LATENCY_FLASH_INDICATOR", "0");
+        SetEnvironmentVariableA("NV_REFLEX_DISABLE_OVERLAY", "1");
+        SetEnvironmentVariableA("NV_DISABLE_REFLEX_OVERLAY", "1");
+        SetEnvironmentVariableA("NV_REFLEX_DISABLE", "1");
+        SetEnvironmentVariableA("GFE_DISABLE_OVERLAY", "1");
+        SetEnvironmentVariableA("DISABLE_VK_LAYER_NV_optimus_1", "1");
+        SetEnvironmentVariableA("DISABLE_VK_LAYER_NV_nomad_1", "1");
+        SetEnvironmentVariableA("PROTON_NVAPI_DISABLE", "1");
+        SetEnvironmentVariableA("DXVK_NVAPI_VKREFLEX", "0");
+    }
+
     // Perform early Steam Overlay injection in Valve mode
     if (enableOverlay && (_stricmp(mode, "valve") == 0 || _stricmp(mode, "steam") == 0)) {
         InjectSteamOverlayWinmm(overlayAppId);

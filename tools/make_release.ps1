@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.1.1" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.2.0" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -40,7 +40,11 @@ function Copy-Into([string]$relative) {
 }
 
 # Entry points
-foreach ($f in "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "Uninstall_ReFix.sh", "ReFix.ini", "LICENSE") { Copy-Into $f }
+foreach ($f in "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "Uninstall_ReFix.sh", "DLC_Unlocker.bat", "ReFix.ini", "LICENSE") { Copy-Into $f }
+
+# Game mods AutoDeploy installs from the catalog without downloading them
+Get-ChildItem -LiteralPath (Join-Path $repo "refix_mods") -File | Where-Object { $_.Extension -in ".tsv", ".rfmod" } |
+    ForEach-Object { Copy-Into ("refix_mods\" + $_.Name) }
 
 # Deploy scripts and the small helpers they call
 Get-ChildItem -LiteralPath $bin -File | Where-Object {
@@ -70,7 +74,7 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.1.1 - LAN / Online
+ReFix 2.2.0 - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.
@@ -91,6 +95,9 @@ ReFix LAN
 - In-game overlay (AutoDeploy asks, [Overlay] in ReFix.ini): the ReFix overlay (Shift+Tab, or the
   Xbox / PS button of a controller), Steam's own overlay, or none. Overlay sounds: [Overlay] Sounds.
 - Debug logging is off ([Debug] EnableLog = false); turn it on only to report a problem.
+
+Game mods: when refix_mods\catalog.tsv has a mod for the game, AutoDeploy installs it into the
+game's refix_mods folder (CS:GO 1.37 has one). The uninstaller removes it again.
 
 Uninstall_ReFix.bat (Windows) or Uninstall_ReFix.sh (Linux) restores the game's original files and gives the game this PC's own saves back.
 ReFix LAN profiles (and the saves each one keeps) stay in %APPDATA%\ReFix: every ReFix game of the PC

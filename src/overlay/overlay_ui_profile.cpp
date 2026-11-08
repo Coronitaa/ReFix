@@ -111,17 +111,7 @@ void Message(ImU32 col, const char* glyph, const std::string& text) {
     ImGui::PopFont();
 }
 
-bool BeginCenteredModal(const char* id, float width) {
-    if (!ImGui::IsPopupOpen(id)) ImGui::OpenPopup(id);
-    const ImVec2 vp = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(ui::S(width), vp.x - ui::S(24)), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(22)));
-    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                                                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::PopStyleVar();
-    return open;
-}
+using ui::BeginCenteredModal;
 
 std::string ProfileName(const std::vector<Profile>& all, const std::wstring& id, const char* fallback) {
     for (const Profile& p : all) {

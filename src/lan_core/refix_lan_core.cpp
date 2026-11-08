@@ -512,6 +512,54 @@ public:
         return false;
     }
 
+    bool SetMaxMembers(std::string_view lobbyId, uint32_t maxMembers) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it != m_lobbies.end()) {
+            it->second.maxMembers = maxMembers;
+            it->second.revision++;
+            LanEvent ev;
+            ev.type = LanEvent::Type::LobbyUpdated;
+            ev.lobbyId = std::string(lobbyId);
+            m_callbacks.PostEvent(ev);
+            BroadcastLobbyState(it->second);
+            return true;
+        }
+        return false;
+    }
+
+    bool SetJoinable(std::string_view lobbyId, bool joinable) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it != m_lobbies.end()) {
+            it->second.joinable = joinable;
+            it->second.revision++;
+            LanEvent ev;
+            ev.type = LanEvent::Type::LobbyUpdated;
+            ev.lobbyId = std::string(lobbyId);
+            m_callbacks.PostEvent(ev);
+            BroadcastLobbyState(it->second);
+            return true;
+        }
+        return false;
+    }
+
+    bool SetPermission(std::string_view lobbyId, LobbyPermissionLevel permission) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_lobbies.find(std::string(lobbyId));
+        if (it != m_lobbies.end()) {
+            it->second.permission = permission;
+            it->second.revision++;
+            LanEvent ev;
+            ev.type = LanEvent::Type::LobbyUpdated;
+            ev.lobbyId = std::string(lobbyId);
+            m_callbacks.PostEvent(ev);
+            BroadcastLobbyState(it->second);
+            return true;
+        }
+        return false;
+    }
+
     bool AddRemoteMember(std::string_view lobbyId, const PeerId& memberPid, const std::string& name, const LanEndpoint& ep) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_lobbies.find(std::string(lobbyId));
@@ -1048,7 +1096,7 @@ public:
             rec.revision = r.ReadU32();
             rec.hostEndpoint = r.ReadEndpoint();
             if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
-            if (sender.ipv4 == 0x7F000001) rec.hostEndpoint.ipv4 = 0x7F000001;
+            if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) rec.hostEndpoint.ipv4 = 0x7F000001;
 
             uint32_t attrCount = r.ReadU32();
             if (!r.HasError() && attrCount <= 1000) {
@@ -1127,9 +1175,16 @@ public:
                         else if (!memInfo.endpoint.IsValid()) memInfo.endpoint = rec.hostEndpoint;
                         if (!m.displayName.empty()) memInfo.displayName = m.displayName;
                         memInfo.externalId.platform = ExternalPlatform::Steam;
-                        if (memInfo.externalId.numericId == 0 && m.peerId.low != 0) {
-                            memInfo.externalId.numericId = m.peerId.low;
-                            memInfo.externalId.stringId = std::to_string(m.peerId.low);
+                        if (memInfo.externalId.numericId == 0) {
+                            // R1 / P1.a: Forbid peerId.low as SteamID fallback. Request presence if endpoint valid.
+                            if (memInfo.endpoint.IsValid()) {
+                                ByteWriter q;
+                                q.WriteString(Scope());
+                                q.WritePeerId(m_identity.GetLocalPeerId());
+                                q.WriteString(m_identity.GetDisplayName());
+                                q.WriteEndpoint(m_transport.GetLocalDataEndpoint());
+                                m_transport.SendDiscoveryPacket(MsgType::DiscoveryQuery, memInfo.endpoint, q.Data(), q.Size());
+                            }
                         }
                         m_peers.RegisterOrUpdatePeer(memInfo);
                     }
@@ -1177,7 +1232,7 @@ public:
             if (r.HasError()) return;
 
             LanEndpoint replyEp = clientEp.IsValid() ? clientEp : sender;
-            if (sender.ipv4 == 0x7F000001) replyEp.ipv4 = 0x7F000001;
+            if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) replyEp.ipv4 = 0x7F000001;
 
             auto lobOpt = m_lobby.GetLobby(lobbyId);
             if (!lobOpt || !m_lobby.IsHosting(lobbyId)) {
@@ -1191,23 +1246,13 @@ public:
             }
 
             if (!lobOpt->joinable) {
-                ByteWriter resp;
-                resp.WriteString(Scope());
-                resp.WritePeerId(m_identity.GetLocalPeerId());
-                resp.WriteString(lobbyId);
-                resp.WriteU8(2); // NotJoinable
-                m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
-                return;
+                // Auto-enable joinable on LAN so players are never rejected with 'NotJoinable'
+                m_lobby.SetJoinable(lobbyId, true);
             }
 
             if (lobOpt->AvailableSlots() == 0) {
-                ByteWriter resp;
-                resp.WriteString(Scope());
-                resp.WritePeerId(m_identity.GetLocalPeerId());
-                resp.WriteString(lobbyId);
-                resp.WriteU8(1); // Full
-                m_transport.SendDiscoveryPacket(MsgType::LobbyJoinResp, replyEp, resp.Data(), resp.Size());
-                return;
+                // Auto-expand lobby slots on LAN so players are never rejected with 'Session Full'
+                m_lobby.SetMaxMembers(lobbyId, (uint32_t)(lobOpt->members.size() + 5));
             }
 
             // Accept and register client peer
@@ -1284,7 +1329,7 @@ public:
                 rec.revision = r.ReadU32();
                 rec.hostEndpoint = r.ReadEndpoint();
                 if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
-                if (sender.ipv4 == 0x7F000001) rec.hostEndpoint.ipv4 = 0x7F000001;
+                if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) rec.hostEndpoint.ipv4 = 0x7F000001;
 
                 uint32_t attrCount = r.ReadU32();
                 if (!r.HasError() && attrCount <= 1000) {
@@ -1349,7 +1394,7 @@ public:
 
     void OnPeerTimeout(const PeerId& peerId, const LanEndpoint& endpoint) override {
         m_transport.ResetPeerState(peerId);
-        m_peers.UnregisterPeer(peerId);
+
         LanEvent ev;
         ev.type = LanEvent::Type::PeerLost;
         ev.peerId = peerId;

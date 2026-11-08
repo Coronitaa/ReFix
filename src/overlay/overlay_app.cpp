@@ -2,14 +2,17 @@
 #define NOMINMAX
 #endif
 #include "overlay_app.h"
+#include "game_actions/overlay_actions.h"
 #include "avatar_image.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "overlay_web.h"
 #include "overlay_sound.h"
+#include "overlay_ui_mods.h"
 #include "../imgui/imgui_internal.h"
 #include "save_swap.h"
 #include "refix_overlay.h"
+#include "../source_main_thread_queue.h"
 
 #include "../include/steam/steam_api.h"
 #include "../unreal_steam_emu.h"
@@ -114,6 +117,7 @@ host::Mode App::DesiredMode() {
     if (dialog_ != DialogKind::None) return host::Mode::Dialog;
     if (!started_) return host::Mode::Hidden;
     if (overlayOpen_) return host::Mode::Overlay;
+    if (hudMarketOpen_ || hudMatchmakingOpen_) return host::Mode::Overlay;
     const host::GameWindow gw = host::CurrentGame();
     if (!toasts_.empty() && gw.foreground) return host::Mode::Toast;
     return host::Mode::Hidden;
@@ -325,33 +329,63 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
                                  [&](const Toast& t) { return t.closing && now - t.closingAt > kToastFadeMs; }),
                   toasts_.end());
 
+    {
+        refix::IRefixServices& svc = refix::GetRefixServices();
+        ImGui::GetAllocatorFunctions(&svc.imgui_alloc, &svc.imgui_free, &svc.imgui_alloc_user_data);
+        svc.imgui_context = ImGui::GetCurrentContext();
+    }
     if (viewport.x <= 0 || viewport.y <= 0) return;
     if (dialog_ != DialogKind::None) DrawDialog(viewport);
     else if (overlayOpen_) DrawOverlay(viewport);
     else DrawToasts(viewport, true);
+
+    if (hudMarketOpen_) DrawMarketGiveModal();
+    if (hudMatchmakingOpen_) DrawMatchmakingToastWidget();
+    for (const auto& modal : refix::overlay::OverlayActionsRegistry::Get().GetModals()) {
+        modal.renderFn(viewport.x, viewport.y);
+    }
     // Keyboard/controller focus moved to another item this frame (never set by the mouse).
     if (ImGui::GetCurrentContext()->NavJustMovedToId != 0 && (overlayOpen_ || dialog_ != DialogKind::None))
         sound::Play(sound::Cue::Move);
 }
 
 void App::Join(const net::RemotePlayer& p) {
-    if (p.lobbyId) {
+    if (p.lobbyId != 0) {
+        // P1.b: ONLY dispatch GameLobbyJoinRequested_t (callback 333).
+        // Let CS:GO call JoinLobby and perform its handshake natively without competing JoinLobby calls.
         GameLobbyJoinRequested_t cb = {};
         cb.m_steamIDLobby = CSteamID(p.lobbyId);
         cb.m_steamIDFriend = CSteamID(p.steamId);
         UnrealSteamEmu::PostCallback(GameLobbyJoinRequested_t::k_iCallback, &cb, sizeof(cb));
     } else if (!p.connect.empty()) {
+        // P1.b: ONLY dispatch GameRichPresenceJoinRequested_t (callback 337).
+        // Do NOT execute +gcconnectG... as an engine console command and do not call engine from overlay thread.
         GameRichPresenceJoinRequested_t cb = {};
         cb.m_steamIDFriend = CSteamID(p.steamId);
         strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
         UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
+    } else if (p.ip != 0) {
+        // Direct IP connect without rich presence connect string: queue to main thread (satisfies R5)
+        char ipBuf[64];
+        snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:%u",
+                 (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF, (p.ip >> 8) & 0xFF, p.ip & 0xFF,
+                 p.port != 0 ? p.port : 27015);
+        std::string cmd = ipBuf;
+        refix::source::MainThreadQueue::Enqueue([cmd]() {
+            ExecuteEngineClientCommand(cmd.c_str());
+        });
     }
-    ReFixLog("[Overlay] Join requested: player %llu lobby %llu", (unsigned long long)p.steamId, (unsigned long long)p.lobbyId);
+    ReFixLog("[Overlay] Join requested: player %llu lobby %llu connect='%s'",
+             (unsigned long long)p.steamId, (unsigned long long)p.lobbyId, p.connect.c_str());
     CloseOverlay();
 }
 
 void App::Invite(const net::RemotePlayer& p) {
-    const uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
+    uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
+    if (lobby == 0) {
+        lobby = UnrealSteamEmu::Matchmaking_CreateLobby(1 /* k_ELobbyTypePublic */, 5);
+        localLobby_ = lobby;
+    }
     const std::string connect = inviteOnly_ && !inviteConnect_.empty() ? inviteConnect_ : localConnect_;
     if (net::SendInvite(p.steamId, lobby, connect)) invitedAt_[p.steamId] = GetTickCount64();
 }
