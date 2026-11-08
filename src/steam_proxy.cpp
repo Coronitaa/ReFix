@@ -47,6 +47,7 @@
 #endif
 #include "source_main_thread_queue.h"
 #include "gc/lan_rooms.h"
+#include <atomic>
 
 static bool EnsureOriginal();
 
@@ -3670,11 +3671,14 @@ static void* FindPanoramaRunScriptByAnchor(uint8_t* base, size_t size) {
         for (uint8_t* ref = begin + 1; ref + 4 <= end; ++ref) {
             if (memcmp(ref, &va, 4) != 0) continue;
             for (uint8_t* p = ref; p > ref - 0x200 && p > begin + 1; --p) {
-                if (p[0] == 0x55 && p[1] == 0x8B && p[2] == 0xEC && (p[-1] == 0xCC || p[-1] == 0x90 || p[-1] == 0xC3)) {
-                    if (p[3] != 0x83 || p[4] != 0xE4 || p[5] != 0xF8) break;
+                // The first padding boundary is the start of the referencing function: never walk past it into
+                // a neighbour (e.g. when RunScript is already patched by MinHook and no longer starts with 55).
+                if (p[-1] != 0xCC && p[-1] != 0x90 && p[-1] != 0xC3) continue;
+                if (p[0] == 0x55 && p[1] == 0x8B && p[2] == 0xEC && p[3] == 0x83 && p[4] == 0xE4 && p[5] == 0xF8) {
                     ReFixLog("[PanoramaHook] RunScript located through its VPROF label at %p", p);
                     return p;
                 }
+                if (p[-1] == 0xCC && p[-2] == 0xCC) break;
             }
         }
     }
@@ -3682,6 +3686,9 @@ static void* FindPanoramaRunScriptByAnchor(uint8_t* base, size_t size) {
 }
 
 static DWORD WINAPI Source_PanoramaHookThread(LPVOID) {
+    // Initialisation runs several times per process: hook once, never re-scan a patched panorama.dll.
+    static std::atomic<bool> s_started{ false };
+    if (s_started.exchange(true)) return 0;
     HMODULE hPan = NULL;
     for (int i = 0; i < 200; ++i) {
         hPan = GetModuleHandleA("panorama.dll");

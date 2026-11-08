@@ -239,6 +239,10 @@ void DrawMatchmakingToastWidget() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(22), ui::S(18)));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ui::color::BackdropSolid);
     ImGui::PushStyleColor(ImGuiCol_Border, ui::color::Border);
+    // The theme's input frames are as dark as this backdrop: lift them so fields and sliders are visible.
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::color::Row);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ui::color::RowHover);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ui::color::RowHover);
     if (ImGui::Begin("##refix_csgo_server", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings)) {
         ImGui::PushFont(ui::F().title);
         ui::TextColored(ui::color::Accent, ui::icon::Lan);
@@ -287,7 +291,7 @@ void DrawMatchmakingToastWidget() {
         if (ui::Clicked(ui::PrimaryButton(i18n::T("Host match", "Hostear partida"), ImVec2(btnW, ui::S(40))))) HostNow();
     }
     ImGui::End();
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(5);
     ImGui::PopStyleVar(2);
 }
 

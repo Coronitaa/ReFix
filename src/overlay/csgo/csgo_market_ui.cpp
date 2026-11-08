@@ -148,7 +148,8 @@ void DrawCategoryRail(refix::csgo::SchemaManager& schema, float w, float h) {
     ImGui::PushFont(ui::F().caption);
     ui::TextColored(ui::color::Faint, i18n::T("SPECIAL", "ESPECIAL"));
     ImGui::PopFont();
-    railItem(kPassesCategory, i18n::T("★ Prime & passes", "★ Prime y pases"), 0, true);
+    std::string passesLabel = std::string(ui::icon::StarFill) + "  " + i18n::T("Prime & passes", "Prime y pases");
+    railItem(kPassesCategory, passesLabel.c_str(), 0, true);
     ImGui::Dummy(ImVec2(0, ui::S(6)));
     ImGui::PushFont(ui::F().caption);
     ui::TextColored(ui::color::Faint, i18n::T("CATEGORIES", "CATEGORÍAS"));
@@ -280,7 +281,7 @@ void DrawDetail(float w, float h) {
         g_market.seed = std::clamp(g_market.seed, 0, 1000);
         ImGui::SameLine();
         if (ui::Clicked(ui::SecondaryButton(i18n::T("Random", "Azar"), ImVec2(ui::S(76), 0)))) g_market.seed = rand() % 1001;
-        ImGui::Checkbox("StatTrak™", &g_market.statTrak);
+        ImGui::Checkbox("StatTrak", &g_market.statTrak);
         Label(i18n::T("NAME TAG", "ETIQUETA DE NOMBRE"));
         ImGui::SetNextItemWidth(fullW);
         ImGui::InputTextWithHint("##tag", i18n::T("Optional", "Opcional"), g_market.nameTag, sizeof(g_market.nameTag));
@@ -420,6 +421,10 @@ void DrawMarketGiveModal() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(22), ui::S(18)));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ui::color::BackdropSolid);
     ImGui::PushStyleColor(ImGuiCol_Border, ui::color::Border);
+    // The theme's input frames are as dark as this backdrop: lift them so fields and sliders are visible.
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::color::Row);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ui::color::RowHover);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ui::color::RowHover);
     if (ImGui::Begin("##refix_csgo_market", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings)) {
         // Header: title, catalogue size, profile status, close.
         ImGui::PushFont(ui::F().title);
@@ -463,7 +468,7 @@ void DrawMarketGiveModal() {
         }
     }
     ImGui::End();
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(5);
     ImGui::PopStyleVar(2);
 }
 
