@@ -28,7 +28,9 @@ const ModeOption kModes[] = {
     { "deathmatch", "Deathmatch", "Deathmatch", 16, 1 },
     { "gungameprogressive", "Arms Race", "Carrera armamentística", 12, 1 },
     { "gungametrbomb", "Demolition", "Demolición", 10, 20 },
+    { "survival", "Danger Zone", "Zona de peligro", 16, 1 },  // game_type 6, dz_* maps
 };
+constexpr int kModeCount = (int)(sizeof(kModes) / sizeof(kModes[0]));
 
 struct ServerState {
     bool mapsLoaded = false;
@@ -145,7 +147,7 @@ void DrawSettings(float w, float h) {
     float fw = w - ui::S(12);
     ui::SectionLabel(i18n::T("Game mode", "Modo de juego"));
     float modeW = (fw - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < kModeCount; ++i) {
         if (i % 3) ImGui::SameLine();
         ImGui::PushID(i);
         const char* label = i18n::T(kModes[i].en, kModes[i].es);
@@ -156,6 +158,12 @@ void DrawSettings(float w, float h) {
             g_server.mode = i;
             g_server.slots = kModes[i].defaultSlots;
             g_server.maxRounds = kModes[i].defaultRounds;
+            // Danger Zone only runs on dz_ maps, and dz_ maps only in Danger Zone.
+            bool dzMode = std::string(kModes[i].id) == "survival", dzMap = g_server.map.rfind("dz_", 0) == 0;
+            if (dzMode != dzMap) {
+                for (const std::string& m : g_server.maps)
+                    if ((m.rfind("dz_", 0) == 0) == dzMode) { g_server.map = m; break; }
+            }
         }
     }
 

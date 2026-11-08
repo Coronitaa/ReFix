@@ -325,6 +325,7 @@ public:
     std::set<std::pair<std::string, std::string>> m_paintedPairs; // (weaponName, paintKitName)
     std::unordered_map<std::string, SchemaKitInfo> m_stickerKits;     // by kit name
     std::unordered_map<std::string, SchemaKitInfo> m_musicKits;       // by kit name
+    std::unordered_map<uint32_t, uint32_t> m_missionCards;            // season -> quest_mission_card count
 
     const SchemaItemInfo* ItemInfoByName(std::string_view name) const {
         for (const auto& pair : m_itemInfo) {
@@ -336,6 +337,35 @@ public:
     SchemaPaintKitInfo* PaintKitInfoByName(std::string_view name) {
         auto it = m_paintKitInfo.find(std::string(name));
         return (it != m_paintKitInfo.end()) ? &it->second : nullptr;
+    }
+
+    void CountMissionCards(const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return;
+        std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        size_t pos = 0;
+        while ((pos = text.find("\"seasonaloperations\"", pos)) != std::string::npos) {
+            pos += 20;
+            int depth = 0;
+            uint32_t season = 0;
+            std::string lastKey;
+            for (size_t i = pos; i < text.size(); ++i) {
+                char ch = text[i];
+                if (ch == '/' && i + 1 < text.size() && text[i + 1] == '/') { while (i < text.size() && text[i] != '\n') ++i; continue; }
+                if (ch == '"') {
+                    size_t e = text.find('"', i + 1);
+                    if (e == std::string::npos) return;
+                    lastKey = text.substr(i + 1, e - i - 1);
+                    i = e;
+                } else if (ch == '{') {
+                    ++depth;
+                    if (depth == 2) season = (uint32_t)strtoul(lastKey.c_str(), nullptr, 10);
+                    if (depth == 3 && lastKey == "quest_mission_card") ++m_missionCards[season];
+                } else if (ch == '}') {
+                    if (--depth == 0) { pos = i; break; }
+                }
+            }
+        }
     }
 
     bool ParseLootListItem(SchemaLootItem& item, std::string_view name) {
@@ -485,6 +515,10 @@ public:
             }
         }
 
+        // 2a. Operation weeks: one "quest_mission_card" per week. The KeyValue reader merges repeated keys, so count
+        // them in the raw text: seasonaloperations { "<season>" { "quest_mission_card" {...} ... } }.
+        CountMissionCards(gamePath);
+
         // 2b. Sticker, graffiti and patch kits; music kits
         if (const KeyValue* skKey = root->GetSubkey("sticker_kits")) {
             for (const KeyValue& sub : skKey->Subkeys()) {
@@ -605,7 +639,11 @@ public:
         auto itItem = m_itemInfo.find(crateDefIndex);
         if (itItem == m_itemInfo.end()) return nullptr;
         uint32_t series = itItem->second.m_supplyCrateSeries;
-        if (!series) return nullptr;
+        if (!series) {
+            // Self-opening boxes (graffiti, some capsules) name their list directly instead of a crate series.
+            auto itList = m_lootLists.find(itItem->second.m_lootListName);
+            return itList != m_lootLists.end() ? &itList->second : nullptr;
+        }
         auto itRev = m_revolvingLootLists.find(series);
         if (itRev == m_revolvingLootLists.end()) return nullptr;
         return &itRev->second;
@@ -632,6 +670,21 @@ std::string SchemaManager::ResolveToken(const std::string& token) const {
     auto it = m_tokens.find(lk);
     if (it != m_tokens.end()) return it->second;
     return key;
+}
+
+uint32_t SchemaManager::FindDefByName(const std::string& itemName) const {
+    auto it = m_weaponNameToDef.find(itemName);
+    return it != m_weaponNameToDef.end() ? it->second : 0;
+}
+
+std::string SchemaManager::GetItemName(uint32_t defIndex) const {
+    auto it = m_defToWeaponName.find(defIndex);
+    return it != m_defToWeaponName.end() ? it->second : std::string();
+}
+
+uint32_t SchemaManager::GetMissionCardCount(uint32_t season) const {
+    auto it = m_missionCards.find(season);
+    return it != m_missionCards.end() ? it->second : 0;
 }
 
 std::string SchemaManager::ResolveTokenEn(const std::string& token) const {
@@ -706,6 +759,8 @@ bool SchemaManager::Load() {
             m_loaded = true;
         }
     }
+
+    m_missionCards = m_impl->m_missionCards;
 
     // Populate lookup maps
     std::unordered_map<std::string, uint32_t> nameToDef;

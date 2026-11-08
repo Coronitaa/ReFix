@@ -87,6 +87,9 @@ public:
     size_t GetTotalGrantableCount() const { return m_marketItems.size(); }
 
     std::string GetWeaponDisplayName(uint32_t defIndex) const;
+    uint32_t FindDefByName(const std::string& itemName) const;   // items_game "name" -> def index, 0 if absent
+    std::string GetItemName(uint32_t defIndex) const;            // def index -> items_game "name"
+    uint32_t GetMissionCardCount(uint32_t season) const;         // weeks of an operation (quest_mission_card entries)
     std::string GetPaintKitDisplayName(uint32_t paintKit) const;
     std::string ResolveToken(const std::string& token) const;
     std::string ResolveTokenEn(const std::string& token) const;  // English only
@@ -109,6 +112,7 @@ private:
     std::vector<SkinDrop> m_universalSpecialKnives;
     std::unordered_map<std::string, std::string> m_tokens;
     std::unordered_map<std::string, std::string> m_tokensEn;
+    std::unordered_map<uint32_t, uint32_t> m_missionCards;  // season -> mission card count
 };
 
 } // namespace refix::csgo
