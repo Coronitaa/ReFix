@@ -195,10 +195,11 @@ deploy_steam_x86() {
     local src="$PRODUCT_BIN/x86/steam_api.dll" d
     [ -f "$src" ] || die "Missing $src"
     while IFS= read -r d; do
-        backup_original "$d" steam_api.dll steam_api_original.dll
-        if [ "$MODE" = online ] && [ -f "$d/steam_api_original.dll" ]; then
-            cp -f "$d/steam_api_original.dll" "$d/steam_api_o.dll"   # Online x86 forwards to steam_api_o.dll
+        # Installs before 2.2.0 kept a second copy as steam_api_o.dll; the proxy now forwards to steam_api_original.dll.
+        if [ -f "$d/steam_api_o.dll" ]; then
+            if [ -f "$d/steam_api_original.dll" ]; then rm -f "$d/steam_api_o.dll"; else mv -f "$d/steam_api_o.dll" "$d/steam_api_original.dll"; fi
         fi
+        backup_original "$d" steam_api.dll steam_api_original.dll
         cp -f "$src" "$d/steam_api.dll"
         ok "Deployed ReFix $MODE x86 steam_api.dll to $d"
     done < <({ dirs_with steam_api.dll; dirs_with steam_api_original.dll; } | sort -u)
