@@ -66,3 +66,10 @@ bin/test_*.exe
 ReFix_Inventory.json
 ReFix_gc_*.log
 bin/steam_api64_test.dll
+
+# Build outputs (shipped copies live in bin/lan, bin/online and refix_mods)
+bin/ReFix/
+bin/x86/
+bin/steam_api64.dll
+bin/refix_net_test.exe
+bin/refix_csgo.dll

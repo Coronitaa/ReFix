@@ -34,12 +34,10 @@ for %%F in (steam_api64.dll winmm.dll EOSSDK-Win64-Shipping.dll RedboneEOS.dll) 
 )
 if not "!RC!"=="0" echo [^^!] Warning: online build.bat exit code !RC! [binaries were produced; likely optional FusionShared publish]
 
-echo [*] Building ReFix Online x86 steam_api proxy...
-if exist "%WT%\bin\x86\steam_api.dll" del /Q "%WT%\bin\x86\steam_api.dll"
-pushd "%WT%"
-call "%WT%\build_x86.bat"
+echo [*] Building ReFix Online x86 steam_api proxy from this tree (it forwards to steam_api_original.dll)...
+if exist "%ROOT%bin\x86\steam_api.dll" del /Q "%ROOT%bin\x86\steam_api.dll"
+call "%ROOT%build_x86.bat"
 set "RC=!ERRORLEVEL!"
-popd
 if not "!RC!"=="0" ( echo [^^!] Online x86 build failed, exit code !RC! & exit /b 1 )
 
 echo [*] Collecting binaries into bin\online\ ...
@@ -55,8 +53,8 @@ for %%F in (steam_api64.dll winmm.dll EOSSDK-Win64-Shipping.dll RedboneEOS.dll) 
     )
 )
 
-if exist "%WT%\bin\x86\steam_api.dll" (
-    copy /Y "%WT%\bin\x86\steam_api.dll" "%OUT%\x86\steam_api.dll" >nul
+if exist "%ROOT%bin\x86\steam_api.dll" (
+    copy /Y "%ROOT%bin\x86\steam_api.dll" "%OUT%\x86\steam_api.dll" >nul
     echo   - bin\online\x86\steam_api.dll
 ) else (
     echo [!] Missing x86 steam_api.dll & exit /b 1
