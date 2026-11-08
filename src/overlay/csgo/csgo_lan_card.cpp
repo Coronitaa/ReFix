@@ -128,7 +128,9 @@ float GetModsCardHeight(float width) {
 
 void DrawModsCard(ImVec2 pos, float width, float height) {
     if (!IsCsgo()) return;
-    if (height <= 0.0f) height = GetModsCardHeight(width);
+    const float wantedH = GetModsCardHeight(width);
+    if (height <= 0.0f) height = wantedH;
+    const bool constrained = (g_measuredHeight > 0.0f && height + 1.0f < g_measuredHeight);
     ui::BeginCard("##csgo_lan_card", pos, ImVec2(width, height), kPad);
     float w = ImGui::GetContentRegionAvail().x;
     float startY = ImGui::GetCursorPosY();
@@ -141,8 +143,17 @@ void DrawModsCard(ImVec2 pos, float width, float height) {
     Caption(i18n::T("Rooms, LAN matches and your inventory", "Salas, partidas LAN y tu inventario"), ui::color::Muted);
     ImGui::Dummy(ImVec2(0, ui::S(4)));
 
-    if (refix::rooms::Current() == 0) DrawRoomList(w);
-    else DrawCurrentRoom(w);
+    const float footerH = ui::S(52);
+    if (constrained) {
+        const float bodyH = (std::max)(ui::S(40), ImGui::GetContentRegionAvail().y - footerH);
+        ImGui::BeginChild("##csgo_lan_rooms_scroll", ImVec2(w, bodyH), false, ImGuiWindowFlags_NoBackground);
+        if (refix::rooms::Current() == 0) DrawRoomList(ImGui::GetContentRegionAvail().x);
+        else DrawCurrentRoom(ImGui::GetContentRegionAvail().x);
+        ImGui::EndChild();
+    } else {
+        if (refix::rooms::Current() == 0) DrawRoomList(w);
+        else DrawCurrentRoom(w);
+    }
 
     ImGui::Dummy(ImVec2(0, ui::S(4)));
     ImGui::Separator();
@@ -152,7 +163,9 @@ void DrawModsCard(ImVec2 pos, float width, float height) {
     ImGui::SameLine();
     if (ui::Clicked(ui::SecondaryButton(i18n::T("LAN server", "Servidor LAN"), ImVec2(half, ui::S(38))))) OpenHostMatchModal();
 
-    g_measuredHeight = ImGui::GetCursorPosY() - startY + ui::S(kPad) * 2 + ui::S(4);
+    if (!constrained) {
+        g_measuredHeight = ImGui::GetCursorPosY() - startY + ui::S(kPad) * 2 + ui::S(4);
+    }
     ui::EndCard();
 }
 

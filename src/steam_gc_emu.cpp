@@ -31,6 +31,10 @@ namespace refix::overlay {
     void OpenMatchmakingToast();
 }
 
+namespace ReFixGC {
+    void OnServerHelloHostConfig();
+}
+
 extern void ReFixLog(const char* fmt, ...);
 
 namespace {
@@ -1423,6 +1427,7 @@ public:
             Reply(kMsgServerWelcome, ReFixGC::BuildServerWelcome(version, UnrealSteamEmu::GetLocalSteamID()));
             Reply(kMsgServerConnectionStatus, ReFixGC::BuildConnectionStatus());
             Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildEquippedCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
+            ReFixGC::OnServerHelloHostConfig();
         } else if (m_gameServer && (msg == 27 || msg == 28)) { // k_ESOMsg_CacheSubscriptionCheck / Refresh
             Reply(24 /* k_ESOMsg_CacheSubscribed */, ReFixGC::BuildEquippedCacheSubscribed(UnrealSteamEmu::GetLocalSteamID()));
         } else if (m_gameServer && msg == 9136 && proto && body) {
@@ -2381,18 +2386,270 @@ bool IsGameServerActive() {
 
 static std::string s_hostConfigJson;
 static std::mutex s_hostConfigMutex;
-
 static std::atomic<bool> s_hostRequested{ false };
+static std::atomic<bool> s_hostConfigActive{ false };
+static std::atomic<int> s_fallbackOverrideSlots{ 0 };
+static std::mutex s_fallbackHookMutex;
+
+namespace {
+
+using GetMaxPlayers2Fn = int(__thiscall*)(void* thisPtr, int gameType, int gameMode);
+using GetMaxPlayers3Fn = int(__thiscall*)(void* thisPtr, int gameType, int gameMode, int skirmishId);
+struct FallbackGameTypesSlot {
+    void** vtableEntry = nullptr;
+    void* original = nullptr;
+    void* hookFn = nullptr;
+};
+static FallbackGameTypesSlot s_fallbackHooks[3] = {};
+
+template <int SlotIdx>
+int __fastcall Fallback_GetMaxPlayersForTypeAndMode2(void* thisPtr, void* /*edx*/, int gameType, int gameMode) {
+    const int slots = s_fallbackOverrideSlots.load();
+    if (slots >= 2 && slots <= 64) return slots;
+    if (auto orig = reinterpret_cast<GetMaxPlayers2Fn>(s_fallbackHooks[SlotIdx].original)) {
+        return orig(thisPtr, gameType, gameMode);
+    }
+    return 10;
+}
+
+template <int SlotIdx>
+int __fastcall Fallback_GetMaxPlayersForTypeAndMode3(void* thisPtr, void* /*edx*/, int gameType, int gameMode, int skirmishId) {
+    const int slots = s_fallbackOverrideSlots.load();
+    if (slots >= 2 && slots <= 64) return slots;
+    if (auto orig = reinterpret_cast<GetMaxPlayers3Fn>(s_fallbackHooks[SlotIdx].original)) {
+        return orig(thisPtr, gameType, gameMode, skirmishId);
+    }
+    return 10;
+}
+
+bool IsFallbackTwoArgGetMaxPlayers(const void* fnAddr) {
+    if (!fnAddr) return false;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(fnAddr);
+    bool sawRet8 = false;
+    for (int i = 0; i < 240; ++i) {
+        if (p[i] == 0xCC && p[i + 1] == 0xCC) break;
+        if (p[i] == 0xC2 && p[i + 2] == 0x00) {
+            if (p[i + 1] == 0x0C) return false;
+            if (p[i + 1] == 0x08) sawRet8 = true;
+        }
+    }
+    return sawRet8;
+}
+
+template <int SlotIdx>
+void InstallFallbackGameTypesHook(const char* modName) {
+    HMODULE hMod = GetModuleHandleA(modName);
+    if (!hMod) return;
+    using CreateInterfaceFn = void* (__cdecl*)(const char* name, int* rc);
+    auto createIf = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hMod, "CreateInterface"));
+    if (!createIf) return;
+    void* gt = createIf("VENGINE_GAMETYPES_VERSION002", nullptr);
+    if (!gt) return;
+    void** vt = *reinterpret_cast<void***>(gt);
+    if (!vt || !vt[31]) return;
+    void** entry = &vt[31];
+    if (s_fallbackHooks[SlotIdx].hookFn && *entry == s_fallbackHooks[SlotIdx].hookFn) return;
+    const bool twoArgs = IsFallbackTwoArgGetMaxPlayers(*entry);
+    void* targetHook = twoArgs
+        ? reinterpret_cast<void*>(&Fallback_GetMaxPlayersForTypeAndMode2<SlotIdx>)
+        : reinterpret_cast<void*>(&Fallback_GetMaxPlayersForTypeAndMode3<SlotIdx>);
+    if (*entry == targetHook) return;
+    DWORD oldProt = 0;
+    if (VirtualProtect(entry, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
+        s_fallbackHooks[SlotIdx].vtableEntry = entry;
+        s_fallbackHooks[SlotIdx].original = *entry;
+        s_fallbackHooks[SlotIdx].hookFn = targetHook;
+        *entry = targetHook;
+        VirtualProtect(entry, sizeof(void*), oldProt, &oldProt);
+    }
+}
+
+void ApplyHostConfigToEngineAndFiles(const std::string& jsonStr) {
+    if (jsonStr.empty()) return;
+
+    // 1. If the CS:GO native mod (refix_csgo.dll) is loaded, notify its LAN Host Enforcer directly.
+    HMODULE hCsgoMod = GetModuleHandleA("refix_csgo.dll");
+    if (hCsgoMod) {
+        using ModApplyFn = void(__cdecl*)(const char*);
+        if (auto fn = reinterpret_cast<ModApplyFn>(GetProcAddress(hCsgoMod, "ReFixCSGOMod_ApplyHostConfig"))) {
+            fn(jsonStr.c_str());
+            s_hostConfigActive.store(true);
+            return;
+        }
+    }
+
+    // 2. Built-in fallback enforcement when refix_csgo.dll is not loaded yet.
+    nlohmann::json j = nlohmann::json::parse(jsonStr, nullptr, false);
+    if (!j.is_object()) return;
+    auto num = [&](const char* key, double def) {
+        double v = j.contains(key) && j[key].is_number() ? j[key].get<double>() : def;
+        return (std::max)(-1.0e6, (std::min)(1.0e6, v));
+    };
+    auto str = [&](const char* key, const char* def) {
+        return j.contains(key) && j[key].is_string() ? j[key].get<std::string>() : std::string(def);
+    };
+
+    const int slots = std::clamp((int)num("maxplayers", 10), 2, 64);
+    const int maxRounds = std::clamp((int)num("maxrounds", 30), 1, 100);
+    const double roundTime = std::clamp(num("roundtime", 1.92), 0.5, 60.0);
+    const int warmupTime = std::clamp((int)num("warmuptime", 60), 0, 3600);
+    const int startMoney = std::clamp((int)num("startmoney", 800), 0, 65535);
+    const int maxMoney = std::clamp((int)num("maxmoney", 16000), 0, 65535);
+    const int friendlyFire = (int)num("friendlyfire", 1) ? 1 : 0;
+    const int bots = std::clamp((int)num("bot_quota", 9), 0, 63);
+    const int botDifficulty = std::clamp((int)num("bot_difficulty", 2), 0, 3);
+    const int cheats = (int)num("sv_cheats", 0) ? 1 : 0;
+    const int overtime = (int)num("overtime", 0) ? 1 : 0;
+    std::string password = str("password", "");
+    password.erase(std::remove_if(password.begin(), password.end(), [](char c) { return c == '"' || c == ';' || c == '\n' || c == '\r'; }),
+                   password.end());
+
+    s_fallbackOverrideSlots.store(slots);
+    s_hostConfigActive.store(true);
+
+    if (HMODULE hTier0 = GetModuleHandleA("tier0.dll")) {
+        using CommandLineFn = void* (__cdecl*)();
+        if (auto getCmdLine = reinterpret_cast<CommandLineFn>(GetProcAddress(hTier0, "CommandLine"))) {
+            if (void* cmdLine = getCmdLine()) {
+                void** vt = *reinterpret_cast<void***>(cmdLine);
+                if (vt && vt[6]) {
+                    using AppendParmFn = void(__thiscall*)(void*, const char*, const char*);
+                    char sBuf[16];
+                    snprintf(sBuf, sizeof(sBuf), "%d", slots);
+                    reinterpret_cast<AppendParmFn>(vt[6])(cmdLine, "-maxplayers_override", sBuf);
+                }
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(s_fallbackHookMutex);
+        InstallFallbackGameTypesHook<0>("server.dll");
+        InstallFallbackGameTypesHook<1>("matchmaking.dll");
+        InstallFallbackGameTypesHook<2>("client.dll");
+    }
+
+    char exe[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string cfgDir = exe;
+    const size_t slash = cfgDir.find_last_of("\\/");
+    cfgDir = (slash == std::string::npos ? "" : cfgDir.substr(0, slash + 1)) + "csgo\\cfg\\";
+    CreateDirectoryA(cfgDir.c_str(), nullptr);
+
+    std::ostringstream cfg;
+    cfg << "// Generated by ReFix LAN Host\r\n"
+        << "sv_lan 1\r\n"
+        << "sv_visiblemaxplayers " << slots << "\r\n"
+        << "mp_maxrounds " << maxRounds << "\r\n"
+        << "mp_roundtime " << roundTime << "\r\n"
+        << "mp_roundtime_defuse " << roundTime << "\r\n"
+        << "mp_roundtime_hostage " << roundTime << "\r\n"
+        << "mp_startmoney " << startMoney << "\r\n"
+        << "mp_maxmoney " << maxMoney << "\r\n"
+        << "mp_friendlyfire " << friendlyFire << "\r\n"
+        << "mp_overtime_enable " << overtime << "\r\n"
+        << "sv_cheats " << cheats << "\r\n"
+        << "sv_password \"" << password << "\"\r\n"
+        << "mp_limitteams 0\r\n"
+        << "mp_autoteambalance 0\r\n"
+        << "mp_humanteam any\r\n"
+        << "bot_difficulty " << botDifficulty << "\r\n"
+        << "bot_chatter normal\r\n"
+        << "bot_join_after_player 1\r\n";
+    if (warmupTime <= 0) {
+        cfg << "mp_do_warmup_period 0\r\n"
+            << "mp_do_warmup_offine 0\r\n"
+            << "mp_warmuptime 0\r\n"
+            << "mp_warmuptime_all_players_connected 0\r\n"
+            << "mp_warmup_end\r\n";
+    } else {
+        cfg << "mp_do_warmup_period 1\r\n"
+            << "mp_do_warmup_offine 1\r\n"
+            << "mp_warmuptime " << warmupTime << "\r\n"
+            << "mp_warmuptime_all_players_connected " << warmupTime << "\r\n"
+            << "mp_warmup_pausetimer 0\r\n";
+    }
+    if (bots <= 0) {
+        cfg << "bot_quota 0\r\n"
+            << "bot_kick\r\n";
+    } else {
+        cfg << "bot_quota_mode normal\r\n"
+            << "bot_quota " << bots << "\r\n";
+    }
+
+    {
+        std::ofstream out(cfgDir + "refix_lan_host.cfg", std::ios::binary | std::ios::trunc);
+        if (out) {
+            const std::string text = cfg.str();
+            out.write(text.data(), (std::streamsize)text.size());
+        }
+    }
+
+    static const char* const kServerModeCfgs[] = {
+        "gamemode_competitive_server.cfg",
+        "gamemode_casual_server.cfg",
+        "gamemode_competitive2v2_server.cfg",
+        "gamemode_weapons_expert_server.cfg",
+        "gamemode_deathmatch_server.cfg",
+        "gamemode_armsrace_server.cfg",
+        "gamemode_demolition_server.cfg",
+        "gamemode_flyingscoutsman_server.cfg",
+        "gamemode_cooperative_server.cfg",
+        "gamemode_coopmission_server.cfg",
+        "gamemode_survival_server.cfg",
+        "op08_flying_scoutsman_server.cfg",
+        "op08_stab_stab_zap_server.cfg",
+        "op08_trigger_discipline_server.cfg",
+        "op08_headshots_server.cfg",
+        "op08_hunter_gatherers_server.cfg",
+        "op08_heavy_assault_suit_server.cfg",
+    };
+    static const char* kHookLine = "exec refix_lan_host.cfg";
+    for (const char* name : kServerModeCfgs) {
+        const std::string path = cfgDir + name;
+        std::string existing;
+        {
+            std::ifstream in(path, std::ios::binary);
+            if (in) {
+                std::ostringstream ss;
+                ss << in.rdbuf();
+                existing = ss.str();
+            }
+        }
+        if (existing.find(kHookLine) == std::string::npos) {
+            std::ofstream out(path, std::ios::binary | std::ios::app);
+            if (out) {
+                if (!existing.empty() && existing.back() != '\n') out << "\r\n";
+                out << kHookLine << "\r\n";
+            }
+        }
+    }
+}
+
+} // namespace
 
 void SetHostConfigJson(const std::string& json) {
     std::lock_guard<std::mutex> lock(s_hostConfigMutex);
     s_hostConfigJson = json;
 }
 
+void OnServerHelloHostConfig() {
+    if (!s_hostConfigActive.load()) return;
+    if (HMODULE hCsgoMod = GetModuleHandleA("refix_csgo.dll")) {
+        using ModHelloFn = void(__cdecl*)();
+        if (auto fn = reinterpret_cast<ModHelloFn>(GetProcAddress(hCsgoMod, "ReFixCSGOMod_OnServerHello"))) {
+            fn();
+            return;
+        }
+    }
+    refix::source::MainThreadQueue::ExecuteClientCmd("exec refix_lan_host.cfg");
+}
 
 // Starts a listen server with the settings last stored by SetHostConfigJson (play menu or overlay).
 void HostLanMatch() {
-    nlohmann::json j = nlohmann::json::parse(GetHostConfigJson(), nullptr, false);
+    const std::string rawJson = GetHostConfigJson();
+    ApplyHostConfigToEngineAndFiles(rawJson);
+    nlohmann::json j = nlohmann::json::parse(rawJson, nullptr, false);
     if (!j.is_object()) j = nlohmann::json::object();
     auto num = [&](const char* key, double def) {
         double v = j.contains(key) && j[key].is_number() ? j[key].get<double>() : def;
@@ -2422,21 +2679,31 @@ void HostLanMatch() {
 
     // sv_lan 1: with 0, CS:GO refuses every direct connect that lacks a Valve matchmaking reservation
     // ("connect-lan-only"); with 1 it only requires a private-network client address.
-    char cmd[768];
+    // Note: maxplayers is enforced via IGameTypes::GetMaxPlayersForTypeAndMode + tier0 -maxplayers_override,
+    // and all mode ConVars are also applied viagamemode_*_server.cfg -> exec refix_lan_host.cfg during map load.
+    const int slots = std::clamp((int)num("maxplayers", 10), 2, 64);
+    const int warmupTime = std::clamp((int)num("warmuptime", 60), 0, 3600);
+    char cmd[896];
     snprintf(cmd, sizeof(cmd),
-             "sv_lan 1; maxplayers %d; game_type %d; game_mode %d; sv_skirmish_id %d; mp_maxrounds %d; mp_roundtime %.2f; "
-             "mp_roundtime_defuse %.2f; mp_roundtime_hostage %.2f; mp_buytime %d; mp_startmoney %d; mp_maxmoney %d; "
+             "sv_lan 1; sv_visiblemaxplayers %d; game_type %d; game_mode %d; sv_skirmish_id %d; mp_maxrounds %d; mp_roundtime %.2f; "
+             "mp_roundtime_defuse %.2f; mp_roundtime_hostage %.2f; mp_warmuptime %d; mp_warmuptime_all_players_connected %d; "
+             "mp_do_warmup_period %d; mp_do_warmup_offine %d; mp_buytime %d; mp_startmoney %d; mp_maxmoney %d; "
              "mp_friendlyfire %d; bot_quota %d; bot_difficulty %d; sv_cheats %d; mp_overtime_enable %d; "
-             "mp_limitteams %d; sv_password \"%s\"; map %s",
-             (int)num("maxplayers", 10), gameType, gameMode, gameType == 5 ? (int)num("skirmish", 3) : 0,
+             "mp_limitteams 0; mp_autoteambalance 0; sv_password \"%s\"; map %s",
+             slots, gameType, gameMode, gameType == 5 ? (int)num("skirmish", 3) : 0,
              (int)num("maxrounds", 30), num("roundtime", 1.92),
-             num("roundtime", 1.92), num("roundtime", 1.92), (int)num("buytime", 20), (int)num("startmoney", 800),
-             (int)num("maxmoney", 16000), (int)num("friendlyfire", 0), (int)num("bot_quota", 10),
-             (int)num("bot_difficulty", 1), (int)num("sv_cheats", 0), (int)num("overtime", 0),
-             (int)num("limitteams", 2), password.c_str(), map.c_str());
+             num("roundtime", 1.92), num("roundtime", 1.92), warmupTime, warmupTime,
+             warmupTime > 0 ? 1 : 0, warmupTime > 0 ? 1 : 0,
+             (int)num("buytime", 20), (int)num("startmoney", 800),
+             (int)num("maxmoney", 16000), (int)num("friendlyfire", 0), (int)num("bot_quota", 9),
+             (int)num("bot_difficulty", 2), (int)num("sv_cheats", 0), (int)num("overtime", 0),
+             password.c_str(), map.c_str());
 
     ReFixLog("[GC] Launching listen server on main thread: %s", cmd);
-    refix::source::MainThreadQueue::ExecuteClientCmd(cmd);
+    refix::source::MainThreadQueue::Enqueue([rawJson, cmdStr = std::string(cmd)]() {
+        ApplyHostConfigToEngineAndFiles(rawJson);
+        refix::source::MainThreadQueue::ExecuteClientCmdImmediate(cmdStr.c_str());
+    });
 
     std::vector<uint8_t> idle;
     PutVarintField(idle, 1, 0); // MatchmakingGC2ClientUpdate: matchmaking = 0 (search over)

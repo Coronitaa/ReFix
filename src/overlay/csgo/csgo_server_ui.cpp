@@ -22,24 +22,40 @@ namespace {
 
 // Every mode of gamemodes.txt that runs on a listen server. War Games are game_type 5 plus the skirmish id of
 // items_game "skirmish_modes"; the server applies that mode's own config. mapPrefix: maps the mode needs.
-struct ModeOption { const char* id; const char* en; const char* es; int defaultSlots; int defaultRounds; int skirmish; const char* mapPrefix; };
+struct ModeOption {
+    const char* id;
+    const char* en;
+    const char* es;
+    int defaultSlots;
+    int defaultRounds;
+    float defaultRoundTime;
+    int defaultWarmupTime;
+    int defaultStartMoney;
+    int defaultMaxMoney;
+    bool defaultFriendlyFire;
+    bool defaultOvertime;
+    int defaultBots;
+    int defaultBotDifficulty;
+    int skirmish;
+    const char* mapPrefix;
+};
 const ModeOption kModes[] = {
-    { "competitive", "Competitive", "Competitivo", 10, 30, 0, nullptr },
-    { "casual", "Casual", "Casual", 20, 15, 0, nullptr },
-    { "scrimcomp2v2", "Wingman", "Compañero", 4, 16, 0, nullptr },
-    { "scrimcomp5v5", "Weapons Expert", "Experto en armas", 10, 30, 0, nullptr },
-    { "deathmatch", "Deathmatch", "Deathmatch", 16, 1, 0, nullptr },
-    { "gungameprogressive", "Arms Race", "Carrera armamentística", 12, 1, 0, nullptr },
-    { "gungametrbomb", "Demolition", "Demolición", 10, 20, 0, nullptr },
-    { "survival", "Danger Zone", "Zona de peligro", 16, 1, 0, "dz_" },
-    { "cooperative", "Guardian", "Guardián", 2, 1, 0, nullptr },
-    { "coopmission", "Co-op Strike", "Ataque cooperativo", 2, 1, 0, "coop_" },
-    { "skirmish", "Flying Scoutsman", "Explorador volador", 16, 15, 3, nullptr },
-    { "skirmish", "Stab Stab Zap", "Apuñala, apuñala, zap", 16, 15, 1, nullptr },
-    { "skirmish", "Trigger Discipline", "Disciplina de gatillo", 16, 15, 4, nullptr },
-    { "skirmish", "Headshots", "Disparos en la cabeza", 16, 1, 6, nullptr },
-    { "skirmish", "Hunter-Gatherers", "Cazadores-recolectores", 16, 1, 7, nullptr },
-    { "skirmish", "Heavy Assault Suit", "Traje de asalto pesado", 16, 15, 8, nullptr },
+    { "competitive",        "Competitive",        "Competitivo",            10, 30,  1.92f, 60,  800, 16000, true,  false,  9, 2, 0, nullptr },
+    { "casual",             "Casual",             "Casual",                 20, 15,  3.00f, 90, 1000, 10000, false, false,  9, 1, 0, nullptr },
+    { "scrimcomp2v2",       "Wingman",            "Compañero",               4, 16,  1.50f, 60,  800,  8000, true,  false,  3, 2, 0, nullptr },
+    { "scrimcomp5v5",       "Weapons Expert",     "Experto en armas",       10, 20,  1.92f, 60,  800, 16000, true,  false,  9, 2, 0, nullptr },
+    { "deathmatch",         "Deathmatch",         "Deathmatch",             16,  1, 10.00f, 20,    0,     0, false, false, 10, 2, 0, nullptr },
+    { "gungameprogressive", "Arms Race",          "Carrera armamentística", 10, 10, 30.00f, 30,    0,     0, false, false,  9, 1, 0, nullptr },
+    { "gungametrbomb",      "Demolition",         "Demolición",             10, 20,  1.50f, 30,    0,     0, false, false,  9, 2, 0, nullptr },
+    { "survival",           "Danger Zone",        "Zona de peligro",        18,  1, 15.00f, 60,  500, 10000, true,  false,  0, 2, 0, "dz_"   },
+    { "cooperative",        "Guardian",           "Guardián",                2, 15,  2.00f, 30,  800, 10000, true,  false,  5, 3, 0, nullptr },
+    { "coopmission",        "Co-op Strike",       "Ataque cooperativo",      2, 15, 45.00f, 30,    0,     0, true,  false, 10, 1, 0, "coop_" },
+    { "skirmish",           "Flying Scoutsman",   "Explorador volador",     16, 15,  3.00f, 30,    0,     0, false, false,  9, 1, 3, nullptr },
+    { "skirmish",           "Stab Stab Zap",      "Apuñala, apuñala, zap",  16, 15,  3.00f, 30,    0,     0, false, false,  9, 1, 1, nullptr },
+    { "skirmish",           "Trigger Discipline", "Disciplina de gatillo",  16, 15,  3.00f, 30, 1000, 10000, false, false,  9, 1, 4, nullptr },
+    { "skirmish",           "Headshots",          "Disparos en la cabeza",  16,  1, 10.00f, 20,    0,     0, false, false, 10, 2, 6, nullptr },
+    { "skirmish",           "Hunter-Gatherers",   "Cazadores-recolectores", 16,  1, 10.00f, 20,    0,     0, false, false, 10, 2, 7, nullptr },
+    { "skirmish",           "Heavy Assault Suit", "Traje de asalto pesado", 16, 15,  3.00f, 30, 1000, 16000, false, false,  9, 1, 8, nullptr },
 };
 
 // Maps only one mode can run (Danger Zone, Co-op Strike).
@@ -55,12 +71,13 @@ struct ServerState {
     int slots = 10;
     int maxRounds = 30;
     float roundTime = 1.92f;
-    int bots = 0;
-    int botDifficulty = 1;
+    int warmupTime = 60;
+    int bots = 9;
+    int botDifficulty = 2;
     int startMoney = 800;
     int maxMoney = 16000;
-    bool friendlyFire = false;
-    bool overtime = true;
+    bool friendlyFire = true;
+    bool overtime = false;
     bool cheats = false;
     char password[64] = "";
 };
@@ -156,6 +173,57 @@ void Segmented(const char* id, int& value, const char* const* labels, int count,
     }
 }
 
+void ApplyModeDefaults(int i) {
+    if (i < 0 || i >= kModeCount) return;
+    if (!g_server.mapsLoaded) LoadMaps();
+    g_server.mode = i;
+    g_server.slots = kModes[i].defaultSlots;
+    g_server.maxRounds = kModes[i].defaultRounds;
+    g_server.roundTime = kModes[i].defaultRoundTime;
+    g_server.warmupTime = kModes[i].defaultWarmupTime;
+    g_server.startMoney = kModes[i].defaultStartMoney;
+    g_server.maxMoney = kModes[i].defaultMaxMoney;
+    g_server.friendlyFire = kModes[i].defaultFriendlyFire;
+    g_server.overtime = kModes[i].defaultOvertime;
+    g_server.bots = kModes[i].defaultBots;
+    g_server.botDifficulty = kModes[i].defaultBotDifficulty;
+    g_server.cheats = false;
+    // Danger Zone and Co-op Strike only run on their own maps, and those maps only in that mode.
+    auto fits = [&](const std::string& m) {
+        return kModes[i].mapPrefix ? m.rfind(kModes[i].mapPrefix, 0) == 0 : !IsModeOnlyMap(m);
+    };
+    if (!fits(g_server.map)) {
+        for (const std::string& m : g_server.maps)
+            if (fits(m)) { g_server.map = m; break; }
+    }
+}
+
+int FindModeIndex(const char* modeId) {
+    if (!modeId || !*modeId) return -1;
+    std::string m = modeId;
+    for (char& c : m) c = (char)tolower((unsigned char)c);
+    if (m == "competitive" || m == "comp") return 0;
+    if (m == "casual") return 1;
+    if (m == "scrimcomp2v2" || m == "wingman" || m == "competitive2v2") return 2;
+    if (m == "scrimcomp5v5" || m == "weaponsexpert") return 3;
+    if (m == "deathmatch" || m == "dm") return 4;
+    if (m == "gungameprogressive" || m == "armsrace" || m == "mg_skirmish_armsrace") return 5;
+    if (m == "gungametrbomb" || m == "demolition" || m == "mg_skirmish_demolition") return 6;
+    if (m == "survival" || m == "dangerzone") return 7;
+    if (m == "cooperative" || m == "guardian") return 8;
+    if (m == "coopmission") return 9;
+    if (m == "flyingscoutsman" || m == "mg_skirmish_flyingscoutsman" || m == "skirmish" || m == "skirmish_3") return 10;
+    if (m == "stabstabzap" || m == "skirmish_1") return 11;
+    if (m == "triggerdiscipline" || m == "skirmish_4") return 12;
+    if (m == "headshots" || m == "skirmish_6") return 13;
+    if (m == "huntergatherers" || m == "skirmish_7") return 14;
+    if (m == "heavyassaultsuit" || m == "skirmish_8") return 15;
+    for (int i = 0; i < kModeCount; ++i) {
+        if (m == kModes[i].id) return i;
+    }
+    return -1;
+}
+
 void DrawSettings(float w, float h) {
     ImGui::BeginChild("##srv_settings", ImVec2(w, h), false);
     float fw = w - ui::S(12);
@@ -172,26 +240,27 @@ void DrawSettings(float w, float h) {
         bool clicked = g_server.mode == i ? ui::PrimaryButton(label, ImVec2(modeW, ui::S(32)))
                                           : ui::SecondaryButton(label, ImVec2(modeW, ui::S(32)));
         ImGui::PopID();
-        if (ui::Clicked(clicked) && g_server.mode != i) {
-            g_server.mode = i;
-            g_server.slots = kModes[i].defaultSlots;
-            g_server.maxRounds = kModes[i].defaultRounds;
-            // Danger Zone and Co-op Strike only run on their own maps, and those maps only in that mode.
-            auto fits = [&](const std::string& m) {
-                return kModes[i].mapPrefix ? m.rfind(kModes[i].mapPrefix, 0) == 0 : !IsModeOnlyMap(m);
-            };
-            if (!fits(g_server.map)) {
-                for (const std::string& m : g_server.maps)
-                    if (fits(m)) { g_server.map = m; break; }
-            }
+        // Clicking any mode button (even the currently active one) loads that mode's default configuration.
+        if (ui::Clicked(clicked)) {
+            ApplyModeDefaults(i);
         }
     }
 
     ui::SectionLabel(i18n::T("Match", "Partida"));
     float half = (fw - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    ImGui::BeginGroup();
     Label(i18n::T("PLAYERS", "JUGADORES"));
-    ImGui::SetNextItemWidth(fw);
-    ImGui::SliderInt("##slots", &g_server.slots, 2, 32);
+    ImGui::SetNextItemWidth(half);
+    if (ImGui::SliderInt("##slots", &g_server.slots, 2, 64)) {
+        if (g_server.bots > g_server.slots - 1) g_server.bots = (std::max)(0, g_server.slots - 1);
+    }
+    ImGui::EndGroup();
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    Label(i18n::T("WARMUP TIME (SEC)", "TIEMPO DE CALENTAMIENTO (SEG)"));
+    ImGui::SetNextItemWidth(half);
+    ImGui::SliderInt("##warmup", &g_server.warmupTime, 0, 300, "%d s");
+    ImGui::EndGroup();
     ImGui::BeginGroup();
     Label(i18n::T("MAX ROUNDS", "RONDAS MÁXIMAS"));
     ImGui::SetNextItemWidth(half);
@@ -201,7 +270,7 @@ void DrawSettings(float w, float h) {
     ImGui::BeginGroup();
     Label(i18n::T("ROUND TIME (MIN)", "TIEMPO DE RONDA (MIN)"));
     ImGui::SetNextItemWidth(half);
-    ImGui::SliderFloat("##rtime", &g_server.roundTime, 1.0f, 10.0f, "%.2f");
+    ImGui::SliderFloat("##rtime", &g_server.roundTime, 1.0f, 45.0f, "%.2f");
     ImGui::EndGroup();
     ImGui::BeginGroup();
     Label(i18n::T("START MONEY", "DINERO INICIAL"));
@@ -212,7 +281,7 @@ void DrawSettings(float w, float h) {
     ImGui::BeginGroup();
     Label(i18n::T("MAX MONEY", "DINERO MÁXIMO"));
     ImGui::SetNextItemWidth(half);
-    ImGui::SliderInt("##mmoney", &g_server.maxMoney, 1000, 65535, "$%d");
+    ImGui::SliderInt("##mmoney", &g_server.maxMoney, 0, 65535, "$%d");
     ImGui::EndGroup();
 
     ui::SectionLabel(i18n::T("Bots", "Bots"));
@@ -243,7 +312,8 @@ void HostNow() {
     nlohmann::json cfg = {
         { "map", g_server.map }, { "mode", kModes[g_server.mode].id }, { "skirmish", kModes[g_server.mode].skirmish },
         { "maxplayers", g_server.slots },
-        { "maxrounds", g_server.maxRounds }, { "roundtime", g_server.roundTime }, { "startmoney", g_server.startMoney },
+        { "maxrounds", g_server.maxRounds }, { "roundtime", g_server.roundTime },
+        { "warmuptime", g_server.warmupTime }, { "startmoney", g_server.startMoney },
         { "maxmoney", g_server.maxMoney }, { "friendlyfire", g_server.friendlyFire ? 1 : 0 }, { "bot_quota", g_server.bots },
         { "bot_difficulty", g_server.botDifficulty }, { "sv_cheats", g_server.cheats ? 1 : 0 },
         { "overtime", g_server.overtime ? 1 : 0 }, { "password", std::string(g_server.password) },
@@ -255,6 +325,13 @@ void HostNow() {
 }
 
 } // namespace
+
+void SetHostMatchMode(const char* modeId) {
+    const int idx = FindModeIndex(modeId);
+    if (idx >= 0) {
+        ApplyModeDefaults(idx);
+    }
+}
 
 void DrawMatchmakingToastWidget() {
     if (!App::Get().IsMatchmakingHUDOpen()) return;

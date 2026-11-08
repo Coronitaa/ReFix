@@ -1,5 +1,6 @@
 #include "mod_host.h"
 #include "../include/refix_services.h"
+#include "../unreal_steam_emu.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -76,6 +77,26 @@ bool ModHost::LoadPackage(const std::string& rfmod_path, std::string& out_error)
     loaded.trust_level = inspect_info.trust_level;
     loaded.is_active = false;
     loaded.is_faulted = false;
+
+    // Validate target AppID compatibility (treating CS:GO classic 730 and standalone legacy 4465480 as equivalent).
+    if (!loaded.manifest.target_games.empty()) {
+        const uint32_t curApp = UnrealSteamEmu::GetAppID();
+        if (curApp != 0 && curApp != 480) {
+            bool appMatch = false;
+            const bool curIsCsgo = (curApp == 730 || curApp == 4465480);
+            for (const auto& tg : loaded.manifest.target_games) {
+                const uint32_t targetId = tg.app_id;
+                if (targetId == 0 || targetId == curApp || (curIsCsgo && (targetId == 730 || targetId == 4465480))) {
+                    appMatch = true;
+                    break;
+                }
+            }
+            if (!appMatch) {
+                out_error = "Mod target_games does not match current AppID " + std::to_string(curApp);
+                return false;
+            }
+        }
+    }
 
     // Check revocation
     if (loaded.trust_level == TrustLevel::Revoked) {

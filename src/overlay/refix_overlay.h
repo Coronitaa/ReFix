@@ -49,7 +49,8 @@ void ActivateOverlayToUser(const char* dialog, uint64_t steamId);
 void ActivateWebPage(const char* url);
 void ActivateStore(uint32_t appId);
 void OpenMarketGiveMenu();
-void OpenLanServer();
+void OpenLanServer(const char* modeId = nullptr);
+void SetLanServerMode(const char* modeId);
 // Overlay toast from any thread, in the overlay language.
 void ShowNotice(const char* title, const char* bodyEs, const char* bodyEn);  // CS:GO "LAN server" window (play menu button)
 void OpenMatchmakerModal();

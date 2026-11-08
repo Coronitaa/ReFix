@@ -40,6 +40,7 @@ __declspec(dllexport) int refix_mod_init(const void* host_api) {
 }
 
 __declspec(dllexport) void refix_mod_shutdown() {
+    refix::csgo::ShutdownCSGOHandlers();
     if (g_modServices && g_modServices->Log) {
         g_modServices->Log("[CSGO Mod] CS:GO LAN & Economy Overhaul shutting down");
     }
@@ -47,7 +48,16 @@ __declspec(dllexport) void refix_mod_shutdown() {
 }
 
 __declspec(dllexport) void refix_mod_on_event(int event_id, const void* event_data) {
-    // Lifecycle and engine event dispatch
+    (void)event_data;
+    refix::csgo::OnModPhaseEvent(event_id);
+}
+
+__declspec(dllexport) void ReFixCSGOMod_ApplyHostConfig(const char* jsonStr) {
+    refix::csgo::ApplyLanHostConfig(jsonStr);
+}
+
+__declspec(dllexport) void ReFixCSGOMod_OnServerHello() {
+    refix::csgo::EnforceActiveLanHostConfig();
 }
 
 } // extern "C"

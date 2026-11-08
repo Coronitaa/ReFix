@@ -46,9 +46,78 @@ inline const std::string& GetRefixPlayMenuScript() {
             $.DispatchEvent('PlaySoundEffect', 'UIPanorama.mainmenu_rollover', 'MOUSE');
         });
         btn.SetPanelEvent('onmouseout', function() { btn.style.backgroundColor = 'rgba(43, 212, 164, 0.16)'; });
+
+        function _ResolveSkirmishSubmode(mg) {
+            if (!mg) return 'flyingscoutsman';
+            var s = mg.toLowerCase();
+            if (s.indexOf('armsrace') !== -1 || s.indexOf('gungameprogressive') !== -1) return 'gungameprogressive';
+            if (s.indexOf('demolition') !== -1 || s.indexOf('gungametrbomb') !== -1) return 'gungametrbomb';
+            if (s.indexOf('flyingscoutsman') !== -1) return 'flyingscoutsman';
+            return 'flyingscoutsman';
+        }
+
+        function _GetActiveMode() {
+            var mode = '';
+            var radios = $('#GameModeSelectionRadios');
+            if (radios && radios.GetChildCount) {
+                var n = radios.GetChildCount();
+                for (var i = 0; i < n; ++i) {
+                    var c = radios.GetChild(i);
+                    if (c && c.checked && c.id) {
+                        mode = c.id;
+                        break;
+                    }
+                }
+            }
+            var mg = '';
+            try {
+                if (typeof LobbyAPI !== 'undefined' && LobbyAPI.GetSessionSettings) {
+                    var st = LobbyAPI.GetSessionSettings();
+                    if (st && st.game) {
+                        if (!mode && st.game.mode) mode = st.game.mode;
+                        if (st.game.mapgroupname) mg = st.game.mapgroupname;
+                    }
+                }
+            } catch (e) {}
+            if (mode === 'skirmish') {
+                if (!mg) {
+                    var list = $('#MapSelectionList');
+                    if (list && list.GetChildCount) {
+                        for (var j = 0; j < list.GetChildCount(); ++j) {
+                            var grp = list.GetChild(j);
+                            if (grp && grp.IsVisible && grp.IsVisible() && grp.GetChildCount) {
+                                for (var k = 0; k < grp.GetChildCount(); ++k) {
+                                    var tile = grp.GetChild(k);
+                                    if (tile && tile.checked && tile.GetAttributeString) {
+                                        mg = tile.GetAttributeString('mapname', '');
+                                        if (mg) break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return _ResolveSkirmishSubmode(mg);
+            }
+            return mode || 'competitive';
+        }
+
+        var s_lastMode = '';
+        function _WatchModeTabs() {
+            var cur = _GetActiveMode();
+            if (cur && cur !== s_lastMode) {
+                s_lastMode = cur;
+                SteamOverlayAPI.OpenURL('refix://mode/' + cur);
+            }
+            $.Schedule(0.25, _WatchModeTabs);
+        }
+        _WatchModeTabs();
+
         btn.SetPanelEvent('onactivate', function() {
             $.DispatchEvent('PlaySoundEffect', 'UIPanorama.mainmenu_press_GO', 'MOUSE');
-            SteamOverlayAPI.OpenURL('refix://server');
+            var activeMode = _GetActiveMode();
+            s_lastMode = activeMode;
+            SteamOverlayAPI.OpenURL('refix://server/' + activeMode);
         });
         $.Msg('[ReFix LAN] LAN server button injected');
     }

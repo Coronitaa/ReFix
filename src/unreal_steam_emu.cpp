@@ -3727,6 +3727,16 @@ namespace UnrealSteamEmu {
                 ReFixOverlay::OpenLanServer();
                 return;
             }
+            static const char kServerPrefix[] = "refix://server/";
+            if (pchURL && strncmp(pchURL, kServerPrefix, sizeof(kServerPrefix) - 1) == 0) {
+                ReFixOverlay::OpenLanServer(pchURL + sizeof(kServerPrefix) - 1);
+                return;
+            }
+            static const char kModePrefix[] = "refix://mode/";
+            if (pchURL && strncmp(pchURL, kModePrefix, sizeof(kModePrefix) - 1) == 0) {
+                ReFixOverlay::SetLanServerMode(pchURL + sizeof(kModePrefix) - 1);
+                return;
+            }
             static const char kHostPrefix[] = "refix://host/";
             if (pchURL && strncmp(pchURL, kHostPrefix, sizeof(kHostPrefix) - 1) == 0) {
                 std::string json;

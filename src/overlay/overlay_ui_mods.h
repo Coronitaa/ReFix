@@ -8,7 +8,8 @@ namespace refix::overlay {
     void DrawMarketGiveModal();
     void DrawMatchmakingToastWidget();
     void OpenMarketGiveMenu();
-    void OpenHostMatchModal();
+    void SetHostMatchMode(const char* modeId);
+    void OpenHostMatchModal(const char* modeId = nullptr);
     void OpenMatchmakingToast();
     void ExecuteEngineClientCommand(const char* cmd);
 }

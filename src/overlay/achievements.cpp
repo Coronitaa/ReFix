@@ -147,6 +147,133 @@ bool HttpGet(const std::wstring& host, const std::wstring& path, size_t maxBytes
 
 std::wstring SchemaFile(const std::wstring& dir, int lang) { return dir + L"\\" + FromUtf8(kApiLang[lang]) + L".json"; }
 
+std::wstring ExeDir() {
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring dir = exe;
+    const size_t slash = dir.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : dir.substr(0, slash + 1);
+}
+
+void ParseUtf16VdfTokens(const std::wstring& path,
+                         std::map<std::string, std::string>& outTokens,
+                         std::vector<std::string>* outDescOrder = nullptr) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return;
+    file.seekg(0, std::ios::end);
+    const size_t size = (size_t)file.tellg();
+    file.seekg(0, std::ios::beg);
+    if (size < 2) return;
+    std::vector<char> raw(size);
+    file.read(raw.data(), (std::streamsize)size);
+    const wchar_t* p = reinterpret_cast<const wchar_t*>(raw.data());
+    size_t wlen = size / 2;
+    if (wlen > 0 && p[0] == 0xFEFF) { ++p; --wlen; }
+
+    auto toUtf8 = [](const wchar_t* ws, int len) -> std::string {
+        if (len <= 0) return {};
+        const int n = WideCharToMultiByte(CP_UTF8, 0, ws, len, nullptr, 0, nullptr, nullptr);
+        std::string s(n, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, ws, len, &s[0], n, nullptr, nullptr);
+        return s;
+    };
+
+    size_t i = 0;
+    while (i < wlen) {
+        while (i < wlen && (p[i] == L' ' || p[i] == L'\t' || p[i] == L'\r' || p[i] == L'\n')) ++i;
+        if (i >= wlen) break;
+        if (p[i] == L'/' && i + 1 < wlen && p[i + 1] == L'/') {
+            while (i < wlen && p[i] != L'\n') ++i;
+            continue;
+        }
+        if (p[i] == L'"') {
+            ++i;
+            const size_t kStart = i;
+            while (i < wlen && p[i] != L'"' && p[i] != L'\n') ++i;
+            const size_t kLen = i - kStart;
+            if (i < wlen && p[i] == L'"') ++i;
+            while (i < wlen && (p[i] == L' ' || p[i] == L'\t')) ++i;
+            if (i < wlen && p[i] == L'"') {
+                ++i;
+                const size_t vStart = i;
+                while (i < wlen && p[i] != L'"' && p[i] != L'\n') {
+                    if (p[i] == L'\\' && i + 1 < wlen) i += 2;
+                    else ++i;
+                }
+                const size_t vLen = i - vStart;
+                if (i < wlen && p[i] == L'"') ++i;
+                std::string key = toUtf8(p + kStart, (int)kLen);
+                for (char& c : key) c = (char)toupper((unsigned char)c);
+                const bool isName = key.size() > 5 && key.compare(key.size() - 5, 5, "_NAME") == 0;
+                const bool isDesc = key.size() > 5 && key.compare(key.size() - 5, 5, "_DESC") == 0;
+                if (isName || isDesc) {
+                    const bool validChars = std::all_of(key.begin(), key.end(), [](char c) {
+                        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+                    });
+                    if (validChars) {
+                        outTokens[key] = toUtf8(p + vStart, (int)vLen);
+                        if (isDesc && outDescOrder) {
+                            outDescOrder->push_back(key.substr(0, key.size() - 5));
+                        }
+                    }
+                }
+            }
+        } else {
+            ++i;
+        }
+    }
+}
+
+bool LoadCsgoLocalSchema(std::vector<Def>& defs) {
+    const std::wstring base = ExeDir();
+    const std::wstring enPath = base + L"csgo\\resource\\csgo_english.txt";
+    if (GetFileAttributesW(enPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+    std::map<std::string, std::string> enTokens, esTokens;
+    std::vector<std::string> order;
+    ParseUtf16VdfTokens(enPath, enTokens, &order);
+    ParseUtf16VdfTokens(base + L"csgo\\resource\\csgo_spanish.txt", esTokens, nullptr);
+
+    const std::wstring panoIcons = base + L"csgo\\materials\\panorama\\images\\icons\\achievements\\";
+    const std::wstring flashIcons = base + L"csgo\\resource\\flash\\images\\achievements\\";
+
+    defs.clear();
+    std::set<std::string> seen;
+    for (const std::string& api : order) {
+        if (!seen.insert(api).second) continue;
+        // Cut beta achievements not in CS:GO's 167 achievement list.
+        if (api == "BOMB_DEFUSE_NEEDED_KIT" || api == "BREAK_PROPS" || api == "GUN_GAME_SELECT_SUICIDE_WITH_KNIFE") continue;
+
+        auto itName = enTokens.find(api + "_NAME");
+        auto itDesc = enTokens.find(api + "_DESC");
+        if (itName == enTokens.end() || itDesc == enTokens.end()) continue;
+
+        std::string lower = api;
+        for (char& c : lower) c = (char)tolower((unsigned char)c);
+        const std::string iconFile = lower + ".jpg";
+        const std::wstring wIcon = FromUtf8(iconFile);
+        if (GetFileAttributesW((panoIcons + wIcon).c_str()) == INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW((flashIcons + wIcon).c_str()) == INVALID_FILE_ATTRIBUTES) {
+            continue;
+        }
+
+        Def d;
+        d.api = api;
+        d.icon = iconFile;
+        d.iconGray = iconFile;
+        d.hidden = false;
+        d.percent = -1.0f;
+        d.name[kEnglish] = itName->second;
+        d.desc[kEnglish] = itDesc->second;
+        auto itEsName = esTokens.find(api + "_NAME");
+        auto itEsDesc = esTokens.find(api + "_DESC");
+        d.name[kSpanish] = (itEsName != esTokens.end() && !itEsName->second.empty()) ? itEsName->second : d.name[kEnglish];
+        d.desc[kSpanish] = (itEsDesc != esTokens.end() && !itEsDesc->second.empty()) ? itEsDesc->second : d.desc[kEnglish];
+        defs.push_back(std::move(d));
+    }
+    return !defs.empty();
+}
+
 // Builds the definitions from the cached answers of IPlayerService/GetGameAchievements. False when there is
 // no usable cache (an empty list is a valid cache: the game has no achievements).
 bool ParseSchema(const std::wstring& dir, std::vector<Def>& defs) {
@@ -317,8 +444,24 @@ void Ensure(bool waitForSchema) {
             const std::wstring folder = g_appId ? ReFixOverlay::StatsFolder(g_appId) : std::wstring();
             if (!folder.empty()) g_stateFile = folder + L"\\stats.ini";
             LoadStateLocked();
+            // Merge CS:GO stats across classic (730) and standalone legacy (4465480) AppIDs if present.
+            if (g_appId == 730 || g_appId == 4465480) {
+                const uint32_t altAppId = (g_appId == 730) ? 4465480u : 730u;
+                const std::wstring altFolder = ReFixOverlay::StatsFolder(altAppId);
+                if (!altFolder.empty()) {
+                    const std::wstring savedFile = g_stateFile;
+                    g_stateFile = altFolder + L"\\stats.ini";
+                    LoadStateLocked();
+                    g_stateFile = savedFile;
+                }
+            }
             g_schemaEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            if (g_appId != 0 && g_appId != 480) {
+            std::vector<Def> csgoDefs;
+            if (LoadCsgoLocalSchema(csgoDefs)) {
+                InstallSchema(std::move(csgoDefs));
+                SetEvent(g_schemaEvent);
+                ReFixLog("[Achievements] Loaded %zu local CS:GO achievements", g_defs.size());
+            } else if (g_appId != 0 && g_appId != 480) {
                 g_cacheDir = profiles::RootDir() + L"\\Achievements\\" + std::to_wstring(g_appId);
                 std::vector<Def> defs;
                 const bool cached = ParseSchema(g_cacheDir, defs);
@@ -609,13 +752,20 @@ bool SchemaReady() {
 
 std::wstring IconFile(const std::string& icon) {
     if (!SafeIconName(icon)) return {};
+    const std::wstring base = ExeDir();
+    const std::wstring wIcon = FromUtf8(icon);
+    const std::wstring panoPath = base + L"csgo\\materials\\panorama\\images\\icons\\achievements\\" + wIcon;
+    if (GetFileAttributesW(panoPath.c_str()) != INVALID_FILE_ATTRIBUTES) return panoPath;
+    const std::wstring flashPath = base + L"csgo\\resource\\flash\\images\\achievements\\" + wIcon;
+    if (GetFileAttributesW(flashPath.c_str()) != INVALID_FILE_ATTRIBUTES) return flashPath;
+
     std::wstring dir;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         if (g_cacheDir.empty()) return {};
         dir = g_cacheDir + L"\\icons\\";
     }
-    const std::wstring path = dir + FromUtf8(icon);
+    const std::wstring path = dir + wIcon;
     if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return path;
     std::lock_guard<std::mutex> lock(g_iconMu);
     if (g_iconRequested.insert(icon).second) {

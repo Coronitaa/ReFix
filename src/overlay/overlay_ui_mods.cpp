@@ -61,7 +61,10 @@ void OpenMarketGiveMenu() {
     App::Get().OpenMarketHUD();
 }
 
-void OpenHostMatchModal() {
+void OpenHostMatchModal(const char* modeId) {
+    if (modeId && *modeId) {
+        SetHostMatchMode(modeId);
+    }
     App::Get().CloseOverlay();
     App::Get().OpenMatchmakingHUD();
 }

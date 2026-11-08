@@ -373,9 +373,16 @@ void ShowNotice(const char* title, const char* bodyEs, const char* bodyEn) {
     App::Get().Post([t, es, en] { App::Get().ShowInfo(t, i18n::T(en.c_str(), es.c_str())); });
 }
 
-void OpenLanServer() {
+void OpenLanServer(const char* modeId) {
     if (!IsEnabled()) return;
-    App::Get().Post([] { refix::overlay::OpenHostMatchModal(); });
+    std::string mode = modeId ? modeId : "";
+    App::Get().Post([mode] { refix::overlay::OpenHostMatchModal(mode.empty() ? nullptr : mode.c_str()); });
+}
+
+void SetLanServerMode(const char* modeId) {
+    if (!IsEnabled() || !modeId || !*modeId) return;
+    std::string mode = modeId;
+    App::Get().Post([mode] { refix::overlay::SetHostMatchMode(mode.c_str()); });
 }
 
 void OpenMarketGiveMenu() {

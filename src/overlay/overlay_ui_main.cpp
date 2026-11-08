@@ -104,16 +104,19 @@ void App::DrawOverlay(ImVec2 viewport) {
         const float height = viewport.y - top - m;
         const float leftW = std::clamp(viewport.x * 0.34f, ui::S(320), ui::S(440));
         float leftY = top;
-        if (HasStorePage(appId_)) {
-            DrawCommunity(ImVec2(m, leftY), leftW);
-            leftY += ui::S(56 + 2 * kTileHeight + 10 + 40) + ui::S(20);
-        }
-        // Left column, top to bottom: community, the game's mod card, achievements. The mod card yields room
-        // so the achievements stay visible (it scrolls); games without achievements show no card for them.
         const bool hasAchievements = !achievements_.empty();
         const float gap = ui::S(20);
         const float achMin = hasAchievements ? ui::S(kAchievementsCardMin) : 0.0f;
         const float actH = GetModsCardHeight(leftW);  // 0 when the game has no card
+        const float commH = ui::S(56 + 2 * kTileHeight + 10 + 40);
+        // Left column, top to bottom: community, the game's mod card, achievements. When both a mod card and
+        // achievements are present on a shorter viewport, yield the static community links first so the mod card
+        // and the achievements card both fit comfortably without clipping each other.
+        const float neededWithComm = commH + gap + (actH > 0.0f ? actH + (achMin > 0.0f ? gap + achMin : 0.0f) : achMin);
+        if (HasStorePage(appId_) && (actH <= 0.0f || !hasAchievements || height >= neededWithComm)) {
+            DrawCommunity(ImVec2(m, leftY), leftW);
+            leftY += commH + gap;
+        }
         const float roomH = top + height - leftY;
         if (actH > 0.0f && roomH >= ui::S(120)) {
             const float modsH = (std::min)(roomH, (std::min)(actH, (std::max)(ui::S(160), roomH - (achMin > 0 ? achMin + gap : 0.0f))));
@@ -121,7 +124,7 @@ void App::DrawOverlay(ImVec2 viewport) {
             leftY += modsH + gap;
         }
         const float achH = top + height - leftY;
-        if (hasAchievements && achH >= ui::S(150)) DrawAchievementsCard(ImVec2(m, leftY), ImVec2(leftW, achH));
+        if (hasAchievements && achH >= ui::S(110)) DrawAchievementsCard(ImVec2(m, leftY), ImVec2(leftW, achH));
         const float px = m + leftW + ui::S(20);
         DrawPlayers(ImVec2(px, top), ImVec2(viewport.x - px - m, height), false);
     }
