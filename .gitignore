@@ -65,3 +65,4 @@ bin/*_test_tmp/
 bin/test_*.exe
 ReFix_Inventory.json
 ReFix_gc_*.log
+bin/steam_api64_test.dll
