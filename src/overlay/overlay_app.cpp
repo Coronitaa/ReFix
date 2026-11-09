@@ -28,7 +28,7 @@ namespace refix::overlay {
 namespace {
 
 constexpr ULONGLONG kRefreshMs = 300;
-constexpr ULONGLONG kNvidiaCheckMs = 500;
+constexpr ULONGLONG kNvidiaCheckMs = 200;
 constexpr ULONGLONG kWelcomeMs = 6500;
 constexpr ULONGLONG kInviteToastMs = 20000;
 constexpr ULONGLONG kInfoToastMs = 4500;
@@ -321,17 +321,18 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
     webDrawn_ = false;
     DrainPosts();
     const ULONGLONG now = GetTickCount64();
+    // NVIDIA App's overlay (its "Alt+Z" notice at game start, stats, Reflex indicator) stays off while this game or
+    // ours is in front ("foreground" covers both: the ReFix overlay is a window of the game process). From the first
+    // frame, not only once the game started Steam: the notice comes with the game's window.
+    if (now - lastNvidiaCheck_ >= kNvidiaCheckMs) {
+        lastNvidiaCheck_ = now;
+        SetNvidiaOverlayHidden(settings::Get().blockReflex && game.foreground);
+    }
     if (started_) {
         Refresh(game);
         PollInvites();
         PollAchievements();
         PollNvidiaReflexHooks();
-        // NVIDIA App's overlay (stats, Reflex indicator) stays off while this game or ours is in front (both are
-        // "foreground" here: the ReFix overlay is a window of the game process).
-        if (now - lastNvidiaCheck_ >= kNvidiaCheckMs) {
-            lastNvidiaCheck_ = now;
-            SetNvidiaOverlayHidden(settings::Get().blockReflex && game.foreground);
-        }
         if (!welcomed_ && game.hwnd && game.foreground) {
             welcomed_ = true;
             if (settings::Get().welcomeToast) {

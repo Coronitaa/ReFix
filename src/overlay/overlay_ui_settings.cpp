@@ -381,15 +381,34 @@ std::pair<std::string, ImU32> SyncLine() {
     }
 }
 
-// Provider mark: a coloured disc with its initial.
+// Service logos drawn with the draw list (no image files): Google Drive's three-colour triangle, OneDrive's cloud.
+void DriveLogo(ImDrawList* dl, ImVec2 c, float size) {
+    const float w = size, h = size * 0.87f;
+    const ImVec2 o(c.x - w * 0.5f, c.y - h * 0.5f);
+    auto P = [&](float x, float y) { return ImVec2(o.x + x * w, o.y + y * h); };
+    auto quad = [&](ImVec2 a, ImVec2 b, ImVec2 c2, ImVec2 d, ImU32 col) { dl->AddQuadFilled(a, b, c2, d, col); };
+    quad(P(0.34f, 0.00f), P(0.50f, 0.28f), P(0.17f, 0.86f), P(0.00f, 0.57f), IM_COL32(15, 157, 88, 255));    // green, left
+    quad(P(0.34f, 0.00f), P(0.66f, 0.00f), P(1.00f, 0.57f), P(0.67f, 0.57f), IM_COL32(244, 180, 0, 255));    // yellow, right
+    quad(P(0.17f, 0.86f), P(0.33f, 0.57f), P(1.00f, 0.57f), P(0.83f, 0.86f), IM_COL32(66, 133, 244, 255));   // blue, bottom
+}
+
+void OneDriveLogo(ImDrawList* dl, ImVec2 c, float size) {
+    const ImU32 dark = IM_COL32(0, 120, 212, 255), light = IM_COL32(40, 168, 234, 255);
+    const float u = size;
+    auto at = [&](float x, float y) { return ImVec2(c.x + (x - 0.5f) * u, c.y + (y - 0.5f) * u); };
+    dl->AddCircleFilled(at(0.36f, 0.56f), u * 0.20f, dark, 24);
+    dl->AddCircleFilled(at(0.58f, 0.44f), u * 0.27f, light, 32);
+    dl->AddCircleFilled(at(0.80f, 0.60f), u * 0.17f, light, 24);
+    dl->AddRectFilled(at(0.18f, 0.58f), at(0.97f, 0.77f), light, u * 0.09f);
+    dl->AddRectFilled(at(0.18f, 0.58f), at(0.45f, 0.77f), dark, u * 0.09f);
+}
+
+// Provider mark: the service's logo on a soft disc.
 void ProviderBadge(ImDrawList* dl, ImVec2 c, float r, cloud::Provider p) {
-    const ImU32 col = p == cloud::Provider::Google ? IM_COL32(66, 133, 244, 255) : IM_COL32(0, 120, 212, 255);
-    dl->AddCircleFilled(c, r, ui::Fade(col, 0.18f), 32);
-    dl->AddCircle(c, r, ui::Fade(col, 0.7f), 32, ui::S(1.5f));
-    ImFont* font = ui::F().heading;
-    const char* letter = p == cloud::Provider::Google ? "G" : "O";
-    const ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, letter);
-    dl->AddText(font, font->FontSize, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col, letter);
+    dl->AddCircleFilled(c, r, IM_COL32(255, 255, 255, 18), 32);
+    dl->AddCircle(c, r, ui::color::Border, 32, ui::S(1));
+    if (p == cloud::Provider::Google) DriveLogo(dl, ImVec2(c.x, c.y + r * 0.04f), r * 1.15f);
+    else OneDriveLogo(dl, c, r * 1.3f);
 }
 
 // Card frame shared by the rows of the Syncing page; returns its top-left and leaves the cursor below it.
@@ -437,11 +456,13 @@ void App::DrawCloudAccounts(const std::wstring& chosen) {
                 place(bs.x);
                 if (ui::PrimaryButton(i18n::T("Use", "Usar"), bs)) sync::SetFolder(cloud::Choice(p));
             }
+        } else if (cloud::SigningIn(p)) {
+            // Waiting for the browser: the player may have closed the tab, so this can always be undone.
+            place(bs.x);
+            if (ui::SecondaryButton(i18n::T("Cancel", "Cancelar"), bs)) cloud::CancelSignIn();
         } else {
             place(ui::S(150));
-            const bool busy = cloud::SigningIn();
-            if (ui::PrimaryButton(busy ? i18n::T("In the browser...", "En el navegador...") : i18n::T("Sign in", "Iniciar sesión"),
-                                  ImVec2(ui::S(150), bs.y), !busy))
+            if (ui::PrimaryButton(i18n::T("Sign in", "Iniciar sesión"), ImVec2(ui::S(150), bs.y), !cloud::SigningIn()))
                 cloud::SignInAsync(p);
         }
         // Text.
@@ -454,6 +475,10 @@ void App::DrawCloudAccounts(const std::wstring& chosen) {
             sub = !a.email.empty() ? a.email : std::string(cloud::Label(p));
             if (inUse) std::tie(status, statusCol) = SyncLine();
             else status = i18n::T("Signed in, not in use", "Sesión iniciada, sin usar");
+        } else if (cloud::SigningIn(p)) {
+            sub = i18n::T("Finish signing in in your browser", "Termina de iniciar sesión en tu navegador");
+            status = i18n::T("Waiting for the browser...", "Esperando al navegador...");
+            statusCol = ui::color::SyncPending;
         } else {
             sub = i18n::T("Keeps your profiles in your account", "Guarda tus perfiles en tu cuenta");
         }
@@ -472,7 +497,7 @@ void App::DrawCloudAccounts(const std::wstring& chosen) {
         if (!status.empty()) {
             ty += f.caption->FontSize + ui::S(2);
             const float dot = ui::S(4);
-            const bool live = inUse && sync::Get().state == sync::State::Syncing;
+            const bool live = (inUse && sync::Get().state == sync::State::Syncing) || cloud::SigningIn(p);
             const float pulse = live ? 0.55f + 0.45f * (0.5f + 0.5f * sinf((float)ImGui::GetTime() * 6.0f)) : 1.0f;
             dl->AddCircleFilled(ImVec2(tx + dot, ty + f.caption->FontSize * 0.55f), dot * pulse, statusCol, 16);
             dl->AddText(f.caption, f.caption->FontSize, ImVec2(tx + ui::S(14), ty), statusCol, status.c_str());

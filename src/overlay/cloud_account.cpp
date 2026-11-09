@@ -66,6 +66,8 @@ std::mutex g_mu;   // tokens and sign-in result
 struct Access { std::string token; ULONGLONG expires = 0; };
 Access g_access[2];
 std::atomic<bool> g_signingIn{ false };
+std::atomic<int> g_signingWith{ -1 };   // Idx of the provider in the browser, -1 none
+std::atomic<bool> g_cancel{ false };    // the player gave up on the browser (closed the tab, changed mind)
 Msg g_error{};
 
 int Idx(Provider p) { return p == Provider::Google ? 0 : 1; }
@@ -331,7 +333,7 @@ void Reply(SOCKET c, const char* status, const std::string& page) {
 // Waits for the browser to come back to http://<loopback>:port/?code=...&state=...
 bool WaitForCode(SOCKET l4, SOCKET l6, const std::string& state, const char* provider, std::string& code, Msg& err) {
     const ULONGLONG until = GetTickCount64() + kSignInWaitMs;
-    while (GetTickCount64() < until) {
+    while (GetTickCount64() < until && !g_cancel) {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(l4, &fds);
@@ -362,7 +364,7 @@ bool WaitForCode(SOCKET l4, SOCKET l6, const std::string& state, const char* pro
         if (!ok) err = kErrDenied;
         return ok;
     }
-    err = kErrTimeout;
+    err = g_cancel ? Msg{} : kErrTimeout;   // cancelled on purpose: nothing to report
     return false;
 }
 
@@ -565,6 +567,8 @@ bool FromChoice(const std::wstring& choice, Provider& out) {
 bool Available(Provider p) { return *S(p).clientId != 0 && (p != Provider::Google || *S(p).clientSecret != 0); }
 bool Connected(Provider p) { return GetFileAttributesW(TokenFile(S(p)).c_str()) != INVALID_FILE_ATTRIBUTES; }
 bool SigningIn() { return g_signingIn; }
+bool SigningIn(Provider p) { return g_signingIn && g_signingWith == Idx(p); }
+void CancelSignIn() { if (g_signingIn) g_cancel = true; }
 
 Msg LastError() {
     std::lock_guard<std::mutex> lock(g_mu);
@@ -573,6 +577,8 @@ Msg LastError() {
 
 void SignInAsync(Provider p) {
     if (!Available(p) || g_signingIn.exchange(true)) return;
+    g_cancel = false;
+    g_signingWith = Idx(p);
     {
         std::lock_guard<std::mutex> lock(g_mu);
         g_error = {};
@@ -587,6 +593,7 @@ void SignInAsync(Provider p) {
             std::lock_guard<std::mutex> lock(g_mu);
             g_error = ok ? Msg{} : err;
         }
+        g_signingWith = -1;
         g_signingIn = false;
     }).detach();
 }

@@ -26,7 +26,9 @@ bool Connected(Provider p);   // a saved sign-in for this Windows user
 
 // Opens the browser to sign in, on a background thread; when it succeeds, profiles sync to that account.
 void SignInAsync(Provider p);
-bool SigningIn();
+bool SigningIn();               // a sign-in (any service) is waiting for the browser
+bool SigningIn(Provider p);     // this service's
+void CancelSignIn();            // stop waiting (the player closed the tab or changed their mind)
 Msg LastError();              // of the last sign-in; en == nullptr when none
 void Disconnect(Provider p);  // forgets the sign-in on this PC (and revokes it, where the provider allows)
 
