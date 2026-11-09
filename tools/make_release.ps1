@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.3.2" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.4.0" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -74,14 +74,15 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.3.2 - LAN / Online
+ReFix 2.4.0 - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.
 2. Pick the game folder.
 3. Choose the mode:
-   [1] ReFix Online via Steam  - uses the Steam client.
-   [2] ReFix LAN without Steam - plays on the local network, Steam not needed.
+   [1] ReFix Online Legacy via Steam - uses the Steam client, as in earlier versions.
+   [2] ReFix LAN / Online            - plays on the local network, Steam not needed. With Steam installed,
+       the Steam button in the overlay's top bar adds your Steam friends to the same rooms (optional).
 4. Launch the game with its own .exe (or a shortcut to that .exe).
    steam:// shortcuts start the game through Steam, without ReFix LAN.
 
@@ -94,7 +95,10 @@ ReFix LAN
 
 - In-game overlay (AutoDeploy asks, [Overlay] in ReFix.ini): the ReFix overlay (Shift+Tab, or the
   Xbox / PS button of a controller), Steam's own overlay, or none. The gear in the overlay opens its settings
-  (notifications, sounds, language, NVIDIA Reflex).
+  (notifications, sound, language, performance, profile sync).
+- Profile sync (Settings > Syncing): keep each profile's saves, achievements and items in your Google Drive or
+  OneDrive account, a cloud app's folder or a USB drive, or export / import a .rfxp file. Optional; your
+  profiles always stay on this PC too. Privacy policy: https://coronitaa.github.io/privacy.html
 - Debug logging is off ([Debug] EnableLog = false); turn it on only to report a problem.
 
 Game mods: when refix_mods\catalog.tsv has a mod for the game, AutoDeploy installs it into the
