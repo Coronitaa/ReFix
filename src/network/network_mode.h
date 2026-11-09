@@ -25,10 +25,13 @@ public:
     // Semantic queries
     static bool IsGoldbergBackendActive();
     static bool IsExternalNetworkingAllowed();
+    // Game sockets may reach the Internet (LAN: [Network] InternetAccess, default allow; Offline: never)
+    static bool IsInternetEgressAllowed();
     static bool IsSteamClientRunning();
     
 private:
     static std::atomic<ReFixNetworkMode> s_mode;
+    static std::atomic<bool> s_lanInternet;
 };
 
 } // namespace ReFix

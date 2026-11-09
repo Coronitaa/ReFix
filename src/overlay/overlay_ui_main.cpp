@@ -126,7 +126,13 @@ void App::DrawOverlay(ImVec2 viewport) {
         const float achH = top + height - leftY;
         if (hasAchievements && achH >= ui::S(110)) DrawAchievementsCard(ImVec2(m, leftY), ImVec2(leftW, achH));
         const float px = m + leftW + ui::S(20);
-        DrawPlayers(ImVec2(px, top), ImVec2(viewport.x - px - m, height), false);
+        float playersW = viewport.x - px - m;
+        if (SteamPanelVisible()) {
+            const float friendsW = std::clamp(playersW * 0.42f, ui::S(280), ui::S(420));
+            playersW -= friendsW + ui::S(20);
+            DrawFriends(ImVec2(px + playersW + ui::S(20), top), ImVec2(friendsW, height));
+        }
+        DrawPlayers(ImVec2(px, top), ImVec2(playersW, height), false);
     }
 
     DrawProfileMenu();
@@ -273,7 +279,10 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
         ImGui::BeginChild("##pickerplayers", size, ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     } else {
         ui::BeginCard("##players", pos, size);
+        const ImVec2 headPos = ImGui::GetCursorScreenPos();
+        const float headW = ImGui::GetContentRegionAvail().x;
         ImGui::PushFont(ui::F().heading);
+        const float headH = ImGui::GetTextLineHeight();
         ui::TextColored(ui::color::Accent, ui::icon::Lan);
         ImGui::SameLine();
         ImGui::TextUnformatted(i18n::T("Players on the LAN", "Jugadores en la LAN"));
@@ -286,6 +295,7 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
                  rows_.size());
         ui::TextColored(ui::color::Muted, count);
         ImGui::PopFont();
+        DrawSteamSwitch(ImVec2(headPos.x + headW, headPos.y + headH * 0.5f));
     }
 
     // Search box with a leading glyph.

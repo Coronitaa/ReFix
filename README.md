@@ -8,8 +8,8 @@ ReFix gets multiplayer working in PC games that normally need Steam or Epic onli
 
 One download contains two products. You pick one per game:
 
-- **ReFix Online** plays over the Internet through your Steam client.
-- **ReFix LAN** plays on your local network (or a VPN like Radmin, Hamachi or ZeroTier) with no Steam client at all.
+- **ReFix LAN / Online** plays on your local network (or a VPN like Radmin, Hamachi or ZeroTier) with no Steam client at all. If Steam is installed, one switch in the overlay also lets you play with your Steam friends over the Internet.
+- **ReFix Online Legacy** is the previous online mode: the whole game runs through your Steam client as Spacewar.
 
 ReFix also ships a DLC unlocker based on SmokeAPI.
 
@@ -18,7 +18,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 1. Download `ReFix_Release_v2.3.2.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
-   - `[1] ReFix Online via Steam` or `[2] ReFix LAN without Steam`
+   - `[1] ReFix Online Legacy via Steam` or `[2] ReFix LAN / Online`
    - which overlay the game shows (ReFix LAN only): ReFix's, Steam's, or none
    - which DLCs to unlock: all, none, or a list you pick from the Steam Store
 4. Start the game.
@@ -29,7 +29,7 @@ To undo everything, run `Uninstall_ReFix.bat` on Windows (or `bash Uninstall_ReF
 
 To update ReFix in a game, run the new `AutoDeploy` on it again.
 
-## ReFix Online
+## ReFix Online Legacy
 
 - Needs the Steam client running. The game runs as Spacewar (AppID 480), so you get Steam lobbies, invites, P2P and Valve's relay.
 - Free-to-play games keep their real AppID (AutoDeploy asks the Steam store), so their own servers accept the Steam login.
@@ -46,7 +46,18 @@ To update ReFix in a game, run the new `AutoDeploy` on it again.
 - Several copies of the same game can run on one PC, each as a different player.
 - 32-bit and 64-bit games, including older Steamworks SDKs (Dark Souls III and other games from around 2016).
 - Photon games work over LAN, public room lists included. Unreal Engine lobbies show up in the server list.
+- The game can still reach its own Internet services (news, analytics, web APIs). Steam and Photon stay emulated. `InternetAccess = block` in `ReFix.ini` keeps it on the local network only.
 
+### Steam online services
+
+When Steam is installed, the players card of the overlay has a small **Steam** switch.
+
+- Turned on, ReFix connects to Steam as Spacewar (AppID 480), and opens Steam in the background if it was closed. Your Steam friends show up in a card next to the LAN players.
+- Friends who run a ReFix game with the switch on become players of your network: lobbies, invites, Photon rooms and the overlay all work with them as on a LAN, carried over Steam P2P. The game itself never talks to Steam.
+- Your Steam account becomes a profile in the profile list, and the default one while Steam is open, with its own saves.
+- Turned off, ReFix goes back to LAN only. The choice is remembered on this PC.
+- `ReFix.ini` `[Steam] OnlineServices`: `auto` (default, on when Steam is already open and signed in), `on` or `off`. The switch in the overlay wins.
+- The ReFix overlay replaces Steam's. `BlockSteamOverlay = false` in `[Overlay]` loads Steam's overlay as well.
 ### Overlay
 
 Press **Shift+Tab**, or the Xbox / PS button of a controller.

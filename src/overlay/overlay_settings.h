@@ -19,6 +19,11 @@ struct Values {
 const Values& Get();
 void Set(const Values& v);           // saves at once
 
+// Steam online services (ReFix Online). Auto = the player never chose: ReFix.ini decides.
+enum class SteamOnline { Auto, On, Off };
+SteamOnline SteamOnlineChoice();
+void SetSteamOnline(bool on);
+
 // DllMain-safe read of the Reflex setting (no shell APIs): the player's choice, else `iniDefault`.
 bool BlockReflexEarly(bool iniDefault);
 

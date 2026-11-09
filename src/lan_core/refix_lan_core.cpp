@@ -1,6 +1,37 @@
 #include "refix_lan_core.h"
 #include "refix_lan_trace.h"
 #include "refix_lan_wire.h"
+#if REFIX_STEAM_LINK
+#include "../steam_link/steam_link.h"
+#endif
+
+namespace refix::lan::lan_bridge {
+// Lobby member lists cross the Steam online services bridge (steam_link.h). Written by a PC with Steam on: a
+// Steam friend's virtual address becomes the bridge port that stands for it on this LAN. Read from a friend:
+// the friend itself is reached at its tunnel address, the LAN players behind it through it.
+inline LanEndpoint Outgoing(LanEndpoint ep) {
+#if REFIX_STEAM_LINK
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    if (steamlink::IsVirtual(ep.ipv4) && steamlink::BridgeEndpoint(ep.ipv4, ep.port, ip, port)) return LanEndpoint{ ip, port };
+#endif
+    return ep;
+}
+
+inline LanEndpoint Incoming(const LanEndpoint& sender, const PeerId& senderPeer, const PeerId& member, LanEndpoint ep) {
+#if REFIX_STEAM_LINK
+    if (!steamlink::IsVirtual(sender.ipv4) || !ep.IsValid() || steamlink::IsVirtual(ep.ipv4)) return ep;
+    if (member == senderPeer) {
+        ep.ipv4 = sender.ipv4;
+    } else if (const uint32_t relay = steamlink::RelayAddress(sender.ipv4, ep.ipv4, ep.port)) {
+        ep.ipv4 = relay;
+    }
+#else
+    (void)sender; (void)senderPeer; (void)member;
+#endif
+    return ep;
+}
+} // namespace refix::lan::lan_bridge
 
 #include <windows.h>
 #include <algorithm>
@@ -404,7 +435,7 @@ public:
         for (const auto& m : lob.members) {
             w.WritePeerId(m.peerId);
             w.WriteString(m.displayName);
-            w.WriteEndpoint(m.endpoint);
+            w.WriteEndpoint(lan_bridge::Outgoing(m.endpoint));
             w.WriteBool(m.isOwner);
         }
 
@@ -1008,6 +1039,18 @@ public:
     }
 
     // ILanTransportListener Implementation
+    // A packet from a Steam friend (ReFix Online tunnel) advertises the friend's own LAN address, which is not
+    // reachable from here: keep the advertised port but address it through the friend's tunnel IP.
+    static LanEndpoint ViaTunnel(const LanEndpoint& sender, LanEndpoint advertised) {
+#if REFIX_STEAM_LINK
+        if (steamlink::IsVirtual(sender.ipv4) && advertised.IsValid()) {
+            steamlink::NoteAdvertised(sender.ipv4, advertised.ipv4, advertised.port);
+            advertised.ipv4 = sender.ipv4;
+        }
+#endif
+        return advertised;
+    }
+
     void OnDiscoveryPacket(const LanEndpoint& sender, MsgType type, const uint8_t* data, size_t len) override {
         ByteReader r(data, len);
         std::string scope = r.ReadString();
@@ -1018,7 +1061,7 @@ public:
 
         if (type == MsgType::DiscoveryBeacon || type == MsgType::DiscoveryResponse || type == MsgType::DiscoveryQuery) {
             std::string name = r.ReadString();
-            LanEndpoint ep = r.ReadEndpoint();
+            LanEndpoint ep = ViaTunnel(sender, r.ReadEndpoint());
             if (!ep.IsValid()) ep = sender;
 
             uint64_t extSteamId = 0;
@@ -1094,7 +1137,7 @@ public:
             rec.permission = static_cast<LobbyPermissionLevel>(r.ReadU8());
             rec.joinable = r.ReadBool();
             rec.revision = r.ReadU32();
-            rec.hostEndpoint = r.ReadEndpoint();
+            rec.hostEndpoint = ViaTunnel(sender, r.ReadEndpoint());
             if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
             if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) rec.hostEndpoint.ipv4 = 0x7F000001;
 
@@ -1114,7 +1157,7 @@ public:
                     LobbyMember m;
                     m.peerId = r.ReadPeerId();
                     m.displayName = r.ReadString();
-                    m.endpoint = r.ReadEndpoint();
+                    m.endpoint = lan_bridge::Incoming(sender, pid, m.peerId, r.ReadEndpoint());
                     m.isOwner = r.ReadBool();
                     if (r.HasError()) break;
                     rec.members.push_back(m);
@@ -1215,7 +1258,7 @@ public:
                     for (const auto& m : lob.members) {
                         w.WritePeerId(m.peerId);
                         w.WriteString(m.displayName);
-                        w.WriteEndpoint(m.endpoint);
+                        w.WriteEndpoint(lan_bridge::Outgoing(m.endpoint));
                         w.WriteBool(m.isOwner);
                     }
 
@@ -1226,7 +1269,7 @@ public:
             std::string lobbyId = r.ReadString();
             PeerId clientPid = r.ReadPeerId();
             std::string clientName = r.ReadString();
-            LanEndpoint clientEp = r.ReadEndpoint();
+            LanEndpoint clientEp = ViaTunnel(sender, r.ReadEndpoint());
             uint64_t clientSteamId = 0;
             if (r.Remaining() >= 8) clientSteamId = r.ReadU64();
             if (r.HasError()) return;
@@ -1302,7 +1345,7 @@ public:
             for (const auto& m : updatedLob->members) {
                 resp.WritePeerId(m.peerId);
                 resp.WriteString(m.displayName);
-                resp.WriteEndpoint(m.endpoint);
+                resp.WriteEndpoint(lan_bridge::Outgoing(m.endpoint));
                 resp.WriteBool(m.isOwner);
             }
 
@@ -1327,7 +1370,7 @@ public:
                 rec.permission = static_cast<LobbyPermissionLevel>(r.ReadU8());
                 rec.joinable = r.ReadBool();
                 rec.revision = r.ReadU32();
-                rec.hostEndpoint = r.ReadEndpoint();
+                rec.hostEndpoint = ViaTunnel(sender, r.ReadEndpoint());
                 if (!rec.hostEndpoint.IsValid()) rec.hostEndpoint = sender;
                 if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) rec.hostEndpoint.ipv4 = 0x7F000001;
 
@@ -1347,7 +1390,7 @@ public:
                         LobbyMember m;
                         m.peerId = r.ReadPeerId();
                         m.displayName = r.ReadString();
-                        m.endpoint = r.ReadEndpoint();
+                        m.endpoint = lan_bridge::Incoming(sender, pid, m.peerId, r.ReadEndpoint());
                         m.isOwner = r.ReadBool();
                         if (r.HasError()) break;
                         rec.members.push_back(m);

@@ -541,6 +541,54 @@ bool IsLockedByOther(const std::wstring& id, const std::wstring& activeId) {
     return true;
 }
 
+bool IsSteamProfile(const Profile& p) {
+    return p.importedFromSteam && !p.guest;
+}
+
+Profile EnsureSteamProfile(const SteamSession& session, std::vector<Profile>& all) {
+    auto it = std::find_if(all.begin(), all.end(), [&](const Profile& p) { return p.steamId == session.steamId; });
+    Profile p;
+    if (it != all.end()) {
+        p = *it;
+    } else {
+        p = MakeNew(session.name, all);
+        p.steamId = session.steamId;
+        ReFixLog("[Profiles] Created the Steam profile %s for %llu", ToUtf8(p.id).c_str(), (unsigned long long)p.steamId);
+    }
+    p.importedFromSteam = true;
+    const bool added = AddGame(p, GameKey(), DefaultGameName(), false);
+    if (it == all.end() || added || !it->importedFromSteam) {
+        Save(p);
+        if (it == all.end()) all.insert(all.begin(), p);
+        else *it = p;
+    }
+    return p;
+}
+
+std::vector<SteamSession> ReadSteamAccounts() {
+    std::vector<SteamSession> out;
+    const std::wstring steamPath = SteamPath();
+    if (steamPath.empty()) return out;
+    std::ifstream f(steamPath + L"\\config\\loginusers.vdf", std::ios::binary);
+    if (!f) return out;
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // Top-level keys are the 17-digit SteamIDs of every account that signed in on this PC.
+    for (size_t at = text.find("\"7656"); at != std::string::npos; at = text.find("\"7656", at + 1)) {
+        const size_t close = text.find('"', at + 1);
+        if (close == std::string::npos || close - at - 1 != 17) continue;
+        const uint64_t id = _strtoui64(text.substr(at + 1, 17).c_str(), nullptr, 10);
+        if (id <= kSteamIdBase || std::any_of(out.begin(), out.end(), [&](const SteamSession& s) { return s.steamId == id; })) continue;
+        SteamSession s;
+        s.steamId = id;
+        s.name = PersonaFromLoginUsers(steamPath, id);
+        if (s.name.empty()) s.name = L"Steam " + std::to_wstring(id - kSteamIdBase);
+        const std::wstring avatar = steamPath + L"\\config\\avatarcache\\" + std::to_wstring(id) + L".png";
+        if (GetFileAttributesW(avatar.c_str()) != INVALID_FILE_ATTRIBUTES) s.avatarPath = avatar;
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
 std::optional<SteamSession> ReadSteamSession(std::wstring& error) {
     DWORD pid = 0, accountId = 0;
     if (!ReadActiveProcess(pid, accountId) || !IsProcessAlive(pid)) {

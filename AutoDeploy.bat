@@ -14,7 +14,7 @@ echo:
 
 if not exist "%BIN_DIR%\online\steam_api64.dll" if not exist "%BIN_DIR%\lan\steam_api64.dll" if not exist "%BIN_DIR%\steam_api64.dll" (
     echo [ERROR] Required binaries not found in "%BIN_DIR%"!
-    echo Please make sure 'bin\online' ^(ReFix Online^) and/or 'bin\lan' ^(ReFix LAN^) contain steam_api64.dll.
+    echo Please make sure 'bin\online' ^(ReFix Online Legacy^) and/or 'bin\lan' ^(ReFix LAN / Online^) contain steam_api64.dll.
     goto ERROR_EXIT
 )
 
@@ -199,15 +199,17 @@ echo ====================================================================
 echo                  Select Connectivity Mode
 echo ====================================================================
 echo:
-echo  [1] ReFix Online via Steam
+echo  [1] ReFix Online Legacy via Steam
 echo      - Uses Steam client and Spacewar (AppID 480).
 echo      - Enables online multiplayer matchmaking via Steam servers.
 echo:
-echo  [2] ReFix LAN without Steam
+echo  [2] ReFix LAN / Online
 echo      - Standalone ReFix LAN emulator: Steam does not need to be installed or running.
 echo      - Finds other ReFix LAN players of the same game on the local network.
 echo      - Automatic per-PC identity: copy the patched game to other PCs as-is.
 echo      - Several instances on the same PC get distinct identities.
+echo      - Optional: turn on Steam online services from the ReFix overlay (Shift+Tab)
+echo        to play with Steam friends over the Internet.
 echo:
 set "ONLINE_MODE_CHOICE=1"
 :: Unattended deploys pick the product with REFIX_DEPLOY_MODE=1 (Online) or 2 (LAN)
@@ -223,7 +225,7 @@ if "%ONLINE_MODE_NAME%"=="goldberg" goto GOLDBERG_PROMPTS
 
 :VALVE_PROMPTS
 echo:
-echo [INFO] Selected Mode: ReFix Online via Steam
+echo [INFO] Selected Mode: ReFix Online Legacy via Steam
 echo:
 set "MASK_APPID=480"
 set "REAL_APPID=%EXISTING_REAL_APPID%"
@@ -481,14 +483,14 @@ echo  Game: %GAME_NAME%  ^|  Engine: %ENGINE_TYPE%
 if "%ONLINE_MODE_NAME%"=="goldberg" goto SUMMARY_GOLDBERG
 
 :SUMMARY_VALVE
-echo  Mode: ReFix Online via Steam [Spacewar 480]
+echo  Mode: ReFix Online Legacy via Steam [Spacewar 480]
 echo  Location: "%EXE_DIR%"
 echo  AppID: MaskAppId=%MASK_APPID%  /  RealAppId=%REAL_APPID%
 echo  DLCs: Mode=%DLC_MODE% [%DLCS%]
 goto AFTER_SUMMARY
 
 :SUMMARY_GOLDBERG
-echo  Mode: ReFix LAN without Steam [standalone, no Steam client]
+echo  Mode: ReFix LAN / Online [no Steam client needed; Steam online services optional]
 echo  Location: "%EXE_DIR%"
 echo  AppID: RealAppId=%REAL_APPID%
 echo  DLCs: Mode=%DLC_MODE% [%DLCS%]

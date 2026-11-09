@@ -219,7 +219,7 @@ uninstall() {
         rm -f "$d/RedboneEOS.dll"
     done < <({ dirs_with EOSSDK_original.dll; dirs_with RedboneEOS.dll; } | sort -u)
     while IFS= read -r d; do restore_one "$d" winmm_o.dll winmm.dll; done < <(dirs_with winmm_o.dll)
-    find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" \) -delete 2>/dev/null || true
+    find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" -o -name "refix_steamlink64.dll" -o -name "refix_steamlink.dll" \) -delete 2>/dev/null || true
     ok "Done. ReFix files removed and backups restored."
     echo "    ReFix LAN profiles and their saves stay in the prefix's AppData/Roaming/ReFix (shared by every game)."
 }
@@ -250,6 +250,10 @@ deploy_steam_x64() {
         fi
         cp -f "$src" "$d/steam_api64.dll"
         ok "Deployed ReFix $MODE steam_api64.dll to $d"
+        # ReFix LAN: Valve's DLL for the optional Steam online services (switched on from the overlay)
+        if [ "$MODE" = lan ] && [ -f "$BIN/valve/steam_api64.dll" ]; then
+            cp -f "$BIN/valve/steam_api64.dll" "$d/refix_steamlink64.dll"
+        fi
     done < <({ dirs_with steam_api64.dll; dirs_with steam_api64_original.dll; } | sort -u)
 }
 
@@ -420,8 +424,8 @@ if [ "$UNINSTALL" = 1 ]; then uninstall; exit 0; fi
 MODE="${2:-}"
 if [ -z "$MODE" ]; then
     echo
-    echo "  [1] ReFix Online via Steam  - uses the Steam client (start the game from Steam)"
-    echo "  [2] ReFix LAN without Steam - plays on the local network, Steam not needed"
+    echo "  [1] ReFix Online Legacy via Steam - uses the Steam client (start the game from Steam)"
+    echo "  [2] ReFix LAN / Online         - local network; Steam online services optional in the overlay"
     read -r -p "Mode [1/2]: " choice
     case "$choice" in 1) MODE=online ;; 2) MODE=lan ;; *) die "Choose 1 or 2" ;; esac
 fi

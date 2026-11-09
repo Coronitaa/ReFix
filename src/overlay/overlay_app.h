@@ -6,6 +6,7 @@
 #include "overlay_theme.h"
 #include "presence_net.h"
 #include "profile_store.h"
+#include "../steam_link/steam_link.h"
 
 #include <windows.h>
 #include <deque>
@@ -202,6 +203,11 @@ private:
     void DrawAchievementsCard(ImVec2 pos, ImVec2 size);
     void DrawAchievementsModal(ImVec2 viewport);
     void DrawSettingsModal(ImVec2 viewport);   // overlay_ui_settings.cpp
+    // overlay_ui_friends.cpp: Steam online services switch and the Steam friends card
+    bool SteamPanelVisible() const;
+    void DrawSteamSwitch(ImVec2 rightCenter);
+    void DrawFriends(ImVec2 pos, ImVec2 size);
+    void DrawFriendRow(const steamlink::Friend& fr, float width);
     void DrawAchievementToast(ImDrawList* dl, const Toast& t, ImVec2 p0, ImVec2 p1, float alpha);
     ImTextureID AchievementIcon(const ach::Entry& e);
     void DrawProfileMenu();

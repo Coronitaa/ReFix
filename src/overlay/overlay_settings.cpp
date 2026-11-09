@@ -64,6 +64,16 @@ void Set(const Values& v) {
     sound::SetEnabled(v.uiSounds);
 }
 
+SteamOnline SteamOnlineChoice() {
+    const int v = ReadBool(Ini(), L"SteamOnline");
+    return v < 0 ? SteamOnline::Auto : v == 1 ? SteamOnline::On : SteamOnline::Off;
+}
+
+void SetSteamOnline(bool on) {
+    CreateDirectoryW(profiles::RootDir().c_str(), nullptr);
+    WritePrivateProfileStringW(kSection, L"SteamOnline", on ? L"1" : L"0", Ini().c_str());
+}
+
 bool BlockReflexEarly(bool iniDefault) {
     wchar_t appdata[MAX_PATH] = {};
     if (!GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH)) return iniDefault;

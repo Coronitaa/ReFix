@@ -128,6 +128,8 @@ public:
 
     using SocketLifecycleCallback = void (*)(uintptr_t sock, bool isCreated);
     static void SetGlobalSocketLifecycleCallback(SocketLifecycleCallback cb);
+    // Steam bridge: replace the endpoint a discovery packet or a lobby join request advertises (false = no such field).
+    static bool RewriteAdvertisedEndpoint(uint8_t* wire, size_t len, uint32_t ip, uint16_t port);
 
 private:
     struct OutboundReliable {
@@ -217,6 +219,13 @@ private:
     std::map<std::pair<PeerId, uint32_t>, FragmentAssembler> m_fragmentMap;
     size_t m_globalReassemblyBytes = 0;
     std::unordered_map<PeerId, size_t> m_peerReassemblyBytes;
+
+    // Datagrams from Steam friends (ReFix Online tunnel), drained by the reactor thread
+    static void TunnelSink(void* ctx, uint32_t fromIp, uint16_t fromPort, uint16_t dstPort, const uint8_t* data, size_t len);
+    void DrainTunnelQueue();
+    int WireSend(const char* buf, int len, const sockaddr* to, int tolen);
+    std::mutex m_tunnelMutex;
+    std::vector<std::pair<LanEndpoint, std::vector<uint8_t>>> m_tunnelQueue;
 
     mutable std::mutex m_inboundQueueMutex;
     std::deque<InboundPacket> m_inboundQueue;

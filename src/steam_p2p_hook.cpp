@@ -613,7 +613,7 @@ void SteamP2PHook::FlushHoldBuffer() {
             SteamP2PHook::Log("[HoldBuffer] TTL expired (%u ms) for packet destined to port %u -> releasing to raw Winsock",
                 k_holdBufferTtlMs, it->destPort);
             if (g_orig_sendto && it->s != INVALID_SOCKET) {
-                if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() &&
+                if (!ReFix::NetworkModeManager::IsInternetEgressAllowed() &&
                     !IsAllowedLanEndpoint((const sockaddr*)&it->destAddr) &&
                     !IsPhotonEgressAllowed(it->destPort)) {
                     refix::lan::LanFirewall::Get().RecordBlockedEgress();
@@ -806,7 +806,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         }
 
         // Enforce Internet-Zero BEFORE buffering into Pre-Lobby Hold Buffer
-        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to) && !IsPhotonEgressAllowed(destPort)) {
+        if (!ReFix::NetworkModeManager::IsInternetEgressAllowed() && !IsAllowedLanEndpoint(to) && !IsPhotonEgressAllowed(destPort)) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
             uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
             SteamP2PHook::Log("[Internet-Zero] BLOCKED sendto to external endpoint %u.%u.%u.%u:%u (synthetic_success, total_blocked=%llu)",
@@ -841,7 +841,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
         if (to->sa_family == AF_INET) {
             rawPort = ntohs(reinterpret_cast<const sockaddr_in*>(to)->sin_port);
         }
-        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !IsAllowedLanEndpoint(to) && !IsPhotonEgressAllowed(rawPort)) {
+        if (!ReFix::NetworkModeManager::IsInternetEgressAllowed() && !IsAllowedLanEndpoint(to) && !IsPhotonEgressAllowed(rawPort)) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
             uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
             char ipStr[64] = "unknown";
@@ -1028,7 +1028,7 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
 
         bool isLan = IsAllowedLanEndpoint(name);
         bool isPhoton = IsPhotonEgressAllowed(port);
-        if (!ReFix::NetworkModeManager::IsExternalNetworkingAllowed() && !isLan && !isPhoton) {
+        if (!ReFix::NetworkModeManager::IsInternetEgressAllowed() && !isLan && !isPhoton) {
             refix::lan::LanFirewall::Get().RecordBlockedEgress();
             uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
             SteamP2PHook::Log("[Internet-Zero] BLOCKED connect to external endpoint %s:%u (error=WSAEHOSTUNREACH, total_blocked=%llu)",

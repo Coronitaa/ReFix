@@ -18,6 +18,8 @@ static ReFixNetworkMode ClampMode(ReFixNetworkMode mode) { return mode; }
 std::atomic<ReFixNetworkMode> NetworkModeManager::s_mode{ ReFixNetworkMode::Online };
 #endif
 
+std::atomic<bool> NetworkModeManager::s_lanInternet{ true };
+
 bool NetworkModeManager::IsSteamClientRunning() {
     bool running = false;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -44,6 +46,8 @@ void NetworkModeManager::LoadMode(const std::string& iniPath) {
     GetPrivateProfileStringA("Online", "Mode", "", lanBuf, sizeof(lanBuf), iniPath.c_str());
     offline = offline || (_stricmp(lanBuf, "offline") == 0);
     s_mode = offline ? ReFixNetworkMode::Offline : ReFixNetworkMode::Lan;
+    GetPrivateProfileStringA("Network", "InternetAccess", "allow", lanBuf, sizeof(lanBuf), iniPath.c_str());
+    s_lanInternet = _stricmp(lanBuf, "block") != 0;
     return;
 #endif
     char buf[64] = {0};
@@ -115,6 +119,14 @@ bool NetworkModeManager::IsOffline() {
 bool NetworkModeManager::IsGoldbergBackendActive() {
     auto m = s_mode.load(std::memory_order_acquire);
     return m == ReFixNetworkMode::Lan || m == ReFixNetworkMode::Offline;
+}
+
+bool NetworkModeManager::IsInternetEgressAllowed() {
+    switch (s_mode.load(std::memory_order_acquire)) {
+    case ReFixNetworkMode::Online: return true;
+    case ReFixNetworkMode::Lan: return s_lanInternet.load(std::memory_order_acquire);
+    default: return false;
+    }
 }
 
 bool NetworkModeManager::IsExternalNetworkingAllowed() {

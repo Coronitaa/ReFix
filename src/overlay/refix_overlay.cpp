@@ -15,6 +15,9 @@
 #include "avatar_image.h"
 #include "presence_net.h"
 #include "../unreal_steam_emu.h"
+#if REFIX_STEAM_LINK
+#include "../steam_link/steam_link.h"
+#endif
 
 #include <windows.h>
 #include <atomic>
@@ -42,6 +45,7 @@ struct Config {
     bool sounds = true;
     bool firstRunDialog = false;
     bool blockNvidiaReflex = true;
+    char steamOnline[8] = "auto";    // ReFix.ini [Steam] OnlineServices: auto | on | off
 };
 
 Config g_cfg;
@@ -96,6 +100,20 @@ void LoadConfig(const std::string& iniPath) {
     // The player's choice in the overlay settings (profiles.ini) wins over the game folder's ReFix.ini.
     g_cfg.blockNvidiaReflex = settings::BlockReflexEarly(read("BlockNvidiaReflex", true));
     sound::SetEnabled(g_cfg.sounds);
+    GetPrivateProfileStringA("Steam", "OnlineServices", "auto", g_cfg.steamOnline, sizeof(g_cfg.steamOnline), iniPath.c_str());
+}
+
+// Steam online services: the player's switch in the overlay wins; else ReFix.ini; "auto" turns them on only
+// when Steam is already running with an account signed in (ReFix never opens Steam uninvited).
+bool WantSteamOnline(bool steamSignedIn) {
+    switch (settings::SteamOnlineChoice()) {
+    case settings::SteamOnline::On: return true;
+    case settings::SteamOnline::Off: return false;
+    default: break;
+    }
+    if (!_stricmp(g_cfg.steamOnline, "on") || !_stricmp(g_cfg.steamOnline, "true")) return true;
+    if (!_stricmp(g_cfg.steamOnline, "off") || !_stricmp(g_cfg.steamOnline, "false")) return false;
+    return steamSignedIn;
 }
 
 // Same search as the emulator's LoadConfig: next to the exe and up to four folders above.
@@ -153,7 +171,22 @@ bool Allowed() {
 
 // `otherInstance`: another window of this game is open, so the player of this one has to say who they are.
 // `all`: the profiles of this game.
-std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherInstance) {
+// Profile of a Steam account with its cached Steam avatar (added once; a picture the player set later stays).
+Profile ImportSteamAccount(const SteamSession& acc, std::vector<Profile>& all) {
+    Profile p = profiles::EnsureSteamProfile(acc, all);
+    if (p.customAvatar || acc.avatarPath.empty()) return p;
+    std::wstring imgErr;
+    CreateDirectoryW(profiles::ProfileDir(p.id).c_str(), nullptr);
+    if (image::ImportAvatar(acc.avatarPath, profiles::AvatarPath(p.id), imgErr)) {
+        p.customAvatar = true;
+        profiles::Save(p);
+        for (Profile& q : all) if (q.id == p.id) q = p;
+    }
+    return p;
+}
+
+// `preferred`: the Steam profile when Steam online services are on; it wins over the last used profile.
+std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherInstance, const std::optional<Profile>& preferred) {
     wchar_t forced[32] = {};
     if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", forced, 32) > 0) {
         SetEnvironmentVariableW(L"REFIX_PROFILE_ID", nullptr);   // not for child processes of the game
@@ -163,6 +196,7 @@ std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherIn
         }
     }
     if (otherInstance) return std::nullopt;
+    if (preferred && profiles::TryLock(preferred->id)) return preferred;
     if (auto last = profiles::Load(profiles::LastProfileId(profiles::GameKey()))) {
         if (profiles::UsedIn(*last, profiles::GameKey()) && profiles::TryLock(last->id)) return last;
     }
@@ -217,9 +251,29 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     profiles::CleanupGuestFolders();
     std::vector<Profile> all = profiles::LoadAll();
     const std::wstring game = profiles::GameKey();
+    std::optional<Profile> steamProfile;
+#if REFIX_STEAM_LINK
+    std::wstring steamErr;
+    const std::optional<SteamSession> session = profiles::ReadSteamSession(steamErr);
+    if (refix::steamlink::SteamInstalled()) {
+        // Every Steam account of this PC is a profile; the signed-in one is the default while Steam is on.
+        std::optional<Profile> signedIn;
+        for (const SteamSession& acc : profiles::ReadSteamAccounts()) {
+            Profile p = ImportSteamAccount(acc, all);
+            if (session && acc.steamId == session->steamId) signedIn = p;
+        }
+        if (session && !signedIn) signedIn = ImportSteamAccount(*session, all);
+        if (WantSteamOnline(session.has_value())) steamProfile = signedIn;
+    }
+    if (refix::steamlink::SteamInstalled() && WantSteamOnline(session.has_value())) {
+        refix::steamlink::SetLocalGame(appId);
+        refix::steamlink::SetSteamOverlay(!g_cfg.blockSteamOverlay);
+        refix::steamlink::Enable();
+    }
+#endif
     const std::vector<Profile> mine = profiles::ForGame(all, game);
     const bool otherInstance = saves::OtherInstanceRunning();
-    std::optional<Profile> chosen = PickProfile(mine, otherInstance);
+    std::optional<Profile> chosen = PickProfile(mine, otherInstance, steamProfile);
     if (!chosen) {
         if (otherInstance) {
             ReFixLog("[Overlay] Another instance is running; showing profile picker");

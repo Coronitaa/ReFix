@@ -17,6 +17,10 @@
 #include "../steam_p2p_hook.h"
 #include "../lan_core/refix_lan_core.h"
 
+#if REFIX_STEAM_LINK
+#include "../steam_link/steam_link.h"
+#endif
+
 extern void ReFixLog(const char* fmt, ...);
 
 namespace refix::overlay::net {
@@ -111,6 +115,12 @@ void SendTo(SOCKET s, uint32_t ip, uint16_t port, const std::vector<uint8_t>& da
     to.sin_family = AF_INET;
     to.sin_addr.s_addr = htonl(ip);
     to.sin_port = htons(port);
+#if REFIX_STEAM_LINK
+    if (steamlink::IsVirtual(ip)) {   // a Steam friend: through the ReFix Online tunnel
+        steamlink::Send(ip, g_ucastPort, port, data.data(), data.size());
+        return;
+    }
+#endif
     sendto(s, (const char*)data.data(), (int)data.size(), 0, (const sockaddr*)&to, sizeof(to));
 }
 
@@ -268,15 +278,10 @@ void OnInviteAck(Reader& r) {
                    g_outbox.end());
 }
 
-void Receive(SOCKET s) {
-    uint8_t buf[2048];
-    sockaddr_in from{};
-    int fromLen = sizeof(from);
-    const int n = recvfrom(s, (char*)buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
+void Handle(const uint8_t* buf, size_t n, uint32_t ip) {
     if (n < 6) return;
-    Reader r(buf, (size_t)n);
+    Reader r(buf, n);
     if (r.U32() != kMagic || r.U8() != kVersion) return;
-    const uint32_t ip = ntohl(from.sin_addr.s_addr);
     switch ((Msg)r.U8()) {
     case Msg::Presence: OnPresence(r, ip); break;
     case Msg::AvatarReq: OnAvatarReq(r, ip); break;
@@ -286,6 +291,35 @@ void Receive(SOCKET s) {
     default: break;
     }
 }
+
+void Receive(SOCKET s) {
+    uint8_t buf[2048];
+    sockaddr_in from{};
+    int fromLen = sizeof(from);
+    const int n = recvfrom(s, (char*)buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
+    if (n > 0) Handle(buf, (size_t)n, ntohl(from.sin_addr.s_addr));
+}
+
+#if REFIX_STEAM_LINK
+// Datagrams from Steam friends arrive on the link thread; the net thread handles them like socket input.
+std::mutex g_tunnelMu;
+std::vector<std::pair<uint32_t, std::vector<uint8_t>>> g_tunnelIn;
+
+void TunnelSink(void*, uint32_t fromIp, uint16_t, uint16_t dstPort, const uint8_t* data, size_t len) {
+    if (dstPort != kPresencePort && dstPort != g_ucastPort) return;
+    std::lock_guard<std::mutex> lock(g_tunnelMu);
+    if (g_tunnelIn.size() < 1024) g_tunnelIn.emplace_back(fromIp, std::vector<uint8_t>(data, data + len));
+}
+
+void DrainTunnel() {
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> batch;
+    {
+        std::lock_guard<std::mutex> lock(g_tunnelMu);
+        batch.swap(g_tunnelIn);
+    }
+    for (auto& [ip, data] : batch) Handle(data.data(), data.size(), ip);
+}
+#endif
 
 void Housekeeping(ULONGLONG now, ULONGLONG& lastAnnounce, ULONGLONG& lastAdapters) {
     if (now - lastAdapters >= kAdapterRefreshMs) {
@@ -333,6 +367,9 @@ void Housekeeping(ULONGLONG now, ULONGLONG& lastAnnounce, ULONGLONG& lastAdapter
             }
         }
     }
+#if REFIX_STEAM_LINK
+    if (!presence.empty()) steamlink::Broadcast(g_ucastPort, kPresencePort, presence.data(), presence.size());
+#endif
     for (const auto& [player, pkt] : resend) SendTo(g_ucast, player.ip, player.port, pkt);
 }
 
@@ -348,6 +385,9 @@ DWORD WINAPI NetThread(LPVOID) {
             if (FD_ISSET(g_bcast, &rd)) Receive(g_bcast);
             if (FD_ISSET(g_ucast, &rd)) Receive(g_ucast);
         }
+#if REFIX_STEAM_LINK
+        DrainTunnel();
+#endif
         Housekeeping(GetTickCount64(), lastAnnounce, lastAdapters);
     }
 }
@@ -407,6 +447,9 @@ bool Start() {
     getsockname(g_ucast, (sockaddr*)&local, &len);
     g_ucastPort = ntohs(local.sin_port);
     RefreshBroadcasts();
+#if REFIX_STEAM_LINK
+    steamlink::AddSink(&TunnelSink, nullptr);
+#endif
     HANDLE t = CreateThread(nullptr, 0, NetThread, nullptr, 0, nullptr);
     if (t) CloseHandle(t);
     ReFixLog("[OverlayNet] Presence on UDP %u, unicast port %u", kPresencePort, g_ucastPort);

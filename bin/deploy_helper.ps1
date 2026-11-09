@@ -340,6 +340,10 @@ EngineType=$($P.EngineType)
 ;   offline      - No network traffic outside this PC.
 Mode = $arbMode
 
+; ReFix LAN: allow (default) lets the game reach its own Internet services (analytics, web APIs, mods).
+; Steam and Photon stay emulated. block keeps every game socket on the local network.
+InternetAccess = allow
+
 ; UDP port for LAN discovery (default 47584)
 DiscoveryPort = $existingDiscoveryPort
 
@@ -1053,6 +1057,13 @@ switch ($OnlineMode) {
                 Copy-Item -LiteralPath $proxyPath -Destination $steamPath -Force -ErrorAction Stop
                 if (-not (Test-Path -LiteralPath $steamPath)) { throw "Target file not created: $steamPath" }
                 Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
+                # Steam online services (optional, switched on from the overlay): Valve's genuine DLL under its own
+                # name, loaded only when the player turns them on. Never named *_valve / *_original, so Uninstall
+                # never takes it for the game's DLL.
+                $linkSrc = Join-Path $BinDir "valve\steam_api64.dll"
+                if (Test-Path -LiteralPath $linkSrc) {
+                    Copy-Item -LiteralPath $linkSrc -Destination (Join-Path $dir "refix_steamlink64.dll") -Force -ErrorAction SilentlyContinue
+                }
             } catch {
                 Write-Host "  [ERROR] Failed to deploy ReFix LAN proxy to $dir : $_" -ForegroundColor Red
                 exit 1

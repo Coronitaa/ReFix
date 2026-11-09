@@ -1,5 +1,8 @@
 #include "refix_lan_transport.h"
 #include "refix_lan_trace.h"
+#if REFIX_STEAM_LINK
+#include "../steam_link/steam_link.h"
+#endif
 #include <iostream>
 #include <algorithm>
 #include <vector>
@@ -375,6 +378,11 @@ bool LanTransport::Start(uint16_t discoveryPort, ILanTransportListener* listener
     // 3. Launch Reactor Thread
     m_running.store(true);
     m_reactorThread = std::thread(&LanTransport::ReactorThreadLoop, this);
+#if REFIX_STEAM_LINK
+    steamlink::SetSocketCallback(g_socketLifecycleCb);
+    steamlink::SetLanSide(m_localDataEndpoint.ipv4, &RewriteAdvertisedEndpoint);
+    steamlink::AddSink(&LanTransport::TunnelSink, this);
+#endif
 
     return true;
 }
@@ -384,6 +392,9 @@ void LanTransport::Stop() {
     if (!m_running.exchange(false)) {
         return;
     }
+#if REFIX_STEAM_LINK
+    steamlink::RemoveSink(&LanTransport::TunnelSink, this);   // waits for a delivery in progress
+#endif
 
     // Wake up reactor thread by sending a local ping datagram to ephemeral port
     if (m_localDataEndpoint.port != 0) {
@@ -491,9 +502,85 @@ void LanTransport::ReactorThreadLoop() {
             }
         }
 
+        DrainTunnelQueue();
+
         // Periodic Retransmissions & Timeouts
         CheckRetransmissionsAndTimeouts();
     }
+}
+
+// Discovery packets (beacon, query, response) carry the sender's data endpoint after the scope, the peer id and
+// the display name; a lobby join request after the scope, peer id, lobby id, client peer id and client name.
+// The Steam bridge replaces it by the bridge socket that stands for a friend on this LAN.
+bool LanTransport::RewriteAdvertisedEndpoint(uint8_t* wire, size_t len, uint32_t ip, uint16_t port) {
+    if (len < sizeof(WireHeader)) return false;
+    const auto* hdr = reinterpret_cast<const WireHeader*>(wire);
+    if (hdr->magic != REFIX_WIRE_MAGIC || hdr->version != REFIX_WIRE_VERSION) return false;
+    const auto type = static_cast<MsgType>(hdr->msgType);
+    const bool join = type == MsgType::LobbyJoinReq;
+    if (!join && type != MsgType::DiscoveryBeacon && type != MsgType::DiscoveryQuery && type != MsgType::DiscoveryResponse)
+        return false;
+    const size_t end = (std::min)(len, sizeof(WireHeader) + hdr->payloadLen);
+    size_t off = sizeof(WireHeader);
+    auto skipString = [&]() {
+        if (off + 4 > end) return false;
+        uint32_t n = 0;
+        memcpy(&n, wire + off, 4);
+        if (n > end - off - 4) return false;
+        off += 4 + n;
+        return true;
+    };
+    if (!skipString()) return false;          // scope
+    off += 16;                                // peer id
+    if (join) {
+        if (off > end || !skipString()) return false;   // lobby id
+        off += 16;                                      // client peer id
+    }
+    if (off > end || !skipString()) return false;   // display name
+    if (off + 6 > end) return false;
+    memcpy(wire + off, &ip, 4);               // WriteEndpoint: u32 + u16, little-endian
+    memcpy(wire + off + 4, &port, 2);
+    return true;
+}
+
+int LanTransport::WireSend(const char* buf, int len, const sockaddr* to, int tolen) {
+#if REFIX_STEAM_LINK
+    const auto* sin = reinterpret_cast<const sockaddr_in*>(to);
+    if (to->sa_family == AF_INET && steamlink::IsVirtual(ntohl(sin->sin_addr.s_addr))) {
+        return steamlink::Send(ntohl(sin->sin_addr.s_addr), m_localDataEndpoint.port, ntohs(sin->sin_port), buf, (size_t)len)
+                   ? len : SOCKET_ERROR;
+    }
+#endif
+    return sendto(m_dataSocket, buf, len, 0, to, tolen);
+}
+
+void LanTransport::TunnelSink(void* ctx, uint32_t fromIp, uint16_t fromPort, uint16_t dstPort, const uint8_t* data, size_t len) {
+    auto* self = static_cast<LanTransport*>(ctx);
+    if (dstPort != 0 && dstPort != self->m_localDataEndpoint.port && dstPort != self->m_discoveryPort) return;
+    {
+        std::lock_guard<std::mutex> lock(self->m_tunnelMutex);
+        if (self->m_tunnelQueue.size() >= 4096) return;   // reactor stalled: drop like a full UDP buffer
+        self->m_tunnelQueue.emplace_back(LanEndpoint{ fromIp, fromPort }, std::vector<uint8_t>(data, data + len));
+    }
+    // Wake the reactor's select() with a 1-byte loopback datagram (dropped as too short for a wire header).
+    std::lock_guard<std::mutex> outLock(self->m_outputMutex);
+    if (self->m_dataSocket == INVALID_SOCKET) return;
+    sockaddr_in loop{};
+    loop.sin_family = AF_INET;
+    loop.sin_addr.s_addr = htonl(0x7F000001);
+    loop.sin_port = htons(self->m_localDataEndpoint.port);
+    const char wake = 0;
+    sendto(self->m_dataSocket, &wake, 1, 0, reinterpret_cast<const sockaddr*>(&loop), sizeof(loop));
+}
+
+void LanTransport::DrainTunnelQueue() {
+    std::vector<std::pair<LanEndpoint, std::vector<uint8_t>>> batch;
+    {
+        std::lock_guard<std::mutex> lock(m_tunnelMutex);
+        if (m_tunnelQueue.empty()) return;
+        batch.swap(m_tunnelQueue);
+    }
+    for (auto& item : batch) ProcessInboundWirePacket(item.second.data(), item.second.size(), item.first);
 }
 
 void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, const LanEndpoint& fromEp) {
@@ -518,6 +605,18 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
     if (localId.IsValid() && senderPeer == localId) {
         return;
     }
+#if REFIX_STEAM_LINK
+    // Steam online services bridge: LAN discovery reaches our Steam friends, and the copies of our friends'
+    // discovery that we repeat on the LAN are not taken back in (we already have those friends directly).
+    if (!steamlink::IsVirtual(fromEp.ipv4)) {
+        const bool fromThisPc = fromEp.ipv4 == 0x7F000001 || fromEp.ipv4 == m_localDataEndpoint.ipv4;
+        if (fromThisPc && steamlink::IsBridgePort(fromEp.port)) return;
+        if (hdr->msgType == static_cast<uint8_t>(MsgType::DiscoveryBeacon) ||
+            hdr->msgType == static_cast<uint8_t>(MsgType::DiscoveryQuery) ||
+            hdr->msgType == static_cast<uint8_t>(MsgType::LobbyAnnouncement))   // rooms hosted on this LAN
+            steamlink::ForwardFromLan(fromEp.ipv4, fromEp.port, buf, len);
+    }
+#endif
 
     const uint8_t* payload = buf + sizeof(WireHeader);
     size_t payloadLen = hdr->payloadLen;
@@ -948,8 +1047,8 @@ void LanTransport::SendAckPacket(const LanEndpoint& target, uint8_t channel, uin
     std::lock_guard<std::mutex> outLock(m_outputMutex);
     if (m_dataSocket == INVALID_SOCKET) return;
 
-    sendto(m_dataSocket, reinterpret_cast<const char*>(&hdr), sizeof(hdr), 0,
-           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    WireSend(reinterpret_cast<const char*>(&hdr), sizeof(hdr),
+             reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
 }
 
 void LanTransport::SendDisconnectPacketLocked(const LanEndpoint& target, uint32_t generationId) {
@@ -980,8 +1079,8 @@ void LanTransport::SendDisconnectPacketLocked(const LanEndpoint& target, uint32_
     std::lock_guard<std::mutex> outLock(m_outputMutex);
     if (m_dataSocket == INVALID_SOCKET) return;
 
-    sendto(m_dataSocket, reinterpret_cast<const char*>(&dHdr), sizeof(dHdr), 0,
-           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
+    WireSend(reinterpret_cast<const char*>(&dHdr), sizeof(dHdr),
+             reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
 }
 
 uint32_t LanTransport::CalculateSackMask(const std::map<uint32_t, InboundPacket>& ooo, uint32_t ackSeq) {
@@ -1257,8 +1356,8 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
                     {
                         std::lock_guard<std::mutex> outLock(m_outputMutex);
                         if (m_dataSocket != INVALID_SOCKET) {
-                            sendto(m_dataSocket, reinterpret_cast<const char*>(it->packetBytes.data()),
-                                   static_cast<int>(it->packetBytes.size()), 0,
+                            WireSend(reinterpret_cast<const char*>(it->packetBytes.data()),
+                                   static_cast<int>(it->packetBytes.size()),
                                    reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
                         }
                     }
@@ -1318,8 +1417,8 @@ bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size
             sin.sin_family = AF_INET;
             sin.sin_addr.s_addr = htonl(ip);
             sin.sin_port = htons(p);
-            sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
-                   static_cast<int>(buffer.size()), 0,
+            WireSend(reinterpret_cast<const char*>(buffer.data()),
+                   static_cast<int>(buffer.size()),
                    reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
         };
         // 1. Multicast Group (239.255.71.84) - ONLY when multicast group successfully joined!
@@ -1338,6 +1437,9 @@ bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size
         }
     };
 
+#if REFIX_STEAM_LINK
+    steamlink::Broadcast(m_localDataEndpoint.port, 0, buffer.data(), buffer.size());
+#endif
     if (targetPort != 0) {
         sendToPort(targetPort);
     } else {
@@ -1396,8 +1498,8 @@ bool LanTransport::SendDiscoveryPacket(MsgType type, const LanEndpoint& target, 
     std::lock_guard<std::mutex> outLock(m_outputMutex);
     if (!m_running.load() || m_dataSocket == INVALID_SOCKET) return false;
 
-    int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
-                      static_cast<int>(buffer.size()), 0,
+    int sent = WireSend(reinterpret_cast<const char*>(buffer.data()),
+                      static_cast<int>(buffer.size()),
                       reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
     return sent > 0;
 }
@@ -1430,8 +1532,8 @@ bool LanTransport::SendDiscoveryResponse(const LanEndpoint& target, const void* 
     std::lock_guard<std::mutex> outLock(m_outputMutex);
     if (!m_running.load() || m_dataSocket == INVALID_SOCKET) return false;
 
-    int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
-                      static_cast<int>(buffer.size()), 0,
+    int sent = WireSend(reinterpret_cast<const char*>(buffer.data()),
+                      static_cast<int>(buffer.size()),
                       reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
     return sent > 0;
 }
@@ -1492,8 +1594,8 @@ LanSendResult LanTransport::SendUnreliableDetailed(const LanEndpoint& target, ui
         return LanSendResult::SocketClosed;
     }
 
-    int sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
-                      static_cast<int>(buffer.size()), 0,
+    int sent = WireSend(reinterpret_cast<const char*>(buffer.data()),
+                      static_cast<int>(buffer.size()),
                       reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
     return (sent > 0) ? LanSendResult::Success : LanSendResult::SocketError;
 }
@@ -1600,8 +1702,8 @@ LanSendResult LanTransport::SendReliableDetailed(const PeerId& targetPeer, const
                 state.nextSequenceOut--;
                 return LanSendResult::SocketClosed;
             }
-            sent = sendto(m_dataSocket, reinterpret_cast<const char*>(buffer.data()),
-                          static_cast<int>(buffer.size()), 0,
+            sent = WireSend(reinterpret_cast<const char*>(buffer.data()),
+                          static_cast<int>(buffer.size()),
                           reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
         }
 
@@ -1676,8 +1778,8 @@ LanSendResult LanTransport::SendReliableDetailed(const PeerId& targetPeer, const
             state.nextMessageIdOut--;
             return LanSendResult::SocketClosed;
         }
-        sent0 = sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[0].packetBytes.data()),
-                       static_cast<int>(preparedFrags[0].packetBytes.size()), 0,
+        sent0 = WireSend(reinterpret_cast<const char*>(preparedFrags[0].packetBytes.data()),
+                       static_cast<int>(preparedFrags[0].packetBytes.size()),
                        reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
     }
 
@@ -1694,8 +1796,8 @@ LanSendResult LanTransport::SendReliableDetailed(const PeerId& targetPeer, const
         for (size_t i = 1; i < preparedFrags.size(); ++i) {
             state.unackedOutbound.push_back(preparedFrags[i]);
             if (m_dataSocket != INVALID_SOCKET) {
-                sendto(m_dataSocket, reinterpret_cast<const char*>(preparedFrags[i].packetBytes.data()),
-                       static_cast<int>(preparedFrags[i].packetBytes.size()), 0,
+                WireSend(reinterpret_cast<const char*>(preparedFrags[i].packetBytes.data()),
+                       static_cast<int>(preparedFrags[i].packetBytes.size()),
                        reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
             }
         }

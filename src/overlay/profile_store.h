@@ -92,6 +92,13 @@ bool IsInUseAnywhere(const std::wstring& id);    // by any game on this PC (this
 // Session of the Steam client running on this PC. Empty with `error` set when Steam is closed or no
 // account is logged in.
 std::optional<SteamSession> ReadSteamSession(std::wstring& error);
+// Every Steam account that has signed in on this PC (config\loginusers.vdf), signed in or not.
+std::vector<SteamSession> ReadSteamAccounts();
+// The profile of that Steam account (name and real SteamID), created on first use and listed in this game.
+// Saved; `all` is updated. A profile imported from the same account earlier is reused. The caller adds the
+// Steam avatar (profile_store does not depend on the image code).
+Profile EnsureSteamProfile(const SteamSession& session, std::vector<Profile>& all);
+bool IsSteamProfile(const Profile& p);
 
 } // namespace profiles
 } // namespace refix::overlay
