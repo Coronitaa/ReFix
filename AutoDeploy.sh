@@ -5,7 +5,8 @@
 # the game's own Steam/EOS DLLs are backed up and replaced by the ReFix binaries for the chosen product.
 #
 #   bash AutoDeploy.sh                         interactive
-#   bash AutoDeploy.sh <game folder|game.exe> [lan|online] [appid] [refix|steam|none]
+#   bash AutoDeploy.sh <game folder|game.exe> [lan|offline|online] [appid] [refix|steam|none]
+#     lan = ReFix Online + LAN, offline = ReFix Offline LAN (previous release), online = ReFix Online Legacy
 #   bash AutoDeploy.sh --uninstall <game folder>
 #
 # The last argument (or REFIX_OVERLAY_MODE) picks the in-game overlay of ReFix LAN: the ReFix overlay
@@ -219,7 +220,13 @@ uninstall() {
         rm -f "$d/RedboneEOS.dll"
     done < <({ dirs_with EOSSDK_original.dll; dirs_with RedboneEOS.dll; } | sort -u)
     while IFS= read -r d; do restore_one "$d" winmm_o.dll winmm.dll; done < <(dirs_with winmm_o.dll)
-    find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" -o -name "refix_steamlink64.dll" -o -name "refix_steamlink.dll" -o -name "refix_steamhost64.exe" -o -name "refix_steamhost.exe" \) -delete 2>/dev/null || true
+    find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" -o -name "refix_steamlink64.dll" -o -name "refix_steamlink.dll" -o -name "refix_steamhost64.exe" -o -name "refix_steamhost.exe" -o -name "ReFixFusionShared.log" \) -delete 2>/dev/null || true
+    # ReFix support tools (Photon Fusion Shared server): only the folder holding ReFix's own server, then its
+    # ReFix parent if nothing else is left in it.
+    while IFS= read -r f; do
+        rm -rf "$(dirname "$f")"
+        rmdir "$(dirname "$(dirname "$f")")" 2>/dev/null || true
+    done < <(find "$GAME_DIR" -type f -name ReFixFusionShared.exe 2>/dev/null)
     ok "Done. ReFix files removed and backups restored."
     echo "    ReFix LAN profiles and their saves stay in the prefix's AppData/Roaming/ReFix (shared by every game)."
 }
@@ -250,10 +257,11 @@ deploy_steam_x64() {
         fi
         cp -f "$src" "$d/steam_api64.dll"
         ok "Deployed ReFix $MODE steam_api64.dll to $d"
-        # ReFix LAN: Valve's DLL for the optional Steam online services (switched on from the overlay)
-        if [ "$MODE" = lan ] && [ -f "$BIN/valve/steam_api64.dll" ]; then
+        # ReFix Online + LAN: Valve's DLL and the helper for the optional Steam online services (overlay switch).
+        # Only products that ship the helper have them (not Offline LAN).
+        if [ "$MODE" = lan ] && [ -f "$PRODUCT_BIN/refix_steamhost64.exe" ] && [ -f "$BIN/valve/steam_api64.dll" ]; then
             cp -f "$BIN/valve/steam_api64.dll" "$d/refix_steamlink64.dll"
-            [ -f "$PRODUCT_BIN/refix_steamhost64.exe" ] && cp -f "$PRODUCT_BIN/refix_steamhost64.exe" "$d/refix_steamhost64.exe"
+            cp -f "$PRODUCT_BIN/refix_steamhost64.exe" "$d/refix_steamhost64.exe"
         fi
     done < <({ dirs_with steam_api64.dll; dirs_with steam_api64_original.dll; } | sort -u)
 }
@@ -425,13 +433,17 @@ if [ "$UNINSTALL" = 1 ]; then uninstall; exit 0; fi
 MODE="${2:-}"
 if [ -z "$MODE" ]; then
     echo
-    echo "  [1] ReFix Online Legacy via Steam - uses the Steam client (start the game from Steam)"
-    echo "  [2] ReFix LAN / Online         - local network; Steam online services optional in the overlay"
-    read -r -p "Mode [1/2]: " choice
-    case "$choice" in 1) MODE=online ;; 2) MODE=lan ;; *) die "Choose 1 or 2" ;; esac
+    echo "  [1] ReFix Online + LAN          - local network; Steam friends optional from the overlay (recommended)"
+    echo "  [2] ReFix Offline LAN           - the LAN version of the previous release, local network only"
+    echo "  [3] ReFix Online Legacy via Steam - uses the Steam client (start the game from Steam)"
+    read -r -p "Mode [1/2/3] (default 1): " choice
+    case "${choice:-1}" in 1) MODE=lan ;; 2) MODE=offline ;; 3) MODE=online ;; *) die "Choose 1, 2 or 3" ;; esac
 fi
-case "$MODE" in online|lan) ;; *) die "Mode must be 'online' or 'lan'" ;; esac
-PRODUCT_BIN="$BIN/$MODE"
+case "$MODE" in online|lan|offline) ;; *) die "Mode must be 'lan', 'offline' or 'online'" ;; esac
+# Offline LAN installs exactly like ReFix LAN, from its own folder (bin/lan_offline).
+PRODUCT_DIR="$MODE"
+if [ "$MODE" = offline ]; then MODE=lan; PRODUCT_DIR=lan_offline; fi
+PRODUCT_BIN="$BIN/$PRODUCT_DIR"
 [ -d "$PRODUCT_BIN" ] || die "ReFix $MODE binaries not found in $PRODUCT_BIN"
 
 APP_ID="${3:-}"
@@ -473,6 +485,10 @@ deploy_eos
 clean_online_winmm
 write_ini
 install_mods
+# ReFix Online + LAN: the Photon Fusion Shared server it starts next to the game (shipped with the Online product)
+if [ "$PRODUCT_DIR" = lan ] && [ -d "$BIN/online/ReFix" ]; then
+    cp -rf "$BIN/online/ReFix" "$EXE_DIR/" && ok "Deployed ReFix support tools (Fusion Shared server) to $EXE_DIR/ReFix"
+fi
 
 echo
 ok "ReFix $MODE is installed in $GAME_NAME."

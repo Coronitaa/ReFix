@@ -6,10 +6,11 @@
 
 ReFix gets multiplayer working in PC games that normally need Steam or Epic online services. It replaces the game's `steam_api64.dll` (and the EOS DLLs when the game has them) with its own, and backs up the originals so you can undo it.
 
-One download contains two products. You pick one per game:
+One download contains three products. You pick one per game:
 
-- **ReFix LAN / Online** plays on your local network (or a VPN like Radmin, Hamachi or ZeroTier) with no Steam client at all. If Steam is installed, one switch in the overlay also lets you play with your Steam friends over the Internet.
-- **ReFix Online Legacy** is the previous online mode: the whole game runs through your Steam client as Spacewar.
+- **ReFix Online + LAN** plays on your local network (or a VPN like Radmin, Hamachi or ZeroTier) with no Steam client at all. If Steam is installed, one switch in the overlay also lets you play with your Steam friends over the Internet.
+- **ReFix Offline LAN** is the LAN version of the previous release (2.3.2), for local network play only.
+- **ReFix Online Legacy** is the online version of the previous release (2.3.2): the whole game runs through your Steam client as Spacewar.
 
 ReFix also ships a DLC unlocker based on SmokeAPI.
 
@@ -18,8 +19,8 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 1. Download `ReFix_Release_v2.4.0.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
-   - `[1] ReFix Online Legacy via Steam` or `[2] ReFix LAN / Online`
-   - which overlay the game shows (ReFix LAN only): ReFix's, Steam's, or none
+   - `[1] ReFix Online + LAN`, `[2] ReFix Offline LAN` or `[3] ReFix Online Legacy via Steam`
+   - which overlay the game shows (LAN products only): ReFix's, Steam's, or none
    - which DLCs to unlock: all, none, or a list you pick from the Steam Store
 4. Start the game.
 

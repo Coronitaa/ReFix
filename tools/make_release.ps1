@@ -18,7 +18,7 @@ $bin = Join-Path $repo "bin"
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
 $required = @(
     "bin\lan\steam_api64.dll", "bin\lan\EOSSDK-Win64-Shipping.dll", "bin\lan\RedboneEOS.dll",
-    "bin\lan\x86\steam_api.dll",
+    "bin\lan\x86\steam_api.dll", "bin\lan_offline\steam_api64.dll", "bin\lan_offline\x86\steam_api.dll",
     "bin\online\steam_api64.dll", "bin\online\winmm.dll", "bin\online\EOSSDK-Win64-Shipping.dll",
     "bin\online\x86\steam_api.dll",
     "bin\deploy_helper.ps1", "AutoDeploy.bat", "AutoDeploy.sh", "Uninstall_ReFix.bat", "Uninstall_ReFix.sh", "ReFix.ini", "LICENSE"
@@ -53,7 +53,7 @@ Get-ChildItem -LiteralPath $bin -File | Where-Object {
 } | ForEach-Object { Copy-Into ("bin\" + $_.Name) }
 
 # Product folders: ReFix LAN, ReFix Online, the legacy x86 fallback and the deploy tools
-foreach ($d in "lan", "online", "goldberg", "valve", "bepinex", "tools") {
+foreach ($d in "lan", "lan_offline", "online", "goldberg", "valve", "bepinex", "tools") {
     if (Test-Path -LiteralPath (Join-Path $bin $d)) { Copy-Into ("bin\" + $d) }
 }
 
@@ -80,9 +80,10 @@ ReFix 2.4.0 - LAN / Online
 1. Run AutoDeploy.bat.
 2. Pick the game folder.
 3. Choose the mode:
-   [1] ReFix Online Legacy via Steam - uses the Steam client, as in earlier versions.
-   [2] ReFix LAN / Online            - plays on the local network, Steam not needed. With Steam installed,
+   [1] ReFix Online + LAN            - plays on the local network, Steam not needed. With Steam installed,
        the Steam button in the overlay's top bar adds your Steam friends to the same rooms (optional).
+   [2] ReFix Offline LAN             - the LAN version of the previous release (2.3.2): local network only.
+   [3] ReFix Online Legacy via Steam - the Online version of the previous release (2.3.2): uses the Steam client.
 4. Launch the game with its own .exe (or a shortcut to that .exe).
    steam:// shortcuts start the game through Steam, without ReFix LAN.
 

@@ -70,14 +70,18 @@ if ($BinDir)    { $BinDir    = $BinDir.Trim().Trim('"').TrimEnd('\').TrimEnd('/'
 if ($ExeDir)    { $ExeDir    = $ExeDir.Trim().Trim('"').TrimEnd('\').TrimEnd('/') }
 if (-not $ExeDir) { $ExeDir  = $TargetDir }
 
-# ReFix Online and ReFix LAN are separate products with their own binaries:
-#   bin\online\  steam_api64.dll / winmm.dll / EOSSDK / x86\steam_api.dll built from the ReFix Online branch
-#   bin\lan\     standalone ReFix LAN emulator (no Steam client, no Valve DLL)
+# ReFix products, each with its own binaries:
+#   bin\lan\          ReFix Online + LAN: the LAN emulator (no Steam client needed) with optional Steam online services
+#   bin\lan_offline\  ReFix Offline LAN: the LAN build of the previous release, LAN only (OnlineMode "lanoffline")
+#   bin\online\       ReFix Online Legacy: steam_api64.dll / winmm.dll / EOSSDK / x86\steam_api.dll via the Steam client
 # No fallback to bin\ itself: deploying one product's DLL for the other would silently break the game.
-$productName = if ($OnlineMode -in @("goldberg", "offline", "lan")) { "lan" } else { "online" }
+# Offline LAN deploys exactly like ReFix LAN from here on (same files, same ReFix.ini), only from its own folder.
+$lanProduct = "lan"
+if ($OnlineMode -eq "lanoffline") { $lanProduct = "lan_offline"; $OnlineMode = "goldberg" }
+$productName = if ($OnlineMode -in @("goldberg", "offline", "lan")) { $lanProduct } else { "online" }
 $ProductBinDir = Join-Path $BinDir $productName
 if (-not (Test-Path -LiteralPath (Join-Path $ProductBinDir "steam_api64.dll"))) {
-    $buildHint = if ($productName -eq "lan") { "build.bat" } else { "build_online.bat" }
+    $buildHint = if ($productName -eq "lan") { "build.bat" } elseif ($productName -eq "lan_offline") { "copy bin\lan from the previous release" } else { "build_online.bat" }
     Write-Host "[ERROR] ReFix $productName binaries not found in $ProductBinDir (run $buildHint)" -ForegroundColor Red
     exit 1
 }
@@ -1057,17 +1061,27 @@ switch ($OnlineMode) {
                 Copy-Item -LiteralPath $proxyPath -Destination $steamPath -Force -ErrorAction Stop
                 if (-not (Test-Path -LiteralPath $steamPath)) { throw "Target file not created: $steamPath" }
                 Write-Host "  [OK] Deployed ReFix proxy steam_api64.dll to $dir" -ForegroundColor Green
-                # Steam online services (optional, switched on from the overlay): Valve's genuine DLL under its own
-                # name, loaded only when the player turns them on. Never named *_valve / *_original, so Uninstall
-                # never takes it for the game's DLL.
+                # Steam online services (optional, switched on from the overlay; ReFix Online + LAN only, so only when
+                # the product ships the helper process that talks to Steam). Valve's genuine DLL goes under its own
+                # name, loaded only when the player turns them on: never *_valve / *_original, so Uninstall never
+                # takes it for the game's DLL.
+                $hostSrc = Join-Path $ProductBinDir "refix_steamhost64.exe"
                 $linkSrc = Join-Path $BinDir "valve\steam_api64.dll"
-                if (Test-Path -LiteralPath $linkSrc) {
+                if ((Test-Path -LiteralPath $hostSrc) -and (Test-Path -LiteralPath $linkSrc)) {
                     Copy-Item -LiteralPath $linkSrc -Destination (Join-Path $dir "refix_steamlink64.dll") -Force -ErrorAction SilentlyContinue
-                }
-                # The helper process that talks to Steam (ending it is what makes Steam stop showing Spacewar)
-                $hostSrc = Join-Path $BinDir "lan\refix_steamhost64.exe"
-                if (Test-Path -LiteralPath $hostSrc) {
                     Copy-Item -LiteralPath $hostSrc -Destination (Join-Path $dir "refix_steamhost64.exe") -Force -ErrorAction SilentlyContinue
+                }
+                # Photon Fusion Shared-mode server (ReFix\FusionShared), which the LAN emulator starts next to the game.
+                # The LAN build does not carry its own copy: it is the same companion the Online product ships.
+                $fusionSrc = Join-Path $BinDir "online\ReFix"
+                if ($lanProduct -eq "lan" -and -not $script:fusionDeployed -and (Test-Path -LiteralPath $fusionSrc)) {
+                    $script:fusionDeployed = $true
+                    try {
+                        Copy-Item -LiteralPath $fusionSrc -Destination $ExeDir -Recurse -Force -ErrorAction Stop
+                        Write-Host "  [OK] Deployed ReFix support tools (Fusion Shared server) to $(Join-Path $ExeDir 'ReFix')" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  [WARNING] Failed to deploy ReFix support tools: $_" -ForegroundColor Yellow
+                    }
                 }
             } catch {
                 Write-Host "  [ERROR] Failed to deploy ReFix LAN proxy to $dir : $_" -ForegroundColor Red
@@ -1105,7 +1119,7 @@ switch ($OnlineMode) {
                     if (Test-Path -LiteralPath $lanDll32) {
                         Copy-Item -LiteralPath $lanDll32 -Destination $steamPath32 -Force -ErrorAction Stop
                         Write-Host "  [OK] Deployed ReFix LAN x86 steam_api.dll to $dir32" -ForegroundColor Green
-                        $hostSrc32 = Join-Path $BinDir "lan\x86\refix_steamhost.exe"
+                        $hostSrc32 = Join-Path $ProductBinDir "x86\refix_steamhost.exe"
                         if (Test-Path -LiteralPath $hostSrc32) {
                             Copy-Item -LiteralPath $hostSrc32 -Destination (Join-Path $dir32 "refix_steamhost.exe") -Force -ErrorAction SilentlyContinue
                         }
