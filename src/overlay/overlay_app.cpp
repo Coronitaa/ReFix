@@ -206,7 +206,10 @@ void App::Refresh(const host::GameWindow& game) {
     const ULONGLONG now = GetTickCount64();
     if (now - lastRefresh_ < kRefreshMs) return;
     lastRefresh_ = now;
-    if (!game.title.empty()) gameTitle_ = game.title;
+    if (!game.title.empty() && game.title != gameTitle_) {
+        gameTitle_ = game.title;
+        steamlink::SetLocalGameName(ToUtf8(gameTitle_));   // friends see which game you play
+    }
     // The window title names this game better than its exe ("Left 4 Dead" for left4dead.exe).
     if (!gameNamed_ && active_ && !active_->guest && !gameTitle_.empty()) {
         gameNamed_ = true;
@@ -555,6 +558,7 @@ void App::ImportProfile(const std::wstring& id) {
 ui::AvatarRef App::ProfileAvatar(const Profile& p) {
     ui::AvatarRef a;
     a.stock = p.stockAvatar;
+    a.steam = profiles::IsSteamProfile(p);
     if (!p.customAvatar) return a;
     const std::string key = "p:" + ToUtf8(p.id) + ":" + std::to_string(profileVersion_);
     const std::wstring path = profiles::AvatarPath(p.id);

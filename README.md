@@ -50,14 +50,26 @@ To update ReFix in a game, run the new `AutoDeploy` on it again.
 
 ### Steam online services
 
-When Steam is installed, the players card of the overlay has a small **Steam** switch.
+When Steam is installed, the top bar of the overlay has a **Steam** button. It asks before it changes anything and explains what happens.
 
-- Turned on, ReFix connects to Steam as Spacewar (AppID 480), and opens Steam in the background if it was closed. Your Steam friends show up in a card next to the LAN players.
-- Friends who run a ReFix game with the switch on become players of your network: lobbies, invites, Photon rooms and the overlay all work with them as on a LAN, carried over Steam P2P. The game itself never talks to Steam.
-- Your Steam account becomes a profile in the profile list, and the default one while Steam is open, with its own saves.
+- Turned on, ReFix connects to Steam as Spacewar (AppID 480), and opens Steam in the background if it was closed.
+- Your Steam friends show up in a card next to the LAN players, with their Steam pictures and status. Friends playing with ReFix come first (the ones in your game at the top) and say which game they play.
+- Friends who run a ReFix game with Steam on become players of your network: lobbies, invites, Photon rooms and the overlay all work with them as on a LAN, carried over Steam P2P. The game itself never talks to Steam.
+- One room can mix both: players on your LAN and Steam friends over the Internet. The PC with Steam on joins them, nobody else has to set anything up.
+- Every Steam account that signed in on this PC becomes a profile (with a Steam badge). The one signed in is the default while Steam is on.
 - Turned off, ReFix goes back to LAN only. The choice is remembered on this PC.
 - `ReFix.ini` `[Steam] OnlineServices`: `auto` (default, on when Steam is already open and signed in), `on` or `off`. The switch in the overlay wins.
 - The ReFix overlay replaces Steam's. `BlockSteamOverlay = false` in `[Overlay]` loads Steam's overlay as well.
+
+### Profile sync
+
+Steam profiles keep everything (saves, achievements, stats, items, emulated Steam Cloud files) in one `.rfxp` file in a folder you choose in Settings. Pick the folder of OneDrive, Google Drive or Dropbox and its app uploads it, so your games follow you to any PC with that Steam account; a USB drive works too. ReFix picks a cloud folder by itself when it finds one.
+
+- The round button next to your profile shows the state: green synced, orange changes waiting, red failed, grey nowhere to sync. Click it to sync now; it spins while it works.
+- At game start ReFix takes a newer file from another PC. What it replaces is kept in `%APPDATA%\ReFix\SyncBackups` (last 3).
+- The file is compressed and scrambled so it is not edited by hand by mistake, and a checksum rejects damaged files. Nothing is sent to ReFix.
+- Local profiles stay on the PC unless you turn on "Sync local profiles too". "Only on this PC" turns syncing off; your profiles always stay on the PC either way.
+- Settings also exports your profile to a `.rfxp` file anywhere, and imports one. An imported file always becomes a new profile, so nothing that exists is replaced.
 ### Overlay
 
 Press **Shift+Tab**, or the Xbox / PS button of a controller.

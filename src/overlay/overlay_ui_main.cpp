@@ -138,6 +138,7 @@ void App::DrawOverlay(ImVec2 viewport) {
     DrawProfileMenu();
     DrawSwitchConfirm();
     DrawDeleteConfirm();
+    DrawSteamConfirm();
     DrawEditorModal();
     DrawPurchaseModal(viewport);
     if (!inviteOnly_) DrawWebModal(viewport);
@@ -197,6 +198,9 @@ void App::DrawTopBar(ImVec2 viewport) {
     TextAt(dl, f.strong, ImVec2(chipMin_.x + ui::S(48), cy - f.strong->FontSize * 0.55f), ui::color::Text, name);
     TextAt(dl, f.caption, ImVec2(chipMax_.x - ui::S(30), cy - f.caption->FontSize * 0.45f), ui::color::Muted,
            ui::icon::ChevronDown);
+    // Next to the profile: its sync ring, then the Steam online services button.
+    x = DrawSyncButton(x - ui::S(10), cy);
+    x = DrawSteamButton(x - ui::S(10), cy);
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -279,10 +283,7 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
         ImGui::BeginChild("##pickerplayers", size, ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     } else {
         ui::BeginCard("##players", pos, size);
-        const ImVec2 headPos = ImGui::GetCursorScreenPos();
-        const float headW = ImGui::GetContentRegionAvail().x;
         ImGui::PushFont(ui::F().heading);
-        const float headH = ImGui::GetTextLineHeight();
         ui::TextColored(ui::color::Accent, ui::icon::Lan);
         ImGui::SameLine();
         ImGui::TextUnformatted(i18n::T("Players on the LAN", "Jugadores en la LAN"));
@@ -295,7 +296,6 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
                  rows_.size());
         ui::TextColored(ui::color::Muted, count);
         ImGui::PopFont();
-        DrawSteamSwitch(ImVec2(headPos.x + headW, headPos.y + headH * 0.5f));
     }
 
     // Search box with a leading glyph.

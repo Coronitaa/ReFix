@@ -440,7 +440,47 @@ void SwitchTo(const Profile& active, const std::vector<Profile>& all) {
         ReFixLog("[Saves] Another instance of this game is running: save folders left as they are");
         return;
     }
-    for (const Location& loc : locations) SwitchOne(loc, active, all);
+    for (const Location& loc : locations) {
+        WritePrivateProfileStringW(L"Paths", loc.label.c_str(), loc.live.c_str(), OwnersIni().c_str());
+        SwitchOne(loc, active, all);
+    }
+}
+
+std::wstring StashOf(const std::wstring& profileId, const std::wstring& label) { return StashDir(profileId, label); }
+
+// Folder of a label recorded before [Paths] existed: UE_<Project>, Unity_<Company>_<Product>.
+static std::wstring DerivePath(const std::wstring& label) {
+    wchar_t buf[MAX_PATH] = {};
+    if (label.rfind(L"UE_", 0) == 0) {
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) return {};
+        return std::wstring(buf) + L"\\" + label.substr(3) + L"\\Saved\\SaveGames";
+    }
+    if (label.rfind(L"Unity_", 0) == 0 && GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH)) {
+        const std::wstring rest = label.substr(6), base = std::wstring(buf) + L"\\AppData\\LocalLow\\";
+        for (size_t at = rest.find(L'_'); at != std::wstring::npos; at = rest.find(L'_', at + 1)) {
+            const std::wstring dir = base + rest.substr(0, at) + L"\\" + rest.substr(at + 1);
+            if (GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES) return dir;
+        }
+    }
+    return {};
+}
+
+std::vector<Location> OwnedBy(const std::wstring& profileId) {
+    std::vector<Location> out;
+    std::vector<wchar_t> buf(32768);
+    const DWORD n = GetPrivateProfileSectionW(L"Owners", buf.data(), (DWORD)buf.size(), OwnersIni().c_str());
+    for (const wchar_t* p = buf.data(); p < buf.data() + n && *p; p += wcslen(p) + 1) {
+        const std::wstring entry = p;
+        const size_t eq = entry.find(L'=');
+        if (eq == std::wstring::npos || entry.substr(eq + 1) != profileId) continue;
+        Location loc;
+        loc.label = entry.substr(0, eq);
+        wchar_t path[MAX_PATH] = {};
+        GetPrivateProfileStringW(L"Paths", loc.label.c_str(), L"", path, MAX_PATH, OwnersIni().c_str());
+        loc.live = path[0] ? std::wstring(path) : DerivePath(loc.label);
+        if (!loc.live.empty()) out.push_back(loc);
+    }
+    return out;
 }
 
 std::wstring GetActiveSaveDir(const std::wstring& label) {

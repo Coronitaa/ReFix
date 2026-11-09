@@ -16,6 +16,7 @@ enum class State { Off, Starting, Online, Failed };
 
 bool SteamInstalled();               // a Steam client is installed for this Windows user
 void SetLocalGame(uint32_t appId);   // published to friends so they see which game you play
+void SetLocalGameName(const std::string& utf8Name);   // its display name (window title), also published
 void SetSteamOverlay(bool on);       // ReFix.ini [Overlay] BlockSteamOverlay=false: load Steam's overlay too
 void Enable();                       // asynchronous; State() goes Starting -> Online or Failed
 void Disable();                      // back to LAN only
@@ -61,9 +62,14 @@ struct Friend {
     bool playing = false;            // in some game
     bool refix = false;              // runs ReFix with Steam online services on
     uint32_t appId = 0;              // game it plays through ReFix (0 = unknown)
+    std::string gameName;            // that game's name as the friend's ReFix publishes it (UTF-8)
+    uint32_t steamGameId = 0;        // AppID of what Steam says the friend plays (480 for ReFix)
+    int avatar = 0;                  // Steam image handle of the friend's medium avatar (0 = not loaded yet)
     uint32_t virtIp = 0;             // its address on the tunnel, 0 when not a ReFix peer
 };
 std::vector<Friend> Friends();       // empty while the link is not Online
 uint64_t SteamIdOf(uint32_t virtIp); // 0 when unknown
+// RGBA8 pixels of a Steam image handle (Friend::avatar). False while Steam has not downloaded it.
+bool AvatarRgba(int image, int& width, int& height, std::vector<uint8_t>& rgba);
 
 } // namespace refix::steamlink

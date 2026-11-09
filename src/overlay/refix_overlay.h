@@ -42,6 +42,7 @@ std::wstring InventoryFolder(uint32_t appId);
 std::wstring ActiveProfileId();
 
 void Start();
+void Shutdown();           // game exit: last profile sync upload
 bool IsEnabled();          // ISteamUtils::IsOverlayEnabled
 
 void ActivateOverlay(const char* dialog);

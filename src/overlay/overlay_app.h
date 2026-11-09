@@ -29,6 +29,8 @@ int NextEditorImageSerial();
 
 // Restores the identity variables the emulator exported (refix_overlay.cpp), for the profile restart.
 void RestoreLaunchEnvironment();
+std::wstring PickFolder(const wchar_t* title, std::string& error);   // "" when cancelled (overlay_ui_import.cpp)
+std::wstring PickProfileFile(bool save, const wchar_t* title, const std::wstring& suggested, std::string& error);
 
 enum class DialogKind { None, FirstRun, Picker };
 
@@ -205,7 +207,12 @@ private:
     void DrawSettingsModal(ImVec2 viewport);   // overlay_ui_settings.cpp
     // overlay_ui_friends.cpp: Steam online services switch and the Steam friends card
     bool SteamPanelVisible() const;
-    void DrawSteamSwitch(ImVec2 rightCenter);
+    float DrawSteamButton(float right, float cy);   // top bar; returns the new left edge
+    float DrawSyncButton(float right, float cy);
+    void DrawSteamConfirm();
+    void DrawSyncSettings();                      // overlay_ui_settings.cpp
+    std::string syncError_;
+    bool steamConfirm_ = false;
     void DrawFriends(ImVec2 pos, ImVec2 size);
     void DrawFriendRow(const steamlink::Friend& fr, float width);
     void DrawAchievementToast(ImDrawList* dl, const Toast& t, ImVec2 p0, ImVec2 p1, float alpha);

@@ -53,6 +53,40 @@ std::wstring PickPath(bool folders, const wchar_t* title, std::string& error) {
 
 } // namespace
 
+std::wstring PickFolder(const wchar_t* title, std::string& error) { return PickPath(true, title, error); }
+
+std::wstring PickProfileFile(bool save, const wchar_t* title, const std::wstring& suggested, std::string& error) {
+    IFileDialog* dlg = nullptr;
+    const HRESULT hr = save ? CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS((IFileSaveDialog**)&dlg))
+                            : CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS((IFileOpenDialog**)&dlg));
+    if (FAILED(hr)) {
+        error = T("Could not open the file picker.", "No se pudo abrir el selector de archivos.");
+        return L"";
+    }
+    const COMDLG_FILTERSPEC types[] = { { i18n::TW(L"ReFix profile", L"Perfil de ReFix"), L"*.rfxp" } };
+    dlg->SetFileTypes(1, types);
+    dlg->SetDefaultExtension(L"rfxp");
+    dlg->SetTitle(title);
+    if (save && !suggested.empty()) dlg->SetFileName(suggested.c_str());
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
+    std::wstring path;
+    if (SUCCEEDED(dlg->Show(host::Window()))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item))) {
+            PWSTR p = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) {
+                path = p;
+                CoTaskMemFree(p);
+            }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return path;
+}
+
 void App::ImportImage() {
     editor_.error.clear();
     editor_.info.clear();

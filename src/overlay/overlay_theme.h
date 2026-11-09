@@ -67,6 +67,13 @@ constexpr ImU32 Star = IM_COL32(255, 192, 70, 255);
 constexpr ImU32 Danger = IM_COL32(255, 107, 107, 255);
 constexpr ImU32 Online = IM_COL32(43, 212, 164, 255);
 constexpr ImU32 InGame = IM_COL32(90, 169, 255, 255);
+// Steam's own friend colours, so the friends list reads like Steam's.
+constexpr ImU32 SteamOnline = IM_COL32(87, 203, 222, 255);
+constexpr ImU32 SteamInGame = IM_COL32(144, 186, 60, 255);
+constexpr ImU32 SteamOffline = IM_COL32(137, 137, 137, 255);
+constexpr ImU32 SteamBlue = IM_COL32(23, 29, 37, 255);
+constexpr ImU32 SyncOk = IM_COL32(76, 201, 112, 255);
+constexpr ImU32 SyncPending = IM_COL32(255, 159, 67, 255);
 } // namespace color
 
 struct Fonts {
@@ -94,8 +101,11 @@ void ApplyStyle(float scale);
 struct AvatarRef {
     int stock = 0;
     ImTextureID texture = 0;     // custom picture when non-zero
+    bool steam = false;          // profile of a Steam account: Steam badge at the bottom right
 };
 void DrawAvatar(ImDrawList* dl, ImVec2 center, float radius, const AvatarRef& a);
+// Steam's mark (disc with the piston) drawn with ImGui shapes, `fg` on a `bg` disc.
+void DrawSteamLogo(ImDrawList* dl, ImVec2 center, float radius, ImU32 fg, ImU32 bg);
 int StockCount();
 
 // Widgets. Ids are taken from the label/icon unless `id` is given.

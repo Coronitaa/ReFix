@@ -5869,6 +5869,9 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixIL2CPP::Shutdown();
 #endif
     UnrealSteamEmu::FlushUserStats();
+#if REFIX_LAN_EDITION
+    ReFixOverlay::Shutdown();   // after the stats flush, so the last achievements go up too
+#endif
     SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);

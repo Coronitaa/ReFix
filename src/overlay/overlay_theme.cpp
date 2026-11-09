@@ -206,11 +206,31 @@ void ApplyStyle(float scale) {
     ImGui::GetStyle() = style;
 }
 
+void DrawSteamLogo(ImDrawList* dl, ImVec2 c, float r, ImU32 fg, ImU32 bg) {
+    dl->AddCircleFilled(c, r, bg, 32);
+    // Piston: a wheel up right, a small knob down left, joined by a rod.
+    const ImVec2 wheel(c.x + r * 0.30f, c.y - r * 0.22f), knob(c.x - r * 0.36f, c.y + r * 0.32f);
+    dl->AddLine(knob, wheel, fg, r * 0.30f);
+    dl->AddCircleFilled(wheel, r * 0.36f, fg, 24);
+    dl->AddCircleFilled(wheel, r * 0.20f, bg, 20);
+    dl->AddCircleFilled(wheel, r * 0.12f, fg, 16);
+    dl->AddCircleFilled(knob, r * 0.21f, fg, 16);
+    dl->AddCircleFilled(knob, r * 0.10f, bg, 12);
+}
+
+static void DrawSteamBadge(ImDrawList* dl, ImVec2 c, float r) {
+    const float br = (std::max)(r * 0.36f, S(7));
+    const ImVec2 bc(c.x + r * 0.72f, c.y + r * 0.72f);
+    dl->AddCircleFilled(bc, br + S(1.5f), color::Panel, 24);
+    DrawSteamLogo(dl, bc, br, IM_COL32(235, 240, 245, 255), color::SteamBlue);
+}
+
 void DrawAvatar(ImDrawList* dl, ImVec2 c, float r, const AvatarRef& a) {
     if (a.texture) {
         dl->AddImageRounded(a.texture, ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), ImVec2(0, 0), ImVec2(1, 1),
                             IM_COL32_WHITE, r);
         dl->AddCircle(c, r, IM_COL32(255, 255, 255, 30), 0, 1.0f);
+        if (a.steam) DrawSteamBadge(dl, c, r);
         return;
     }
     const Stock& s = kStock[std::clamp(a.stock, 0, StockCount() - 1)];
@@ -219,6 +239,7 @@ void DrawAvatar(ImDrawList* dl, ImVec2 c, float r, const AvatarRef& a) {
     ImGui::ShadeVertsLinearColorGradientKeepAlpha(dl, first, dl->VtxBuffer.Size, ImVec2(c.x - r, c.y - r),
                                                   ImVec2(c.x + r, c.y + r), s.from, s.to);
     GlyphCentered(dl, F().glyph, r * 1.05f, c, IM_COL32(255, 255, 255, 235), s.glyph);
+    if (a.steam) DrawSteamBadge(dl, c, r);
 }
 
 bool PrimaryButton(const char* label, ImVec2 size, bool enabled) {

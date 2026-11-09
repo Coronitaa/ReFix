@@ -779,4 +779,8 @@ std::wstring IconFile(const std::string& icon) {
     return {};
 }
 
+bool WebGet(const std::wstring& host, const std::wstring& path, size_t maxBytes, std::string& out) {
+    return HttpGet(host, path, maxBytes, out);
+}
+
 } // namespace refix::overlay::ach

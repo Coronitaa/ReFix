@@ -77,4 +77,7 @@ std::wstring IconFile(const std::string& icon);
 
 Lang LangFromSteam(const char* steamLanguage);
 
+// HTTPS GET with the overlay's shared WinHTTP session (any thread). False unless HTTP 200 within maxBytes.
+bool WebGet(const std::wstring& host, const std::wstring& path, size_t maxBytes, std::string& out);
+
 } // namespace refix::overlay::ach

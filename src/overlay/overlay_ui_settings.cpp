@@ -7,6 +7,8 @@
 #include "nvidia_reflex_block.h"
 #include "overlay_i18n.h"
 #include "overlay_settings.h"
+#include "overlay_text.h"
+#include "profile_sync.h"
 
 #include <algorithm>
 
@@ -203,6 +205,7 @@ void App::DrawSettingsModal(ImVec2 viewport) {
                 "el overlay. Desactívalo si el juego va peor con esta opción."),
         &v.blockReflex, true, reflexNote);
     changed |= reflexChanged;
+    DrawSyncSettings();
     ImGui::EndChild();
 
     if (changed) {
@@ -227,6 +230,87 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
+}
+
+// Where profiles sync: the cloud folders found on this PC, any folder (USB drive, NAS), or automatic.
+void App::DrawSyncSettings() {
+    SectionTitle(ui::icon::Refresh, i18n::T("Profile sync", "Sincronización de perfiles"));
+    ImGui::PushFont(ui::F().caption);
+    ImGui::PushTextWrapPos(0.0f);
+    ui::TextColored(ui::color::Muted,
+                    i18n::T("Your Steam profiles keep all their saves, achievements, stats and items in one file in this folder. "
+                            "Pick the folder of OneDrive, Google Drive or Dropbox and their app uploads it, so your games follow you "
+                            "to any PC. A USB drive works too. Nothing is sent to ReFix.",
+                            "Tus perfiles de Steam guardan todas sus partidas, logros, estadísticas e inventarios en un archivo en esta "
+                            "carpeta. Elige la carpeta de OneDrive, Google Drive o Dropbox y su app lo sube, así tus partidas te siguen "
+                            "a cualquier PC. También sirve un USB. Nada se envía a ReFix."));
+    const std::wstring chosen = sync::ChosenFolder(), effective = sync::EffectiveFolder();
+    const bool localOnly = chosen == sync::kLocalOnly;
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    const std::string where = localOnly ? std::string(i18n::T("Only on this PC", "Solo en este PC"))
+                              : effective.empty() ? std::string(i18n::T("Not chosen yet", "Sin elegir todavía"))
+                                                  : ToUtf8(effective) + (chosen.empty() ? i18n::T(" (automatic)", " (automática)") : "");
+    ui::TextColored(effective.empty() ? ui::color::SyncPending : ui::color::Text,
+                    (std::string(i18n::T("Folder: ", "Carpeta: ")) + where).c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    for (const sync::CloudFolder& c : sync::CloudFolders()) {
+        const std::wstring folder = c.path + L"\\ReFix Sync";
+        const std::string label = std::string(i18n::T("Use ", "Usar ")) + ToUtf8(c.label);
+        ImGui::PushID(ToUtf8(c.path).c_str());
+        if (ui::SecondaryButton(label.c_str(), ImVec2(0, ui::S(36)), folder != effective)) sync::SetFolder(folder);
+        ImGui::PopID();
+        ImGui::SameLine(0, ui::S(8));
+    }
+    if (ui::SecondaryButton(i18n::T("USB or other folder...", "USB u otra carpeta..."), ImVec2(0, ui::S(36)))) {
+        const std::wstring picked = PickFolder(i18n::TW(L"Folder to keep your profiles in", L"Carpeta para guardar tus perfiles"), syncError_);
+        if (!picked.empty()) sync::SetFolder(picked);
+    }
+    ImGui::SameLine(0, ui::S(8));
+    if (ui::SecondaryButton(i18n::T("Only on this PC", "Solo en este PC"), ImVec2(0, ui::S(36)), !localOnly)) sync::SetFolder(sync::kLocalOnly);
+    if (!chosen.empty()) {
+        ImGui::SameLine(0, ui::S(8));
+        if (ui::LinkButton(i18n::T("Automatic", "Automática"))) sync::SetFolder(L"");
+    }
+    ImGui::PushFont(ui::F().caption);
+    ImGui::PushTextWrapPos(0.0f);
+    ui::TextColored(ui::color::Muted, i18n::T("Your profiles always stay on this PC too: the folder holds a synced copy.",
+                                              "Tus perfiles siempre se quedan también en este PC: la carpeta guarda una copia sincronizada."));
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    // A file for anywhere else (mail, another PC), and back as a new profile.
+    ImGui::Dummy(ImVec2(0, ui::S(4)));
+    if (ui::SecondaryButton(i18n::T("Export my profile...", "Exportar mi perfil..."), ImVec2(0, ui::S(36)), active_ && !active_->guest)) {
+        const std::wstring file = PickProfileFile(true, i18n::TW(L"Export your profile", L"Exportar tu perfil"), active_->name + L".rfxp", syncError_);
+        std::string err;
+        if (!file.empty())
+            ShowInfo(sync::ExportTo(*active_, file, err) ? i18n::T("Profile exported", "Perfil exportado") : i18n::T("Export failed", "Error al exportar"),
+                     err.empty() ? ToUtf8(file) : err);
+    }
+    ImGui::SameLine(0, ui::S(8));
+    if (ui::SecondaryButton(i18n::T("Import a profile file...", "Importar archivo de perfil..."), ImVec2(0, ui::S(36)))) {
+        const std::wstring file = PickProfileFile(false, i18n::TW(L"Import a ReFix profile", L"Importar un perfil de ReFix"), L"", syncError_);
+        std::string err;
+        if (!file.empty()) {
+            if (auto p = sync::ImportAsNewProfile(file, err)) {
+                ReloadProfiles();
+                ShowInfo(i18n::T("Profile imported", "Perfil importado"),
+                         ToUtf8(p->name) + i18n::T(" is a new profile: switch to it from your profile menu. Nothing was replaced.",
+                                                   " es un perfil nuevo: cámbiate a él desde el menú de tu perfil. No se reemplazó nada."));
+            } else {
+                ShowInfo(i18n::T("Import failed", "Error al importar"), err);
+            }
+        }
+    }
+    if (!syncError_.empty()) ui::TextColored(ui::color::Danger, syncError_.c_str());
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+    bool local = sync::SyncLocalProfiles();
+    if (SettingRow("synclocal", i18n::T("Sync local profiles too", "Sincronizar también los perfiles locales"),
+                   i18n::T("Profiles not linked to Steam stay on this PC unless you turn this on.",
+                           "Los perfiles que no son de Steam se quedan en este PC salvo que actives esto."),
+                   &local))
+        sync::SetSyncLocalProfiles(local);
 }
 
 } // namespace refix::overlay

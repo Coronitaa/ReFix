@@ -91,11 +91,17 @@ struct Api {
     const char* (*FriendRP)(void*, uint64_t, const char*) = nullptr;
     bool (*SetRP)(void*, const char*, const char*) = nullptr;
     bool (*HasFriend)(void*, uint64_t, int) = nullptr;
+    int (*MediumAvatar)(void*, uint64_t) = nullptr;
+    void* (*UtilsIface)() = nullptr;
+    bool (*ImageSize)(void*, int, uint32_t*, uint32_t*) = nullptr;
+    bool (*ImageRgba)(void*, int, uint8_t*, int) = nullptr;
 };
 
 Api g_api;
 void* g_msgs = nullptr;
 void* g_friends = nullptr;
+void* g_utils = nullptr;
+std::string g_gameName;                            // guarded by g_mu
 std::atomic<State> g_state{ State::Off };
 std::atomic<bool> g_wanted{ false };
 std::atomic<uint32_t> g_appId{ 0 };
@@ -238,7 +244,11 @@ bool LoadValve() {
                   Resolve(g_api.FriendGame, "SteamAPI_ISteamFriends_GetFriendGamePlayed") &&
                   Resolve(g_api.FriendRP, "SteamAPI_ISteamFriends_GetFriendRichPresence") &&
                   Resolve(g_api.SetRP, "SteamAPI_ISteamFriends_SetRichPresence") &&
-                  Resolve(g_api.HasFriend, "SteamAPI_ISteamFriends_HasFriend");
+                  Resolve(g_api.HasFriend, "SteamAPI_ISteamFriends_HasFriend") &&
+                  Resolve(g_api.MediumAvatar, "SteamAPI_ISteamFriends_GetMediumFriendAvatar") &&
+                  Resolve(g_api.UtilsIface, "SteamAPI_SteamUtils_v010") &&
+                  Resolve(g_api.ImageSize, "SteamAPI_ISteamUtils_GetImageSize") &&
+                  Resolve(g_api.ImageRgba, "SteamAPI_ISteamUtils_GetImageRGBA");
         if (ok) {
             ReFixLog("[SteamLink] Using %ls", path.c_str());
             return true;
@@ -276,6 +286,7 @@ bool InitAsSpacewar() {
         return false;
     }
     g_selfId = g_api.GetSteamID(user);
+    g_utils = g_api.UtilsIface();
     return true;
 }
 
@@ -302,6 +313,12 @@ void PublishPresence(bool on) {
     g_api.SetRP(g_friends, "refix", on ? "1" : "");
     const std::string app = on ? std::to_string(g_appId.load()) : std::string();
     g_api.SetRP(g_friends, "refix_app", app.c_str());
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (on) name = g_gameName.substr(0, 120);   // rich presence values are short
+    }
+    g_api.SetRP(g_friends, "refix_game", name.c_str());
 }
 
 void RefreshFriends() {
@@ -316,9 +333,16 @@ void RefreshFriends() {
         f.personaState = g_api.FriendState(g_friends, f.steamId);
         FriendGameInfo game{};
         f.playing = g_api.FriendGame(g_friends, f.steamId, &game) && game.gameId != 0;
+        if (f.playing) f.steamGameId = (uint32_t)(game.gameId & 0xFFFFFF);
         const char* rp = g_api.FriendRP(g_friends, f.steamId, "refix");
-        f.refix = f.playing && (game.gameId & 0xFFFFFF) == 480 && rp && rp[0] == '1';
-        if (f.refix) f.appId = strtoul(g_api.FriendRP(g_friends, f.steamId, "refix_app"), nullptr, 10);
+        f.refix = f.playing && f.steamGameId == 480 && rp && rp[0] == '1';
+        if (f.refix) {
+            f.appId = strtoul(g_api.FriendRP(g_friends, f.steamId, "refix_app"), nullptr, 10);
+            const char* gname = g_api.FriendRP(g_friends, f.steamId, "refix_game");
+            f.gameName = gname ? gname : "";
+        }
+        f.avatar = g_api.MediumAvatar(g_friends, f.steamId);   // -1 while loading, 0 when none
+        if (f.avatar < 0) f.avatar = 0;
         list.push_back(std::move(f));
     }
     std::lock_guard<std::mutex> lock(g_mu);
@@ -584,6 +608,26 @@ bool SteamInstalled() {
 }
 
 void SetLocalGame(uint32_t appId) { g_appId = appId; }
+
+void SetLocalGameName(const std::string& utf8Name) {
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (g_gameName == utf8Name) return;
+        g_gameName = utf8Name;
+    }
+    if (g_state == State::Online) PublishPresence(true);
+}
+
+bool AvatarRgba(int image, int& width, int& height, std::vector<uint8_t>& rgba) {
+    if (g_state != State::Online || image <= 0 || !g_utils) return false;
+    uint32_t w = 0, h = 0;
+    if (!g_api.ImageSize(g_utils, image, &w, &h) || w == 0 || h == 0 || w > 512 || h > 512) return false;
+    rgba.resize((size_t)w * h * 4);
+    if (!g_api.ImageRgba(g_utils, image, rgba.data(), (int)rgba.size())) return false;
+    width = (int)w;
+    height = (int)h;
+    return true;
+}
 
 void SetSteamOverlay(bool on) { g_steamOverlay = on; }
 

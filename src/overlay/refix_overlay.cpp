@@ -14,6 +14,7 @@
 #include "overlay_settings.h"
 #include "avatar_image.h"
 #include "presence_net.h"
+#include "profile_sync.h"
 #include "../unreal_steam_emu.h"
 #if REFIX_STEAM_LINK
 #include "../steam_link/steam_link.h"
@@ -304,6 +305,7 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
         profiles::AddGame(p, game, profiles::DefaultGameName(), false);
         profiles::Save(p);
         profiles::SetLastProfileId(p.id, game);
+        sync::Begin(p);   // a newer package from another PC lands before the save folders switch
         if (g_cfg.isolateSaves) saves::SwitchTo(p, profiles::ForGame(all, game));
     }
     {
@@ -316,6 +318,8 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
              (unsigned long long)p.steamId, appId);
     return true;
 }
+
+void Shutdown() { sync::Shutdown(); }
 
 std::wstring CloudFolder(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_mu);

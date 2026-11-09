@@ -41,4 +41,9 @@ std::wstring GetActiveSaveDir(const std::wstring& label = L"");
 // A deleted profile no longer owns any folder; whatever is in place is treated as data from before profiles.
 void ForgetOwner(const std::wstring& profileId);
 
+// Save folders of every game on this PC that `profileId` owns right now (its saves are live there, not in
+// its stash). Paths come from saves.ini [Paths] (recorded by SwitchTo) or are derived from the label.
+std::vector<Location> OwnedBy(const std::wstring& profileId);
+std::wstring StashOf(const std::wstring& profileId, const std::wstring& label);
+
 } // namespace refix::overlay::saves
