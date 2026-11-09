@@ -36,10 +36,11 @@ To update ReFix in a game, run the new `AutoDeploy` on it again.
 - Free-to-play games keep their real AppID (AutoDeploy asks the Steam store), so their own servers accept the Steam login.
 - If Steam has no install folder for the real AppID, the game gets its own folder instead of an empty path.
 - The real AppID goes into the lobby data, so you only see players of the same game.
+- The game's server browser searches its real AppID (AutoDeploy sets `[ServerBrowser] OverrideServerListAppId`), so public dedicated and community servers show up. Servers that check a ticket for the real game may still refuse the Spacewar login.
 - Photon games (PUN 2, Realtime, Voice, Fusion) run against a local Photon emulator, and their traffic goes over Steam P2P. No Photon servers or AppIDs are needed.
 - Epic Online Services games get a DeviceID login through the bundled EOS proxy.
 
-## ReFix LAN
+## ReFix Online + LAN
 
 - No Steam client needed. ReFix LAN replaces the game's Steam and EOS libraries with a local emulator.
 - Players on the same network find each other through the game's own lobbies and server lists. Some older Source games (CS:GO) still join by IP: `connect <host IP>:27015` in the console.
@@ -48,14 +49,17 @@ To update ReFix in a game, run the new `AutoDeploy` on it again.
 - 32-bit and 64-bit games, including older Steamworks SDKs (Dark Souls III and other games from around 2016).
 - Photon games work over LAN, public room lists included. Unreal Engine lobbies show up in the server list.
 - The game can still reach its own Internet services (news, analytics, web APIs). Steam and Photon stay emulated. `InternetAccess = block` in `ReFix.ini` keeps it on the local network only.
+- Photon Fusion games in Shared mode get ReFix's own Fusion server next to the game (`ReFix\FusionShared`).
+
+**ReFix Offline LAN** (AutoDeploy option [2]) is the LAN build of 2.3.2, unchanged: the same local network play, without the Steam online services, profile sync and the rest of what is new in 2.4.0.
 
 ### Steam online services
 
 When Steam is installed, the top bar of the overlay has a **Steam** button. It asks before it changes anything and explains what happens.
 
-- Turned on, ReFix connects to Steam as Spacewar (AppID 480), and opens Steam in the background if it was closed.
+- Turned on, ReFix connects to Steam as Spacewar (AppID 480), and starts Steam in the background (notification area) if it was closed. A small helper, `refix_steamhost64.exe`, talks to Steam, so turning it off makes Steam stop showing Spacewar at once.
 - Your Steam friends show up in a card next to the LAN players, with their Steam pictures and status. Friends playing with ReFix come first (the ones in your game at the top) and say which game they play.
-- Friends who run a ReFix game with Steam on become players of your network: lobbies, invites, Photon rooms and the overlay all work with them as on a LAN, carried over Steam P2P. The game itself never talks to Steam.
+- Friends who run a ReFix game with Steam on become players of your network: lobbies, invites, Photon rooms and the overlay all work with them as on a LAN, carried over Steam P2P. Invite them or join their match from their row, like LAN players. The game itself never talks to Steam.
 - One room can mix both: players on your LAN and Steam friends over the Internet. The PC with Steam on joins them, nobody else has to set anything up.
 - Every Steam account that signed in on this PC becomes a profile (with a Steam badge). The one signed in is the default while Steam is on.
 - Turned off, ReFix goes back to LAN only. The choice is remembered on this PC.
@@ -64,26 +68,30 @@ When Steam is installed, the top bar of the overlay has a **Steam** button. It a
 
 ### Profile sync
 
-Steam profiles keep everything (saves, achievements, stats, items, emulated Steam Cloud files) in one `.rfxp` file in a folder you choose in Settings. Pick the folder of OneDrive, Google Drive or Dropbox and its app uploads it, so your games follow you to any PC with that Steam account; a USB drive works too. ReFix picks a cloud folder by itself when it finds one.
+Settings > **Syncing** keeps each profile's saves, achievements, stats, items and emulated Steam Cloud files in one `.rfxp` file, wherever you choose. Your profiles always stay on the PC too; nothing is sent to ReFix.
 
-- The round button next to your profile shows the state: green synced, orange changes waiting, red failed, grey nowhere to sync. Click it to sync now; it spins while it works.
-- At game start ReFix takes a newer file from another PC. What it replaces is kept in `%APPDATA%\ReFix\SyncBackups` (last 3).
-- The file is compressed and scrambled so it is not edited by hand by mistake, and a checksum rejects damaged files. Nothing is sent to ReFix.
-- Local profiles stay on the PC unless you turn on "Sync local profiles too".
-- Or sign in to Google Drive or OneDrive in Settings and ReFix keeps the file in its own folder of your account, with no desktop app needed. ReFix can only see that folder, and the sign-in stays encrypted for your Windows user. Builds need ReFix's client IDs: see [docs/cloud-sync-setup.md](docs/cloud-sync-setup.md). "Only on this PC" turns syncing off; your profiles always stay on the PC either way.
-- Settings also exports your profile to a `.rfxp` file anywhere, and imports one. An imported file always becomes a new profile, so nothing that exists is replaced.
+- **In the cloud:** sign in to **Google Drive** or **OneDrive** right in the overlay. ReFix only gets its own app folder in your account, never your files, and the sign-in stays on the PC, encrypted for your Windows user. The card shows the account, the live sync state and a Disconnect button. The folder of a cloud desktop app (OneDrive, Google Drive, Dropbox) works too.
+- **Local:** a USB drive or any folder, or "Only on this PC".
+- **Export or import:** a `.rfxp` file to carry by hand. An imported file always becomes a new profile, so nothing that exists is replaced.
+- The round button next to your profile shows the state: a green tick when synced, orange changes waiting, red failed, grey nowhere to sync. Click it to sync now.
+- At game start ReFix takes a newer file from another PC. What it replaces is kept in `%APPDATA%\ReFix\SyncBackups` (last 3). If the destination could not be read at start, ReFix never uploads over a newer copy from another PC.
+- Steam profiles sync on their own; local profiles only with "Sync local profiles too".
+- Privacy policy: <https://coronitaa.github.io/privacy.html>. Building ReFix yourself: the cloud services need client IDs, see [docs/cloud-sync-setup.md](docs/cloud-sync-setup.md).
+
 ### Overlay
 
 Press **Shift+Tab**, or the Xbox / PS button of a controller.
 
 - See who on the network is playing, join their match or invite them. Invites show up as a notification in the other player's game.
 - Steam achievements: a notice with the icon and rarity when you unlock one, your recent ones, and the full list with progress. Saved per profile, in English and Spanish.
-- Settings (the gear): turn each kind of notification and sound on or off, change the language, and the NVIDIA Reflex option below.
+- Settings (the gear): Notifications, Sound, Language, Performance and Syncing, each in its own page.
+- The top bar shows the game's own icon, the Steam button and the sync button.
 - The game's Store, Community, Guides, Workshop and News pages open inside the overlay. They need the WebView2 Runtime (included in Windows 11); without it they open in your browser.
 - Works with Xbox and XInput controllers, DualShock 4 and DualSense, in English and Spanish.
 - Draws over borderless and fullscreen-window games. Games in exclusive fullscreen minimise while it is open.
 - If another module of the game has patched DXGI, the overlay draws through a layered window instead of DirectComposition, so it does not crash the game.
-- Nothing in the game or in Windows is patched or hooked, except NVIDIA Reflex: it is paused while the overlay is open, so the overlay does not flicker or turn see-through (Settings, or `BlockNvidiaReflex = false`, turns this off).
+- Each game window has its own overlay: another instance or app in front hides it until you go back.
+- Nothing in the game or in Windows is patched or hooked, except NVIDIA: with "Turn off NVIDIA Reflex" on (Settings > Performance, `BlockNvidiaReflex`), Reflex never runs in the game and NVIDIA App's overlay (its Alt+Z notice, stats) stays hidden while the game is in front, so the ReFix overlay does not flicker or turn see-through.
 
 ### Profiles
 
@@ -98,12 +106,13 @@ Press **Shift+Tab**, or the Xbox / PS button of a controller.
 
 ```bash
 bash AutoDeploy.sh                                        # asks for everything
-bash AutoDeploy.sh "/path/to/game" lan                    # ReFix LAN
+bash AutoDeploy.sh "/path/to/game" lan                    # ReFix Online + LAN
+bash AutoDeploy.sh "/path/to/game" offline                # ReFix Offline LAN (2.3.2)
 bash AutoDeploy.sh "/path/to/game" online 480 none        # game folder, mode, AppID, overlay
 bash Uninstall_ReFix.sh "/path/to/game"                    # or bash AutoDeploy.sh --uninstall
 ```
 
-For ReFix Online, launch the game from Steam with Proton so the Steam client is running. The script has only been tested with bash on Windows so far. If it fails on your distro, open an issue with the output.
+For ReFix Online Legacy, launch the game from Steam with Proton so the Steam client is running. The script has only been tested with bash on Windows so far. If it fails on your distro, open an issue with the output.
 
 ## Game mods
 
@@ -136,16 +145,22 @@ SteamId =
 Enabled = true             ; ReFix overlay
 BlockSteamOverlay = true   ; keep Steam's overlay out of the game
 Sounds = true
-BlockNvidiaReflex = true   ; pause NVIDIA Reflex while the overlay is open
+BlockNvidiaReflex = true   ; NVIDIA Reflex off in the game, NVIDIA App's overlay hidden
 IsolateSaves = true        ; each profile keeps its own saves
 
 [Steam]
 RealAppId =                ; the game's real AppID
 DLCs = all                 ; all | none | comma-separated AppIDs
+OnlineServices = auto      ; Online + LAN: auto | on | off (the overlay's Steam button wins)
+
+[ServerBrowser]
+OverrideServerListAppId = true   ; Online Legacy: search the game's servers under its real AppID
+ServerListAppId =                ; the real AppID (AutoDeploy fills both)
 
 [Network]
 DiscoveryPort = 47584      ; LAN discovery
 CustomBroadcasts =         ; extra broadcast IPs for VPNs, comma-separated
+InternetAccess = allow     ; Online + LAN: block keeps the game on the local network
 
 [Debug]
 EnableLog = false          ; set to true to get a ReFix.log for a bug report
