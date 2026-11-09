@@ -83,3 +83,23 @@ seguridad la dan PKCE, el permiso mínimo y que cada usuario acepte en su navega
     <https://account.live.com/consent/Manage>.
   - Los datos en Google Drive se borran en Drive → Configuración → Administrar aplicaciones → ReFix → Eliminar
     datos ocultos de la aplicación. En OneDrive están en la carpeta `Aplicaciones\ReFix`.
+
+## 5. Verificación de la app en Google (para publicarla)
+
+El sitio está en <https://coronitaa.github.io> (repo `Coronitaa/Coronitaa.github.io`; la fuente es `site/` de este
+repo: si cambias algo ahí, cópialo también a ese repo).
+
+1. **Search Console** (<https://search.google.com/search-console>), con la misma cuenta de Google que es dueña del
+   proyecto de Google Cloud: *Añadir propiedad* → **Prefijo de URL** → `https://coronitaa.github.io/`.
+2. Método **Archivo HTML**: descarga el archivo `googleXXXX.html`, súbelo a la raíz del repo
+   `Coronitaa.github.io` (o déjalo en la carpeta de ReFix LAN para que lo suba quien mantenga el sitio) y pulsa
+   **Verificar** cuando `https://coronitaa.github.io/googleXXXX.html` responda.
+3. **Google Auth Platform → Branding**:
+   - Página principal: `https://coronitaa.github.io/`
+   - Política de privacidad: `https://coronitaa.github.io/privacy.html`
+   - Condiciones del servicio: `https://coronitaa.github.io/terms.html`
+   - Dominios autorizados: `coronitaa.github.io`
+4. Espera 24 horas después de verificar y vuelve a enviar la app a verificación.
+
+Si no subes logo, Google no exige verificar la marca para el permiso no sensible `drive.appdata`: la app se puede
+pasar a "En producción" directamente.
