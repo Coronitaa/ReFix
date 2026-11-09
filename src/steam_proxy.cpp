@@ -3261,6 +3261,39 @@ static int Intercepted_SteamAPI_ISteamApps_GetLaunchCommandLine(void* self, char
     return Hooked_ISteamApps_GetLaunchCommandLine(self, pszCommandLine, cubCommandLine);
 }
 
+// Steam has no install folder for a RealAppId the account doesn't own (the game runs as MaskAppId), and
+// Facepunch.Steamworks builds a DirectoryInfo from it at init: Risk of Rain 2 then shows "Failed to start
+// Steamworks Integration". Answer with the game's own folder instead.
+// shortcut: the exe's folder, not the depot root (differs for Unreal's Binaries\Win64); upgrade if a game needs it.
+typedef uint32_t (*fn_VTable_GetAppInstallDir_t)(void* self, uint32_t appID, char* pchFolder, uint32_t cchFolder);
+static fn_VTable_GetAppInstallDir_t g_orig_VTable_GetAppInstallDir = nullptr;
+static fn_VTable_GetAppInstallDir_t g_orig_Flat_GetAppInstallDir = nullptr;
+
+static uint32_t FillMissingInstallDir(uint32_t appID, char* pchFolder, uint32_t cchFolder, uint32_t steamResult) {
+    const bool ours = appID == g_realAppIdNum || appID == g_maskAppIdNum;
+    if (!ours || !pchFolder || cchFolder == 0 || (steamResult > 0 && pchFolder[0])) return steamResult;
+    char exe[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    while (n > 0 && exe[n - 1] != '\\' && exe[n - 1] != '/') --n;
+    if (n == 0) return steamResult;
+    exe[n - 1] = '\0';
+    strncpy_s(pchFolder, cchFolder, exe, _TRUNCATE);
+    ReFixLog("ISteamApps::GetAppInstallDir(%u): Steam has none, returning game folder '%s'", appID, pchFolder);
+    return (uint32_t)strlen(pchFolder) + 1;   // Steam counts the terminator
+}
+
+static uint32_t Hooked_ISteamApps_GetAppInstallDir(void* self, uint32_t appID, char* pchFolder, uint32_t cchFolder) {
+    if (pchFolder && cchFolder) pchFolder[0] = '\0';
+    const uint32_t r = g_orig_VTable_GetAppInstallDir ? g_orig_VTable_GetAppInstallDir(self, appID, pchFolder, cchFolder) : 0;
+    return FillMissingInstallDir(appID, pchFolder, cchFolder, r);
+}
+
+static uint32_t Intercepted_SteamAPI_ISteamApps_GetAppInstallDir(void* self, uint32_t appID, char* pchFolder, uint32_t cchFolder) {
+    if (pchFolder && cchFolder) pchFolder[0] = '\0';
+    const uint32_t r = g_orig_Flat_GetAppInstallDir ? g_orig_Flat_GetAppInstallDir(self, appID, pchFolder, cchFolder) : 0;
+    return FillMissingInstallDir(appID, pchFolder, cchFolder, r);
+}
+
 typedef void (WINAPI* fn_ExitProcess_t)(UINT uExitCode);
 static fn_ExitProcess_t g_orig_ExitProcess = nullptr;
 
@@ -3612,6 +3645,7 @@ static void HookISteamApps(void* iface, const char* version) {
         { "SteamAPI_ISteamApps_BIsSubscribedApp", (void*)Hooked_ISteamApps_BIsSubscribedApp, (void**)&g_orig_VTable_BIsSubscribedApp },
         { "SteamAPI_ISteamApps_BIsDlcInstalled", (void*)Hooked_ISteamApps_BIsDlcInstalled, (void**)&g_orig_VTable_BIsDlcInstalled },
         { "SteamAPI_ISteamApps_GetLaunchCommandLine", (void*)Hooked_ISteamApps_GetLaunchCommandLine, (void**)&g_orig_VTable_GetLaunchCommandLine },
+        { "SteamAPI_ISteamApps_GetAppInstallDir", (void*)Hooked_ISteamApps_GetAppInstallDir, (void**)&g_orig_VTable_GetAppInstallDir },
     };
     HookByThunks(iface, "apps", version, kPrefixes, kHooks, _countof(kHooks));
 }
@@ -5488,6 +5522,14 @@ static bool EnsureOriginal() {
     if (idxLaunchCmd >= 0) {
         g_steamProcs[idxLaunchCmd] = (FARPROC)Intercepted_SteamAPI_ISteamApps_GetLaunchCommandLine;
         ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamApps_GetLaunchCommandLine");
+    }
+
+    int idxInstallDir = FindSteamExportIndex("SteamAPI_ISteamApps_GetAppInstallDir");
+    if (idxInstallDir >= 0 && g_steamProcs[idxInstallDir] &&
+        g_steamProcs[idxInstallDir] != (FARPROC)Intercepted_SteamAPI_ISteamApps_GetAppInstallDir) {
+        g_orig_Flat_GetAppInstallDir = (fn_VTable_GetAppInstallDir_t)g_steamProcs[idxInstallDir];
+        g_steamProcs[idxInstallDir] = (FARPROC)Intercepted_SteamAPI_ISteamApps_GetAppInstallDir;
+        ReFixLog("EnsureOriginal: Intercepted flat export SteamAPI_ISteamApps_GetAppInstallDir");
     }
 
     int idxRestart = FindSteamExportIndex("SteamAPI_RestartAppIfNecessary");
