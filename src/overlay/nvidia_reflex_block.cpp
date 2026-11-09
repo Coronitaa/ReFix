@@ -4,6 +4,7 @@
 #include "nvidia_reflex_block.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -142,7 +143,10 @@ BOOL CALLBACK HideNvidiaWindow(HWND w, LPARAM) {
     InternalGetWindowText(w, title, 64);   // no WM_GETTEXT round trip to another process
     if (wcsncmp(title, L"NVIDIA GeForce Overlay", 22) != 0) return TRUE;
     ShowWindowAsync(w, SW_HIDE);
-    g_nvHidden.push_back(w);
+    if (std::find(g_nvHidden.begin(), g_nvHidden.end(), w) == g_nvHidden.end()) {
+        g_nvHidden.push_back(w);
+        ReFixLog("[NvidiaReflexBlock] NVIDIA overlay window hidden while the game is in front");
+    }
     return TRUE;
 }
 } // namespace
@@ -150,7 +154,7 @@ BOOL CALLBACK HideNvidiaWindow(HWND w, LPARAM) {
 void SetNvidiaOverlayHidden(bool hidden) {
     std::lock_guard<std::mutex> lock(g_nvOverlayMu);
     if (hidden) {
-        if (g_nvHidden.empty()) EnumWindows(HideNvidiaWindow, 0);
+        EnumWindows(HideNvidiaWindow, 0);   // every time: NVIDIA shows it again by itself
         return;
     }
     for (HWND w : g_nvHidden) if (IsWindow(w)) ShowWindowAsync(w, SW_SHOWNA);

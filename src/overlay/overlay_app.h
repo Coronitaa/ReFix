@@ -251,6 +251,7 @@ private:
     std::optional<Profile> dialogResult_;
     std::deque<Toast> toasts_;
     bool welcomed_ = false;
+    ULONGLONG lastNvidiaCheck_ = 0;
     ULONGLONG lastToastTick_ = 0;    // last frame, to pause notification timers while they cannot be seen
     ULONGLONG lastRefresh_ = 0;
     uint32_t avatarKey_ = 0;

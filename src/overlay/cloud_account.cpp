@@ -195,27 +195,33 @@ bool Http(const wchar_t* method, const std::wstring& url, const std::wstring& he
 // --- token store (DPAPI, current Windows user) ---------------------------------------------------------------
 std::wstring TokenFile(const Spec& s) { return profiles::RootDir() + L"\\Cloud\\" + s.file; }
 
-bool SaveRefresh(const Spec& s, const std::string& token) {
-    DATA_BLOB in = { (DWORD)token.size(), (BYTE*)token.data() }, ent = { sizeof(kEntropy) - 1, (BYTE*)kEntropy }, out = {};
+// Account name and email shown in Settings: personal data, kept encrypted like the sign-in.
+std::wstring AccountFile(const Spec& s) { return TokenFile(s) + L".account"; }
+
+bool SaveProtected(const std::wstring& file, const std::string& data) {
+    DATA_BLOB in = { (DWORD)data.size(), (BYTE*)data.data() }, ent = { sizeof(kEntropy) - 1, (BYTE*)kEntropy }, out = {};
     if (!CryptProtectData(&in, L"ReFix", &ent, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return false;
     CreateDirectoryW((profiles::RootDir() + L"\\Cloud").c_str(), nullptr);
-    std::ofstream f(TokenFile(s), std::ios::binary | std::ios::trunc);
+    std::ofstream f(file, std::ios::binary | std::ios::trunc);
     const bool ok = f && f.write((const char*)out.pbData, out.cbData);
     LocalFree(out.pbData);
     return ok;
 }
 
-bool LoadRefresh(const Spec& s, std::string& token) {
-    std::ifstream f(TokenFile(s), std::ios::binary);
+bool LoadProtected(const std::wstring& file, std::string& data) {
+    std::ifstream f(file, std::ios::binary);
     if (!f) return false;
     std::string blob((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     DATA_BLOB in = { (DWORD)blob.size(), (BYTE*)blob.data() }, ent = { sizeof(kEntropy) - 1, (BYTE*)kEntropy }, out = {};
     if (!CryptUnprotectData(&in, nullptr, &ent, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return false;
-    token.assign((const char*)out.pbData, out.cbData);
+    data.assign((const char*)out.pbData, out.cbData);
     SecureZeroMemory(out.pbData, out.cbData);
     LocalFree(out.pbData);
-    return !token.empty();
+    return !data.empty();
 }
+
+bool SaveRefresh(const Spec& s, const std::string& token) { return SaveProtected(TokenFile(s), token); }
+bool LoadRefresh(const Spec& s, std::string& token) { return LoadProtected(TokenFile(s), token); }
 
 // The Google secret sits in the DLL as hex of its bytes XOR 0x5A. Not secrecy (Google treats a desktop client's
 // secret as public): it keeps secret scanners from finding the GOCSPX- pattern in the published binary.
@@ -277,16 +283,53 @@ const Msg kErrToken{ "Could not finish signing in. Check your connection and try
                      "No se pudo terminar el inicio de sesión. Revisa tu conexión y vuelve a intentarlo." };
 const Msg kErrLocal{ "Could not start the sign-in on this PC.", "No se pudo iniciar sesión en este PC." };
 
-void Reply(SOCKET c, const char* status, const char* text) {
-    std::string page = std::string("<!doctype html><meta charset=utf-8><title>ReFix</title>"
-                                   "<body style=\"font:16px sans-serif;margin:3em\"><h2>ReFix</h2><p>") + text + "</p>";
+// The page the browser shows when it comes back from the sign-in: compact, in the player's browser language.
+std::string ResultPage(bool ok, const char* provider) {
+    std::string page = R"(<!doctype html><html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>ReFix</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box;margin:0}
+body{min-height:100vh;display:grid;place-items:center;background:radial-gradient(900px 520px at 50% -12%,#10392f 0,#0b0f14 60%) #0b0f14;
+font:15px/1.5 "Segoe UI",system-ui,sans-serif;color:#e8edf2}
+.card{width:min(400px,92vw);padding:30px 28px 24px;border-radius:20px;background:rgba(19,25,33,.88);
+border:1px solid rgba(255,255,255,.08);box-shadow:0 28px 70px rgba(0,0,0,.55);text-align:center;animation:in .5s cubic-bezier(.2,.8,.2,1)}
+.mark{width:68px;height:68px;margin:0 auto 16px;border-radius:50%;display:grid;place-items:center;background:var(--soft);box-shadow:0 0 0 8px var(--ring)}
+.mark svg{width:34px;height:34px}.mark path{stroke:var(--c);stroke-width:3.2;fill:none;stroke-linecap:round;stroke-linejoin:round;
+stroke-dasharray:40;stroke-dashoffset:40;animation:draw .55s .25s ease-out forwards}
+h1{font-size:21px;font-weight:600;letter-spacing:-.01em}.sub{margin-top:6px;color:#9aa6b2}
+.pill{display:inline-flex;align-items:center;gap:8px;margin-top:16px;padding:6px 13px;border-radius:999px;font-size:12.5px;
+color:#c9d2da;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--c);box-shadow:0 0 9px var(--c)}
+.foot{margin-top:20px;font-size:12.5px;color:#6f7b87}.brand{font-weight:700;letter-spacing:.08em;color:#2bd4a4}
+@keyframes draw{to{stroke-dashoffset:0}}@keyframes in{from{opacity:0;transform:translateY(10px) scale(.98)}}
+</style><body><main class=card style="%STYLE%"><div class=mark><svg viewBox="0 0 24 24"><path d="%PATH%"/></svg></div>
+<h1 id=t></h1><p class=sub id=s></p><div class=pill><span class=dot></span><span id=p></span></div>
+<p class=foot><span class=brand>REFIX</span> &middot; <span id=f></span></p></main><script>
+const P="%PROVIDER%",ok=%OK%,es=(navigator.language||"").toLowerCase().startsWith("es");
+const T=ok?(es?["Sesión iniciada",P+" quedó conectado a ReFix. Tus partidas se sincronizarán ahí.","Solo la carpeta de ReFix, nada más","Ya puedes cerrar esta pestaña y volver al juego."]
+:["You're signed in",P+" is now connected to ReFix. Your saves will sync to it.","Only ReFix's own folder, nothing else","You can close this tab and go back to the game."])
+:(es?["No se completó el inicio de sesión","Vuelve al juego e inténtalo de nuevo.",P,"Puedes cerrar esta pestaña."]
+:["Sign-in not completed","Go back to the game and try again.",P,"You can close this tab."]);
+["t","s","p","f"].forEach((id,i)=>document.getElementById(id).textContent=T[i]);document.title="ReFix · "+T[0];
+</script>)";
+    auto put = [&](const char* key, const std::string& value) {
+        for (size_t at; (at = page.find(key)) != std::string::npos;) page.replace(at, strlen(key), value);
+    };
+    put("%STYLE%", ok ? "--c:#2bd4a4;--soft:rgba(43,212,164,.14);--ring:rgba(43,212,164,.06)"
+                      : "--c:#f05a5a;--soft:rgba(240,90,90,.14);--ring:rgba(240,90,90,.06)");
+    put("%PATH%", ok ? "M5 12.5l4.5 4.5L19 7" : "M7 7l10 10M17 7L7 17");
+    put("%PROVIDER%", provider);   // one of our own labels, never input from the request
+    put("%OK%", ok ? "true" : "false");
+    return page;
+}
+
+void Reply(SOCKET c, const char* status, const std::string& page) {
     std::string resp = std::string("HTTP/1.1 ") + status + "\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
-                       std::to_string(page.size()) + "\r\nConnection: close\r\n\r\n" + page;
+                       std::to_string(page.size()) + "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" + page;
     send(c, resp.data(), (int)resp.size(), 0);
 }
 
 // Waits for the browser to come back to http://<loopback>:port/?code=...&state=...
-bool WaitForCode(SOCKET l4, SOCKET l6, const std::string& state, std::string& code, Msg& err) {
+bool WaitForCode(SOCKET l4, SOCKET l6, const std::string& state, const char* provider, std::string& code, Msg& err) {
     const ULONGLONG until = GetTickCount64() + kSignInWaitMs;
     while (GetTickCount64() < until) {
         fd_set fds;
@@ -314,9 +357,7 @@ bool WaitForCode(SOCKET l4, SOCKET l6, const std::string& state, std::string& co
         code = stateOk ? Param(line, "code") : std::string();
         Wipe(line);
         const bool ok = !code.empty();
-        Reply(c, ok ? "200 OK" : "400 Bad Request",
-              ok ? "Signed in. You can close this tab and go back to the game.<br>Sesión iniciada. Puedes cerrar esta pestaña y volver al juego."
-                 : "Sign-in was not completed.<br>No se completó el inicio de sesión.");
+        Reply(c, ok ? "200 OK" : "400 Bad Request", ResultPage(ok, provider));
         closesocket(c);
         if (!ok) err = kErrDenied;
         return ok;
@@ -356,7 +397,7 @@ bool Connect(Provider p, Msg& err) {
         ok = (INT_PTR)ShellExecuteW(nullptr, L"open", FromUtf8(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
         if (!ok) err = kErrNoBrowser;
     }
-    if (ok) ok = WaitForCode(l4, l6, state, code, err);
+    if (ok) ok = WaitForCode(l4, l6, state, s.label, code, err);
     if (l4 != INVALID_SOCKET) closesocket(l4);
     if (l6 != INVALID_SOCKET) closesocket(l6);
     WSACleanup();
@@ -370,6 +411,37 @@ bool Connect(Provider p, Msg& err) {
     Wipe(code);
     ReFixLog("[Cloud] %s sign-in %s", s.label, ok ? "done" : "failed");
     return ok;
+}
+
+// --- account shown in Settings ----------------------------------------------------------------------------------
+// Google: Drive's about.user (drive.appdata is enough). OneDrive: the drive owner's name (no email without
+// User.Read, which ReFix does not ask for).
+bool FetchAccount(Provider p, Account& out) {
+    std::string token;
+    if (!AccessToken(p, token)) return false;
+    const std::wstring auth = L"Authorization: Bearer " + FromUtf8(token) + L"\r\n";
+    Wipe(token);
+    Resp r;
+    const std::wstring url = p == Provider::Google
+        ? L"https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress)"
+        : L"https://graph.microsoft.com/v1.0/me/drive?$select=owner";
+    if (!Http(L"GET", url, auth, std::string(), r) || r.status != 200) return false;
+    const json::Value v = json::Parse(r.body);
+    const json::Value& user = p == Provider::Google ? v["user"] : v["owner"]["user"];
+    out.name = user.Str("displayName");
+    out.email = p == Provider::Google ? user.Str("emailAddress") : user.Str("email");
+    return !out.name.empty() || !out.email.empty();
+}
+
+Account g_accounts[2];          // guarded by g_mu
+bool g_accountLoaded[2] = {};   // read from disk (or fetched) this session
+std::atomic<bool> g_fetching[2] = {};
+
+void StoreAccount(Provider p, const Account& a) {
+    SaveProtected(AccountFile(S(p)), a.name + "\n" + a.email);
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_accounts[Idx(p)] = a;
+    g_accountLoaded[Idx(p)] = true;
 }
 
 // --- Google Drive: the hidden app data folder ------------------------------------------------------------------
@@ -508,6 +580,8 @@ void SignInAsync(Provider p) {
     std::thread([p] {
         Msg err{};
         const bool ok = Connect(p, err);
+        Account a;
+        if (ok && FetchAccount(p, a)) StoreAccount(p, a);
         if (ok) sync::SetFolder(Choice(p));
         {
             std::lock_guard<std::mutex> lock(g_mu);
@@ -522,10 +596,13 @@ void Disconnect(Provider p) {
     std::string refresh;
     const bool revoke = p == Provider::Google && LoadRefresh(s, refresh);   // Microsoft: the account page revokes
     DeleteFileW(TokenFile(s).c_str());
+    DeleteFileW(AccountFile(s).c_str());
     {
         std::lock_guard<std::mutex> lock(g_mu);
         Wipe(g_access[Idx(p)].token);
         g_access[Idx(p)].expires = 0;
+        g_accounts[Idx(p)] = Account{};
+        g_accountLoaded[Idx(p)] = false;
     }
     if (!revoke) return;
     std::thread([refresh]() mutable {   // network: off the UI thread
@@ -535,6 +612,39 @@ void Disconnect(Provider p) {
         Wipe(refresh);
     }).detach();
     Wipe(refresh);
+}
+
+Account AccountOf(Provider p) {
+    const int i = Idx(p);
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (g_accountLoaded[i]) return g_accounts[i];
+    }
+    if (!Connected(p)) return {};
+    std::string blob;
+    if (LoadProtected(AccountFile(S(p)), blob)) {
+        Account a;
+        const size_t cut = blob.find('\n');
+        a.name = blob.substr(0, cut);
+        a.email = cut == std::string::npos ? std::string() : blob.substr(cut + 1);
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_accounts[i] = a;
+        g_accountLoaded[i] = true;
+        return a;
+    }
+    // Signed in before ReFix kept the account: ask once, in the background.
+    if (!g_fetching[i].exchange(true)) {
+        std::thread([p, i] {
+            Account a;
+            if (FetchAccount(p, a)) StoreAccount(p, a);
+            else {
+                std::lock_guard<std::mutex> lock(g_mu);
+                g_accountLoaded[i] = true;   // do not ask again this session
+            }
+            g_fetching[i] = false;
+        }).detach();
+    }
+    return {};
 }
 
 std::unique_ptr<sync::ISyncTarget> MakeTarget(Provider p) {

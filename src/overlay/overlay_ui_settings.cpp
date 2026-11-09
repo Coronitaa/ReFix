@@ -13,6 +13,8 @@
 #include "cloud_account.h"
 
 #include <algorithm>
+#include <cmath>
+#include <tuple>
 
 namespace refix::overlay {
 namespace {
@@ -223,7 +225,7 @@ void App::DrawSettingsModal(ImVec2 viewport) {
     static const NavGroup kGroups[] = {
         { "OVERLAY", "OVERLAY", { { kNotifications, ui::icon::Bell, "Notifications", "Notificaciones" },
                                   { kSound, ui::icon::Volume, "Sound", "Sonido" },
-                                  { kLanguage, ui::icon::Language, "Language", "Idioma" } }, 3 },
+                                  { kLanguage, ui::icon::Globe, "Language", "Idioma" } }, 3 },
         { "GAME", "JUEGO", { { kPerformance, ui::icon::Speed, "Performance", "Rendimiento" } }, 1 },
         { "PROFILES", "PERFILES", { { kSync, ui::icon::Refresh, "Syncing", "Sincronización" } }, 1 },
     };
@@ -338,102 +340,269 @@ void App::DrawSettingsModal(ImVec2 viewport) {
     ImGui::EndPopup();
 }
 
-// Sign in to Google Drive / OneDrive (shown only when this build carries ReFix's client IDs).
-void App::DrawCloudAccounts(const std::wstring& chosen) {
-    const ImVec2 size(0, ui::S(36));
-    bool any = false;
-    for (cloud::Provider p : { cloud::Provider::Google, cloud::Provider::OneDrive }) {
-        if (!cloud::Available(p)) continue;
-        any = true;
-        ImGui::PushID(cloud::Label(p));
-        if (cloud::Connected(p)) {
-            const std::string use = std::string(i18n::T("Use my ", "Usar mi cuenta de ")) + cloud::Label(p) + i18n::T(" account", "");
-            if (ui::SecondaryButton(use.c_str(), size, chosen != cloud::Choice(p))) sync::SetFolder(cloud::Choice(p));
-            ImGui::SameLine(0, ui::S(6));
-            if (ui::LinkButton(i18n::T("Sign out", "Cerrar sesión"))) {
-                if (chosen == cloud::Choice(p)) sync::SetFolder(L"");
-                cloud::Disconnect(p);
-            }
-        } else {
-            const std::string in = cloud::SigningIn() ? std::string(i18n::T("Waiting for the browser...", "Esperando al navegador..."))
-                                                      : std::string(i18n::T("Sign in to ", "Iniciar sesión en ")) + cloud::Label(p) + "...";
-            if (ui::SecondaryButton(in.c_str(), size, !cloud::SigningIn())) cloud::SignInAsync(p);
-        }
-        ImGui::PopID();
-        ImGui::SameLine(0, ui::S(8));
-    }
-    if (!any) return;
-    ImGui::NewLine();
-    ImGui::PushFont(ui::F().caption);
-    ImGui::PushTextWrapPos(0.0f);
-    ui::TextColored(ui::color::Muted,
-                    i18n::T("Signing in only lets ReFix use its own folder in your account: it cannot see your files. "
-                            "The sign-in stays on this PC, encrypted for your Windows user.",
-                            "Iniciar sesión solo deja que ReFix use su propia carpeta en tu cuenta: no puede ver tus archivos. "
-                            "La sesión queda en este PC, cifrada para tu usuario de Windows."));
-    const cloud::Msg err = cloud::LastError();
-    if (err.en) ui::TextColored(ui::color::Danger, i18n::T(err.en, err.es));
-    ImGui::PopTextWrapPos();
-    ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0, ui::S(4)));
+namespace {
+
+// Sub-heading of the Syncing page: accent glyph, label, hairline to the right.
+void SyncSection(const char* glyph, const char* text) {
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGui::Dummy(ImVec2(0, ui::S(10)));
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x, h = f.strong->FontSize;
+    dl->AddText(f.body, f.body->FontSize, ImVec2(p0.x, p0.y + (h - f.body->FontSize) * 0.5f), ui::color::Accent, glyph);
+    dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + ui::S(26), p0.y), ui::color::Text, text);
+    const float tx = p0.x + ui::S(26) + f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, 0, text).x + ui::S(12);
+    dl->AddLine(ImVec2(tx, p0.y + h * 0.55f), ImVec2(p0.x + w, p0.y + h * 0.55f), ui::color::Border);
+    ImGui::Dummy(ImVec2(w, h + ui::S(8)));
 }
 
-// Where profiles sync: the cloud folders found on this PC, any folder (USB drive, NAS), or automatic.
+std::string Clock(uint64_t filetime) {
+    FILETIME ft{ (DWORD)filetime, (DWORD)(filetime >> 32) }, local;
+    SYSTEMTIME st;
+    FileTimeToLocalFileTime(&ft, &local);
+    FileTimeToSystemTime(&local, &st);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02u/%02u %02u:%02u", st.wDay, st.wMonth, st.wHour, st.wMinute);
+    return buf;
+}
+
+// Live state of the sync, for the destination in use.
+std::pair<std::string, ImU32> SyncLine() {
+    const sync::Status s = sync::Get();
+    const std::string when = s.lastSync ? Clock(s.lastSync) : std::string();
+    switch (s.state) {
+    case sync::State::Synced:
+        return { std::string(i18n::T("Synced", "Sincronizado")) + (when.empty() ? "" : " \xC2\xB7 " + when), ui::color::SyncOk };
+    case sync::State::Syncing: return { i18n::T("Syncing now...", "Sincronizando..."), ui::color::Accent };
+    case sync::State::Pending: return { i18n::T("Changes waiting to sync", "Cambios esperando para sincronizar"), ui::color::SyncPending };
+    case sync::State::Failed: return { i18n::T("Last sync failed", "Falló la última sincronización"), ui::color::Danger };
+    case sync::State::Unavailable: return { i18n::T("Not reachable right now", "No disponible ahora"), ui::color::SyncPending };
+    default: return { i18n::T("This profile does not sync", "Este perfil no se sincroniza"), ui::color::Muted };
+    }
+}
+
+// Provider mark: a coloured disc with its initial.
+void ProviderBadge(ImDrawList* dl, ImVec2 c, float r, cloud::Provider p) {
+    const ImU32 col = p == cloud::Provider::Google ? IM_COL32(66, 133, 244, 255) : IM_COL32(0, 120, 212, 255);
+    dl->AddCircleFilled(c, r, ui::Fade(col, 0.18f), 32);
+    dl->AddCircle(c, r, ui::Fade(col, 0.7f), 32, ui::S(1.5f));
+    ImFont* font = ui::F().heading;
+    const char* letter = p == cloud::Provider::Google ? "G" : "O";
+    const ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, letter);
+    dl->AddText(font, font->FontSize, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col, letter);
+}
+
+// Card frame shared by the rows of the Syncing page; returns its top-left and leaves the cursor below it.
+struct Card { ImVec2 p0, p1; float cy; };
+Card BeginCard(float h, bool active) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    Card c;
+    c.p0 = ImGui::GetCursorScreenPos();
+    c.p1 = ImVec2(c.p0.x + ImGui::GetContentRegionAvail().x, c.p0.y + h);
+    c.cy = c.p0.y + h * 0.5f;
+    dl->AddRectFilled(c.p0, c.p1, active ? ui::color::AccentSoft : ui::color::Row, ui::S(12));
+    if (active) dl->AddRect(c.p0, c.p1, ui::color::AccentLine, ui::S(12));
+    return c;
+}
+void EndCard(const Card& c) {
+    ImGui::SetCursorScreenPos(ImVec2(c.p0.x, c.p1.y + ui::S(kRowGap)));
+    ImGui::Dummy(ImVec2(0, 0));
+}
+
+} // namespace
+
+// One card per cloud service. Signed in: the account (name, email), the live sync state when it is the
+// destination, Use and Disconnect. Not signed in: what it does and Sign in. Only with ReFix's client IDs.
+void App::DrawCloudAccounts(const std::wstring& chosen) {
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h = ui::S(78), pad = ui::S(16), r = ui::S(20);
+    for (cloud::Provider p : { cloud::Provider::Google, cloud::Provider::OneDrive }) {
+        if (!cloud::Available(p)) continue;
+        ImGui::PushID(cloud::Label(p));
+        const bool connected = cloud::Connected(p), inUse = connected && chosen == cloud::Choice(p);
+        const Card c = BeginCard(h, inUse);
+        ProviderBadge(dl, ImVec2(c.p0.x + pad + r, c.cy), r, p);
+        // Buttons, right to left.
+        float x = c.p1.x - pad;
+        const ImVec2 bs(ui::S(120), ui::S(34));
+        auto place = [&](float w) { x -= w; ImGui::SetCursorScreenPos(ImVec2(x, c.cy - bs.y * 0.5f)); x -= ui::S(8); };
+        if (connected) {
+            place(bs.x);
+            if (ui::DangerButton(i18n::T("Disconnect", "Desconectar"), bs)) {
+                if (inUse) sync::SetFolder(L"");
+                cloud::Disconnect(p);
+            }
+            if (!inUse) {
+                place(bs.x);
+                if (ui::PrimaryButton(i18n::T("Use", "Usar"), bs)) sync::SetFolder(cloud::Choice(p));
+            }
+        } else {
+            place(ui::S(150));
+            const bool busy = cloud::SigningIn();
+            if (ui::PrimaryButton(busy ? i18n::T("In the browser...", "En el navegador...") : i18n::T("Sign in", "Iniciar sesión"),
+                                  ImVec2(ui::S(150), bs.y), !busy))
+                cloud::SignInAsync(p);
+        }
+        // Text.
+        const float tx = c.p0.x + pad + 2 * r + ui::S(14), tw = std::max(ui::S(60), x - tx);
+        std::string title = cloud::Label(p), sub, status;
+        ImU32 statusCol = ui::color::Muted;
+        if (connected) {
+            const cloud::Account a = cloud::AccountOf(p);
+            if (!a.name.empty()) title = a.name;
+            sub = !a.email.empty() ? a.email : std::string(cloud::Label(p));
+            if (inUse) std::tie(status, statusCol) = SyncLine();
+            else status = i18n::T("Signed in, not in use", "Sesión iniciada, sin usar");
+        } else {
+            sub = i18n::T("Keeps your profiles in your account", "Guarda tus perfiles en tu cuenta");
+        }
+        ImGui::PushFont(f.strong);
+        title = ui::Ellipsize(title, tw);
+        ImGui::PopFont();
+        ImGui::PushFont(f.caption);
+        sub = ui::Ellipsize(sub, tw);
+        status = ui::Ellipsize(status, tw - ui::S(14));
+        ImGui::PopFont();
+        const float lines = status.empty() ? 2.0f : 3.0f;
+        float ty = c.cy - (f.strong->FontSize + (lines - 1) * (f.caption->FontSize + ui::S(2))) * 0.5f;
+        dl->AddText(f.strong, f.strong->FontSize, ImVec2(tx, ty), ui::color::Text, title.c_str());
+        ty += f.strong->FontSize + ui::S(2);
+        dl->AddText(f.caption, f.caption->FontSize, ImVec2(tx, ty), ui::color::Muted, sub.c_str());
+        if (!status.empty()) {
+            ty += f.caption->FontSize + ui::S(2);
+            const float dot = ui::S(4);
+            const bool live = inUse && sync::Get().state == sync::State::Syncing;
+            const float pulse = live ? 0.55f + 0.45f * (0.5f + 0.5f * sinf((float)ImGui::GetTime() * 6.0f)) : 1.0f;
+            dl->AddCircleFilled(ImVec2(tx + dot, ty + f.caption->FontSize * 0.55f), dot * pulse, statusCol, 16);
+            dl->AddText(f.caption, f.caption->FontSize, ImVec2(tx + ui::S(14), ty), statusCol, status.c_str());
+        }
+        EndCard(c);
+        ImGui::PopID();
+    }
+    const cloud::Msg err = cloud::LastError();
+    if (err.en) {
+        ImGui::PushFont(f.caption);
+        ui::TextColored(ui::color::Danger, i18n::T(err.en, err.es));
+        ImGui::PopFont();
+    }
+}
+
+// Syncing: where each profile's file goes. In the cloud (accounts, cloud apps' folders), local (USB, any
+// folder, only this PC), and a file to move by hand (export / import).
 void App::DrawSyncSettings() {
-    ImGui::PushFont(ui::F().heading);
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGui::PushFont(f.heading);
     ImGui::TextUnformatted(i18n::T("Profile sync", "Sincronización de perfiles"));
     ImGui::PopFont();
-    ImGui::PushFont(ui::F().caption);
+    ImGui::PushFont(f.caption);
     ImGui::PushTextWrapPos(0.0f);
     ui::TextColored(ui::color::Muted,
-                    i18n::T("Your Steam profiles keep all their saves, achievements, stats and items in one file in this folder. "
-                            "Pick the folder of OneDrive, Google Drive or Dropbox and their app uploads it, so your games follow you "
-                            "to any PC. A USB drive works too. Nothing is sent to ReFix.",
-                            "Tus perfiles de Steam guardan todas sus partidas, logros, estadísticas e inventarios en un archivo en esta "
-                            "carpeta. Elige la carpeta de OneDrive, Google Drive o Dropbox y su app lo sube, así tus partidas te siguen "
-                            "a cualquier PC. También sirve un USB. Nada se envía a ReFix."));
-    const std::wstring chosen = sync::ChosenFolder(), effective = sync::EffectiveFolder();
-    const bool localOnly = chosen == sync::kLocalOnly;
-    ImGui::Dummy(ImVec2(0, ui::S(4)));
-    cloud::Provider account;
-    const bool isAccount = cloud::FromChoice(chosen, account);
-    const std::string where = localOnly ? std::string(i18n::T("Only on this PC", "Solo en este PC"))
-                              : isAccount ? std::string(i18n::T("Your ", "Tu cuenta de ")) + cloud::Label(account) + i18n::T(" account", "")
-                              : effective.empty() ? std::string(i18n::T("Not chosen yet", "Sin elegir todavía"))
-                                                  : ToUtf8(effective) + (chosen.empty() ? i18n::T(" (automatic)", " (automática)") : "");
-    ui::TextColored(effective.empty() ? ui::color::SyncPending : ui::color::Text,
-                    (std::string(i18n::T("Destination: ", "Destino: ")) + where).c_str());
+                    i18n::T("Saves, achievements, stats and items of each profile in one file, kept where you choose. "
+                            "Your profiles always stay on this PC too. Nothing is sent to ReFix.",
+                            "Partidas, logros, estadísticas e inventario de cada perfil en un archivo, guardado donde elijas. "
+                            "Tus perfiles siempre se quedan también en este PC. Nada se envía a ReFix."));
     ImGui::PopTextWrapPos();
     ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0, ui::S(4)));
+
+    const std::wstring chosen = sync::ChosenFolder(), effective = sync::EffectiveFolder();
+    const bool localOnly = chosen == sync::kLocalOnly;
+    cloud::Provider account;
+    const bool isAccount = cloud::FromChoice(chosen, account);
+    const float pad = ui::S(16);
+    const ImVec2 bs(ui::S(120), ui::S(34));
+
+    // A row: glyph, title, detail, one button on the right (selected rows show a check instead).
+    auto choiceRow = [&](const char* id, const char* glyph, const std::string& title, const std::string& detail,
+                         bool selected, const char* button) -> bool {
+        ImGui::PushID(id);
+        const Card c = BeginCard(ui::S(62), selected);
+        dl->AddText(f.heading, f.heading->FontSize, ImVec2(c.p0.x + pad, c.cy - f.heading->FontSize * 0.5f),
+                    selected ? ui::color::Accent : ui::color::Muted, glyph);
+        bool clicked = false;
+        float x = c.p1.x - pad;
+        if (selected) {
+            const char* inUse = i18n::T("In use", "En uso");
+            const float w = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, inUse).x;
+            dl->AddText(f.caption, f.caption->FontSize, ImVec2(x - w, c.cy - f.caption->FontSize * 0.5f), ui::color::Accent, inUse);
+            x -= w + ui::S(8);
+            dl->AddText(f.body, f.body->FontSize, ImVec2(x - ui::S(14), c.cy - f.body->FontSize * 0.5f), ui::color::Accent, ui::icon::Check);
+            x -= ui::S(22);
+        } else if (button) {
+            x -= bs.x;
+            ImGui::SetCursorScreenPos(ImVec2(x, c.cy - bs.y * 0.5f));
+            clicked = ui::SecondaryButton(button, bs);
+            x -= ui::S(8);
+        }
+        const float tx = c.p0.x + pad + ui::S(38), tw = std::max(ui::S(60), x - tx);
+        ImGui::PushFont(f.strong);
+        const std::string t = ui::Ellipsize(title, tw);
+        ImGui::PopFont();
+        ImGui::PushFont(f.caption);
+        const std::string d = ui::Ellipsize(detail, tw);
+        ImGui::PopFont();
+        const float th = f.strong->FontSize + (d.empty() ? 0 : ui::S(2) + f.caption->FontSize);
+        dl->AddText(f.strong, f.strong->FontSize, ImVec2(tx, c.cy - th * 0.5f), ui::color::Text, t.c_str());
+        if (!d.empty())
+            dl->AddText(f.caption, f.caption->FontSize, ImVec2(tx, c.cy - th * 0.5f + f.strong->FontSize + ui::S(2)), ui::color::Muted, d.c_str());
+        EndCard(c);
+        ImGui::PopID();
+        return clicked;
+    };
+
+    // In the cloud.
+    SyncSection(ui::icon::Cloud, i18n::T("In the cloud", "En la nube"));
+    DrawCloudAccounts(chosen);
     for (const sync::CloudFolder& c : sync::CloudFolders()) {
         const std::wstring folder = c.path + L"\\ReFix Sync";
-        const std::string label = std::string(i18n::T("Use ", "Usar ")) + ToUtf8(c.label);
-        ImGui::PushID(ToUtf8(c.path).c_str());
-        if (ui::SecondaryButton(label.c_str(), ImVec2(0, ui::S(36)), folder != effective)) sync::SetFolder(folder);
-        ImGui::PopID();
-        ImGui::SameLine(0, ui::S(8));
+        const std::string title = ToUtf8(c.label) + i18n::T(" (desktop app)", " (app de escritorio)");
+        if (choiceRow(ToUtf8(c.path).c_str(), ui::icon::Cloud, title, ToUtf8(folder), folder == effective && !isAccount,
+                      i18n::T("Use", "Usar")))
+            sync::SetFolder(folder);
     }
-    DrawCloudAccounts(chosen);
-    if (ui::SecondaryButton(i18n::T("USB or other folder...", "USB u otra carpeta..."), ImVec2(0, ui::S(36)))) {
+    ImGui::PushFont(f.caption);
+    ImGui::PushTextWrapPos(0.0f);
+    ui::TextColored(ui::color::Muted,
+                    i18n::T("ReFix only gets its own folder in your account: it cannot see your files. The sign-in stays on this PC, "
+                            "encrypted for your Windows user.",
+                            "ReFix solo obtiene su propia carpeta en tu cuenta: no puede ver tus archivos. La sesión queda en este PC, "
+                            "cifrada para tu usuario de Windows."));
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+
+    // Local.
+    SyncSection(ui::icon::Folder, i18n::T("Local", "Local"));
+    const bool customFolder = !chosen.empty() && !localOnly && !isAccount && effective == chosen &&
+                              [&] { for (const sync::CloudFolder& c : sync::CloudFolders()) if (c.path + L"\\ReFix Sync" == chosen) return false; return true; }();
+    if (choiceRow("folder", ui::icon::Usb, i18n::T("USB or other folder", "USB u otra carpeta"),
+                  customFolder ? ToUtf8(chosen) : std::string(i18n::T("A USB drive, a NAS or any folder", "Un USB, un NAS o cualquier carpeta")),
+                  false, customFolder ? i18n::T("Change...", "Cambiar...") : i18n::T("Choose...", "Elegir..."))) {
         const std::wstring picked = PickFolder(i18n::TW(L"Folder to keep your profiles in", L"Carpeta para guardar tus perfiles"), syncError_);
         if (!picked.empty()) sync::SetFolder(picked);
     }
-    ImGui::SameLine(0, ui::S(8));
-    if (ui::SecondaryButton(i18n::T("Only on this PC", "Solo en este PC"), ImVec2(0, ui::S(36)), !localOnly)) sync::SetFolder(sync::kLocalOnly);
-    if (!chosen.empty()) {
-        ImGui::SameLine(0, ui::S(8));
-        if (ui::LinkButton(i18n::T("Automatic", "Automática"))) sync::SetFolder(L"");
+    if (customFolder) {
+        // The chosen folder is the one in use: say so under its row.
+        ImGui::PushFont(f.caption);
+        ui::TextColored(ui::color::Accent, (std::string(i18n::T("In use: ", "En uso: ")) + SyncLine().first).c_str());
+        ImGui::PopFont();
     }
-    ImGui::PushFont(ui::F().caption);
-    ImGui::PushTextWrapPos(0.0f);
-    ui::TextColored(ui::color::Muted, i18n::T("Your profiles always stay on this PC too: the folder holds a synced copy.",
-                                              "Tus perfiles siempre se quedan también en este PC: la carpeta guarda una copia sincronizada."));
-    ImGui::PopTextWrapPos();
-    ImGui::PopFont();
-    // A file for anywhere else (mail, another PC), and back as a new profile.
-    ImGui::Dummy(ImVec2(0, ui::S(4)));
-    if (ui::SecondaryButton(i18n::T("Export my profile...", "Exportar mi perfil..."), ImVec2(0, ui::S(36)), active_ && !active_->guest)) {
+    if (choiceRow("local", ui::icon::Lock, i18n::T("Only on this PC", "Solo en este PC"),
+                  i18n::T("No copy anywhere else", "Sin copia en ningún otro lugar"), localOnly, i18n::T("Use", "Usar")))
+        sync::SetFolder(sync::kLocalOnly);
+    if (!chosen.empty() && ui::LinkButton(i18n::T("Back to automatic", "Volver a automática")))
+        sync::SetFolder(L"");
+    bool localProfiles = sync::SyncLocalProfiles();
+    if (SettingRow("synclocal", i18n::T("Sync local profiles too", "Sincronizar también los perfiles locales"),
+                   i18n::T("Profiles not linked to Steam stay on this PC unless you turn this on.",
+                           "Los perfiles que no son de Steam se quedan en este PC salvo que actives esto."),
+                   &localProfiles))
+        sync::SetSyncLocalProfiles(localProfiles);
+
+    // Export or import.
+    SyncSection(ui::icon::Import, i18n::T("Export or import", "Exportar o importar"));
+    const float half = (ImGui::GetContentRegionAvail().x - ui::S(8)) * 0.5f;
+    if (ui::SecondaryButton(i18n::T("Export my profile...", "Exportar mi perfil..."), ImVec2(half, ui::S(40)), active_ && !active_->guest)) {
         const std::wstring file = PickProfileFile(true, i18n::TW(L"Export your profile", L"Exportar tu perfil"), active_->name + L".rfxp", syncError_);
         std::string err;
         if (!file.empty())
@@ -441,7 +610,7 @@ void App::DrawSyncSettings() {
                      err.empty() ? ToUtf8(file) : err);
     }
     ImGui::SameLine(0, ui::S(8));
-    if (ui::SecondaryButton(i18n::T("Import a profile file...", "Importar archivo de perfil..."), ImVec2(0, ui::S(36)))) {
+    if (ui::SecondaryButton(i18n::T("Import a profile file...", "Importar archivo de perfil..."), ImVec2(half, ui::S(40)))) {
         const std::wstring file = PickProfileFile(false, i18n::TW(L"Import a ReFix profile", L"Importar un perfil de ReFix"), L"", syncError_);
         std::string err;
         if (!file.empty()) {
@@ -455,14 +624,13 @@ void App::DrawSyncSettings() {
             }
         }
     }
+    ImGui::PushFont(f.caption);
+    ImGui::PushTextWrapPos(0.0f);
+    ui::TextColored(ui::color::Muted, i18n::T("A .rfxp file to carry by hand. Importing always makes a new profile: nothing is replaced.",
+                                              "Un archivo .rfxp para llevar a mano. Importar siempre crea un perfil nuevo: no se reemplaza nada."));
     if (!syncError_.empty()) ui::TextColored(ui::color::Danger, syncError_.c_str());
-    ImGui::Dummy(ImVec2(0, ui::S(6)));
-    bool local = sync::SyncLocalProfiles();
-    if (SettingRow("synclocal", i18n::T("Sync local profiles too", "Sincronizar también los perfiles locales"),
-                   i18n::T("Profiles not linked to Steam stay on this PC unless you turn this on.",
-                           "Los perfiles que no son de Steam se quedan en este PC salvo que actives esto."),
-                   &local))
-        sync::SetSyncLocalProfiles(local);
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
 }
 
 } // namespace refix::overlay

@@ -13,10 +13,11 @@ namespace refix::overlay {
 void ArmNvidiaReflexBlock();
 void PollNvidiaReflexHooks();
 
-bool NvidiaReflexBlockArmed();
+bool NvidiaReflexBlockArmed();   // the block is active in this game session
 
 // NVIDIA App's in-game overlay is a transparent always-on-top window over every game; it fights the ReFix
-// overlay for the top and makes it flicker. Hidden while the ReFix overlay is open, shown again after.
-void SetNvidiaOverlayHidden(bool hidden);   // the block is active in this game session
+// overlay for the top and shows Reflex/performance stats over the game. Kept hidden while the game (or the ReFix
+// overlay) is in front; call it again regularly, NVIDIA shows it again by itself. Shown again on false.
+void SetNvidiaOverlayHidden(bool hidden);
 
 } // namespace refix::overlay

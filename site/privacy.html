@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy · ReFix</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="./">REFIX</a>
+  <nav><a href="./">Home</a><a href="privacy.html" aria-current="page">Privacy</a><a href="terms.html">Terms</a><a href="https://github.com/Coronitaa/ReFix">GitHub</a></nav>
+</header>
+<main>
+<article>
+  <h1>Privacy policy</h1>
+  <p class="meta">Effective date: November 9, 2026</p>
+
+  <p>This policy explains what information ReFix (the "app") handles, why, where it is kept and how you control it.
+    In short: ReFix has no servers and does not collect, sell or share your personal information. Everything ReFix
+    stores stays on your PC, or in your own cloud storage when you choose to turn on profile sync.</p>
+
+  <h2>1. Who we are</h2>
+  <p>ReFix is a free, open-source tool for PC games, developed by an independent developer and published at
+    <a href="https://github.com/Coronitaa/ReFix">github.com/Coronitaa/ReFix</a>. You can reach us through
+    <a href="https://github.com/Coronitaa/ReFix/issues">GitHub issues</a>.</p>
+
+  <h2>2. Information kept on your PC</h2>
+  <ul>
+    <li><b>Profiles:</b> the name and picture you give each profile, and its saves, achievements, statistics and items.</li>
+    <li><b>Settings:</b> your overlay preferences (language, notifications, sync destination).</li>
+    <li><b>Sign-in to a cloud service:</b> if you connect Google Drive, the sign-in (an OAuth refresh token) and your
+      Google account name and email address, so the overlay can show which account is connected. These are encrypted
+      with Windows Data Protection (DPAPI) for your Windows user, in <code>%APPDATA%\ReFix\Cloud</code>, and can only be
+      read by that Windows user on that PC. Short-lived access tokens are kept in memory only and are never written to logs.</li>
+    <li><b>Log file:</b> a technical log next to the game, used to diagnose problems. It never contains passwords or tokens.</li>
+  </ul>
+  <p>None of this information is sent to ReFix or to any server operated by ReFix. ReFix does not have servers.</p>
+
+  <h2>3. Information shared with other players</h2>
+  <p>When you play, ReFix announces your profile name, picture and the game you are playing to the other ReFix players
+    on your local network, so they can see and invite you. If you turn on Steam online services, the same information
+    is shared with your Steam friends who use ReFix, through Steam's own peer-to-peer network. You can turn Steam online
+    services off at any time from the overlay.</p>
+
+  <h2>4. Google user data</h2>
+  <p>Profile sync with Google Drive is optional and off until you sign in from the overlay (Settings &gt; Syncing).
+    When you connect your Google account, ReFix requests only:</p>
+  <ul>
+    <li><code>https://www.googleapis.com/auth/drive.appdata</code>: access to a private application data folder in your
+      Google Drive that only ReFix can use. ReFix cannot see, read, change or delete any other file in your Drive.</li>
+  </ul>
+  <p><b>What ReFix does with it:</b> it stores one file per profile in that folder (your saves, achievements, statistics
+    and items, compressed) and reads it back on your other PCs, so your progress follows you. It also reads your Google
+    account's display name and email address from the Drive API (<code>about.user</code>) only to show you, in the
+    overlay, which account is connected.</p>
+  <p><b>Where it goes:</b> data travels directly between your PC and Google over an encrypted (HTTPS) connection. It is
+    never sent to ReFix, to the developer or to any third party, and it is not used for advertising, analytics, profiling
+    or training of any kind.</p>
+  <p><b>Limited Use:</b> ReFix's use and transfer to any other app of information received from Google APIs will adhere to
+    the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>,
+    including the Limited Use requirements. No person reads your data.</p>
+
+  <h2>5. Keeping and deleting your data</h2>
+  <ul>
+    <li><b>Disconnect:</b> in the overlay, Settings &gt; Syncing &gt; Disconnect deletes the sign-in and account details from
+      your PC and revokes ReFix's access with Google.</li>
+    <li><b>Remove access from Google:</b> at any time at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
+    <li><b>Delete the synced files:</b> in Google Drive on the web, open Settings &gt; Manage apps &gt; ReFix &gt; Options &gt;
+      Delete hidden app data.</li>
+    <li><b>Delete everything on your PC:</b> uninstall ReFix and delete the folder <code>%APPDATA%\ReFix</code>.</li>
+  </ul>
+  <p>Synced files stay in your Google Drive until you delete them as described above.</p>
+
+  <h2>6. Security</h2>
+  <p>Sign-in uses Google's OAuth 2.0 with PKCE in your own browser; ReFix never sees your Google password. The sign-in is
+    stored encrypted for your Windows user, all connections use HTTPS, and ReFix only asks for the narrowest permission
+    that makes the feature work.</p>
+
+  <h2>7. Children</h2>
+  <p>ReFix is not directed to children under 13 and does not knowingly handle their personal information.</p>
+
+  <h2>8. Changes</h2>
+  <p>If this policy changes, the new version will be published on this page with a new effective date.</p>
+
+  <h2>9. Contact</h2>
+  <p>Questions or requests about your data: open an issue at
+    <a href="https://github.com/Coronitaa/ReFix/issues">github.com/Coronitaa/ReFix/issues</a>.</p>
+</article>
+</main>
+<footer>
+  <a href="./">Home</a><a href="terms.html">Terms of use</a><a href="https://github.com/Coronitaa/ReFix/issues">Contact</a>
+</footer>
+</body>
+</html>

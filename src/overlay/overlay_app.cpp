@@ -28,6 +28,7 @@ namespace refix::overlay {
 namespace {
 
 constexpr ULONGLONG kRefreshMs = 300;
+constexpr ULONGLONG kNvidiaCheckMs = 500;
 constexpr ULONGLONG kWelcomeMs = 6500;
 constexpr ULONGLONG kInviteToastMs = 20000;
 constexpr ULONGLONG kInfoToastMs = 4500;
@@ -146,9 +147,6 @@ void App::OnHotkey() {
 }
 
 void App::OnModeChanged(host::Mode from, host::Mode to) {
-    // NVIDIA App's overlay window fights ours for the top: out of the way while ours is open (same setting as Reflex).
-    const bool ours = to == host::Mode::Overlay || to == host::Mode::Dialog;
-    SetNvidiaOverlayHidden(ours && settings::Get().blockReflex);
     if (to == host::Mode::Overlay) PostOverlayActivated(true);
     else if (from == host::Mode::Overlay) PostOverlayActivated(false);
 }
@@ -328,6 +326,12 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
         PollInvites();
         PollAchievements();
         PollNvidiaReflexHooks();
+        // NVIDIA App's overlay (stats, Reflex indicator) stays off while this game or ours is in front (both are
+        // "foreground" here: the ReFix overlay is a window of the game process).
+        if (now - lastNvidiaCheck_ >= kNvidiaCheckMs) {
+            lastNvidiaCheck_ = now;
+            SetNvidiaOverlayHidden(settings::Get().blockReflex && game.foreground);
+        }
         if (!welcomed_ && game.hwnd && game.foreground) {
             welcomed_ = true;
             if (settings::Get().welcomeToast) {

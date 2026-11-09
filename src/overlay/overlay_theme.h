@@ -46,6 +46,8 @@ constexpr const char* Settings = "\xEE\x9C\x93";     // E713 gear
 constexpr const char* Bell = "\xEE\xAA\x8F";         // EA8F ringer
 constexpr const char* Volume = "\xEE\x9D\xA7";       // E767
 constexpr const char* Speed = "\xEE\xB1\x8A";        // EC4A speed high
+constexpr const char* Cloud = "\xEE\x9D\x93";        // E753
+constexpr const char* Usb = "\xEE\xA2\x8E";          // E88E
 } // namespace icon
 
 namespace color {

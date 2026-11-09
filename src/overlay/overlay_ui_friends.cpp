@@ -293,7 +293,10 @@ float App::DrawSyncButton(float right, float cy) {
     if (steamProfile) {
         ui::DrawSteamLogo(dl, c, r - ui::S(7), grey ? ui::color::Muted : IM_COL32(240, 244, 248, 255), ui::color::SteamBlue);
     } else {
-        ui::GlyphCentered(dl, ui::F().glyph, ui::S(18), c, grey ? ui::color::Muted : ui::color::Text, ui::icon::Refresh);
+        // Done: a tick in the ring's green; otherwise the sync arrows.
+        const bool done = s.state == sync::State::Synced;
+        ui::GlyphCentered(dl, ui::F().glyph, ui::S(18), c, grey ? ui::color::Muted : done ? ui::color::SyncOk : ui::color::Text,
+                          done ? ui::icon::Check : ui::icon::Refresh);
     }
     if (clicked) {
         if (s.destination.empty()) { settingsSection_ = 4; settingsRequested_ = true; }   // Settings > Syncing   // nowhere to sync yet: the choice is in Settings

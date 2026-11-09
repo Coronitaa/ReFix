@@ -30,6 +30,9 @@ bool SigningIn();
 Msg LastError();              // of the last sign-in; en == nullptr when none
 void Disconnect(Provider p);  // forgets the sign-in on this PC (and revokes it, where the provider allows)
 
+struct Account { std::string name, email; };   // UTF-8; email may be empty (OneDrive)
+Account AccountOf(Provider p);                 // empty until known (fetched in the background after sign-in)
+
 std::unique_ptr<sync::ISyncTarget> MakeTarget(Provider p);
 
 } // namespace refix::overlay::cloud
