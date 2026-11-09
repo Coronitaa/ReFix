@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <vector>
 #include "../minhook/MinHook.h"
 
 extern void ReFixLog(const char* fmt, ...);
@@ -129,5 +130,31 @@ void PollNvidiaReflexHooks() {
 }
 
 bool NvidiaReflexBlockArmed() { return g_armed; }
+
+namespace {
+std::mutex g_nvOverlayMu;
+std::vector<HWND> g_nvHidden;   // NVIDIA overlay windows we hid, to show again
+
+BOOL CALLBACK HideNvidiaWindow(HWND w, LPARAM) {
+    wchar_t cls[64] = {};
+    if (!IsWindowVisible(w) || !GetClassNameW(w, cls, 64) || wcscmp(cls, L"CEF-OSC-WIDGET") != 0) return TRUE;
+    wchar_t title[64] = {};
+    InternalGetWindowText(w, title, 64);   // no WM_GETTEXT round trip to another process
+    if (wcsncmp(title, L"NVIDIA GeForce Overlay", 22) != 0) return TRUE;
+    ShowWindowAsync(w, SW_HIDE);
+    g_nvHidden.push_back(w);
+    return TRUE;
+}
+} // namespace
+
+void SetNvidiaOverlayHidden(bool hidden) {
+    std::lock_guard<std::mutex> lock(g_nvOverlayMu);
+    if (hidden) {
+        if (g_nvHidden.empty()) EnumWindows(HideNvidiaWindow, 0);
+        return;
+    }
+    for (HWND w : g_nvHidden) if (IsWindow(w)) ShowWindowAsync(w, SW_SHOWNA);
+    g_nvHidden.clear();
+}
 
 } // namespace refix::overlay

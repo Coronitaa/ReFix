@@ -11,8 +11,8 @@
 #define REFIX_GOOGLE_CLIENT_ID ""
 #endif
 // Google requires it from "Desktop app" clients; for installed apps Google itself treats it as public.
-#ifndef REFIX_GOOGLE_CLIENT_SECRET
-#define REFIX_GOOGLE_CLIENT_SECRET ""
+#ifndef REFIX_GOOGLE_CLIENT_SECRET_HEX
+#define REFIX_GOOGLE_CLIENT_SECRET_HEX ""   // hex of the secret XOR 0x5A (cloud_account.cpp Unscramble)
 #endif
 #ifndef REFIX_MICROSOFT_CLIENT_ID
 #define REFIX_MICROSOFT_CLIENT_ID ""

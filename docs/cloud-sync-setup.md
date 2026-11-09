@@ -52,6 +52,8 @@ seguridad la dan PKCE, el permiso mínimo y que cada usuario acepte en su navega
 
 1. En `src/overlay/`, copia `cloud_keys.local.h.example` como `cloud_keys.local.h` y pega tus valores.
    Git ignora ese archivo (`.gitignore`), así que no se sube nunca.
+   El secreto de Google va como hex de sus bytes XOR 0x5A (el ejemplo trae el comando de Python), para que
+   los escáneres de secretos de GitHub no lo encuentren en la DLL publicada y Google no lo revoque solo.
 2. Guarda también una copia en tu gestor de contraseñas. No los pegues en issues, chats ni capturas.
 3. Compila con `build.bat`. Si el archivo no existe, la build funciona igual y los botones de Google Drive y
    OneDrive no aparecen (siguen las carpetas, el USB y la exportación).

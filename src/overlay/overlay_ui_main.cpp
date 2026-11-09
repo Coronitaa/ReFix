@@ -15,6 +15,9 @@ extern void ReFixLog(const char* fmt, ...);
 #include <cstdio>
 
 #include "overlay_ui_mods.h"
+#include "avatar_image.h"
+#include "overlay_host.h"
+#include <vector>
 
 namespace refix::overlay {
 namespace {
@@ -56,9 +59,47 @@ std::string StatusLine(const PlayerRow& r, uint64_t localLobby, InviteState invi
     return r.p.joinable ? i18n::T("In a lobby", "En una sala") : i18n::T("In a closed lobby", "En una sala cerrada");
 }
 
-bool CanJoin(const PlayerRow& r, uint64_t localLobby) {
-    if (!r.sameGame || (r.p.lobbyId && r.p.lobbyId == localLobby)) return false;
-    return (r.p.lobbyId && r.p.joinable) || (!r.p.lobbyId && !r.p.connect.empty());
+
+
+// The icon of the game's exe (largest it has, up to 256 px), as RGBA. No network: it is in the exe.
+bool GameIconRgba(image::Rgba& out) {
+    wchar_t exe[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return false;
+    constexpr int kSize = 128;
+    HICON icon = nullptr;
+    UINT id = 0;
+    if (PrivateExtractIconsW(exe, 0, kSize, kSize, &icon, &id, 1, LR_DEFAULTCOLOR) != 1 || !icon) return false;
+    ICONINFO ii{};
+    bool ok = false;
+    if (GetIconInfo(icon, &ii) && ii.hbmColor) {
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = kSize;
+        bi.bmiHeader.biHeight = -kSize;   // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        std::vector<uint8_t> bgra((size_t)kSize * kSize * 4);
+        HDC dc = GetDC(nullptr);
+        ok = GetDIBits(dc, ii.hbmColor, 0, kSize, bgra.data(), &bi, DIB_RGB_COLORS) == kSize;
+        ReleaseDC(nullptr, dc);
+        bool anyAlpha = false;
+        for (size_t i = 3; i < bgra.size(); i += 4) anyAlpha |= bgra[i] != 0;
+        if (ok) {
+            out.width = out.height = kSize;
+            out.pixels.resize(bgra.size());
+            for (size_t i = 0; i < bgra.size(); i += 4) {
+                out.pixels[i] = bgra[i + 2];
+                out.pixels[i + 1] = bgra[i + 1];
+                out.pixels[i + 2] = bgra[i];
+                out.pixels[i + 3] = anyAlpha ? bgra[i + 3] : 255;   // old icons without alpha: opaque
+            }
+        }
+    }
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    DestroyIcon(icon);
+    return ok;
 }
 
 void TextAt(ImDrawList* dl, ImFont* font, ImVec2 pos, ImU32 col, const std::string& text) {
@@ -66,6 +107,11 @@ void TextAt(ImDrawList* dl, ImFont* font, ImVec2 pos, ImU32 col, const std::stri
 }
 
 } // namespace
+
+bool CanJoin(const PlayerRow& r, uint64_t localLobby) {
+    if (!r.sameGame || (r.p.lobbyId && r.p.lobbyId == localLobby)) return false;
+    return (r.p.lobbyId && r.p.joinable) || (!r.p.lobbyId && !r.p.connect.empty());
+}
 
 void App::DrawOverlay(ImVec2 viewport) {
     // A fullscreen game that minimised when we took the focus leaves the desktop behind: hide it.
@@ -162,9 +208,18 @@ void App::DrawTopBar(ImVec2 viewport) {
     dl->AddRect(barMin, barMax, ui::color::Border, ui::S(12));
     const std::string title = gameTitle_.empty() ? i18n::T("Game", "Juego") : ToUtf8(gameTitle_);
     const float cy = m + h * 0.5f;
-    dl->AddCircleFilled(ImVec2(m + ui::S(26), cy), ui::S(18), ui::Fade(ui::color::Accent, 0.16f), 32);
-    const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Game);
-    TextAt(dl, f.heading, ImVec2(m + ui::S(26) - gs.x * 0.5f, cy - gs.y * 0.5f), ui::color::Accent, ui::icon::Game);
+    // The game's own icon in the circle; the joystick when its exe has none.
+    const ImVec2 ic(m + ui::S(26), cy);
+    const float ir = ui::S(18);
+    dl->AddCircleFilled(ic, ir, ui::Fade(ui::color::Accent, 0.16f), 32);
+    if (const ImTextureID icon = host::Texture("game-icon", GameIconRgba)) {
+        dl->AddImageRounded(icon, ImVec2(ic.x - ir, ic.y - ir), ImVec2(ic.x + ir, ic.y + ir), ImVec2(0, 0), ImVec2(1, 1),
+                            IM_COL32_WHITE, ir);
+        dl->AddCircle(ic, ir, ui::color::Border, 32, ui::S(1));
+    } else {
+        const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Game);
+        TextAt(dl, f.heading, ImVec2(ic.x - gs.x * 0.5f, cy - gs.y * 0.5f), ui::color::Accent, ui::icon::Game);
+    }
     const float titleX = m + ui::S(56);
 
     // Right, from the edge inwards: close, profile chip, clock.

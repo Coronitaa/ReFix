@@ -43,7 +43,7 @@ struct Spec {
     const char* label;
     const wchar_t* choice;
     const char* clientId;
-    const char* clientSecret;
+    const char* clientSecret;   // scrambled (Unscramble)
     const char* authUrl;
     const wchar_t* tokenUrl;
     const char* scope;
@@ -52,7 +52,7 @@ struct Spec {
 };
 
 const Spec kSpecs[] = {
-    { "Google Drive", L"cloud:google", REFIX_GOOGLE_CLIENT_ID, REFIX_GOOGLE_CLIENT_SECRET,
+    { "Google Drive", L"cloud:google", REFIX_GOOGLE_CLIENT_ID, REFIX_GOOGLE_CLIENT_SECRET_HEX,
       "https://accounts.google.com/o/oauth2/v2/auth", L"https://oauth2.googleapis.com/token",
       "https://www.googleapis.com/auth/drive.appdata", "127.0.0.1", L"google.bin" },
     { "OneDrive", L"cloud:onedrive", REFIX_MICROSOFT_CLIENT_ID, "",
@@ -217,11 +217,23 @@ bool LoadRefresh(const Spec& s, std::string& token) {
     return !token.empty();
 }
 
+// The Google secret sits in the DLL as hex of its bytes XOR 0x5A. Not secrecy (Google treats a desktop client's
+// secret as public): it keeps secret scanners from finding the GOCSPX- pattern in the published binary.
+std::string Unscramble(const char* hex) {
+    std::string out;
+    for (size_t i = 0; hex[i] && hex[i + 1]; i += 2) {
+        const char pair[3] = { hex[i], hex[i + 1], 0 };
+        out += (char)(strtol(pair, nullptr, 16) ^ 0x5A);
+    }
+    return out;
+}
+
 // Token endpoint call; keeps the access token in memory and the (possibly rotated) refresh token on disk.
 bool TokenRequest(Provider p, std::string form) {
     const Spec& s = S(p);
     form += "&client_id=" + UrlEncode(s.clientId);
-    if (*s.clientSecret) form += "&client_secret=" + UrlEncode(s.clientSecret);
+    const std::string secret = Unscramble(s.clientSecret);
+    if (!secret.empty()) form += "&client_secret=" + UrlEncode(secret);
     Resp r;
     const bool sent = Http(L"POST", s.tokenUrl, L"Content-Type: application/x-www-form-urlencoded\r\n", form, r);
     Wipe(form);

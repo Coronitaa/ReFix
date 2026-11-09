@@ -319,7 +319,10 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     return true;
 }
 
-void Shutdown() { sync::Shutdown(); }
+void Shutdown() {
+    SetNvidiaOverlayHidden(false);   // never leave NVIDIA's overlay hidden after the game
+    sync::Shutdown();
+}
 
 std::wstring CloudFolder(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_mu);

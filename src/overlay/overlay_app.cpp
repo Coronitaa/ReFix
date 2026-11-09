@@ -146,7 +146,9 @@ void App::OnHotkey() {
 }
 
 void App::OnModeChanged(host::Mode from, host::Mode to) {
-    // NVIDIA Reflex paces the game's frames in a way that left the overlay flickering or see-through.
+    // NVIDIA App's overlay window fights ours for the top: out of the way while ours is open (same setting as Reflex).
+    const bool ours = to == host::Mode::Overlay || to == host::Mode::Dialog;
+    SetNvidiaOverlayHidden(ours && settings::Get().blockReflex);
     if (to == host::Mode::Overlay) PostOverlayActivated(true);
     else if (from == host::Mode::Overlay) PostOverlayActivated(false);
 }

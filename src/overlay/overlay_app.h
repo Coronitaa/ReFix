@@ -89,6 +89,9 @@ struct PlayerRow {
     bool sameGame = false;
 };
 
+// The player plays this game in a lobby or server this player can join (overlay_ui_main.cpp).
+bool CanJoin(const PlayerRow& r, uint64_t localLobby);
+
 class App : public host::Client {
 public:
     static App& Get();

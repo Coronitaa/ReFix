@@ -20,6 +20,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "user32.lib")
 
 using namespace refix::steamlink::proto;
 
@@ -80,6 +81,8 @@ SOCKET g_sock = INVALID_SOCKET;
 sockaddr_in g_game{};
 HANDLE g_gameProcess = nullptr;
 bool g_quit = false;
+bool g_startedSteam = false;                       // Steam was closed and this helper opened it
+constexpr ULONGLONG kKeepSteamInTrayMs = 20000;    // Steam opens its window a few seconds after the login
 uint32_t g_appId = 0;
 std::string g_gameName;
 uint64_t g_self = 0;
@@ -238,6 +241,28 @@ bool RunSteam(const std::wstring& exe, const wchar_t* args) {
     return false;
 }
 
+// Steam that ReFix opened stays in the notification area: its main window ("Steam"), which it opens after the
+// login despite -silent, is closed, which in Steam means "to the tray". Login and update windows have other
+// titles and are left alone.
+BOOL CALLBACK TrayIfSteamMain(HWND w, LPARAM) {
+    wchar_t title[16] = {};
+    if (!IsWindowVisible(w) || GetWindow(w, GW_OWNER) || !InternalGetWindowText(w, title, 16) || wcscmp(title, L"Steam") != 0)
+        return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return TRUE;
+    wchar_t path[MAX_PATH] = {};
+    DWORD len = MAX_PATH;
+    const bool steam = QueryFullProcessImageNameW(h, 0, path, &len) &&
+                       (wcsstr(Normalized(path).c_str(), L"\\steamwebhelper.exe") || wcsstr(Normalized(path).c_str(), L"\\steam.exe"));
+    CloseHandle(h);
+    if (steam) PostMessageW(w, WM_CLOSE, 0, 0);
+    return TRUE;
+}
+
+void SendSteamToTray() { EnumWindows(TrayIfSteamMain, 0); }
+
 bool StartSteamAndWait() {
     if (SteamSignedIn()) return true;
     const std::wstring exe = RegString(L"Software\\Valve\\Steam", L"SteamExe");
@@ -245,6 +270,7 @@ bool StartSteamAndWait() {
     if (!SteamRunning()) {
         Report(kOpeningSteam);
         if (!RunSteam(exe, L"-silent")) { Report(kFailed, "Could not start Steam"); return false; }
+        g_startedSteam = true;
     }
     // Never another steam.exe while one runs: it would only rewrite ActiveProcess (see SteamPid).
     for (DWORD waited = 0; waited < kSteamStartTimeoutMs; waited += 500) {
@@ -427,10 +453,15 @@ int Run(int argc, wchar_t** argv) {
     Report(kOnline);
     PublishPresence(true);
     SendFriends();
-    ULONGLONG lastFriends = GetTickCount64();
+    ULONGLONG lastFriends = GetTickCount64(), lastHide = 0;
+    const ULONGLONG hideUntil = g_startedSteam ? GetTickCount64() + kKeepSteamInTrayMs : 0;
     while (Wait(2)) {
         HandleCallbacks(pipe);
         ForwardMessages();
+        if (GetTickCount64() < hideUntil && GetTickCount64() - lastHide >= 500) {
+            lastHide = GetTickCount64();
+            SendSteamToTray();
+        }
         if (GetTickCount64() - lastFriends >= kFriendRefreshMs) {
             lastFriends = GetTickCount64();
             SendFriends();

@@ -29,6 +29,7 @@ int main() {
     CHECK(cloud::Param(line, "state") == "abc");
     CHECK(cloud::Param("GET /favicon.ico HTTP/1.1", "state").empty());
     CHECK(cloud::UrlEncode("a b/'") == "a%20b%2F%27");
+    CHECK(cloud::Unscramble("1d1519") == "GOC");   // secret stored as hex of bytes XOR 0x5A
 
     CreateDirectoryW(profiles::RootDir().c_str(), nullptr);
     const cloud::Spec& g = cloud::S(cloud::Provider::Google);

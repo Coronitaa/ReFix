@@ -317,17 +317,42 @@ void App::DrawFriendRow(const steamlink::Friend& fr, float width) {
 
     const PlayerRow* row = nullptr;   // a ReFix friend in this game is also a LAN player (tunnel): invite from here
     if (fr.refix && fr.virtIp) {
-        for (const PlayerRow& r : rows_) if (r.p.ip == fr.virtIp) row = &r;
+        for (const PlayerRow& r : rows_) if (r.p.ip == fr.virtIp || r.p.steamId == fr.steamId) row = &r;
     }
+    // Same actions as a LAN player of this game: invite to my lobby, join theirs.
     float right = p1.x - ui::S(8);
     if (row && row->sameGame) {
         const float d = ui::S(36);
-        ImGui::SetCursorScreenPos(ImVec2(right - d, cy - d * 0.5f));
         ImGui::PushID((const void*)(uintptr_t)fr.steamId);
-        if (ui::IconButton("invite", ui::icon::Invite, T("Invite to your game", "Invitar a tu partida"), ui::color::Invite, true, d))
-            Invite(row->p);
+        right -= d;
+        ImGui::SetCursorScreenPos(ImVec2(right, cy - d * 0.5f));
+        switch (InviteStateFor(*row)) {
+        case InviteState::InLobby:
+            ui::IconButton("inv", ui::icon::Check, T("Already in your lobby", "Ya está en tu sala"), ui::color::Accent, false, d);
+            break;
+        case InviteState::Fresh:
+            ui::IconButton("inv", ui::icon::Check, T("Invite sent", "Invitación enviada"), ui::color::Accent, false, d);
+            break;
+        case InviteState::Pending:
+            if (ui::IconButton("inv", ui::icon::Refresh, T("Invited, not here yet: invite again", "Invitado, todavía no se unió: reenviar"),
+                               ui::color::Invite, true, d))
+                Invite(row->p);
+            break;
+        case InviteState::NoLobby:
+            ui::IconButton("inv", ui::icon::Invite, T("Create or join a lobby to invite", "Crea o únete a una sala para invitar"),
+                           ui::color::Invite, false, d);
+            break;
+        case InviteState::Ready:
+            if (ui::IconButton("inv", ui::icon::Invite, T("Invite to my lobby", "Invitar a mi sala"), ui::color::Invite, true, d)) Invite(row->p);
+            break;
+        }
+        if (CanJoin(*row, localLobby_)) {
+            right -= d + ui::S(6);
+            ImGui::SetCursorScreenPos(ImVec2(right, cy - d * 0.5f));
+            if (ui::IconButton("join", ui::icon::Join, T("Join their match", "Unirse a su partida"), ui::color::Accent, true, d)) Join(row->p);
+        }
         ImGui::PopID();
-        right -= d + ui::S(6);
+        right -= ui::S(6);
     }
     const float textX = p0.x + ui::S(12 + 2 * kAvatarR + 14);
     const float textW = std::max(ui::S(40), right - textX);
