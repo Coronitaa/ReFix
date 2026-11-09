@@ -315,6 +315,15 @@ write_ini() {
     local ini="$EXE_DIR/ReFix.ini" photon eos emu
     if [ "$MODE" = lan ]; then emu=goldberg; eos=emulated; else emu=valve; eos=passthrough; fi
     if uses_photon; then photon=ReFixCloud; else photon=OfficialPhoton; fi
+    # Free-to-play games keep their real AppID online: their backend checks a Steam ticket for it.
+    local mask=480 store="$(mktemp)"
+    if [ "$MODE" = online ] && [ "$APP_ID" != 480 ] &&
+       fetch "https://store.steampowered.com/api/appdetails?appids=$APP_ID&filters=basic" "$store" &&
+       grep -q '"is_free":true' "$store"; then
+        mask="$APP_ID"
+        echo "[INFO] AppID $APP_ID is free to play on Steam: ReFix Online will use it without masking."
+    fi
+    rm -f "$store"
     if [ ! -f "$ini" ]; then
         cat > "$ini" <<EOF
 ; ReFix configuration (written by AutoDeploy.sh). See README.txt for every option.
@@ -334,7 +343,7 @@ Backend = $photon
 Mode = $emu
 
 [Steam]
-MaskAppId = 480
+MaskAppId = $mask
 RealAppId = $APP_ID
 Language = english
 BypassLicenseCheck = true

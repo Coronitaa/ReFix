@@ -193,6 +193,24 @@ void CreateRenderTarget() {
     }
 }
 
+// Another module patched DXGI's factory vtable (Brawlhalla's FrameFixDLL does): composition swap chains
+// then run through its hook and crash inside dxgi, so the overlay draws through a layered window instead.
+bool FactoryPatchedByOtherModule(IDXGIFactory2* factory) {
+    const HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
+    void** vtable = *reinterpret_cast<void***>(factory);
+    for (const int slot : { 10, 15, 24 }) {   // CreateSwapChain, CreateSwapChainForHwnd, CreateSwapChainForComposition
+        HMODULE owner = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(vtable[slot]), &owner);
+        if (owner == dxgi) continue;
+        wchar_t name[MAX_PATH] = L"?";
+        if (owner) GetModuleFileNameW(owner, name, MAX_PATH);
+        ReFixLog("[Overlay] DXGI factory slot %d is patched by %ls", slot, name);
+        return true;
+    }
+    return false;
+}
+
 bool CreateDeviceAndSurface(UINT w, UINT h) {
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
@@ -219,7 +237,8 @@ bool CreateDeviceAndSurface(UINT w, UINT h) {
     sd.Scaling = DXGI_SCALING_STRETCH;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-    const bool composition = GetPrivateProfileIntA("Overlay", "Composition", 1, ".\\ReFix.ini") != 0;
+    const bool composition = GetPrivateProfileIntA("Overlay", "Composition", 1, ".\\ReFix.ini") != 0 &&
+                             !(factory && FactoryPatchedByOtherModule(factory));
     hr = !composition ? E_NOTIMPL : factory ? factory->CreateSwapChainForComposition(g_device, &sd, nullptr, &g_swap) : E_FAIL;
     if (SUCCEEDED(hr)) hr = DCompositionCreateDevice(dxgiDevice, IID_PPV_ARGS(&g_dcomp));
     // Not topmost: child windows (the overlay browser) are drawn above the ImGui visual.

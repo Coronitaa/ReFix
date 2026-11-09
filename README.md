@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.3.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.3.1)
+[![Release](https://img.shields.io/badge/version-v2.3.2-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.3.2)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -15,7 +15,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 ## Install
 
-1. Download `ReFix_Release_v2.3.1.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
+1. Download `ReFix_Release_v2.3.2.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
    - `[1] ReFix Online via Steam` or `[2] ReFix LAN without Steam`
@@ -32,6 +32,8 @@ To update ReFix in a game, run the new `AutoDeploy` on it again.
 ## ReFix Online
 
 - Needs the Steam client running. The game runs as Spacewar (AppID 480), so you get Steam lobbies, invites, P2P and Valve's relay.
+- Free-to-play games keep their real AppID (AutoDeploy asks the Steam store), so their own servers accept the Steam login.
+- If Steam has no install folder for the real AppID, the game gets its own folder instead of an empty path.
 - The real AppID goes into the lobby data, so you only see players of the same game.
 - Photon games (PUN 2, Realtime, Voice, Fusion) run against a local Photon emulator, and their traffic goes over Steam P2P. No Photon servers or AppIDs are needed.
 - Epic Online Services games get a DeviceID login through the bundled EOS proxy.
@@ -55,6 +57,7 @@ Press **Shift+Tab**, or the Xbox / PS button of a controller.
 - The game's Store, Community, Guides, Workshop and News pages open inside the overlay. They need the WebView2 Runtime (included in Windows 11); without it they open in your browser.
 - Works with Xbox and XInput controllers, DualShock 4 and DualSense, in English and Spanish.
 - Draws over borderless and fullscreen-window games. Games in exclusive fullscreen minimise while it is open.
+- If another module of the game has patched DXGI, the overlay draws through a layered window instead of DirectComposition, so it does not crash the game.
 - Nothing in the game or in Windows is patched or hooked, except NVIDIA Reflex: it is paused while the overlay is open, so the overlay does not flicker or turn see-through (Settings, or `BlockNvidiaReflex = false`, turns this off).
 
 ### Profiles

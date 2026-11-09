@@ -43,6 +43,20 @@ if (-not $CustomBroadcasts -and $env:REFIX_CUSTOM_BROADCASTS) { $CustomBroadcast
 if (-not $PhotonAppId -and $env:REFIX_PHOTON_APPID) { $PhotonAppId = $env:REFIX_PHOTON_APPID }
 if (-not $PhotonRegion -and $env:REFIX_PHOTON_REGION) { $PhotonRegion = $env:REFIX_PHOTON_REGION }
 if (-not $OverlayMode -and $env:REFIX_OVERLAY_MODE) { $OverlayMode = $env:REFIX_OVERLAY_MODE }
+
+# Free-to-play games (Brawlhalla) are in every Steam library and their own backend checks a Steam ticket for the
+# real AppID, so ReFix Online keeps the real AppID instead of masking it as 480. Offline lookup keeps 480.
+if ($OnlineMode -eq "valve" -and $MaskAppId -eq "480" -and $RealAppId -match '^\d+$' -and $RealAppId -ne "480") {
+    try {
+        $details = Invoke-RestMethod -TimeoutSec 10 -Uri "https://store.steampowered.com/api/appdetails?appids=$RealAppId&filters=basic"
+        if ($details."$RealAppId".data.is_free -eq $true) {
+            $MaskAppId = $RealAppId
+            Write-Host "[INFO] AppID $RealAppId is free to play on Steam: ReFix Online will use it without masking."
+        }
+    } catch {
+        Write-Host "[INFO] Could not ask the Steam store whether AppID $RealAppId is free to play; masking it as 480."
+    }
+}
 # In-game overlay of ReFix LAN: refix (default) | steam | none (also 1 / 2 / 3)
 switch -Regex ("$OverlayMode".Trim().ToLower()) {
     '^(2|steam)$' { $OverlayMode = "steam" }
