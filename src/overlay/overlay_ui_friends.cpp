@@ -46,7 +46,12 @@ ImU32 StateColor(State s) {
 const char* StateLabel(State s) {
     switch (s) {
     case State::Online: return T("On", "Activado");
-    case State::Starting: return T("Connecting...", "Conectando...");
+    case State::Starting:
+        switch (steamlink::CurrentStep()) {
+        case steamlink::Step::OpeningSteam: return T("Opening Steam...", "Abriendo Steam...");
+        case steamlink::Step::SigningIn: return T("Sign in to Steam...", "Inicia sesión en Steam...");
+        default: return T("Connecting...", "Conectando...");
+        }
     case State::Failed: return T("Error", "Error");
     default: return T("Off", "Desactivado");
     }
@@ -113,6 +118,18 @@ ImU32 SyncColor(sync::State s) {
     }
 }
 
+// sync errors are English; the ones a player can act on get their Spanish here.
+std::string SyncError(const std::string& e) {
+    static const struct { const char* en; const char* es; } kKnown[] = {
+        { "Newer saves from another PC: restart the game to take them", "Hay partidas más nuevas de otro PC: reinicia el juego para traerlas" },
+        { "Destination not available", "El destino no está disponible" },
+        { "Could not write to the destination", "No se pudo escribir en el destino" },
+        { "The saved package is damaged", "El archivo guardado está dañado" },
+    };
+    for (const auto& k : kKnown) if (e == k.en) return T(k.en, k.es);
+    return e;
+}
+
 std::string SyncTooltip(const sync::Status& s) {
     std::string t;
     switch (s.state) {
@@ -120,7 +137,7 @@ std::string SyncTooltip(const sync::Status& s) {
     case sync::State::Pending: t = T("Changes ready to sync.", "Cambios listos para sincronizar."); break;
     case sync::State::Syncing: t = T("Syncing...", "Sincronizando..."); break;
     case sync::State::Failed:
-        t = T("Sync failed: ", "La sincronización falló: ") + s.error + ".";
+        t = T("Sync failed: ", "La sincronización falló: ") + SyncError(s.error) + ".";
         break;
     default:
         t = s.destination.empty() ? T("Choose where to keep your saves in Settings (a cloud folder or a USB drive).",
@@ -128,7 +145,7 @@ std::string SyncTooltip(const sync::Status& s) {
                                   : T("The sync folder is not available right now.", "La carpeta de sincronización no está disponible ahora.");
         break;
     }
-    if (!s.destination.empty()) t += std::string("\n") + T("Folder: ", "Carpeta: ") + ToUtf8(s.destination);
+    if (!s.destination.empty()) t += std::string("\n") + T("Destination: ", "Destino: ") + ToUtf8(s.destination);
     if (s.lastSync) {
         FILETIME ft{ (DWORD)s.lastSync, (DWORD)(s.lastSync >> 32) }, local;
         SYSTEMTIME st;
@@ -279,7 +296,7 @@ float App::DrawSyncButton(float right, float cy) {
         ui::GlyphCentered(dl, ui::F().glyph, ui::S(18), c, grey ? ui::color::Muted : ui::color::Text, ui::icon::Refresh);
     }
     if (clicked) {
-        if (s.destination.empty()) settingsRequested_ = true;   // nowhere to sync yet: the choice is in Settings
+        if (s.destination.empty()) { settingsSection_ = 4; settingsRequested_ = true; }   // Settings > Syncing   // nowhere to sync yet: the choice is in Settings
         else sync::SyncNow();
     }
     return right - d;
@@ -359,8 +376,11 @@ void App::DrawFriends(ImVec2 pos, ImVec2 size) {
         ImGui::PushFont(ui::F().caption);
         ImGui::PushTextWrapPos(0.0f);
         if (st == State::Starting) {
-            ui::TextColored(ui::color::Muted, T("Connecting to Steam (it opens by itself if it was closed)...",
-                                                "Conectando con Steam (se abre solo si estaba cerrado)..."));
+            const bool signIn = steamlink::CurrentStep() == steamlink::Step::SigningIn;
+            ui::TextColored(ui::color::Muted, signIn ? T("Waiting for Steam to sign in. If Steam asks for your account or an update, finish it there.",
+                                                         "Esperando a que Steam inicie sesión. Si Steam pide tu cuenta o una actualización, termínala allí.")
+                                                     : T("Connecting to Steam (it opens by itself if it was closed)...",
+                                                         "Conectando con Steam (se abre solo si estaba cerrado)..."));
         } else {
             ui::TextColored(ui::color::Danger, T("Could not connect to Steam.", "No se pudo conectar con Steam."));
             const std::string err = steamlink::LastError();

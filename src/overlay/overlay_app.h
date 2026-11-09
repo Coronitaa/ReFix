@@ -182,6 +182,7 @@ public:
     bool settingsOpen_ = false;
     bool settingsRequested_ = false;
     ULONGLONG settingsOpenedAt_ = 0;
+    int settingsSection_ = 0;        // sidebar section open in Settings
     ULONGLONG achModalOpenedAt_ = 0;
 
 private:
@@ -210,7 +211,8 @@ private:
     float DrawSteamButton(float right, float cy);   // top bar; returns the new left edge
     float DrawSyncButton(float right, float cy);
     void DrawSteamConfirm();
-    void DrawSyncSettings();                      // overlay_ui_settings.cpp
+    void DrawSyncSettings();
+    void DrawCloudAccounts(const std::wstring& chosen);                      // overlay_ui_settings.cpp
     std::string syncError_;
     bool steamConfirm_ = false;
     void DrawFriends(ImVec2 pos, ImVec2 size);

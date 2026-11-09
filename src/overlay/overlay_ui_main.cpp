@@ -210,8 +210,6 @@ void App::DrawTopBar(ImVec2 viewport) {
     x -= ui::S(20) + cs.x;
     TextAt(dl, f.heading, ImVec2(x, cy - cs.y * 0.5f), ui::color::Muted, clock);
     x -= ui::S(16);
-    DrawLanguageSwitch(ImVec2(x, cy));
-    x -= ui::S(96);
 
     ImGui::PushFont(f.title);
     const std::string shown = ui::Ellipsize(title, (std::max)(ui::S(80), x - ui::S(24) - titleX));

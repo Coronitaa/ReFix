@@ -1,5 +1,5 @@
-// NVIDIA Reflex pause for the overlay. On a PC with an NVIDIA driver it hooks the real NVAPI and checks that
-// NvAPI_D3D_Sleep returns at once (NVAPI_OK) while the overlay is open and reaches the driver again after.
+// NVIDIA Reflex off in the game. On a PC with an NVIDIA driver it hooks the real NVAPI and checks that the game can
+// no longer look Reflex up, and that NvAPI_D3D_Sleep found earlier returns at once without the driver.
 #include "../src/overlay/nvidia_reflex_block.h"
 #include <windows.h>
 #include <cassert>
@@ -17,17 +17,17 @@ static std::wstring GetEnv(const wchar_t* name) {
 
 int main() {
     using namespace refix::overlay;
-    printf("[*] NVIDIA Reflex pause tests\n");
+    printf("[*] NVIDIA Reflex block tests\n");
 
-    // Not armed: pausing does nothing (and must not crash).
-    SetReflexPausedForOverlay(true);
-    SetReflexPausedForOverlay(false);
+    PollNvidiaReflexHooks();   // not armed: nothing happens
+    assert(!NvidiaReflexBlockArmed());
 
     ArmNvidiaReflexBlock();
-    ArmNvidiaReflexBlock();   // idempotent
+    ArmNvidiaReflexBlock();    // idempotent
+    assert(NvidiaReflexBlockArmed());
     assert(GetEnv(L"NV_LOW_LATENCY_FLASH_INDICATOR") == L"0");
-    assert(GetEnv(L"NV_REFLEX_DISABLE") == L"");   // Reflex itself is not switched off for the game
-    printf("  [PASS] armed; flash indicator switches set, Reflex left on for the game\n");
+    assert(GetEnv(L"NV_REFLEX_DISABLE") == L"1");
+    printf("  [PASS] armed; Reflex switches set in the environment\n");
 
 #ifdef _WIN64
     HMODULE nvapi = LoadLibraryW(L"nvapi64.dll");
@@ -38,20 +38,19 @@ int main() {
         printf("  [SKIP] no NVIDIA driver on this PC\n");
         return 0;
     }
-    PollNvidiaReflexHooks();
     using Query = void* (*)(unsigned int);
     using SleepFn = int (*)(void*);
     auto query = reinterpret_cast<Query>(GetProcAddress(nvapi, "nvapi_QueryInterface"));
     assert(query);
-    auto sleepFn = reinterpret_cast<SleepFn>(query(0x852CD1D2));   // NvAPI_D3D_Sleep (hooked in place)
+    auto sleepFn = reinterpret_cast<SleepFn>(query(0x852CD1D2));   // looked up before the hooks, like an early game
     assert(sleepFn);
-
     const int before = sleepFn(nullptr);   // reaches the driver: an error for a null device
-    SetReflexPausedForOverlay(true);
-    assert(sleepFn(nullptr) == 0);         // paused: returns NVAPI_OK without calling the driver
-    SetReflexPausedForOverlay(false);
-    assert(sleepFn(nullptr) == before);    // back to the driver
-    printf("  [PASS] NvAPI_D3D_Sleep paused while the overlay is open (driver result %d otherwise)\n", before);
+    PollNvidiaReflexHooks();
+    assert(sleepFn(nullptr) == 0);                  // hooked in place: NVAPI_OK without the driver
+    assert(query(0x852CD1D2) == nullptr);           // NvAPI_D3D_Sleep is no longer offered
+    assert(query(0xAC789736) == nullptr);           // NvAPI_D3D_SetSleepMode either
+    assert(query(0x0150E828) != nullptr);           // other NVAPI functions still are (NvAPI_Initialize)
+    printf("  [PASS] Reflex hidden from NVAPI lookups; early Sleep pointer returns at once (driver said %d)\n", before);
     printf("[SUCCESS]\n");
     return 0;
 }

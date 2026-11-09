@@ -41,6 +41,7 @@ public:
     virtual bool Ready() const = 0;
     virtual bool Read(const std::wstring& file, std::vector<uint8_t>& out) = 0;   // false when missing
     virtual bool Write(const std::wstring& file, const std::vector<uint8_t>& data) = 0;
+    virtual bool Failed() const { return false; }   // the last Read could not reach it (not the same as missing)
 };
 std::unique_ptr<ISyncTarget> MakeFolderTarget(const std::wstring& folder);
 

@@ -68,7 +68,8 @@ Steam profiles keep everything (saves, achievements, stats, items, emulated Stea
 - The round button next to your profile shows the state: green synced, orange changes waiting, red failed, grey nowhere to sync. Click it to sync now; it spins while it works.
 - At game start ReFix takes a newer file from another PC. What it replaces is kept in `%APPDATA%\ReFix\SyncBackups` (last 3).
 - The file is compressed and scrambled so it is not edited by hand by mistake, and a checksum rejects damaged files. Nothing is sent to ReFix.
-- Local profiles stay on the PC unless you turn on "Sync local profiles too". "Only on this PC" turns syncing off; your profiles always stay on the PC either way.
+- Local profiles stay on the PC unless you turn on "Sync local profiles too".
+- Or sign in to Google Drive or OneDrive in Settings and ReFix keeps the file in its own folder of your account, with no desktop app needed. ReFix can only see that folder, and the sign-in stays encrypted for your Windows user. Builds need ReFix's client IDs: see [docs/cloud-sync-setup.md](docs/cloud-sync-setup.md). "Only on this PC" turns syncing off; your profiles always stay on the PC either way.
 - Settings also exports your profile to a `.rfxp` file anywhere, and imports one. An imported file always becomes a new profile, so nothing that exists is replaced.
 ### Overlay
 

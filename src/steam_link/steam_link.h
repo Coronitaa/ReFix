@@ -21,6 +21,8 @@ void SetSteamOverlay(bool on);       // ReFix.ini [Overlay] BlockSteamOverlay=fa
 void Enable();                       // asynchronous; State() goes Starting -> Online or Failed
 void Disable();                      // back to LAN only
 State GetState();
+enum class Step { None, OpeningSteam, SigningIn, Connecting };
+Step CurrentStep();                  // what Starting is waiting for
 std::string LastError();             // UTF-8, English (the overlay translates the common ones)
 uint64_t LocalSteamId();
 

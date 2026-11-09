@@ -8,6 +8,7 @@
 #define NOMINMAX
 #endif
 #include "profile_sync.h"
+#include "cloud_account.h"
 #include "overlay_text.h"
 #include "save_swap.h"
 
@@ -36,6 +37,7 @@ std::optional<Profile> g_profile;
 Status g_status;
 std::atomic<bool> g_busy{ false };
 std::atomic<bool> g_started{ false };
+std::atomic<bool> g_seenRemote{ false };   // this session read the destination (or knows nothing newer is there)
 HANDLE g_wake = nullptr;
 uint8_t g_lastPending[32] = {};  // state seen by the previous check (uploads wait until it holds still)
 
@@ -166,13 +168,23 @@ void SetLastHash(const Profile& p, const uint8_t hash[32]) {
     g_status.lastSync = now;
 }
 
-std::unique_ptr<ISyncTarget> Target() { return MakeFolderTarget(EffectiveFolder()); }
+std::unique_ptr<ISyncTarget> Target() {
+    const std::wstring where = EffectiveFolder();
+    cloud::Provider p;
+    return cloud::FromChoice(where, p) ? cloud::MakeTarget(p) : MakeFolderTarget(where);
+}
+
+std::wstring Destination() {   // what the player reads
+    const std::wstring where = EffectiveFolder();
+    cloud::Provider p;
+    return cloud::FromChoice(where, p) ? FromUtf8(cloud::Label(p)) : where;
+}
 
 void SetState(State s, const std::string& error = {}) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_status.state = s;
     g_status.error = error;
-    g_status.destination = EffectiveFolder();
+    g_status.destination = Destination();
 }
 
 bool BuildPackage(const Profile& p, const std::vector<Entry>& files, const uint8_t hash[32], std::vector<uint8_t>& pkg) {
@@ -244,7 +256,14 @@ void Pull(const Profile& p) {
     const std::vector<Entry> local = Collect(p);
     uint8_t localHash[32];
     StateHash(local, localHash);
-    if (!target->Read(PackageName(p), pkg)) { SetState(local.empty() ? State::Synced : State::Pending); return; }
+    const bool read = target->Read(PackageName(p), pkg);
+    if (read || !target->Failed()) g_seenRemote = true;
+    if (!read) {
+        // Unreachable is not "missing": never let a later upload replace a package this PC could not see.
+        if (target->Failed()) SetState(State::Unavailable, "Destination not available");
+        else SetState(local.empty() ? State::Synced : State::Pending);
+        return;
+    }
     FileList files;
     uint64_t steamId = 0;
     uint8_t remoteHash[32];
@@ -270,6 +289,22 @@ void Pull(const Profile& p) {
              last.empty() || last == localHex ? "" : "; this PC's changes kept in SyncBackups");
 }
 
+// Before the first upload of a session whose start could not reach the destination: only when what is there is
+// what this PC last synced (taking a newer package mid-game would overwrite live saves; the next start takes it).
+bool RemoteUnchanged(const Profile& p, ISyncTarget& target) {
+    if (g_seenRemote) return true;
+    std::vector<uint8_t> pkg;
+    if (!target.Read(PackageName(p), pkg)) {
+        if (target.Failed()) { SetState(State::Unavailable, "Destination not available"); return false; }
+        return g_seenRemote = true;
+    }
+    FileList files;
+    uint8_t remoteHash[32];
+    if (Unpack(pkg, files, nullptr, remoteHash) && ToUtf8(Hex(remoteHash, 32)) == LastHash(p)) return g_seenRemote = true;
+    SetState(State::Failed, "Newer saves from another PC: restart the game to take them");
+    return false;
+}
+
 // Upload when the profile changed since the last sync. `force`: now, without waiting for it to hold still.
 void Push(const Profile& p, bool force) {
     const std::vector<Entry> files = Collect(p);
@@ -281,6 +316,7 @@ void Push(const Profile& p, bool force) {
     auto target = Target();
     if (!target->Ready()) { SetState(State::Unavailable, "Destination not available"); return; }
     if (!force && !steady) { SetState(State::Pending); return; }
+    if (!RemoteUnchanged(p, *target)) return;
     SetState(State::Syncing);
     std::vector<uint8_t> pkg;
     if (!BuildPackage(p, files, hash, pkg)) { SetState(State::Failed, "Could not build the package"); return; }
@@ -386,6 +422,7 @@ void Begin(const Profile& active) {
         std::lock_guard<std::mutex> lock(g_mu);
         g_profile = active;
         g_status = Status{};
+        g_seenRemote = false;
         LastHash(active, &g_status.lastSync);
     }
     if (Syncs(active)) Pull(active);

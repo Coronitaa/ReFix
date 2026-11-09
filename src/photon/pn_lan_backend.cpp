@@ -25,8 +25,13 @@ namespace {
 
 // LanCore channels 249 (lobby chat) and 250 (RFXS sockets) are taken by the emulator; games' own P2P channels
 // are small numbers.
+// Steam channel 9 (Photon's default) keeps channel 248 as is, so older ReFix builds still talk to this one; every
+// other Steam channel (the Party Animals relay, a non-default Photon channel) shares 246 with a 1-byte channel
+// prefix. Each Steam channel has its own inbox: the relay's pump must never swallow Photon's messages.
 constexpr uint8_t kPhotonLanChannel = 248;
-constexpr size_t kMaxQueuedMessages = 8192; // drop the oldest beyond this if the pump stalls
+constexpr uint8_t kOtherLanChannel = 246;
+constexpr int kPhotonSteamChannel = 9;
+constexpr size_t kMaxQueuedMessages = 8192; // per Steam channel; drop the oldest beyond this if the pump stalls
 
 struct Inbound {
     refix::lan::PeerId sender;
@@ -34,7 +39,7 @@ struct Inbound {
 };
 
 std::mutex g_inboxMutex;
-std::deque<Inbound> g_inbox;
+std::map<int, std::deque<Inbound>> g_inbox;   // by Steam channel
 std::atomic<bool> g_attached{ false };
 
 std::mutex g_idCacheMutex;
@@ -54,6 +59,13 @@ uint64_t SteamIdOf(const refix::lan::PeerId& peer) {
     return it != g_peerToSteam.end() ? it->second : 0;
 }
 
+void Queue(int channel, const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
+    std::lock_guard<std::mutex> lock(g_inboxMutex);
+    std::deque<Inbound>& box = g_inbox[channel];
+    if (box.size() >= kMaxQueuedMessages) box.pop_front();
+    box.push_back({ sender, std::vector<uint8_t>(data, data + len) });
+}
+
 // Installs the channel handler once the LAN emulator is up (LanCore is initialized with it).
 bool EnsureAttached() {
     if (g_attached.load(std::memory_order_acquire)) return true;
@@ -61,9 +73,11 @@ bool EnsureAttached() {
     if (g_attached.exchange(true)) return true;
     refix::lan::ILanCore::Get().SetChannelHandler(kPhotonLanChannel,
         [](const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
-            std::lock_guard<std::mutex> lock(g_inboxMutex);
-            if (g_inbox.size() >= kMaxQueuedMessages) g_inbox.pop_front();
-            g_inbox.push_back({ sender, std::vector<uint8_t>(data, data + len) });
+            Queue(kPhotonSteamChannel, sender, data, len);
+        });
+    refix::lan::ILanCore::Get().SetChannelHandler(kOtherLanChannel,
+        [](const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
+            if (len > 1) Queue(data[0], sender, data + 1, len - 1);
         });
     ReFixLog("[Photon] LAN backend attached (LanCore channel %u)", kPhotonLanChannel);
     return true;
@@ -120,7 +134,7 @@ uint64_t ActiveLobbyID() {
     return EnsureAttached() ? UnrealSteamEmu::GetActiveLobbyID() : 0;
 }
 
-bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int, bool reliable) {
+bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel, bool reliable) {
     if (!data || !size || !EnsureAttached()) return false;
     auto& core = refix::lan::ILanCore::Get();
     auto peerId = core.Peers().FindBySteamId(steamID);
@@ -132,19 +146,31 @@ bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int, bool re
     if (!peerId) return false;
     auto peer = core.Peers().FindByPeerId(*peerId);
     if (!peer || !peer->endpoint.IsValid()) return false;
+    std::vector<uint8_t> tagged;
+    uint8_t lanChannel = kPhotonLanChannel;
+    if (channel != kPhotonSteamChannel) {
+        if (channel < 0 || channel > 255) return false;
+        tagged.reserve(size + 1);
+        tagged.push_back((uint8_t)channel);
+        tagged.insert(tagged.end(), (const uint8_t*)data, (const uint8_t*)data + size);
+        data = tagged.data();
+        size = (uint32_t)tagged.size();
+        lanChannel = kOtherLanChannel;
+    }
     if (reliable || size > refix::lan::REFIX_MAX_UNRELIABLE_PAYLOAD)
-        return core.Transport().SendReliable(*peerId, peer->endpoint, kPhotonLanChannel, data, size);
-    return core.Transport().SendUnreliable(peer->endpoint, kPhotonLanChannel, data, size);
+        return core.Transport().SendReliable(*peerId, peer->endpoint, lanChannel, data, size);
+    return core.Transport().SendUnreliable(peer->endpoint, lanChannel, data, size);
 }
 
-int ReceiveMessages(int, int maxMessages, const std::function<void(uint64_t, const uint8_t*, uint32_t)>& onMessage) {
+int ReceiveMessages(int channel, int maxMessages, const std::function<void(uint64_t, const uint8_t*, uint32_t)>& onMessage) {
     if (maxMessages <= 0 || !EnsureAttached()) return 0;
     std::vector<Inbound> batch;
     {
         std::lock_guard<std::mutex> lock(g_inboxMutex);
-        while (!g_inbox.empty() && (int)batch.size() < maxMessages) {
-            batch.push_back(std::move(g_inbox.front()));
-            g_inbox.pop_front();
+        auto it = g_inbox.find(channel);
+        while (it != g_inbox.end() && !it->second.empty() && (int)batch.size() < maxMessages) {
+            batch.push_back(std::move(it->second.front()));
+            it->second.pop_front();
         }
     }
     for (const auto& m : batch) {

@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "steam_link.h"
+#include "steam_host_proto.h"
 
 #include <winsock2.h>
 #include <windows.h>
@@ -23,84 +24,27 @@ extern void ReFixLog(const char* fmt, ...);
 namespace refix::steamlink {
 namespace {
 
-// --- Valve flat API, resolved from our private copy of steam_api64.dll -------------------------------------
-// Minimal layouts of the SDK structs we read (only the leading fields, which are stable since SDK 1.48).
-struct NetIdentity {                 // SteamNetworkingIdentity
-    int32_t type;                    // 16 = k_ESteamNetworkingIdentityType_SteamID
-    int32_t size;
-    union { uint64_t steamId; char raw[128]; };
-};
-static_assert(sizeof(NetIdentity) == 136, "SteamNetworkingIdentity layout");
-struct NetMessage {                  // SteamNetworkingMessage_t (leading fields)
-    void* data;
-    int32_t size;
-    uint32_t conn;
-    NetIdentity peer;
-};
-struct CallbackMsg {                 // CallbackMsg_t
-    int32_t user;
-    int32_t id;
-    uint8_t* param;
-    int32_t paramSize;
-};
-struct FriendGameInfo {              // FriendGameInfo_t
-    uint64_t gameId;
-    uint32_t ip;
-    uint16_t port, queryPort;
-    uint64_t lobby;
-};
-
-constexpr int kChannel = 47;                       // ISteamNetworkingMessages channel of the tunnel
-constexpr int kSendFlags = 1 | 32;                 // UnreliableNoNagle | AutoRestartBrokenSession
-constexpr int kCbSessionRequest = 1251;            // SteamNetworkingMessagesSessionRequest_t
-constexpr int kFriendFlagImmediate = 4;
+// The Steam side runs in refix_steamhost(64).exe (steam_host.cpp): Steam shows a process as playing Spacewar
+// until it exits, so turning Steam online off ends that process. This side keeps the tunnel and bridge logic.
 constexpr uint8_t kFlagBroadcast = 1;
 constexpr uint8_t kFlagToLan = 2;                  // bridge: deliver on your LAN to the IPv4 that follows
 constexpr uint8_t kFlagFromLan = 4;                // from a LAN player behind the sender, whose IPv4 follows
 constexpr uint16_t kDiscoveryPortFirst = 47584;    // LanCore discovery ports (refix_lan_transport.cpp)
 constexpr uint16_t kDiscoveryPortLast = 47599;
-constexpr DWORD kSteamStartTimeoutMs = 120000;
 constexpr DWORD kPumpIntervalMs = 2;
-constexpr DWORD kInitRetryMs = 2000;
-constexpr ULONGLONG kFriendRefreshMs = 3000;
+constexpr DWORD kHelloTimeoutMs = 10000;
+constexpr DWORD kQuitWaitMs = 5000;
+constexpr DWORD kAvatarRetryMs = 2000;
 constexpr size_t kHeader = 5;                      // srcPort u16, dstPort u16, flags u8
 constexpr size_t kMaxDatagram = 65535;
 
-struct Api {
-    HMODULE dll = nullptr;
-    bool (*Init)() = nullptr;
-    void (*Shutdown)() = nullptr;
-    void (*DispatchInit)() = nullptr;
-    void (*RunFrame)(int32_t) = nullptr;
-    bool (*NextCallback)(int32_t, CallbackMsg*) = nullptr;
-    void (*FreeCallback)(int32_t) = nullptr;
-    int32_t (*Pipe)() = nullptr;
-    void* (*Messages)() = nullptr;
-    void* (*FriendsIface)() = nullptr;
-    void* (*UserIface)() = nullptr;
-    int (*SendMsg)(void*, const NetIdentity*, const void*, uint32_t, int, int) = nullptr;
-    int (*RecvMsgs)(void*, int, NetMessage**, int) = nullptr;
-    bool (*AcceptSession)(void*, const NetIdentity*) = nullptr;
-    void (*Release)(NetMessage*) = nullptr;
-    uint64_t (*GetSteamID)(void*) = nullptr;
-    int (*FriendCount)(void*, int) = nullptr;
-    uint64_t (*FriendByIndex)(void*, int, int) = nullptr;
-    const char* (*FriendName)(void*, uint64_t) = nullptr;
-    int (*FriendState)(void*, uint64_t) = nullptr;
-    bool (*FriendGame)(void*, uint64_t, FriendGameInfo*) = nullptr;
-    const char* (*FriendRP)(void*, uint64_t, const char*) = nullptr;
-    bool (*SetRP)(void*, const char*, const char*) = nullptr;
-    bool (*HasFriend)(void*, uint64_t, int) = nullptr;
-    int (*MediumAvatar)(void*, uint64_t) = nullptr;
-    void* (*UtilsIface)() = nullptr;
-    bool (*ImageSize)(void*, int, uint32_t*, uint32_t*) = nullptr;
-    bool (*ImageRgba)(void*, int, uint8_t*, int) = nullptr;
-};
-
-Api g_api;
-void* g_msgs = nullptr;
-void* g_friends = nullptr;
-void* g_utils = nullptr;
+SOCKET g_ipc = INVALID_SOCKET;                     // loopback socket to the helper (link thread; sendto is thread-safe)
+sockaddr_in g_host{};                              // helper's address, set by its hello
+std::atomic<bool> g_hostKnown{ false };
+std::atomic<int> g_step{ 0 };                      // proto::Step while Starting
+struct Avatar { int w = 0, h = 0; std::vector<uint8_t> rgba; };
+std::map<int, Avatar> g_avatars;                   // guarded by g_mu
+std::map<int, ULONGLONG> g_avatarAsked;            // guarded by g_mu
 std::string g_gameName;                            // guarded by g_mu
 std::atomic<State> g_state{ State::Off };
 std::atomic<bool> g_wanted{ false };
@@ -142,50 +86,6 @@ std::wstring RegString(const wchar_t* key, const wchar_t* value) {
     return buf;
 }
 
-DWORD RegDword(const wchar_t* key, const wchar_t* value) {
-    DWORD v = 0, size = sizeof(v);
-    return RegGetValueW(HKEY_CURRENT_USER, key, value, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS ? v : 0;
-}
-
-bool ProcessAlive(DWORD pid) {
-    HANDLE h = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
-    if (!h) return false;
-    const bool alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-    CloseHandle(h);
-    return alive;
-}
-
-// Steam is up and signed in (the same registry values steam_api checks before it connects).
-bool SteamSignedIn() {
-    const wchar_t* key = L"Software\\Valve\\Steam\\ActiveProcess";
-    return ProcessAlive(RegDword(key, L"pid")) && RegDword(key, L"ActiveUser") != 0;
-}
-
-bool StartSteamAndWait() {
-    if (SteamSignedIn()) return true;
-    const std::wstring exe = RegString(L"Software\\Valve\\Steam", L"SteamExe");
-    if (exe.empty()) {
-        SetError("Steam is not installed");
-        return false;
-    }
-    if (!ProcessAlive(RegDword(L"Software\\Valve\\Steam\\ActiveProcess", L"pid"))) {
-        ReFixLog("[SteamLink] Starting Steam in the background");
-        if ((INT_PTR)ShellExecuteW(nullptr, L"open", exe.c_str(), L"-silent", nullptr, SW_SHOWMINNOACTIVE) <= 32) {
-            SetError("Could not start Steam");
-            return false;
-        }
-    }
-    for (DWORD waited = 0; waited < kSteamStartTimeoutMs && g_wanted; waited += 500) {
-        if (SteamSignedIn()) {
-            Sleep(2000);   // steamclient needs a moment after login before it accepts API clients
-            return true;
-        }
-        Sleep(500);
-    }
-    SetError(g_wanted ? "Steam did not sign in in time" : "Cancelled");
-    return false;
-}
-
 std::wstring ModuleDir() {
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -194,108 +94,6 @@ std::wstring ModuleDir() {
     GetModuleFileNameW(self, path, MAX_PATH);
     std::wstring dir = path;
     return dir.substr(0, dir.find_last_of(L"\\/") + 1);
-}
-
-template <class F> bool Resolve(F& fn, const char* name) {
-    fn = reinterpret_cast<F>(GetProcAddress(g_api.dll, name));
-    return fn != nullptr;
-}
-
-template <class F> bool ResolveAny(F& fn, std::initializer_list<const char*> names) {
-    for (const char* n : names) if (Resolve(fn, n)) return true;
-    return false;
-}
-
-// ReFix ships Valve's DLL as refix_steamlink(64).dll; the game's own genuine copy is the fallback.
-#ifdef _WIN64
-constexpr const wchar_t* kLinkDll = L"refix_steamlink64.dll";
-constexpr const wchar_t* kGameDll = L"steam_api64_original.dll";
-#else
-constexpr const wchar_t* kLinkDll = L"refix_steamlink.dll";
-constexpr const wchar_t* kGameDll = L"steam_api_original.dll";
-#endif
-
-bool LoadValve() {
-    const std::wstring dir = ModuleDir();
-    for (const std::wstring& name : { std::wstring(kLinkDll), std::wstring(kGameDll), L"ReFix\\" + std::wstring(kLinkDll) }) {
-        const std::wstring path = dir + name;
-        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-        g_api.dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!g_api.dll) continue;
-        bool ok = Resolve(g_api.Init, "SteamAPI_Init") && Resolve(g_api.Shutdown, "SteamAPI_Shutdown") &&
-                  Resolve(g_api.DispatchInit, "SteamAPI_ManualDispatch_Init") &&
-                  Resolve(g_api.RunFrame, "SteamAPI_ManualDispatch_RunFrame") &&
-                  Resolve(g_api.NextCallback, "SteamAPI_ManualDispatch_GetNextCallback") &&
-                  Resolve(g_api.FreeCallback, "SteamAPI_ManualDispatch_FreeLastCallback") &&
-                  Resolve(g_api.Pipe, "SteamAPI_GetHSteamPipe") &&
-                  Resolve(g_api.Messages, "SteamAPI_SteamNetworkingMessages_SteamAPI_v002") &&
-                  ResolveAny(g_api.FriendsIface, { "SteamAPI_SteamFriends_v017", "SteamAPI_SteamFriends_v018" }) &&
-                  ResolveAny(g_api.UserIface, { "SteamAPI_SteamUser_v023", "SteamAPI_SteamUser_v022",
-                                                "SteamAPI_SteamUser_v021", "SteamAPI_SteamUser_v020" }) &&
-                  Resolve(g_api.SendMsg, "SteamAPI_ISteamNetworkingMessages_SendMessageToUser") &&
-                  Resolve(g_api.RecvMsgs, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel") &&
-                  Resolve(g_api.AcceptSession, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser") &&
-                  Resolve(g_api.Release, "SteamAPI_SteamNetworkingMessage_t_Release") &&
-                  Resolve(g_api.GetSteamID, "SteamAPI_ISteamUser_GetSteamID") &&
-                  Resolve(g_api.FriendCount, "SteamAPI_ISteamFriends_GetFriendCount") &&
-                  Resolve(g_api.FriendByIndex, "SteamAPI_ISteamFriends_GetFriendByIndex") &&
-                  Resolve(g_api.FriendName, "SteamAPI_ISteamFriends_GetFriendPersonaName") &&
-                  Resolve(g_api.FriendState, "SteamAPI_ISteamFriends_GetFriendPersonaState") &&
-                  Resolve(g_api.FriendGame, "SteamAPI_ISteamFriends_GetFriendGamePlayed") &&
-                  Resolve(g_api.FriendRP, "SteamAPI_ISteamFriends_GetFriendRichPresence") &&
-                  Resolve(g_api.SetRP, "SteamAPI_ISteamFriends_SetRichPresence") &&
-                  Resolve(g_api.HasFriend, "SteamAPI_ISteamFriends_HasFriend") &&
-                  Resolve(g_api.MediumAvatar, "SteamAPI_ISteamFriends_GetMediumFriendAvatar") &&
-                  Resolve(g_api.UtilsIface, "SteamAPI_SteamUtils_v010") &&
-                  Resolve(g_api.ImageSize, "SteamAPI_ISteamUtils_GetImageSize") &&
-                  Resolve(g_api.ImageRgba, "SteamAPI_ISteamUtils_GetImageRGBA");
-        if (ok) {
-            ReFixLog("[SteamLink] Using %ls", path.c_str());
-            return true;
-        }
-        ReFixLog("[SteamLink] %ls lacks the Steam networking API; skipped", path.c_str());
-        FreeLibrary(g_api.dll);
-        g_api = Api{};
-    }
-    SetError("Steam API library not found (refix_steamlink DLL)");
-    return false;
-}
-
-// SteamAPI_Init reads the AppID from the environment: Spacewar for this call only, so the game's
-// own view of SteamAppId (read by the emulator and the EOS proxy) is left untouched.
-bool InitAsSpacewar() {
-    wchar_t prevApp[32] = {}, prevGame[32] = {};
-    const bool hadApp = GetEnvironmentVariableW(L"SteamAppId", prevApp, 32) > 0;
-    const bool hadGame = GetEnvironmentVariableW(L"SteamGameId", prevGame, 32) > 0;
-    SetEnvironmentVariableW(L"SteamAppId", L"480");
-    SetEnvironmentVariableW(L"SteamGameId", L"480");
-    g_api.DispatchInit();
-    const bool ok = g_api.Init();
-    SetEnvironmentVariableW(L"SteamAppId", hadApp ? prevApp : nullptr);
-    SetEnvironmentVariableW(L"SteamGameId", hadGame ? prevGame : nullptr);
-    if (!ok) {
-        SetError("SteamAPI_Init failed (is Steam signed in?)");
-        return false;
-    }
-    g_msgs = g_api.Messages();
-    g_friends = g_api.FriendsIface();
-    void* user = g_api.UserIface();
-    if (!g_msgs || !g_friends || !user) {
-        SetError("Steam interfaces unavailable");
-        g_api.Shutdown();
-        return false;
-    }
-    g_selfId = g_api.GetSteamID(user);
-    g_utils = g_api.UtilsIface();
-    return true;
-}
-
-NetIdentity IdentityOf(uint64_t steamId) {
-    NetIdentity id{};
-    id.type = 16;
-    id.size = 8;
-    id.steamId = steamId;
-    return id;
 }
 
 uint32_t VirtualIpLocked(uint64_t steamId) {
@@ -308,60 +106,39 @@ uint32_t VirtualIpLocked(uint64_t steamId) {
     return ip;
 }
 
-void PublishPresence(bool on) {
-    if (!g_friends) return;
-    g_api.SetRP(g_friends, "refix", on ? "1" : "");
-    const std::string app = on ? std::to_string(g_appId.load()) : std::string();
-    g_api.SetRP(g_friends, "refix_app", app.c_str());
+void ToHost(const proto::Writer& w) {
+    if (g_hostKnown && w.b.size() <= proto::kMaxDatagram)
+        sendto(g_ipc, (const char*)w.b.data(), (int)w.b.size(), 0, (const sockaddr*)&g_host, sizeof(g_host));
+}
+
+void PublishPresence() {
     std::string name;
     {
         std::lock_guard<std::mutex> lock(g_mu);
-        if (on) name = g_gameName.substr(0, 120);   // rich presence values are short
+        name = g_gameName.substr(0, 120);   // rich presence values are short
     }
-    g_api.SetRP(g_friends, "refix_game", name.c_str());
+    ToHost(proto::Writer(proto::kPresence).Put<uint32_t>(g_appId.load()).Str(name));
 }
 
-void RefreshFriends() {
+void ReadFriends(proto::Reader& r) {
     std::vector<Friend> list;
-    const int n = g_api.FriendCount(g_friends, kFriendFlagImmediate);
-    for (int i = 0; i < n; ++i) {
+    const uint16_t n = r.Get<uint16_t>();
+    for (uint16_t i = 0; i < n && r.ok; ++i) {
         Friend f;
-        f.steamId = g_api.FriendByIndex(g_friends, i, kFriendFlagImmediate);
-        if (!f.steamId) continue;
-        const char* name = g_api.FriendName(g_friends, f.steamId);
-        f.name = name ? name : "";
-        f.personaState = g_api.FriendState(g_friends, f.steamId);
-        FriendGameInfo game{};
-        f.playing = g_api.FriendGame(g_friends, f.steamId, &game) && game.gameId != 0;
-        if (f.playing) f.steamGameId = (uint32_t)(game.gameId & 0xFFFFFF);
-        const char* rp = g_api.FriendRP(g_friends, f.steamId, "refix");
-        f.refix = f.playing && f.steamGameId == 480 && rp && rp[0] == '1';
-        if (f.refix) {
-            f.appId = strtoul(g_api.FriendRP(g_friends, f.steamId, "refix_app"), nullptr, 10);
-            const char* gname = g_api.FriendRP(g_friends, f.steamId, "refix_game");
-            f.gameName = gname ? gname : "";
-        }
-        f.avatar = g_api.MediumAvatar(g_friends, f.steamId);   // -1 while loading, 0 when none
-        if (f.avatar < 0) f.avatar = 0;
-        list.push_back(std::move(f));
+        f.steamId = r.Get<uint64_t>();
+        f.personaState = r.Get<int32_t>();
+        f.playing = r.Get<uint8_t>() != 0;
+        f.steamGameId = r.Get<uint32_t>();
+        f.refix = r.Get<uint8_t>() != 0;
+        f.appId = r.Get<uint32_t>();
+        f.avatar = r.Get<int32_t>();
+        f.name = r.Str();
+        f.gameName = r.Str();
+        if (r.ok && f.steamId) list.push_back(std::move(f));
     }
     std::lock_guard<std::mutex> lock(g_mu);
     for (Friend& f : list) if (f.refix) f.virtIp = VirtualIpLocked(f.steamId);
     g_friendList = std::move(list);
-}
-
-void HandleCallbacks(int32_t pipe) {
-    g_api.RunFrame(pipe);
-    CallbackMsg cb{};
-    while (g_api.NextCallback(pipe, &cb)) {
-        if (cb.id == kCbSessionRequest && cb.param && cb.paramSize >= (int)sizeof(NetIdentity)) {
-            const auto* remote = reinterpret_cast<const NetIdentity*>(cb.param);
-            // Only Steam friends may open a tunnel to us.
-            if (remote->type == 16 && g_api.HasFriend(g_friends, remote->steamId, kFriendFlagImmediate))
-                g_api.AcceptSession(g_msgs, remote);
-        }
-        g_api.FreeCallback(pipe);
-    }
 }
 
 bool SendRaw(uint64_t steamId, uint16_t srcPort, uint16_t dstPort, uint8_t flags, const void* data, size_t len,
@@ -496,18 +273,6 @@ void Deliver(uint64_t from, const uint8_t* buf, size_t len) {
     if ((flags & kFlagBroadcast) && !(flags & kFlagFromLan) && dstPort == 0) BridgeToLan(from, srcPort, 0, 0, data, n, true);
 }
 
-void ReceiveAll() {
-    NetMessage* msgs[32];
-    int n;
-    while ((n = g_api.RecvMsgs(g_msgs, kChannel, msgs, 32)) > 0) {
-        for (int i = 0; i < n; ++i) {
-            if (msgs[i]->peer.type == 16 && msgs[i]->size > 0)
-                Deliver(msgs[i]->peer.steamId, static_cast<const uint8_t*>(msgs[i]->data), (size_t)msgs[i]->size);
-            g_api.Release(msgs[i]);
-        }
-    }
-}
-
 // Steam's own overlay, only when ReFix.ini asks for it (the ReFix overlay replaces it by default). Same environment
 // GameOverlayRenderer expects from a Steam launch, as Spacewar; SteamAppId/SteamGameId go back afterwards.
 void LoadSteamOverlay() {
@@ -532,72 +297,213 @@ void LoadSteamOverlay() {
     ReFixLog("[SteamLink] Steam overlay %s (%lu)", h ? "loaded" : "failed to load", h ? 0UL : GetLastError());
 }
 
-// Steam that ReFix has just opened still shows the previous session in the registry for a moment and refuses API
-// clients until the login finishes: retry until it accepts us.
-bool InitWhenReady() {
-    for (DWORD waited = 0; g_wanted; waited += kInitRetryMs) {
-        if (SteamSignedIn() && InitAsSpacewar()) return true;
-        if (waited >= kSteamStartTimeoutMs) return false;
-        Sleep(kInitRetryMs);
+#ifdef _WIN64
+constexpr const wchar_t* kHostExe = L"refix_steamhost64.exe";
+#else
+constexpr const wchar_t* kHostExe = L"refix_steamhost.exe";
+#endif
+
+// The helper inherits none of the game's Steam* variables (it sets Spacewar itself).
+HANDLE StartHost(uint16_t port, const std::string& token) {
+    const std::wstring dir = ModuleDir();
+    std::wstring exe = dir + kHostExe;
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) exe = dir + L"ReFix\\" + kHostExe;
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        SetError("refix_steamhost is missing next to the game's steam_api: deploy ReFix again");
+        return nullptr;
     }
-    return false;
+    std::wstring env;
+    if (wchar_t* block = GetEnvironmentStringsW()) {
+        for (const wchar_t* v = block; *v; v += wcslen(v) + 1) {
+            if (_wcsnicmp(v, L"Steam", 5) == 0 || _wcsnicmp(v, L"_SteamInjection", 15) == 0 ||
+                _wcsnicmp(v, L"ENABLE_STEAM_OVERLAY", 20) == 0) continue;
+            env.append(v);
+            env.push_back(L'\0');
+        }
+        FreeEnvironmentStringsW(block);
+    }
+    env.push_back(L'\0');
+    const std::wstring dllDir = dir.substr(0, dir.size() - 1);
+    std::wstring cmd = L"\"" + exe + L"\" " + std::to_wstring(port) + L" " + std::wstring(token.begin(), token.end()) + L" " +
+                       std::to_wstring(GetCurrentProcessId()) + L" \"" + dllDir + L"\"";
+    STARTUPINFOW si{ sizeof(si) };
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        env.data(), dllDir.c_str(), &si, &pi)) {
+        SetError("Could not start refix_steamhost");
+        return nullptr;
+    }
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+
+std::string NewToken() {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%08lx%016llx", GetCurrentProcessId() ^ GetTickCount(), (unsigned long long)t.QuadPart);
+    return buf;
+}
+
+void OnHostState(proto::Reader& r) {
+    const uint8_t step = r.Get<uint8_t>();
+    const uint64_t self = r.Get<uint64_t>();
+    const std::string error = r.Str();
+    if (!r.ok) return;
+    if (step == proto::kFailed) {
+        SetError(error);
+        g_state = State::Failed;
+        return;
+    }
+    if (step != proto::kOnline) {
+        static const char* kSteps[] = { "", "opening Steam", "waiting for Steam to sign in", "connecting" };
+        if (g_step.exchange(step) != step && step < 4) ReFixLog("[SteamLink] Steam: %s", kSteps[step]);
+        return;
+    }
+    g_selfId = self;
+    if (g_state == State::Online) return;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_error.clear();
+    }
+    g_state = State::Online;
+    PublishPresence();
+    if (g_steamOverlay && !GetModuleHandleW(sizeof(void*) == 8 ? L"GameOverlayRenderer64.dll" : L"GameOverlayRenderer.dll"))
+        LoadSteamOverlay();
+    ReFixLog("[SteamLink] Online as %llu (Spacewar), app %u", (unsigned long long)self, g_appId.load());
+}
+
+// One datagram from the helper; before its hello (with our token) nothing else is taken.
+void HandleHost(const uint8_t* buf, size_t n, const std::string& token, const sockaddr_in& from) {
+    if (!n) return;
+    proto::Reader r(buf + 1, n - 1);
+    if (buf[0] == proto::kHello) {
+        if (!g_hostKnown && n - 1 == token.size() && memcmp(buf + 1, token.data(), token.size()) == 0) {
+            g_host = from;
+            g_hostKnown = true;
+        }
+        return;
+    }
+    if (!g_hostKnown || from.sin_port != g_host.sin_port || from.sin_addr.s_addr != g_host.sin_addr.s_addr) return;
+    switch (buf[0]) {
+    case proto::kState: OnHostState(r); break;
+    case proto::kFriends: ReadFriends(r); break;
+    case proto::kMessage: {
+        const uint64_t sender = r.Get<uint64_t>();
+        if (r.ok) Deliver(sender, r.p, r.Left());
+        break;
+    }
+    case proto::kAvatarData: {
+        Avatar a;
+        const int image = r.Get<int32_t>();
+        a.w = r.Get<uint16_t>();
+        a.h = r.Get<uint16_t>();
+        if (!r.ok || r.Left() != (size_t)a.w * a.h * 4) return;
+        a.rgba.assign(r.p, r.p + r.Left());
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_avatars[image] = std::move(a);
+        break;
+    }
+    default: break;
+    }
+}
+
+bool OpenIpc(uint16_t& port) {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    g_ipc = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in self{};
+    self.sin_family = AF_INET;
+    self.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int selfLen = sizeof(self), big = 1 << 20;
+    if (g_ipc == INVALID_SOCKET) return false;
+    setsockopt(g_ipc, SOL_SOCKET, SO_RCVBUF, (const char*)&big, sizeof(big));
+    setsockopt(g_ipc, SOL_SOCKET, SO_SNDBUF, (const char*)&big, sizeof(big));
+    if (bind(g_ipc, (const sockaddr*)&self, sizeof(self)) != 0 || getsockname(g_ipc, (sockaddr*)&self, &selfLen) != 0) {
+        closesocket(g_ipc);
+        g_ipc = INVALID_SOCKET;
+        return false;
+    }
+    if (auto cb = g_sockCb.load()) cb((uintptr_t)g_ipc, true);   // ReFix's own socket: Winsock hooks skip it
+    u_long nonblock = 1;
+    ioctlsocket(g_ipc, FIONBIO, &nonblock);
+    port = ntohs(self.sin_port);
+    return true;
 }
 
 void LinkThread() {
-    if (!StartSteamAndWait() || !g_wanted || (!g_api.dll && !LoadValve()) || !InitWhenReady()) {
-        g_state = g_wanted ? State::Failed : State::Off;
+    uint16_t port = 0;
+    if (!OpenIpc(port)) {
+        SetError("Could not open the Steam helper socket");
+        g_state = State::Failed;
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(g_mu);
-        g_error.clear();   // failed attempts while Steam was still signing in
-    }
-    const int32_t pipe = g_api.Pipe();
-    PublishPresence(true);
-    RefreshFriends();
-    g_state = State::Online;
-    if (g_steamOverlay && !GetModuleHandleW(sizeof(void*) == 8 ? L"GameOverlayRenderer64.dll" : L"GameOverlayRenderer.dll"))
-        LoadSteamOverlay();
-    ReFixLog("[SteamLink] Online as %llu (Spacewar), app %u", (unsigned long long)g_selfId.load(), g_appId.load());
-    ULONGLONG lastFriends = GetTickCount64();
-    while (g_wanted) {
-        HandleCallbacks(pipe);
-        ReceiveAll();
-        PumpBridges();
-        const ULONGLONG now = GetTickCount64();
-        if (now - lastFriends >= kFriendRefreshMs) {
-            lastFriends = now;
-            RefreshFriends();
+    const std::string token = NewToken();
+    HANDLE host = StartHost(port, token);
+    const ULONGLONG started = GetTickCount64();
+    static std::vector<uint8_t> buf(proto::kMaxDatagram + 16);
+    while (host && g_wanted) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(g_ipc, &fds);
+        timeval tv{ 0, (long)kPumpIntervalMs * 1000 };
+        if (select(0, &fds, nullptr, nullptr, &tv) > 0) {
+            for (;;) {
+                sockaddr_in from{};
+                int fromLen = sizeof(from);
+                const int n = recvfrom(g_ipc, (char*)buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
+                if (n <= 0) break;
+                HandleHost(buf.data(), (size_t)n, token, from);
+            }
         }
-        Sleep(kPumpIntervalMs);
+        PumpBridges();
+        if (g_state == State::Failed) break;
+        if (WaitForSingleObject(host, 0) != WAIT_TIMEOUT) {
+            SetError("The Steam helper stopped");
+            g_state = State::Failed;
+            break;
+        }
+        if (!g_hostKnown && GetTickCount64() - started > kHelloTimeoutMs) {
+            SetError("The Steam helper did not answer");
+            g_state = State::Failed;
+            break;
+        }
     }
-    PublishPresence(false);
+    // Off or failed: the helper signs out of Steam and exits, so Steam stops showing Spacewar.
+    if (host) {
+        ToHost(proto::Writer(proto::kQuit));
+        if (WaitForSingleObject(host, kQuitWaitMs) != WAIT_OBJECT_0) TerminateProcess(host, 0);
+        CloseHandle(host);
+    }
     CloseBridges();
-    HandleCallbacks(pipe);
-    g_api.Shutdown();   // Steam stops showing Spacewar; Enable() can init again later
+    if (auto cb = g_sockCb.load()) cb((uintptr_t)g_ipc, false);
+    closesocket(g_ipc);
+    g_ipc = INVALID_SOCKET;
+    g_hostKnown = false;
+    g_step = 0;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         g_friendList.clear();
+        g_avatars.clear();
+        g_avatarAsked.clear();
     }
-    g_state = State::Off;
-    ReFixLog("[SteamLink] Off");
+    if (!host) g_state = State::Failed;
+    if (!g_wanted) g_state = State::Off;
+    else if (g_state != State::Failed) g_state = State::Failed;
+    ReFixLog("[SteamLink] %s", g_state == State::Off ? "Off" : "Stopped (failed)");
 }
 
 bool SendRaw(uint64_t steamId, uint16_t srcPort, uint16_t dstPort, uint8_t flags, const void* data, size_t len,
              uint32_t lanIp) {
     const size_t head = kHeader + ((flags & (kFlagToLan | kFlagFromLan)) ? 4 : 0);
     if (g_state != State::Online || len + head > kMaxDatagram) return false;
-    thread_local std::vector<uint8_t> buf;
-    buf.resize(len + head);
-    buf[0] = (uint8_t)srcPort;
-    buf[1] = (uint8_t)(srcPort >> 8);
-    buf[2] = (uint8_t)dstPort;
-    buf[3] = (uint8_t)(dstPort >> 8);
-    buf[4] = flags;
-    if (head > kHeader) memcpy(buf.data() + kHeader, &lanIp, 4);
-    if (len) memcpy(buf.data() + head, data, len);
-    const NetIdentity id = IdentityOf(steamId);
-    return g_api.SendMsg(g_msgs, &id, buf.data(), (uint32_t)buf.size(), kSendFlags, kChannel) == 1;  // k_EResultOK
+    proto::Writer w(proto::kSend);
+    w.Put<uint64_t>(steamId).Put<uint16_t>(srcPort).Put<uint16_t>(dstPort).Put<uint8_t>(flags);
+    if (head > kHeader) w.Raw(&lanIp, 4);
+    if (len) w.Raw(data, len);
+    if (w.b.size() > proto::kMaxDatagram) return false;
+    ToHost(w);
+    return true;
 }
 
 } // namespace
@@ -615,18 +521,36 @@ void SetLocalGameName(const std::string& utf8Name) {
         if (g_gameName == utf8Name) return;
         g_gameName = utf8Name;
     }
-    if (g_state == State::Online) PublishPresence(true);
+    if (g_state == State::Online) PublishPresence();
 }
 
 bool AvatarRgba(int image, int& width, int& height, std::vector<uint8_t>& rgba) {
-    if (g_state != State::Online || image <= 0 || !g_utils) return false;
-    uint32_t w = 0, h = 0;
-    if (!g_api.ImageSize(g_utils, image, &w, &h) || w == 0 || h == 0 || w > 512 || h > 512) return false;
-    rgba.resize((size_t)w * h * 4);
-    if (!g_api.ImageRgba(g_utils, image, rgba.data(), (int)rgba.size())) return false;
-    width = (int)w;
-    height = (int)h;
-    return true;
+    if (g_state != State::Online || image <= 0) return false;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_avatars.find(image);
+        if (it != g_avatars.end()) {
+            width = it->second.w;
+            height = it->second.h;
+            rgba = it->second.rgba;
+            return true;
+        }
+        ULONGLONG& asked = g_avatarAsked[image];
+        const ULONGLONG now = GetTickCount64();
+        if (asked && now - asked < kAvatarRetryMs) return false;   // Steam may still be downloading it
+        asked = now;
+    }
+    ToHost(proto::Writer(proto::kAvatar).Put<int32_t>(image));
+    return false;
+}
+
+Step CurrentStep() {
+    switch (g_step.load()) {
+    case proto::kOpeningSteam: return Step::OpeningSteam;
+    case proto::kSigningIn: return Step::SigningIn;
+    case proto::kConnecting: return Step::Connecting;
+    default: return Step::None;
+    }
 }
 
 void SetSteamOverlay(bool on) { g_steamOverlay = on; }

@@ -1064,6 +1064,11 @@ switch ($OnlineMode) {
                 if (Test-Path -LiteralPath $linkSrc) {
                     Copy-Item -LiteralPath $linkSrc -Destination (Join-Path $dir "refix_steamlink64.dll") -Force -ErrorAction SilentlyContinue
                 }
+                # The helper process that talks to Steam (ending it is what makes Steam stop showing Spacewar)
+                $hostSrc = Join-Path $BinDir "lan\refix_steamhost64.exe"
+                if (Test-Path -LiteralPath $hostSrc) {
+                    Copy-Item -LiteralPath $hostSrc -Destination (Join-Path $dir "refix_steamhost64.exe") -Force -ErrorAction SilentlyContinue
+                }
             } catch {
                 Write-Host "  [ERROR] Failed to deploy ReFix LAN proxy to $dir : $_" -ForegroundColor Red
                 exit 1
@@ -1100,6 +1105,10 @@ switch ($OnlineMode) {
                     if (Test-Path -LiteralPath $lanDll32) {
                         Copy-Item -LiteralPath $lanDll32 -Destination $steamPath32 -Force -ErrorAction Stop
                         Write-Host "  [OK] Deployed ReFix LAN x86 steam_api.dll to $dir32" -ForegroundColor Green
+                        $hostSrc32 = Join-Path $BinDir "lan\x86\refix_steamhost.exe"
+                        if (Test-Path -LiteralPath $hostSrc32) {
+                            Copy-Item -LiteralPath $hostSrc32 -Destination (Join-Path $dir32 "refix_steamhost.exe") -Force -ErrorAction SilentlyContinue
+                        }
                     } elseif (Test-Path -LiteralPath $goldbergDll32) {
                         Copy-Item -LiteralPath $goldbergDll32 -Destination $steamPath32 -Force -ErrorAction Stop
                         $backendPath32 = $steamPath32

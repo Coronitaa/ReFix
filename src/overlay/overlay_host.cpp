@@ -697,9 +697,17 @@ DWORD WINAPI HostThread(LPVOID) {
         const GameWindow gw = CurrentGame();
         Mode m = g_client->DesiredMode();
         if ((m == Mode::Toast && (!gw.hwnd || gw.minimized)) || (m == Mode::Overlay && !gw.hwnd)) m = Mode::Hidden;
-        if (m != Mode::Hidden && m != g_mode) MaybeRescale(gw);
-        ApplyMode(m, gw);
-        if (g_mode == Mode::Hidden) {
+        // Another app (or another game instance) is in front: our topmost window steps aside without changing
+        // mode, and comes back over its own game when that game is in front again.
+        const HWND fg = GetForegroundWindow();
+        const bool away = !g_childOf && m != Mode::Hidden && gw.hwnd && fg && !IsOurProcessWindow(fg);
+        if (away) {
+            if (IsWindowVisible(g_hwnd)) ShowWindow(g_hwnd, SW_HIDE);
+        } else {
+            if (m != Mode::Hidden && m != g_mode) MaybeRescale(gw);
+            ApplyMode(m, gw);
+        }
+        if (g_mode == Mode::Hidden || away) {
             // Keep ImGui's frame clock and the client's timers running cheaply.
             MsgWaitForMultipleObjects(0, nullptr, FALSE, kIdleWaitMs, QS_ALLINPUT);
             ImGui_ImplDX11_NewFrame();

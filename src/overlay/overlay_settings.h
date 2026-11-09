@@ -12,7 +12,7 @@ struct Values {
     bool welcomeToast = true;        // "Press Shift+Tab" when the game starts
     bool otherToasts = true;         // other notices that arrive while playing (overlay closed)
     bool uiSounds = true;            // clicks, open/close
-    bool blockReflex = true;         // NVIDIA Reflex paused while the overlay is open
+    bool blockReflex = true;         // NVIDIA Reflex never runs in the game (from the next start)
 };
 
 // Host thread (UI). Loaded on first use.

@@ -1,0 +1,5 @@
+// Copy to cloud_keys.local.h (ignored by git) and fill in. See docs/cloud-sync-setup.md.
+#pragma once
+#define REFIX_GOOGLE_CLIENT_ID "1234567890-xxxxxxxxxxxxxxxx.apps.googleusercontent.com"
+#define REFIX_GOOGLE_CLIENT_SECRET "GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxx"
+#define REFIX_MICROSOFT_CLIENT_ID "00000000-0000-0000-0000-000000000000"

@@ -3489,11 +3489,10 @@ namespace UnrealSteamEmu {
 
         // Every LAN peer is an immediate friend and nothing else: queries for blocked/ignored/requesting
         // users get no one (Lethal Company refused to join a host it found in GetFriendCount(Blocked)).
+        // k_EFriendFlagAll is 0xFFFF, so "flags & All" is true for any flag: test the Immediate bit, which All also
+        // carries. GetFriendCount(Blocked) counted every LAN peer, and Dumb Ways to Build refused them all (SD-104).
         static bool CountsLanPeers(int iFriendFlags) {
-            if (iFriendFlags & (k_EFriendFlagBlocked | k_EFriendFlagIgnored | k_EFriendFlagIgnoredFriend)) {
-                if (!(iFriendFlags & (k_EFriendFlagImmediate | k_EFriendFlagAll))) return false;
-            }
-            return true;
+            return (iFriendFlags & k_EFriendFlagImmediate) != 0;
         }
 
         static std::vector<uint64_t> GetCurrentFriendList() {
