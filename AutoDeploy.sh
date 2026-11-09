@@ -402,6 +402,11 @@ EOF
         fi
         ok "Updated ReFix.ini in $EXE_DIR for ReFix $MODE"
     fi
+    # The game's server list (dedicated / community servers) under its real AppID: as Spacewar it shows none.
+    if [ "$APP_ID" != 480 ] && [ "$APP_ID" != "$mask" ]; then
+        ini_set "$ini" ServerBrowser OverrideServerListAppId true
+        ini_set "$ini" ServerBrowser ServerListAppId "$APP_ID"
+    fi
     printf '%s\n' "$APP_ID" > "$EXE_DIR/steam_appid.txt"
     ok "steam_appid.txt = $APP_ID"
 }

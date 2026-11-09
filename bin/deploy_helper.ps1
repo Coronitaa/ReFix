@@ -304,6 +304,15 @@ function Generate-UNAE-ReFixIni {
     # choice: re-decide it. Without this a redeploy keeps the emulator off on one PC while the other uses it,
     # and the joining player hits real Photon Cloud with a Spacewar ticket ("Custom Authentication Failed").
     if ($photonBackend -eq "OfficialPhoton") { $photonBackend = $photonDefault }
+    # Server list: searched under the game's real AppID when it is known and masked (Spacewar), so the game's public
+    # dedicated / community servers show up; as 480 they never did. An existing "false" is what older templates
+    # always wrote, not a choice: re-decided like the Photon backend above. "true" set by hand is kept.
+    $realId = "$($P.RealAppId)"
+    $knowsReal = $realId -and $realId -ne "0" -and $realId -ne "480" -and $realId -ne "$($P.MaskAppId)"
+    $serverListOverride = & $Pick "ServerBrowser" "OverrideServerListAppId" ""
+    if ($serverListOverride -ne "true") { $serverListOverride = if ($knowsReal) { "true" } else { "false" } }
+    $serverListAppId = & $Pick "ServerBrowser" "ServerListAppId" ""
+    if (-not $serverListAppId -or $serverListAppId -eq "480") { $serverListAppId = if ($realId -and $realId -ne "0") { $realId } else { "480" } }
     $eosAuth       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
     # Fast-failing cloud TCP (443/80) only helps when there is no internet backend to reach; online it would
     # block EOS sign-in, PlayFab and other official services.
@@ -489,8 +498,11 @@ LobbyDistanceFilter = worldwide
 MaxLobbyResults = 50
 
 [ServerBrowser]
-OverrideServerListAppId = false
-ServerListAppId = 480
+; Server list of the game (dedicated / community servers). true: searched under ServerListAppId, the game's real
+; AppID, so its public servers show up. false: searched as the masked AppID (Spacewar 480), where servers hosted
+; with ReFix Online register.
+OverrideServerListAppId = $serverListOverride
+ServerListAppId = $serverListAppId
 
 [Storage]
 LocalSave = saves
