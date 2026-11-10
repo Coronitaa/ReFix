@@ -1040,15 +1040,14 @@ public:
 
     // ILanTransportListener Implementation
     // A packet from a Steam friend (ReFix Online tunnel) advertises the friend's own LAN address, which is not
-    // reachable from here: keep the advertised port but address it through the friend's tunnel IP.
+    // reachable from here: keep the advertised port but address it through the friend's tunnel IP. Same for a
+    // multi-adapter peer (ZeroTier, VPN): see ReachableFrom.
     static LanEndpoint ViaTunnel(const LanEndpoint& sender, LanEndpoint advertised) {
 #if REFIX_STEAM_LINK
-        if (steamlink::IsVirtual(sender.ipv4) && advertised.IsValid()) {
+        if (steamlink::IsVirtual(sender.ipv4) && advertised.IsValid())
             steamlink::NoteAdvertised(sender.ipv4, advertised.ipv4, advertised.port);
-            advertised.ipv4 = sender.ipv4;
-        }
 #endif
-        return advertised;
+        return ReachableFrom(sender, advertised);
     }
 
     void OnDiscoveryPacket(const LanEndpoint& sender, MsgType type, const uint8_t* data, size_t len) override {

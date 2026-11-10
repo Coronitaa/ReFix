@@ -78,6 +78,13 @@ int main() {
     std::vector<uint8_t> bad = Packet(MsgType::DiscoveryBeacon, priv);
     bad[0] ^= 0xFF;                                 // not a ReFix wire packet
     assert(!LanTransport::RewriteAdvertisedEndpoint(bad.data(), bad.size(), 1, 1));
+    {   // issue #20: a ZeroTier peer advertises its home LAN IP; reply to the ZeroTier IP the packet came from
+        const LanEndpoint zt{ 0x0A3A3741, 47584 };  // 10.58.55.65
+        const LanEndpoint home{ 0xC0A80141, 62098 }; // 192.168.1.65
+        assert((ReachableFrom(zt, home) == LanEndpoint{ zt.ipv4, home.port }));
+        assert(ReachableFrom(LanEndpoint{ 0x7F000001, 1 }, home) == home);   // same-PC instance keeps its address
+        assert(!ReachableFrom(zt, LanEndpoint{}).IsValid());                  // nothing advertised stays empty
+    }
     std::puts("test_lan_bridge_rewrite: OK");
     return 0;
 }

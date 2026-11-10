@@ -101,6 +101,14 @@ struct LanEndpoint {
     }
 };
 
+// A peer with several adapters (home LAN + ZeroTier/VPN) advertises its primary adapter's IP, which may be
+// unreachable from here; the IP its packet arrived from did reach us, and its data socket listens on every
+// adapter. Keep the advertised port. Loopback senders (instances on this PC) keep the advertised address.
+inline LanEndpoint ReachableFrom(const LanEndpoint& sender, LanEndpoint advertised) {
+    if (advertised.IsValid() && sender.ipv4 != 0 && (sender.ipv4 >> 24) != 127) advertised.ipv4 = sender.ipv4;
+    return advertised;
+}
+
 // =============================================================================
 // External Identity Mapping (Steam, EOS, Photon, Unity)
 // =============================================================================
