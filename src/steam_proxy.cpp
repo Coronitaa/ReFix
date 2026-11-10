@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <thread>
 #include <mutex>
+#include <map>
+#include <sys/stat.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
 #include "upnp_firewall.h"
@@ -1712,6 +1714,7 @@ struct ReFixConfig {
     uint32_t maskAppIdNum = 480;
     std::string realAppId = "";
     uint32_t realAppIdNum = 0;
+    std::string localSaveDir = "saves";   // [Storage] LocalSave
     std::string language = "english";
     std::string getAppIdMode = "auto";
     bool bypassLicenseCheck = true;
@@ -1812,6 +1815,11 @@ static void LoadConfig() {
     char bufMask[64], bufReal[64], bufLang[64];
     ReadString("Steam", "MaskAppId", "480", bufMask, sizeof(bufMask));
     ReadString("Steam", "RealAppId", "", bufReal, sizeof(bufReal));
+    {
+        char bufSave[MAX_PATH];
+        ReadString("Storage", "LocalSave", "saves", bufSave, sizeof(bufSave));
+        g_config.localSaveDir = bufSave;
+    }
     ReadString("Steam", "Language", "english", bufLang, sizeof(bufLang));
 
     g_config.maskAppId = bufMask;
@@ -4257,6 +4265,214 @@ static void HookNetworkingUtils(void* iface, const char* version) {
     HookByThunks(iface, "netutils", version, kPrefixes, kHooks, _countof(kHooks));
 }
 
+// ISteamRemoteStorage on local files. The Steam session runs as MaskAppId (Spacewar 480), whose Steam Cloud
+// holds about 4 KB per account and is shared by every masked game: FileWrite of a real save fails and the game
+// starts from scratch every launch ("save file corrupted"). Files go to <game>\<LocalSave>\SteamCloud instead.
+namespace LocalCloud {
+static std::mutex g_mutex;
+static std::string g_root;                       // ends with '\'
+static std::vector<std::pair<std::string, int32_t>> g_list;   // GetFileCount snapshot (name with '/', size)
+static std::map<uint64_t, std::pair<std::string, std::string>> g_streams;   // handle -> (name, data)
+static uint64_t g_nextStream = 1;
+static void* g_orig[15] = {};   // Steam's methods, for files saved in the Spacewar cloud before this existed
+typedef bool (*fn_name_t)(void*, const char*);
+typedef int32_t (*fn_size_t)(void*, const char*);
+typedef int32_t (*fn_read_t)(void*, const char*, void*, int32_t);
+
+static bool Enabled() {
+    return g_config.realAppIdNum != 0 && g_config.realAppIdNum != g_config.maskAppIdNum;
+}
+
+// Steam file names are relative and may contain '/'; anything that could leave the folder is refused.
+static bool PathFor(const char* name, std::string& out) {
+    if (!name || !*name || strlen(name) > 260 || strchr(name, ':') || strstr(name, "..") ||
+        name[0] == '/' || name[0] == '\\') return false;
+    out = g_root + name;
+    for (char& c : out) if (c == '/') c = '\\';
+    return true;
+}
+
+static int64_t FileSizeOf(const std::string& path) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &a) || (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return -1;
+    return ((int64_t)a.nFileSizeHigh << 32) | a.nFileSizeLow;
+}
+
+static bool WriteAll(const char* name, const void* data, size_t size) {
+    std::string path;
+    if (!PathFor(name, path) || (size && !data)) return false;
+    for (size_t i = g_root.size(); i < path.size(); i++)
+        if (path[i] == '\\') CreateDirectoryA(path.substr(0, i).c_str(), nullptr);
+    // Write a temp file and swap it in, so a crash mid-write never leaves a half save.
+    const std::string tmp = path + ".refixtmp";
+    FILE* f = nullptr;
+    if (fopen_s(&f, tmp.c_str(), "wb") != 0 || !f) return false;
+    const bool ok = fwrite(data, 1, size, f) == size;
+    fclose(f);
+    if (!ok || !MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileA(tmp.c_str());
+        ReFixLog("[LocalCloud] FileWrite '%s' (%zu bytes) FAILED (err=%lu)", name, size, GetLastError());
+        return false;
+    }
+    ReFixLog("[LocalCloud] FileWrite '%s' (%zu bytes)", name, size);
+    return true;
+}
+
+static void Scan(const std::string& dir, const std::string& prefix) {
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((dir + "*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const std::string n = fd.cFileName;
+        if (n == "." || n == "..") continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) Scan(dir + n + "\\", prefix + n + "/");
+        else if (n.size() < 10 || n.compare(n.size() - 10, 10, ".refixtmp") != 0)
+            g_list.emplace_back(prefix + n, (int32_t)fd.nFileSizeLow);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+static bool FileWrite(void*, const char* name, const void* data, int32_t cub) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return cub >= 0 && WriteAll(name, data, (size_t)cub);
+}
+
+static int32_t FileRead(void* self, const char* name, void* data, int32_t cubMax) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::string path;
+    FILE* f = nullptr;
+    if (!data || cubMax <= 0 || !PathFor(name, path)) return 0;
+    if (FileSizeOf(path) < 0 && g_orig[1]) {
+        // Not here yet: an older ReFix left it in the Spacewar cloud. Import it so progress is not lost.
+        const int32_t n = ((fn_read_t)g_orig[1])(self, name, data, cubMax);
+        if (n > 0) WriteAll(name, data, (size_t)n);
+        return n;
+    }
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return 0;
+    const int32_t n = (int32_t)fread(data, 1, (size_t)cubMax, f);
+    fclose(f);
+    ReFixLog("[LocalCloud] FileRead '%s' -> %d bytes", name, n);
+    return n;
+}
+
+static bool FileForget(void*, const char*) { return true; }
+
+static bool FileDelete(void*, const char* name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::string path;
+    return PathFor(name, path) && DeleteFileA(path.c_str());
+}
+
+static bool FileExists(void* self, const char* name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::string path;
+    if (!PathFor(name, path)) return false;
+    return FileSizeOf(path) >= 0 || (g_orig[4] && ((fn_name_t)g_orig[4])(self, name));
+}
+
+static int32_t GetFileSize(void* self, const char* name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::string path;
+    if (!PathFor(name, path)) return 0;
+    const int64_t n = FileSizeOf(path);
+    if (n < 0) return g_orig[6] ? ((fn_size_t)g_orig[6])(self, name) : 0;
+    return (int32_t)n;
+}
+
+static int64_t GetFileTimestamp(void*, const char* name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::string path;
+    struct _stat64 st;
+    return PathFor(name, path) && _stat64(path.c_str(), &st) == 0 ? (int64_t)st.st_mtime : 0;
+}
+
+static int32_t GetFileCount(void*) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_list.clear();
+    Scan(g_root, "");
+    return (int32_t)g_list.size();
+}
+
+static const char* GetFileNameAndSize(void*, int iFile, int32_t* pnFileSizeInBytes) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    const bool ok = iFile >= 0 && iFile < (int)g_list.size();
+    if (pnFileSizeInBytes) *pnFileSizeInBytes = ok ? g_list[iFile].second : 0;
+    return ok ? g_list[iFile].first.c_str() : "";
+}
+
+static bool GetQuota(void*, uint64_t* total, uint64_t* available) {
+    if (total) *total = 1ull << 30;
+    if (available) *available = 1ull << 30;
+    return true;
+}
+
+static uint64_t StreamOpen(void*, const char* name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::string path;
+    if (!PathFor(name, path)) return 0xFFFFFFFFFFFFFFFFull;   // k_UGCFileStreamHandleInvalid
+    g_streams[g_nextStream] = { name, std::string() };
+    return g_nextStream++;
+}
+
+static bool StreamChunk(void*, uint64_t h, const void* data, int32_t cub) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_streams.find(h);
+    if (it == g_streams.end() || cub < 0 || (cub && !data)) return false;
+    it->second.second.append((const char*)data, (size_t)cub);
+    return true;
+}
+
+static bool StreamClose(void*, uint64_t h) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_streams.find(h);
+    if (it == g_streams.end()) return false;
+    const bool ok = WriteAll(it->second.first.c_str(), it->second.second.data(), it->second.second.size());
+    g_streams.erase(it);
+    return ok;
+}
+
+static bool StreamCancel(void*, uint64_t h) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_streams.erase(h) != 0;
+}
+} // namespace LocalCloud
+
+static void HookISteamRemoteStorage(void* iface, const char* version) {
+    if (!LocalCloud::Enabled()) return;
+    {
+        std::lock_guard<std::mutex> lock(LocalCloud::g_mutex);
+        if (LocalCloud::g_root.empty()) {
+            std::string dir = g_config.localSaveDir.empty() ? "saves" : g_config.localSaveDir;
+            if (dir.size() < 2 || dir[1] != ':') dir = GetProxyDllDir() + dir;
+            CreateDirectoryA(dir.c_str(), nullptr);
+            LocalCloud::g_root = dir + "\\SteamCloud\\";
+            CreateDirectoryA(LocalCloud::g_root.c_str(), nullptr);
+            ReFixLog("[LocalCloud] Steam Cloud files of AppID %u kept in '%s'", g_config.realAppIdNum, LocalCloud::g_root.c_str());
+        }
+    }
+    static const char* const kPrefixes[] = { "SteamAPI_SteamRemoteStorage_v", nullptr };
+    void** orig = LocalCloud::g_orig;
+    static const ThunkHook kHooks[] = {
+        { "SteamAPI_ISteamRemoteStorage_FileWrite", (void*)LocalCloud::FileWrite, &orig[0] },
+        { "SteamAPI_ISteamRemoteStorage_FileRead", (void*)LocalCloud::FileRead, &orig[1] },
+        { "SteamAPI_ISteamRemoteStorage_FileForget", (void*)LocalCloud::FileForget, &orig[2] },
+        { "SteamAPI_ISteamRemoteStorage_FileDelete", (void*)LocalCloud::FileDelete, &orig[3] },
+        { "SteamAPI_ISteamRemoteStorage_FileExists", (void*)LocalCloud::FileExists, &orig[4] },
+        { "SteamAPI_ISteamRemoteStorage_FilePersisted", (void*)LocalCloud::FileExists, &orig[5] },
+        { "SteamAPI_ISteamRemoteStorage_GetFileSize", (void*)LocalCloud::GetFileSize, &orig[6] },
+        { "SteamAPI_ISteamRemoteStorage_GetFileTimestamp", (void*)LocalCloud::GetFileTimestamp, &orig[7] },
+        { "SteamAPI_ISteamRemoteStorage_GetFileCount", (void*)LocalCloud::GetFileCount, &orig[8] },
+        { "SteamAPI_ISteamRemoteStorage_GetFileNameAndSize", (void*)LocalCloud::GetFileNameAndSize, &orig[9] },
+        { "SteamAPI_ISteamRemoteStorage_GetQuota", (void*)LocalCloud::GetQuota, &orig[10] },
+        { "SteamAPI_ISteamRemoteStorage_FileWriteStreamOpen", (void*)LocalCloud::StreamOpen, &orig[11] },
+        { "SteamAPI_ISteamRemoteStorage_FileWriteStreamWriteChunk", (void*)LocalCloud::StreamChunk, &orig[12] },
+        { "SteamAPI_ISteamRemoteStorage_FileWriteStreamClose", (void*)LocalCloud::StreamClose, &orig[13] },
+        { "SteamAPI_ISteamRemoteStorage_FileWriteStreamCancel", (void*)LocalCloud::StreamCancel, &orig[14] },
+    };
+    HookByThunks(iface, "remotestorage", version, kPrefixes, kHooks, _countof(kHooks));
+}
+
 static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     if (!iface || !pszVersion) return;
     if (strstr(pszVersion, "SteamMatchMakingServers") || strstr(pszVersion, "SteamMatchmakingServers")) {
@@ -4284,6 +4500,9 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     else if (strstr(pszVersion, "SteamNetworkingUtils")) {
         SteamNetCompat::NotifySocketsPathDetected();
         HookNetworkingUtils(iface, pszVersion);
+    }
+    else if (strstr(pszVersion, "STEAMREMOTESTORAGE")) {
+        HookISteamRemoteStorage(iface, pszVersion);
     }
     else if (strstr(pszVersion, "SteamHTTP")) {
         HookISteamHTTP(iface, pszVersion);
@@ -4406,6 +4625,14 @@ static void InstallVTableHooks() {
         hookFirst(kUtils, _countof(kUtils), HookISteamUtils);
         hookFirst(kUser, _countof(kUser), HookISteamUser);
         hookFirst(kApps, _countof(kApps), HookISteamApps);
+    }
+    {
+        int rsVersion = 0;
+        if (void* pRS = DllInterface("SteamAPI_SteamRemoteStorage_v", rsVersion)) {
+            char version[48];
+            snprintf(version, sizeof(version), "STEAMREMOTESTORAGE_INTERFACE_VERSION%03d", rsVersion);
+            HookISteamRemoteStorage(pRS, version);
+        }
     }
 
     // Hook ExitProcess for diagnostics
