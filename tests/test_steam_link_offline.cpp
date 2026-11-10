@@ -13,15 +13,16 @@ static int g_calls = 0;
 static void Sink(void*, uint32_t, uint16_t, uint16_t, const uint8_t*, size_t) { ++g_calls; }
 
 int main() {
-    assert(sl::IsVirtual(0x0A310001) && sl::IsVirtual(0x0A31FFFE));
-    assert(!sl::IsVirtual(0x0A300001) && !sl::IsVirtual(0xC0A80001) && !sl::IsVirtual(0x7F000001));
+    assert(sl::IsVirtual(0xC6120001) && sl::IsVirtual(0xC612FFFE));
+    assert(!sl::IsVirtual(0xC6130001) && !sl::IsVirtual(0xC0A80001) && !sl::IsVirtual(0x7F000001));
+    assert(!sl::IsVirtual(0x0A31EF37));   // 10.49.239.55: a real LAN address seen in the wild, not the tunnel
 
     assert(sl::GetState() == sl::State::Off);
     const char payload[] = "hello";
-    assert(!sl::Send(0x0A310001, 1, 2, payload, sizeof(payload)));   // link off: refused, not queued
+    assert(!sl::Send(0xC6120001, 1, 2, payload, sizeof(payload)));   // link off: refused, not queued
     sl::Broadcast(1, 0, payload, sizeof(payload));                    // link off: no-op
     assert(sl::Friends().empty());
-    assert(sl::SteamIdOf(0x0A310001) == 0);
+    assert(sl::SteamIdOf(0xC6120001) == 0);
     assert(sl::LocalSteamId() == 0);
 
     int ctx = 0;

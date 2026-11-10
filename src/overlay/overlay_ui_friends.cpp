@@ -305,6 +305,12 @@ float App::DrawSyncButton(float right, float cy) {
     return right - d;
 }
 
+const PlayerRow* App::FriendRow(const steamlink::Friend& fr) const {
+    if (!fr.refix || !fr.virtIp) return nullptr;
+    for (const PlayerRow& r : rows_) if (r.p.ip == fr.virtIp || r.p.steamId == fr.steamId) return &r;
+    return nullptr;
+}
+
 void App::DrawFriendRow(const steamlink::Friend& fr, float width) {
     const ui::Fonts& f = ui::F();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -318,10 +324,7 @@ void App::DrawFriendRow(const steamlink::Friend& fr, float width) {
     ui::DrawAvatar(dl, ac, ui::S(kAvatarR), FriendAvatar(fr));
     dl->AddCircle(ac, ui::S(kAvatarR) + ui::S(2), col, 32, ui::S(2));   // Steam's coloured frame
 
-    const PlayerRow* row = nullptr;   // a ReFix friend in this game is also a LAN player (tunnel): invite from here
-    if (fr.refix && fr.virtIp) {
-        for (const PlayerRow& r : rows_) if (r.p.ip == fr.virtIp || r.p.steamId == fr.steamId) row = &r;
-    }
+    const PlayerRow* row = FriendRow(fr);   // a ReFix friend in this game is also a LAN player (tunnel): invite from here
     // Same actions as a LAN player of this game: invite to my lobby, join theirs.
     float right = p1.x - ui::S(8);
     if (row && row->sameGame) {
@@ -362,11 +365,27 @@ void App::DrawFriendRow(const steamlink::Friend& fr, float width) {
     ImGui::PushFont(f.strong);
     const std::string name = ui::Ellipsize(fr.name, textW);
     ImGui::PopFont();
+    // In ReFix per Steam, but no presence through the tunnel yet: say why there is no invite or join.
+    std::string label = PersonaLabel(fr, appId_);
+    ImU32 statusCol = col;
+    auto wait = friendWait_.find(fr.steamId);
+    if (!row && wait != friendWait_.end()) {
+        label = wait->second.late ? T("Can't be reached through Steam: no invite or join", "No se le alcanza por Steam: sin invitar ni unirse")
+                                  : T("Connecting through Steam...", "Conectando por Steam...");
+        statusCol = wait->second.late ? ui::color::Danger : ui::color::SyncPending;
+        if (wait->second.late && ImGui::IsMouseHoveringRect(p0, p1))
+            ImGui::SetTooltip("%s", T("Steam says this friend plays this game with ReFix, but nothing has arrived from their game through "
+                                      "Steam's network. Both of you need ReFix 2.4 or newer with Steam online services on. "
+                                      "Turning Steam online services off and on again on both PCs usually fixes it.",
+                                      "Steam dice que este amigo juega a este juego con ReFix, pero no llega nada de su juego por la red "
+                                      "de Steam. Los dos necesitáis ReFix 2.4 o posterior con los servicios online de Steam activados. "
+                                      "Desactivar y volver a activar los servicios online de Steam en los dos PCs suele arreglarlo."));
+    }
     ImGui::PushFont(f.caption);
-    const std::string status = ui::Ellipsize(PersonaLabel(fr, appId_), textW);
+    const std::string status = ui::Ellipsize(label, textW);
     ImGui::PopFont();
     dl->AddText(f.strong, f.strong->FontSize, ImVec2(textX, cy - f.strong->FontSize), fr.personaState ? ui::color::Text : ui::color::Muted, name.c_str());
-    dl->AddText(f.caption, f.caption->FontSize, ImVec2(textX, cy + ui::S(2)), col, status.c_str());
+    dl->AddText(f.caption, f.caption->FontSize, ImVec2(textX, cy + ui::S(2)), statusCol, status.c_str());
     ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + ui::S(6)));
     ImGui::Dummy(ImVec2(width, 0));
 }

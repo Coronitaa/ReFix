@@ -330,6 +330,21 @@ void App::DrawCommunity(ImVec2 pos, float width) {
     ui::EndCard();
 }
 
+int App::DrawWaitingFriends(float width) {
+    if (friendWait_.empty()) return 0;
+    const std::string filter = Lower(filter_);
+    std::vector<steamlink::Friend> friends = steamlink::Friends();
+    friends.erase(std::remove_if(friends.begin(), friends.end(), [&](const steamlink::Friend& x) {
+                      return !friendWait_.count(x.steamId) || FriendRow(x) || Lower(x.name).find(filter) == std::string::npos;
+                  }),
+                  friends.end());
+    if (friends.empty()) return 0;
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+    ui::SectionLabel(i18n::T("Steam friends in this game", "Amigos de Steam en este juego"), (int)friends.size());
+    for (const auto& fr : friends) DrawFriendRow(fr, width);
+    return (int)friends.size();
+}
+
 void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
     if (pickerStyle) {
         ImGui::SetCursorScreenPos(pos);
@@ -377,7 +392,9 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
     };
     if (pickerStyle) {
         section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite; });
-        section(i18n::T("On the LAN", "En la LAN"), [](const PlayerRow& r) { return !r.favorite; });
+        section(i18n::T("On the LAN", "En la LAN"), [](const PlayerRow& r) { return !r.favorite && !steamlink::IsVirtual(r.p.ip); });
+        section(i18n::T("Through Steam", "Por Steam"), [](const PlayerRow& r) { return !r.favorite && steamlink::IsVirtual(r.p.ip); });
+        if (const int n = DrawWaitingFriends(width)) shown += n;
     } else {
         section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite; });
         section(i18n::T("In this game", "En este juego"), [](const PlayerRow& r) { return !r.favorite && r.sameGame; });
