@@ -193,6 +193,16 @@ function Get-Or-Generate-Identity {
 # ------------------------------------------------------------
 # Helper: UNAE Network Topology Detection Engine (PowerShell)
 # ------------------------------------------------------------
+# An older ReFix copied the Fusion Shared server into every game: drop it where the game does not use Fusion.
+function Remove-UnusedFusionServer([string]$Dir) {
+    $fusion = Join-Path $Dir "ReFix\FusionShared"
+    if (-not (Test-Path -LiteralPath (Join-Path $fusion "ReFixFusionShared.exe"))) { return }
+    Remove-Item -LiteralPath $fusion -Recurse -Force -ErrorAction SilentlyContinue
+    $parent = Join-Path $Dir "ReFix"
+    if (-not (Get-ChildItem -LiteralPath $parent -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $parent -Force -ErrorAction SilentlyContinue }
+    Write-Host "  [OK] Removed the Fusion Shared server: this game does not use Photon Fusion" -ForegroundColor Green
+}
+
 function Detect-UNAE-Topology {
     param([string]$TargetDir)
 
@@ -214,10 +224,14 @@ function Detect-UNAE-Topology {
             $contentStr = [System.Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min($bytes.Length, 4194304))
             if ($contentStr -match "Photon\.Pun|ConnectToRegionMaster|PhotonHandler") { $il2cppPUN = $true }
             if ($contentStr -match "Fusion\.NetworkRunner|Fusion\.Runtime") { $il2cppFusion = $true }
+            # The Fusion names can sit past the first 4 MB: look at the whole file before leaving the server out.
+            elseif ([System.Text.Encoding]::ASCII.GetString($bytes) -match "Fusion\.NetworkRunner|Fusion\.Runtime") { $il2cppFusion = $true }
             if ($contentStr -match "Photon\.Voice|VoiceClient") { $hasPhotonVoice = $true }
         } catch {}
     }
 
+    # Only Photon Fusion games need ReFix's Fusion Shared server (ReFix\FusionShared, ~7 MB).
+    $script:usesFusion = $hasPhotonFusion -or $il2cppFusion
     $usesPhoton = $hasPhotonRealtime -or $hasPhoton3Unity -or $hasPhotonVoice -or $hasPhotonFusion -or $il2cppPUN -or $il2cppFusion
 
     # Topology B: hybrid (Fusion + nanosockets, Mirror + EOS WebRTC). Checked before topology C so that
@@ -861,9 +875,10 @@ switch ($OnlineMode) {
             }
         }
 
-        # Deploy ReFix companion tools (such as FusionShared) if present
+        # Deploy ReFix companion tools (the Fusion Shared server) only for Photon Fusion games
         $refixBin = Join-Path $ProductBinDir "ReFix"
-        if (Test-Path -LiteralPath $refixBin) {
+        if (-not $script:usesFusion) { Remove-UnusedFusionServer $ExeDir }
+        elseif (Test-Path -LiteralPath $refixBin) {
             try {
                 $targetRefix = Join-Path $ExeDir "ReFix"
                 Copy-Item -LiteralPath $refixBin -Destination $ExeDir -Recurse -Force -ErrorAction Stop
@@ -1086,7 +1101,8 @@ switch ($OnlineMode) {
                 # Photon Fusion Shared-mode server (ReFix\FusionShared), which the LAN emulator starts next to the game.
                 # The LAN build does not carry its own copy: it is the same companion the Online product ships.
                 $fusionSrc = Join-Path $BinDir "online\ReFix"
-                if ($lanProduct -eq "lan" -and -not $script:fusionDeployed -and (Test-Path -LiteralPath $fusionSrc)) {
+                if (-not $script:usesFusion) { Remove-UnusedFusionServer $ExeDir }
+                elseif ($lanProduct -eq "lan" -and -not $script:fusionDeployed -and (Test-Path -LiteralPath $fusionSrc)) {
                     $script:fusionDeployed = $true
                     try {
                         Copy-Item -LiteralPath $fusionSrc -Destination $ExeDir -Recurse -Force -ErrorAction Stop
