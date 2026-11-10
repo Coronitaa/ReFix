@@ -23,6 +23,7 @@ enum Type : uint8_t {
                        // u32 appId, i32 avatar, str name, str game
     kMessage = 13,     // u64 from, tunnel datagram
     kAvatarData = 14,  // i32 image, u16 w, u16 h, rgba
+    kLog = 15,         // str line: the helper's tunnel diagnostics, written to ReFix.log
 };
 
 enum Step : uint8_t { kOpeningSteam = 1, kSigningIn = 2, kConnecting = 3, kOnline = 4, kFailed = 5 };

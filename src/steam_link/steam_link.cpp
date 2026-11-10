@@ -391,6 +391,11 @@ void HandleHost(const uint8_t* buf, size_t n, const std::string& token, const so
     switch (buf[0]) {
     case proto::kState: OnHostState(r); break;
     case proto::kFriends: ReadFriends(r); break;
+    case proto::kLog: {
+        const std::string line = r.Str();
+        if (r.ok) ReFixLog("[SteamHost] %s", line.c_str());
+        break;
+    }
     case proto::kMessage: {
         const uint64_t sender = r.Get<uint64_t>();
         if (r.ok) Deliver(sender, r.p, r.Left());

@@ -373,13 +373,18 @@ void App::DrawFriendRow(const steamlink::Friend& fr, float width) {
         label = wait->second.late ? T("Can't be reached through Steam: no invite or join", "No se le alcanza por Steam: sin invitar ni unirse")
                                   : T("Connecting through Steam...", "Conectando por Steam...");
         statusCol = wait->second.late ? ui::color::Danger : ui::color::SyncPending;
-        if (wait->second.late && ImGui::IsMouseHoveringRect(p0, p1))
-            ImGui::SetTooltip("%s", T("Steam says this friend plays this game with ReFix, but nothing has arrived from their game through "
+        if (wait->second.late && ImGui::IsMouseHoveringRect(p0, p1)) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ui::S(420));
+            ImGui::TextUnformatted(T("Steam says this friend plays this game with ReFix, but nothing has arrived from their game through "
                                       "Steam's network. Both of you need ReFix 2.4 or newer with Steam online services on. "
-                                      "Turning Steam online services off and on again on both PCs usually fixes it.",
+                                      "If it stays like this, turn on [Debug] EnableLog in ReFix.ini on both PCs and send both ReFix.log files.",
                                       "Steam dice que este amigo juega a este juego con ReFix, pero no llega nada de su juego por la red "
                                       "de Steam. Los dos necesitáis ReFix 2.4 o posterior con los servicios online de Steam activados. "
-                                      "Desactivar y volver a activar los servicios online de Steam en los dos PCs suele arreglarlo."));
+                                      "Si sigue así, activad [Debug] EnableLog en ReFix.ini en los dos PCs y enviad los dos ReFix.log."));
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
     }
     ImGui::PushFont(f.caption);
     const std::string status = ui::Ellipsize(label, textW);
