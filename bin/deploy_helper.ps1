@@ -206,14 +206,15 @@ function Remove-UnusedFusionServer([string]$Dir) {
 function Detect-UNAE-Topology {
     param([string]$TargetDir)
 
-    $hasPhotonRealtime = (Get-ChildItem -LiteralPath $TargetDir -Filter "PhotonRealtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasPhoton3Unity   = (Get-ChildItem -LiteralPath $TargetDir -Filter "Photon3Unity3D.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasPhotonVoice    = (Get-ChildItem -LiteralPath $TargetDir -Filter "PhotonVoice.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasPhotonFusion   = (Get-ChildItem -LiteralPath $TargetDir -Filter "Fusion.Runtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasNanosockets    = (Get-ChildItem -LiteralPath $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasMirror         = (Get-ChildItem -LiteralPath $TargetDir -Filter "Mirror.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasKcp            = (Get-ChildItem -LiteralPath $TargetDir -Filter "kcp2k.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $hasEOS            = (Get-ChildItem -LiteralPath $TargetDir -Filter "*EOSSDK*.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    # ReFix's own Fusion Shared server (ReFix\FusionShared) carries Fusion/NanoSockets DLLs: never count it as the game's.
+    $hasPhotonRealtime = (Get-ChildItem -LiteralPath $TargetDir -Filter "PhotonRealtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
+    $hasPhoton3Unity   = (Get-ChildItem -LiteralPath $TargetDir -Filter "Photon3Unity3D.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
+    $hasPhotonVoice    = (Get-ChildItem -LiteralPath $TargetDir -Filter "PhotonVoice.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
+    $hasPhotonFusion   = (Get-ChildItem -LiteralPath $TargetDir -Filter "Fusion.Runtime.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
+    $hasNanosockets    = (Get-ChildItem -LiteralPath $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
+    $hasMirror         = (Get-ChildItem -LiteralPath $TargetDir -Filter "Mirror.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
+    $hasKcp            = (Get-ChildItem -LiteralPath $TargetDir -Filter "kcp2k.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
+    $hasEOS            = (Get-ChildItem -LiteralPath $TargetDir -Filter "*EOSSDK*.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Measure-Object).Count -gt 0
 
     $il2cppMeta = Get-ChildItem -LiteralPath $TargetDir -Filter "global-metadata.dat" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
     $il2cppPUN = $false
@@ -1516,7 +1517,7 @@ if ($EngineType -eq "Unity") {
     # ------------------------------------------------------------
     # Photon Fusion / nanosockets Detection & Asset Configuration
     # ------------------------------------------------------------
-    $nanosocketsDll = Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    $nanosocketsDll = Get-ChildItem -Path $TargetDir -Filter "nanosockets.dll" -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\ReFix\\FusionShared\\' } | Select-Object -First 1
     if ($nanosocketsDll) {
         Write-Host "  [DETECT] Detected Photon Fusion nanosockets transport: $($nanosocketsDll.FullName)" -ForegroundColor Cyan
         

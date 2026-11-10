@@ -306,14 +306,15 @@ clean_online_winmm() {
 
 uses_photon() {
     find "$GAME_DIR" -type f \( -iname 'Photon3Unity3D.dll' -o -iname 'PhotonRealtime.dll' -o -iname 'Fusion.Runtime.dll' \
-        -o -iname 'PhotonUnityNetworking.dll' \) -print -quit 2>/dev/null | grep -q . && return 0
+        -o -iname 'PhotonUnityNetworking.dll' \) -not -path '*/ReFix/FusionShared/*' -print -quit 2>/dev/null | grep -q . && return 0
     local meta
     meta="$(find "$GAME_DIR" -type f -name 'global-metadata.dat' -print -quit 2>/dev/null)"
     [ -n "$meta" ] && grep -qaE 'ExitGames\.Client\.Photon|Photon\.Realtime|Fusion\.NetworkRunner' "$meta"
 }
 
 uses_fusion() {
-    find "$GAME_DIR" -type f -iname 'Fusion.Runtime.dll' -print -quit 2>/dev/null | grep -q . && return 0
+    # ReFix's own Fusion Shared server carries Fusion DLLs: never count it as the game's.
+    find "$GAME_DIR" -type f -iname 'Fusion.Runtime.dll' -not -path '*/ReFix/FusionShared/*' -print -quit 2>/dev/null | grep -q . && return 0
     local meta
     meta="$(find "$GAME_DIR" -type f -name 'global-metadata.dat' -print -quit 2>/dev/null)"
     [ -n "$meta" ] && grep -qaE 'Fusion\.NetworkRunner|Fusion\.Runtime' "$meta"
