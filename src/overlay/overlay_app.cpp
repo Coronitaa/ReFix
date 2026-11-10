@@ -28,6 +28,7 @@ namespace refix::overlay {
 namespace {
 
 constexpr ULONGLONG kRefreshMs = 300;
+constexpr ULONGLONG kTunnelGraceMs = 15000;   // presence every 2 s; a new Steam P2P session takes a few seconds
 constexpr ULONGLONG kNvidiaCheckMs = 200;
 constexpr ULONGLONG kWelcomeMs = 6500;
 constexpr ULONGLONG kInviteToastMs = 20000;
@@ -237,6 +238,21 @@ void App::Refresh(const host::GameWindow& game) {
         return Lower(a.p.name) < Lower(b.p.name);
     });
     rows_ = std::move(rows);
+
+    // Steam shows these friends in ReFix (rich presence), but invite and join need their presence through the tunnel.
+    std::map<uint64_t, FriendWait> waiting;
+    for (const steamlink::Friend& f : steamlink::Friends()) {
+        if (!f.refix || f.appId != appId_ || FriendRow(f)) continue;
+        auto it = friendWait_.find(f.steamId);
+        FriendWait w = it != friendWait_.end() ? it->second : FriendWait{ now, false };
+        if (!w.late && now - w.since >= kTunnelGraceMs) {
+            w.late = true;
+            ReFixLog("[Overlay] Steam friend %llu plays this game with ReFix, but nothing came from them through the Steam tunnel in %llu s",
+                     (unsigned long long)f.steamId, (unsigned long long)((now - w.since) / 1000));
+        }
+        waiting[f.steamId] = w;
+    }
+    friendWait_ = std::move(waiting);
     PublishPresence();
 }
 

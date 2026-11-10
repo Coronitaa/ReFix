@@ -141,6 +141,9 @@ public:
     std::vector<Profile> allProfiles_;   // every profile on the PC (unique SteamIDs, import from another game)
     std::vector<PlayerRow> rows_;
     std::map<uint64_t, SentInvite> invitedAt_;
+    // ReFix friends in this game with no presence through the Steam tunnel yet (so no row): since when.
+    struct FriendWait { ULONGLONG since = 0; bool late = false; };   // late: past the grace, logged once
+    std::map<uint64_t, FriendWait> friendWait_;
     uint64_t localLobby_ = 0;
     std::string localConnect_;
     std::wstring gameTitle_;
@@ -220,6 +223,8 @@ private:
     bool steamConfirm_ = false;
     void DrawFriends(ImVec2 pos, ImVec2 size);
     void DrawFriendRow(const steamlink::Friend& fr, float width);
+    const PlayerRow* FriendRow(const steamlink::Friend& fr) const;   // its tunnel presence, if any
+    int DrawWaitingFriends(float width);   // invite picker: ReFix friends in this game not reached yet
     void DrawAchievementToast(ImDrawList* dl, const Toast& t, ImVec2 p0, ImVec2 p1, float alpha);
     ImTextureID AchievementIcon(const ach::Entry& e);
     void DrawProfileMenu();

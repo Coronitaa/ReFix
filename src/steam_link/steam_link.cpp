@@ -13,6 +13,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -263,6 +264,8 @@ void Deliver(uint64_t from, const uint8_t* buf, size_t len) {
     {
         std::lock_guard<std::mutex> lock(g_mu);
         ip = (flags & kFlagFromLan) ? RelayIpLocked(from, lanIp) : VirtualIpLocked(from);
+        static std::set<uint64_t> heard;   // the two-PC diagnosis: does anything arrive from this friend at all?
+        if (heard.insert(from).second) ReFixLog("[SteamLink] First datagram through the tunnel from %llu", (unsigned long long)from);
     }
     if (!ip) return;
     {
@@ -388,6 +391,11 @@ void HandleHost(const uint8_t* buf, size_t n, const std::string& token, const so
     switch (buf[0]) {
     case proto::kState: OnHostState(r); break;
     case proto::kFriends: ReadFriends(r); break;
+    case proto::kLog: {
+        const std::string line = r.Str();
+        if (r.ok) ReFixLog("[SteamHost] %s", line.c_str());
+        break;
+    }
     case proto::kMessage: {
         const uint64_t sender = r.Get<uint64_t>();
         if (r.ok) Deliver(sender, r.p, r.Left());

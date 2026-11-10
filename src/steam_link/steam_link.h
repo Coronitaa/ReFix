@@ -3,7 +3,7 @@
 // client if it is closed, loads Valve's steam_api64.dll a second time under its own name as Spacewar (480) and
 // uses it for two things only: the Steam friends list and a P2P tunnel. The game keeps talking to ReFix's
 // emulator; LanCore and the overlay presence send their datagrams through the tunnel, where every Steam friend
-// that runs ReFix shows up as a virtual LAN address 10.49.x.y.
+// that runs ReFix shows up as a virtual LAN address 198.18.x.y.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +27,9 @@ std::string LastError();             // UTF-8, English (the overlay translates t
 uint64_t LocalSteamId();
 
 // Virtual UDP over Steam P2P.
-constexpr uint32_t kVirtualNet = 0x0A310000;   // 10.49.0.0/16, host byte order
+// 198.18.0.0/16 (RFC 2544 benchmarking range): never a real LAN. 10.49.0.0/16 was, and a PC on such a LAN sent
+// its own LAN traffic into the tunnel. Virtual addresses never cross the wire, so older ReFix peers are unaffected.
+constexpr uint32_t kVirtualNet = 0xC6120000;   // 198.18.0.0/16, host byte order
 constexpr uint32_t kVirtualMask = 0xFFFF0000;
 inline bool IsVirtual(uint32_t ipHostOrder) { return (ipHostOrder & kVirtualMask) == kVirtualNet; }
 

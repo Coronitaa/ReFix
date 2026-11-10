@@ -13,7 +13,10 @@
 
 #include "steam_host_proto.h"
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -30,12 +33,14 @@ namespace {
 struct NetIdentity { int32_t type; int32_t size; union { uint64_t steamId; char raw[128]; }; };
 static_assert(sizeof(NetIdentity) == 136, "SteamNetworkingIdentity layout");
 struct NetMessage { void* data; int32_t size; uint32_t conn; NetIdentity peer; };
-struct CallbackMsg { int32_t user; int32_t id; uint8_t* param; int32_t paramSize; };
 struct FriendGameInfo { uint64_t gameId; uint32_t ip; uint16_t port, queryPort; uint64_t lobby; };
 
 constexpr int kChannel = 47;
 constexpr int kSendFlags = 1 | 32;                 // UnreliableNoNagle | AutoRestartBrokenSession
 constexpr int kCbSessionRequest = 1251;
+constexpr int kCbSessionFailed = 1252;
+constexpr int kResultOk = 1;
+constexpr ULONGLONG kDiagMs = 5000;
 constexpr int kFriendFlagImmediate = 4;
 constexpr DWORD kSteamStartTimeoutMs = 180000;
 constexpr DWORD kInitRetryMs = 2000;
@@ -46,11 +51,9 @@ struct Api {
     HMODULE dll = nullptr;
     bool (*Init)() = nullptr;
     void (*Shutdown)() = nullptr;
-    void (*DispatchInit)() = nullptr;
-    void (*RunFrame)(int32_t) = nullptr;
-    bool (*NextCallback)(int32_t, CallbackMsg*) = nullptr;
-    void (*FreeCallback)(int32_t) = nullptr;
-    int32_t (*Pipe)() = nullptr;
+    void (*RunCallbacks)() = nullptr;
+    void (*RegisterCallback)(void*, int) = nullptr;
+    void (*UnregisterCallback)(void*) = nullptr;
     void* (*Messages)() = nullptr;
     void* (*FriendsIface)() = nullptr;
     void* (*UserIface)() = nullptr;
@@ -71,7 +74,18 @@ struct Api {
     void* (*UtilsIface)() = nullptr;
     bool (*ImageSize)(void*, int, uint32_t*, uint32_t*) = nullptr;
     bool (*ImageRgba)(void*, int, uint8_t*, int) = nullptr;
+    // Optional (diagnostics and relay warm-up): older Steam API DLLs may lack them.
+    void* (*NetUtils)() = nullptr;
+    int (*InitRelay)(void*) = nullptr;
+    int (*RelayStatus)(void*, void*) = nullptr;
+    int (*SessionInfo)(void*, const NetIdentity*, void*, void*) = nullptr;
 };
+
+// SteamRelayNetworkStatus_t: availability of the relays, then Steam's own explanation.
+struct RelayStatusInfo { int avail; int pinging; int availConfig; int availRelay; char debug[256]; };
+
+// Per friend, what the tunnel did: the two-PC diagnosis reads these lines in ReFix.log.
+struct PeerStats { uint32_t sent = 0, failed = 0, received = 0; int lastResult = 0; uint32_t logged = 0; };
 
 Api g_api;
 void* g_msgs = nullptr;
@@ -90,6 +104,18 @@ uint64_t g_self = 0;
 void Post(const Writer& w) {
     if (w.b.size() <= kMaxDatagram) sendto(g_sock, (const char*)w.b.data(), (int)w.b.size(), 0, (const sockaddr*)&g_game, sizeof(g_game));
 }
+
+void Log(const char* fmt, ...) {
+    char line[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    Post(Writer(kLog).Str(line));
+}
+
+std::map<uint64_t, PeerStats> g_peers;
+void* g_netUtils = nullptr;
 
 void Report(Step step, const char* error = "") { Post(Writer(kState).Put<uint8_t>(step).Put<uint64_t>(g_self).Str(error)); }
 
@@ -131,7 +157,14 @@ void HandleGame() {
             const uint64_t to = r.Get<uint64_t>();
             if (!r.ok || !r.Left() || !g_msgs) break;
             const NetIdentity id = IdentityOf(to);
-            g_api.SendMsg(g_msgs, &id, r.p, (uint32_t)r.Left(), kSendFlags, kChannel);
+            const int result = g_api.SendMsg(g_msgs, &id, r.p, (uint32_t)r.Left(), kSendFlags, kChannel);
+            PeerStats& st = g_peers[to];
+            ++st.sent;
+            if (result != kResultOk) {
+                if (!st.failed) Log("send to %llu failed: EResult %d", (unsigned long long)to, result);
+                ++st.failed;
+                st.lastResult = result;
+            }
             break;
         }
         case kPresence:
@@ -307,11 +340,9 @@ bool LoadValve(const std::wstring& dir) {
         g_api.dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!g_api.dll) continue;
         const bool ok = Resolve(g_api.Init, "SteamAPI_Init") && Resolve(g_api.Shutdown, "SteamAPI_Shutdown") &&
-            Resolve(g_api.DispatchInit, "SteamAPI_ManualDispatch_Init") &&
-            Resolve(g_api.RunFrame, "SteamAPI_ManualDispatch_RunFrame") &&
-            Resolve(g_api.NextCallback, "SteamAPI_ManualDispatch_GetNextCallback") &&
-            Resolve(g_api.FreeCallback, "SteamAPI_ManualDispatch_FreeLastCallback") &&
-            Resolve(g_api.Pipe, "SteamAPI_GetHSteamPipe") &&
+            Resolve(g_api.RunCallbacks, "SteamAPI_RunCallbacks") &&
+            Resolve(g_api.RegisterCallback, "SteamAPI_RegisterCallback") &&
+            Resolve(g_api.UnregisterCallback, "SteamAPI_UnregisterCallback") &&
             Resolve(g_api.Messages, "SteamAPI_SteamNetworkingMessages_SteamAPI_v002") &&
             ResolveAny(g_api.FriendsIface, { "SteamAPI_SteamFriends_v017", "SteamAPI_SteamFriends_v018" }) &&
             ResolveAny(g_api.UserIface, { "SteamAPI_SteamUser_v023", "SteamAPI_SteamUser_v022",
@@ -333,7 +364,13 @@ bool LoadValve(const std::wstring& dir) {
             Resolve(g_api.UtilsIface, "SteamAPI_SteamUtils_v010") &&
             Resolve(g_api.ImageSize, "SteamAPI_ISteamUtils_GetImageSize") &&
             Resolve(g_api.ImageRgba, "SteamAPI_ISteamUtils_GetImageRGBA");
-        if (ok) return true;
+        if (ok) {
+            ResolveAny(g_api.NetUtils, { "SteamAPI_SteamNetworkingUtils_SteamAPI_v004", "SteamAPI_SteamNetworkingUtils_SteamAPI_v003" });
+            Resolve(g_api.InitRelay, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
+            Resolve(g_api.RelayStatus, "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus");
+            Resolve(g_api.SessionInfo, "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo");
+            return true;
+        }
         FreeLibrary(g_api.dll);
         g_api = Api{};
     }
@@ -344,7 +381,6 @@ bool LoadValve(const std::wstring& dir) {
 bool InitAsSpacewar() {
     SetEnvironmentVariableW(L"SteamAppId", L"480");
     SetEnvironmentVariableW(L"SteamGameId", L"480");
-    g_api.DispatchInit();
     if (!g_api.Init()) return false;
     g_msgs = g_api.Messages();
     g_friends = g_api.FriendsIface();
@@ -395,24 +431,89 @@ void SendFriends() {
     Post(w);
 }
 
-void HandleCallbacks(int32_t pipe) {
-    g_api.RunFrame(pipe);
-    CallbackMsg cb{};
-    while (g_api.NextCallback(pipe, &cb)) {
-        if (cb.id == kCbSessionRequest && cb.param && cb.paramSize >= (int)sizeof(NetIdentity)) {
-            const auto* remote = reinterpret_cast<const NetIdentity*>(cb.param);
-            if (remote->type == 16 && g_api.HasFriend(g_friends, remote->steamId, kFriendFlagImmediate))   // friends only
-                g_api.AcceptSession(g_msgs, remote);
+// Peer-to-peer goes through Valve's relays: start reaching them now instead of on the first message.
+void StartRelay() {
+    g_netUtils = g_api.NetUtils ? g_api.NetUtils() : nullptr;
+    if (g_netUtils && g_api.InitRelay) g_api.InitRelay(g_netUtils);
+    else Log("relay network warm-up not available in this Steam API DLL");
+}
+
+// Every few seconds: the relays' state when it changes, and each friend's tunnel counters when they move.
+void Diagnose() {
+    static int lastAvail = 0x7fffffff, lastConfig = 0, lastRelay = 0;
+    if (g_netUtils && g_api.RelayStatus) {
+        RelayStatusInfo s{};
+        const int avail = g_api.RelayStatus(g_netUtils, &s);
+        s.debug[sizeof(s.debug) - 1] = 0;
+        if (avail != lastAvail || s.availConfig != lastConfig || s.availRelay != lastRelay) {   // 100 = ready
+            lastAvail = avail;
+            lastConfig = s.availConfig;
+            lastRelay = s.availRelay;
+            Log("relay network: %d (config %d, relays %d) %s", avail, s.availConfig, s.availRelay, s.debug);
         }
-        g_api.FreeCallback(pipe);
+    }
+    for (auto& [id, st] : g_peers) {
+        const uint32_t total = st.sent + st.received;
+        if (total == st.logged) continue;
+        st.logged = total;
+        int state = -1;
+        if (g_api.SessionInfo) {
+            const NetIdentity peer = IdentityOf(id);
+            static uint8_t info[2048], status[2048];   // larger than SteamNetConnectionInfo_t / RealTimeStatus_t
+            state = g_api.SessionInfo(g_msgs, &peer, info, status);
+        }
+        // state: 0 none, 1 connecting, 2 finding route, 3 connected, 4 closed by peer, 5 problem detected locally
+        Log("tunnel %llu: sent %u (failed %u, last EResult %d), received %u, session state %d", (unsigned long long)id,
+            st.sent, st.failed, st.lastResult, st.received, state);
     }
 }
+
+void OnSessionRequest(void* param) {
+    const auto* remote = static_cast<const NetIdentity*>(param);
+    const bool isFriend = remote->type == 16 && g_api.HasFriend(g_friends, remote->steamId, kFriendFlagImmediate);
+    const bool accepted = isFriend && g_api.AcceptSession(g_msgs, remote);   // friends only
+    Log("session request from %llu: %s", (unsigned long long)remote->steamId,
+        accepted ? "accepted" : isFriend ? "accept failed" : "ignored (not a friend)");
+}
+
+void OnSessionFailed(void* param) {   // SteamNetworkingMessagesSessionFailed_t starts with the remote identity
+    Log("session with %llu failed", (unsigned long long)static_cast<const NetIdentity*>(param)->steamId);
+}
+
+// Valve's CCallbackBase (steam_api_common.h), declared the same way so MSVC gives it the same vtable.
+// Callbacks go through SteamAPI_RunCallbacks like in any game: with manual dispatch the relay network never got
+// its configuration (it waited for results only the regular dispatcher delivers), so P2P sessions never connected.
+class CallbackBase {
+public:
+    virtual void Run(void* param) = 0;
+    virtual void Run(void* param, bool ioFailure, uint64_t call) = 0;
+    virtual int GetCallbackSizeBytes() = 0;
+protected:
+    uint8_t flags_ = 0;
+    int id_ = 0;
+};
+
+class HostCallback : public CallbackBase {
+public:
+    HostCallback(int id, int size, void (*fn)(void*)) : size_(size), fn_(fn) { id_ = id; }
+    void Run(void* param) override { fn_(param); }
+    void Run(void* param, bool, uint64_t) override { fn_(param); }
+    int GetCallbackSizeBytes() override { return size_; }
+    int Id() const { return id_; }
+private:
+    int size_;
+    void (*fn_)(void*);
+};
+
+HostCallback g_sessionRequest(kCbSessionRequest, (int)sizeof(NetIdentity), &OnSessionRequest);
+HostCallback g_sessionFailed(kCbSessionFailed, (int)sizeof(NetIdentity), &OnSessionFailed);
 
 void ForwardMessages() {
     NetMessage* msgs[32];
     int n;
     while ((n = g_api.RecvMsgs(g_msgs, kChannel, msgs, 32)) > 0) {
         for (int i = 0; i < n; ++i) {
+            if (msgs[i]->peer.type == 16) ++g_peers[msgs[i]->peer.steamId].received;
             if (msgs[i]->peer.type == 16 && msgs[i]->size > 0 && (size_t)msgs[i]->size < kMaxDatagram - 16)
                 Post(Writer(kMessage).Put<uint64_t>(msgs[i]->peer.steamId).Raw(msgs[i]->data, (size_t)msgs[i]->size));
             g_api.Release(msgs[i]);
@@ -449,18 +550,24 @@ int Run(int argc, wchar_t** argv) {
         while (Wait(500)) {}   // stay until the game reads the failure and lets us go
         return 1;
     }
-    const int32_t pipe = g_api.Pipe();
+    g_api.RegisterCallback(&g_sessionRequest, g_sessionRequest.Id());
+    g_api.RegisterCallback(&g_sessionFailed, g_sessionFailed.Id());
+    StartRelay();
     Report(kOnline);
     PublishPresence(true);
     SendFriends();
-    ULONGLONG lastFriends = GetTickCount64(), lastHide = 0;
+    ULONGLONG lastFriends = GetTickCount64(), lastHide = 0, lastDiag = GetTickCount64();
     const ULONGLONG hideUntil = g_startedSteam ? GetTickCount64() + kKeepSteamInTrayMs : 0;
     while (Wait(2)) {
-        HandleCallbacks(pipe);
+        g_api.RunCallbacks();
         ForwardMessages();
         if (GetTickCount64() < hideUntil && GetTickCount64() - lastHide >= 500) {
             lastHide = GetTickCount64();
             SendSteamToTray();
+        }
+        if (GetTickCount64() - lastDiag >= kDiagMs) {
+            lastDiag = GetTickCount64();
+            Diagnose();
         }
         if (GetTickCount64() - lastFriends >= kFriendRefreshMs) {
             lastFriends = GetTickCount64();
@@ -468,7 +575,9 @@ int Run(int argc, wchar_t** argv) {
         }
     }
     PublishPresence(false);
-    HandleCallbacks(pipe);
+    g_api.RunCallbacks();
+    g_api.UnregisterCallback(&g_sessionRequest);
+    g_api.UnregisterCallback(&g_sessionFailed);
     g_api.Shutdown();
     return 0;   // process exit: Steam stops showing Spacewar
 }
