@@ -30,6 +30,8 @@ namespace {
 
 constexpr DWORD kCheckEveryMs = 60000;
 constexpr DWORD kShutdownWaitMs = 8000;
+constexpr ULONGLONG kAutoSyncQuietMs = 5000;        // the game's save has finished writing
+constexpr ULONGLONG kAutoSyncCooldownMs = 300000;   // at most one autosync upload every 5 minutes
 constexpr int kBackupsKept = 3;
 
 std::mutex g_mu;                 // everything below
@@ -337,10 +339,55 @@ void Run(bool force) {
     g_busy = false;
 }
 
+// Folders the game writes its saves to (the profile's emulated Steam Cloud and the live save folders).
+std::vector<std::wstring> WatchedDirs() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    std::vector<std::wstring> dirs;
+    if (!g_profile || !Syncs(*g_profile)) return dirs;
+    dirs.push_back(profiles::ProfileDir(g_profile->id));
+    for (const saves::Location& loc : saves::OwnedBy(g_profile->id)) dirs.push_back(loc.live);
+    return dirs;
+}
+
 DWORD WINAPI Loop(LPVOID) {
+    std::vector<std::wstring> dirs;
+    std::vector<HANDLE> watches;
+    ULONGLONG savedAt = 0, lastAuto = 0;   // last save seen, last autosync upload (GetTickCount64)
+    ULONGLONG nextCheck = GetTickCount64() + kCheckEveryMs;
     for (;;) {
-        const bool woken = WaitForSingleObject(g_wake, kCheckEveryMs) == WAIT_OBJECT_0;
-        Run(woken);
+        if (std::vector<std::wstring> now = AutoSync() ? WatchedDirs() : std::vector<std::wstring>{}; now != dirs) {
+            for (HANDLE h : watches) FindCloseChangeNotification(h);
+            watches.clear();
+            dirs = std::move(now);
+            for (const std::wstring& d : dirs) {
+                HANDLE h = FindFirstChangeNotificationW(d.c_str(), TRUE, FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME);
+                if (h != INVALID_HANDLE_VALUE && watches.size() < MAXIMUM_WAIT_OBJECTS - 1) watches.push_back(h);
+                else if (h != INVALID_HANDLE_VALUE) FindCloseChangeNotification(h);
+            }
+        }
+        const ULONGLONG t = GetTickCount64();
+        ULONGLONG due = nextCheck;
+        if (savedAt) due = (std::min)(due, (std::max)(savedAt + kAutoSyncQuietMs, lastAuto + kAutoSyncCooldownMs));
+        std::vector<HANDLE> waitOn{ g_wake };
+        waitOn.insert(waitOn.end(), watches.begin(), watches.end());
+        const DWORD r = WaitForMultipleObjects((DWORD)waitOn.size(), waitOn.data(), FALSE, due > t ? (DWORD)(due - t) : 0);
+        const ULONGLONG now = GetTickCount64();
+        if (r == WAIT_OBJECT_0) { Run(true); nextCheck = now + kCheckEveryMs; continue; }
+        if (r > WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + waitOn.size()) {
+            FindNextChangeNotification(waitOn[r - WAIT_OBJECT_0]);
+            savedAt = now;   // saves come in bursts: wait until they stop
+            continue;
+        }
+        if (savedAt && now >= savedAt + kAutoSyncQuietMs && (lastAuto == 0 || now >= lastAuto + kAutoSyncCooldownMs)) {
+            ReFixLog("[Sync] Autosync after the game saved");
+            Run(true);
+            savedAt = 0;
+            lastAuto = now;
+            nextCheck = now + kCheckEveryMs;
+        } else if (now >= nextCheck) {
+            Run(false);
+            nextCheck = now + kCheckEveryMs;
+        }
     }
 }
 
@@ -362,6 +409,13 @@ std::wstring EffectiveFolder() {
 
 void SetFolder(const std::wstring& folder) {
     WritePrivateProfileStringW(L"Sync", L"Folder", folder.empty() ? nullptr : folder.c_str(), Ini().c_str());
+    SyncNow();
+}
+
+bool AutoSync() { return GetPrivateProfileIntW(L"Sync", L"AutoSync", 1, Ini().c_str()) != 0; }
+
+void SetAutoSync(bool on) {
+    WritePrivateProfileStringW(L"Sync", L"AutoSync", on ? L"1" : L"0", Ini().c_str());
     SyncNow();
 }
 

@@ -617,6 +617,12 @@ void App::DrawSyncSettings() {
         sync::SetFolder(sync::kLocalOnly);
     if (!chosen.empty() && ui::LinkButton(i18n::T("Back to automatic", "Volver a automática")))
         sync::SetFolder(L"");
+    bool autoSync = sync::AutoSync();
+    if (SettingRow("autosync", i18n::T("Autosync", "Autosincronizar"),
+                   i18n::T("Syncs a few seconds after the game saves, at most once every 5 minutes.",
+                           "Sincroniza unos segundos después de que el juego guarde, como mucho una vez cada 5 minutos."),
+                   &autoSync))
+        sync::SetAutoSync(autoSync);
     bool localProfiles = sync::SyncLocalProfiles();
     if (SettingRow("synclocal", i18n::T("Sync local profiles too", "Sincronizar también los perfiles locales"),
                    i18n::T("Profiles not linked to Steam stay on this PC unless you turn this on.",

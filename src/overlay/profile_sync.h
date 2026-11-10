@@ -54,6 +54,8 @@ constexpr const wchar_t* kLocalOnly = L"-";     // SetFolder value: keep profile
 std::wstring ChosenFolder();                     // player's choice, "" = automatic, kLocalOnly = none
 std::wstring EffectiveFolder();                  // choice, else first cloud folder + \ReFix Sync, else ""
 void SetFolder(const std::wstring& folder);      // "" = automatic
+bool AutoSync();                                 // upload soon after the game saves (5 min cooldown)
+void SetAutoSync(bool on);
 bool SyncLocalProfiles();
 void SetSyncLocalProfiles(bool on);
 
