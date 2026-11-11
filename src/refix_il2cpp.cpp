@@ -409,6 +409,25 @@ static void* ResolveConcreteMethod(void* obj, void* intfMethod, void* fallbackKl
     return intfMethod;
 }
 
+static void* FindClassMethod(void* klass, const char* methodName) {
+    if (!klass || !methodName) return nullptr;
+    if (g_pfn_class_get_methods && g_pfn_method_get_name) {
+        void* iter = nullptr;
+        void* m = nullptr;
+        while ((m = g_pfn_class_get_methods(klass, &iter)) != nullptr) {
+            const char* name = g_pfn_method_get_name(m);
+            if (name && strcmp(name, methodName) == 0) {
+                return m;
+            }
+        }
+    }
+    for (int args = 0; args <= 4; args++) {
+        void* m = g_pfn_class_get_method_from_name(klass, methodName, args);
+        if (m) return m;
+    }
+    return nullptr;
+}
+
 static bool ReadIniBool(const char* section, const char* key, bool defaultValue);
 
 static bool ActivateP2PModeInternal() {
@@ -1306,6 +1325,74 @@ static void Hooked_InternetCheckFailed(void* self, bool fatal, void* message, bo
     }
 }
 
+// Inventory and Item Data Bypass (generic for IL2CPP titles with online cosmetic/inventory checks)
+typedef void* (*fn_InventoryManager_Initialize_t)(void* self, void* arg1, void* arg2);
+static fn_InventoryManager_Initialize_t g_orig_InventoryManager_Initialize = nullptr;
+
+typedef void* (*fn_InventoryManager_UpdateItemData_t)(void* self, void* method);
+static fn_InventoryManager_UpdateItemData_t g_orig_InventoryManager_UpdateItemData = nullptr;
+
+typedef bool (*fn_InventoryManager_IsPurchased_t)(void* self, void* itemKey, void* method);
+static fn_InventoryManager_IsPurchased_t g_orig_InventoryManager_IsPurchased = nullptr;
+
+typedef bool (*fn_UpdateItemData_MoveNext_t)(void* self, void* method);
+static fn_UpdateItemData_MoveNext_t g_orig_UpdateItemData_MoveNext = nullptr;
+
+static int g_offset_UpdateItemDataStatus = 0;
+static int g_offset_UpdateItemData_This = 0x20;
+
+static void ForceInventorySuccess(void* invMgr) {
+    if (!invMgr) return;
+    if (g_offset_UpdateItemDataStatus > 0) {
+        *(int32_t*)((char*)invMgr + g_offset_UpdateItemDataStatus) = 2; // Succeeded
+    }
+}
+
+static void* Hooked_InventoryManager_Initialize(void* self, void* arg1, void* arg2) {
+    void* task = nullptr;
+    if (g_orig_InventoryManager_Initialize) {
+        task = g_orig_InventoryManager_Initialize(self, arg1, arg2);
+    }
+    if (self && ReadIniBool("Inventory", "BypassOnlineInventory", true)) {
+        ForceInventorySuccess(self);
+        ReFixLog("[Inventory IL2CPP] InventoryManager.Initialize: pre-set Status = 2 (Succeeded)");
+    }
+    return task;
+}
+
+static void* Hooked_InventoryManager_UpdateItemData(void* self, void* method) {
+    void* coro = nullptr;
+    if (g_orig_InventoryManager_UpdateItemData) {
+        coro = g_orig_InventoryManager_UpdateItemData(self, method);
+    }
+    if (self && ReadIniBool("Inventory", "BypassOnlineInventory", true)) {
+        ForceInventorySuccess(self);
+        ReFixLog("[Inventory IL2CPP] InventoryManager.UpdateItemData: pre-set Status = 2 (Succeeded)");
+    }
+    return coro;
+}
+
+static bool Hooked_InventoryManager_IsPurchased(void* self, void* itemKey, void* method) {
+    if (ReadIniBool("Inventory", "UnlockAll", true)) {
+        return true;
+    }
+    return g_orig_InventoryManager_IsPurchased ? g_orig_InventoryManager_IsPurchased(self, itemKey, method) : false;
+}
+
+static bool Hooked_UpdateItemData_MoveNext(void* self, void* method) {
+    if (ReadIniBool("Inventory", "BypassOnlineInventory", true)) {
+        if (self) {
+            void* parent = *(void**)((char*)self + g_offset_UpdateItemData_This);
+            if (parent) {
+                ForceInventorySuccess(parent);
+                ReFixLog("[Inventory IL2CPP] Coroutine UpdateItemData MoveNext: forced Status = 2 (Succeeded)");
+            }
+        }
+        return false;
+    }
+    return g_orig_UpdateItemData_MoveNext ? g_orig_UpdateItemData_MoveNext(self, method) : false;
+}
+
 static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
     if (self) g_pSelectServerPaneUiInstance.store(self);
     ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnApplyButtonClick (Confirm) clicked! <<<");
@@ -1651,6 +1738,95 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
                         ReFixLog("[IL2CPP] Hooked %s.%s.InternetCheck at %p", ns, cls, pCode);
                     }
                 }
+            }
+        }
+    }
+
+    // Generic inventory and item data bypass for titles requiring backend cosmetic checks
+    const char* invClasses[] = { "InventoryManager", "EOSInventoryManager", "ItemManager", "CosmeticManager" };
+    const char* invNamespaces[] = { "SG.EosSDK", "SG.Platform", "Platform", "EosSDK", "" };
+    for (const char* ns : invNamespaces) {
+        for (const char* cls : invClasses) {
+            void* klassInv = FindClassAcrossImages(ns, cls);
+            if (klassInv) {
+                if (g_pfn_class_get_field_from_name && g_pfn_field_get_offset) {
+                    void* fldStatus = g_pfn_class_get_field_from_name(klassInv, "UpdateItemDataStatus");
+                    if (fldStatus) {
+                        g_offset_UpdateItemDataStatus = g_pfn_field_get_offset(fldStatus);
+                        ReFixLog("[IL2CPP] Found %s.%s.UpdateItemDataStatus offset: 0x%x", ns, cls, g_offset_UpdateItemDataStatus);
+                    }
+                }
+                if (g_offset_UpdateItemDataStatus == 0) g_offset_UpdateItemDataStatus = 0xcc;
+
+                void* mInit = FindClassMethod(klassInv, "Initialize");
+                if (mInit) {
+                    void* pCode = ResolveRealCodePointer(*(void**)mInit);
+                    if (pCode && MH_CreateHook(pCode, (void*)Hooked_InventoryManager_Initialize, (void**)&g_orig_InventoryManager_Initialize) == MH_OK) {
+                        MH_EnableHook(pCode);
+                        ReFixLog("[IL2CPP] Hooked %s.%s.Initialize at %p", ns, cls, pCode);
+                    }
+                }
+
+                void* mUpdate = FindClassMethod(klassInv, "UpdateItemData");
+                if (mUpdate) {
+                    void* pCode = ResolveRealCodePointer(*(void**)mUpdate);
+                    if (pCode && MH_CreateHook(pCode, (void*)Hooked_InventoryManager_UpdateItemData, (void**)&g_orig_InventoryManager_UpdateItemData) == MH_OK) {
+                        MH_EnableHook(pCode);
+                        ReFixLog("[IL2CPP] Hooked %s.%s.UpdateItemData at %p", ns, cls, pCode);
+                    }
+                }
+
+                void* mIsPurchased = FindClassMethod(klassInv, "IsPurchased");
+                if (mIsPurchased) {
+                    void* pCode = ResolveRealCodePointer(*(void**)mIsPurchased);
+                    if (pCode && MH_CreateHook(pCode, (void*)Hooked_InventoryManager_IsPurchased, (void**)&g_orig_InventoryManager_IsPurchased) == MH_OK) {
+                        MH_EnableHook(pCode);
+                        ReFixLog("[IL2CPP] Hooked %s.%s.IsPurchased at %p", ns, cls, pCode);
+                    }
+                }
+
+                if (g_pfn_class_get_nested_types && g_pfn_class_get_name) {
+                    void* iterNested = nullptr;
+                    void* nestedKlass = nullptr;
+                    while ((nestedKlass = g_pfn_class_get_nested_types(klassInv, &iterNested)) != nullptr) {
+                        const char* nName = g_pfn_class_get_name(nestedKlass);
+                        if (nName && strstr(nName, "UpdateItemData")) {
+                            if (g_pfn_class_get_field_from_name && g_pfn_field_get_offset) {
+                                void* fldThis = g_pfn_class_get_field_from_name(nestedKlass, "<>4__this");
+                                if (fldThis) {
+                                    g_offset_UpdateItemData_This = g_pfn_field_get_offset(fldThis);
+                                }
+                            }
+                            void* mMoveNext = FindClassMethod(nestedKlass, "MoveNext");
+                            if (mMoveNext) {
+                                void* pCode = ResolveRealCodePointer(*(void**)mMoveNext);
+                                if (pCode && MH_CreateHook(pCode, (void*)Hooked_UpdateItemData_MoveNext, (void**)&g_orig_UpdateItemData_MoveNext) == MH_OK) {
+                                    MH_EnableHook(pCode);
+                                    ReFixLog("[IL2CPP] Hooked nested %s.MoveNext at %p (offset_this=0x%x)", nName, pCode, g_offset_UpdateItemData_This);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void* klassUpdateCoro = FindClassAcrossImages("", "<UpdateItemData>d__74");
+    if (!klassUpdateCoro) klassUpdateCoro = FindClassAcrossImages("SG.EosSDK", "<UpdateItemData>d__74");
+    if (klassUpdateCoro) {
+        if (g_pfn_class_get_field_from_name && g_pfn_field_get_offset) {
+            void* fldThis = g_pfn_class_get_field_from_name(klassUpdateCoro, "<>4__this");
+            if (fldThis) {
+                g_offset_UpdateItemData_This = g_pfn_field_get_offset(fldThis);
+            }
+        }
+        void* mMoveNext = FindClassMethod(klassUpdateCoro, "MoveNext");
+        if (mMoveNext) {
+            void* pCode = ResolveRealCodePointer(*(void**)mMoveNext);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_UpdateItemData_MoveNext, (void**)&g_orig_UpdateItemData_MoveNext) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked <UpdateItemData>d__74.MoveNext directly at %p", pCode);
             }
         }
     }
