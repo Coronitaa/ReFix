@@ -1393,6 +1393,23 @@ static bool Hooked_UpdateItemData_MoveNext(void* self, void* method) {
     return g_orig_UpdateItemData_MoveNext ? g_orig_UpdateItemData_MoveNext(self, method) : false;
 }
 
+typedef void (*fn_MenuManager_GotoDefaultMenu_t)(void* self, void* method);
+static fn_MenuManager_GotoDefaultMenu_t g_pfn_MenuManager_GotoDefaultMenu = nullptr;
+
+typedef void (*fn_MenuManager_GotoNextMenu_t)(void* self, void* nextMenu, void* method);
+static fn_MenuManager_GotoNextMenu_t g_orig_MenuManager_GotoNextMenu = nullptr;
+
+static void Hooked_MenuManager_GotoNextMenu(void* self, void* nextMenu, void* method) {
+    if (self && g_pfn_MenuManager_GotoDefaultMenu && ReadIniBool("Inventory", "SkipFTUE", true)) {
+        ReFixLog("[IL2CPP] MenuManager.GotoNextMenu -> redirecting directly to GotoDefaultMenu() (MainMenu)");
+        g_pfn_MenuManager_GotoDefaultMenu(self, nullptr);
+        return;
+    }
+    if (g_orig_MenuManager_GotoNextMenu) {
+        g_orig_MenuManager_GotoNextMenu(self, nextMenu, method);
+    }
+}
+
 static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
     if (self) g_pSelectServerPaneUiInstance.store(self);
     ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnApplyButtonClick (Confirm) clicked! <<<");
@@ -1827,6 +1844,26 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
             if (pCode && MH_CreateHook(pCode, (void*)Hooked_UpdateItemData_MoveNext, (void**)&g_orig_UpdateItemData_MoveNext) == MH_OK) {
                 MH_EnableHook(pCode);
                 ReFixLog("[IL2CPP] Hooked <UpdateItemData>d__74.MoveNext directly at %p", pCode);
+            }
+        }
+    }
+
+    // MenuManager FTUE bypass -> Direct MainMenu
+    {
+        void* klassMenuMgr = FindClassAcrossImages("SG.Airlock.UI.TitleScreen", "MenuManager");
+        if (klassMenuMgr) {
+            void* mDefault = FindClassMethod(klassMenuMgr, "GotoDefaultMenu");
+            if (mDefault) {
+                g_pfn_MenuManager_GotoDefaultMenu = (fn_MenuManager_GotoDefaultMenu_t)ResolveRealCodePointer(*(void**)mDefault);
+                ReFixLog("[IL2CPP] Found MenuManager.GotoDefaultMenu at %p", g_pfn_MenuManager_GotoDefaultMenu);
+            }
+            void* mNext = FindClassMethod(klassMenuMgr, "GotoNextMenu");
+            if (mNext) {
+                void* pCode = ResolveRealCodePointer(*(void**)mNext);
+                if (pCode && MH_CreateHook(pCode, (void*)Hooked_MenuManager_GotoNextMenu, (void**)&g_orig_MenuManager_GotoNextMenu) == MH_OK) {
+                    MH_EnableHook(pCode);
+                    ReFixLog("[IL2CPP] Hooked MenuManager.GotoNextMenu at %p", pCode);
+                }
             }
         }
     }
