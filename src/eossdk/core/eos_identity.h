@@ -45,7 +45,12 @@ public:
     const UserRecord& ResolveLocalUser(int32_t credentialType, const char* token);
 
     const UserRecord& LocalUser();
-    bool              HasLocalUser() const { return m_resolved; }
+    bool              HasLocalUser() const {
+        if (!m_resolved) {
+            const_cast<Identity*>(this)->ResolveLocalUser(-1, nullptr);
+        }
+        return m_resolved;
+    }
 
     EOS_ProductUserId LocalPuid();
     EOS_EpicAccountId LocalEaid();
@@ -66,6 +71,7 @@ public:
     // The product scope every derived id is salted with, so two different games
     // never produce the same ProductUserId for the same Steam account.
     const std::string& ProductScope() const { return m_productScope; }
+    void               SetProductScope(const std::string& scope);
 
     // Instance suffix (REFIX_USER_INSTANCE). Empty for a normal single install;
     // set it to run a second, independent player on the same PC.

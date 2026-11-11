@@ -63,6 +63,7 @@ static bool TestFirewall() {
     TEST_ASSERT(fw.IsAllowedIpv4(0xAC100001), "172.16.0.1 must be allowed (172.16/12)");
     TEST_ASSERT(fw.IsAllowedIpv4(0xC0A80101), "192.168.1.1 must be allowed (192.168/16)");
     TEST_ASSERT(fw.IsAllowedIpv4(0xA9FE0101), "169.254.1.1 must be allowed (APIPA)");
+    TEST_ASSERT(fw.IsAllowedIpv4(0xC6120001), "198.18.0.1 virtual Steam tunnel must be allowed");
     TEST_ASSERT(fw.IsAllowedIpv4(0xFFFFFFFF), "255.255.255.255 broadcast must be allowed");
 
     // 2. Allowed Scoped Multicast
@@ -73,6 +74,7 @@ static bool TestFirewall() {
     TEST_ASSERT(!fw.IsAllowedIpv4(0x08080808), "8.8.8.8 must be BLOCKED");
     TEST_ASSERT(!fw.IsAllowedIpv4(0x01010101), "1.1.1.1 must be BLOCKED");
     TEST_ASSERT(!fw.IsAllowedIpv4(0xA2FE0001), "162.254.0.1 Valve SDR must be BLOCKED");
+    TEST_ASSERT(!fw.IsAllowedIpv4(0xC6140001), "198.20.0.1 outside virtual tunnel must be BLOCKED");
     TEST_ASSERT(!fw.IsAllowedIpv4(0xE0000101), "224.0.1.1 global multicast must be BLOCKED");
 
     std::cout << "  [PASS] All Internet-Zero egress policies verified." << std::endl;
@@ -527,12 +529,12 @@ static bool TestTransportRetransmissionTimeout() {
     const char data[] = "Timeout test packet";
     transport.SendReliable(ghostPeer, deadEndpoint, 0, data, sizeof(data));
 
-    // Wait until retry exhaustion (8 retries * ~200ms = ~1.6s)
+    // Wait until retry exhaustion (40 retries * 100ms = ~4.0s)
     auto start = std::chrono::steady_clock::now();
     while (listener.timeoutCount.load() == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 4) break;
+        if (elapsed > 6) break;
     }
 
     TEST_ASSERT(listener.timeoutCount.load() == 1, "OnPeerTimeout must be called exactly once upon retry exhaustion");

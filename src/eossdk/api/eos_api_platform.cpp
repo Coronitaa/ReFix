@@ -67,10 +67,16 @@ EOS_DECLARE_FUNC(EOS_HPlatform) EOS_Platform_Create(const EOS_Platform_Options* 
         if (Options->SandboxId)    g_platform->SandboxId    = Options->SandboxId;
         if (Options->DeploymentId) g_platform->DeploymentId = Options->DeploymentId;
         if (Options->ClientCredentials.ClientId) g_platform->ClientId = Options->ClientCredentials.ClientId;
+        if (Options->ProductId && *Options->ProductId) {
+            Identity::Get().SetProductScope(Options->ProductId);
+        }
     }
-    RFLOG(Platform, "EOS_Platform_Create: product='%s' sandbox='%s' deployment='%s'",
+    const UserRecord& user = Identity::Get().ResolveLocalUser(-1, nullptr);
+    LobbyDirectory::Get().SetLocalPuid(user.Puid);
+    LobbyDirectory::Get().SetLocalName(user.DisplayName);
+    RFLOG(Platform, "EOS_Platform_Create: product='%s' sandbox='%s' deployment='%s' localPuid='%s'",
           g_platform->ProductId.c_str(), g_platform->SandboxId.c_str(),
-          g_platform->DeploymentId.c_str());
+          g_platform->DeploymentId.c_str(), user.Puid.c_str());
     return (EOS_HPlatform)&g_platform->Self;
 }
 

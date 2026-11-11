@@ -43,7 +43,13 @@ bool LanFirewall::IsAllowedIpv4(uint32_t ip) const noexcept {
         return true;
     }
 
-    // 5. Multicast (224.0.0.0/4: 0xE0000000 - 0xEFFFFFFF)
+    // 5. Virtual SteamLink / RFC 2544 Subnet (198.18.0.0/16: 0xC6120000)
+    // Used by ReFix Online tunnel to represent remote Steam friends as virtual LAN peers
+    if ((ip & 0xFFFF0000) == 0xC6120000) {
+        return true;
+    }
+
+    // 6. Multicast (224.0.0.0/4: 0xE0000000 - 0xEFFFFFFF)
     // Strictly restrict to Link-Local Control (224.0.0.0/24) and Administratively Scoped (239.0.0.0/8).
     // Globally routable multicast (224.0.1.0 - 238.255.255.255) is BLOCKED.
     if ((ip & 0xFFFFFF00) == 0xE0000000) {
@@ -53,7 +59,7 @@ bool LanFirewall::IsAllowedIpv4(uint32_t ip) const noexcept {
         return true; // 239.0.0.0/8 Administratively Scoped (RFC 2365)
     }
 
-    // 6. Explicitly configured custom subnets (e.g. VLAN / VPN subnets)
+    // 7. Explicitly configured custom subnets (e.g. VLAN / VPN subnets)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (const auto& entry : m_customSubnets) {

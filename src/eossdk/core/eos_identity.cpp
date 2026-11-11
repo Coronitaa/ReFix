@@ -68,6 +68,20 @@ std::string Identity::HardwareFingerprint() const {
     return buf;
 }
 
+void Identity::SetProductScope(const std::string& scope) {
+    if (scope.empty()) return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::string lowerScope = ToLower(scope);
+    if (m_productScope != lowerScope) {
+        m_productScope = lowerScope;
+        if (m_resolved && !m_local.External.AccountId.empty()) {
+            m_local = BuildUser(m_local.External.AccountId, m_local.External.Type, m_local.DisplayName);
+            RFLOG(Auth, "Identity productScope updated to '%s': PUID=%s",
+                  m_productScope.c_str(), m_local.Puid.c_str());
+        }
+    }
+}
+
 std::string Identity::DerivePuidFor(const std::string& externalId) const {
     return DerivedId("refix.eos.puid|" + m_productScope + "|" + externalId + "|", 16);
 }

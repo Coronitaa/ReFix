@@ -346,6 +346,10 @@ int App::DrawWaitingFriends(float width) {
 }
 
 void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
+    const size_t lanCount = std::count_if(rows_.begin(), rows_.end(), [](const PlayerRow& r) {
+        return !steamlink::IsVirtual(r.p.ip);
+    });
+
     if (pickerStyle) {
         ImGui::SetCursorScreenPos(pos);
         ImGui::BeginChild("##pickerplayers", size, ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
@@ -360,8 +364,8 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
         ImGui::PushFont(ui::F().caption);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ui::S(5));
         char count[48];
-        snprintf(count, sizeof(count), rows_.size() == 1 ? i18n::T("%zu online", "%zu conectado") : i18n::T("%zu online", "%zu conectados"),
-                 rows_.size());
+        snprintf(count, sizeof(count), lanCount == 1 ? i18n::T("%zu online", "%zu conectado") : i18n::T("%zu online", "%zu conectados"),
+                 lanCount);
         ui::TextColored(ui::color::Muted, count);
         ImGui::PopFont();
     }
@@ -396,15 +400,16 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
         section(i18n::T("Through Steam", "Por Steam"), [](const PlayerRow& r) { return !r.favorite && steamlink::IsVirtual(r.p.ip); });
         if (const int n = DrawWaitingFriends(width)) shown += n;
     } else {
-        section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite; });
-        section(i18n::T("In this game", "En este juego"), [](const PlayerRow& r) { return !r.favorite && r.sameGame; });
-        section(i18n::T("In other games", "En otros juegos"), [](const PlayerRow& r) { return !r.favorite && !r.sameGame; });
+        section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite && !steamlink::IsVirtual(r.p.ip); });
+        section(i18n::T("In this game", "En este juego"), [](const PlayerRow& r) { return !r.favorite && !steamlink::IsVirtual(r.p.ip) && r.sameGame; });
+        section(i18n::T("In other games", "En otros juegos"), [](const PlayerRow& r) { return !r.favorite && !steamlink::IsVirtual(r.p.ip) && !r.sameGame; });
     }
     if (shown == 0) {
         ImGui::Dummy(ImVec2(0, ui::S(36)));
-        const char* head = rows_.empty() ? i18n::T("Nobody else on the LAN yet", "Nadie más en la LAN por ahora")
-                                         : i18n::T("No player matches", "Ningún jugador coincide");
-        const char* body = rows_.empty()
+        const bool isEmpty = pickerStyle ? rows_.empty() : (lanCount == 0);
+        const char* head = isEmpty ? i18n::T("Nobody else on the LAN yet", "Nadie más en la LAN por ahora")
+                                   : i18n::T("No player matches", "Ningún jugador coincide");
+        const char* body = isEmpty
                                ? i18n::T("Players show up here as soon as they open a game with ReFix LAN on this network.",
                                          "Los jugadores aparecen aquí en cuanto abren un juego con ReFix LAN en esta red.")
                                : i18n::T("Try another name or clear the search.", "Prueba con otro nombre o borra la búsqueda.");
