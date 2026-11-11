@@ -71,6 +71,10 @@ static fn_il2cpp_string_new g_pfn_string_new = nullptr;
 static fn_il2cpp_object_get_virtual_method g_pfn_object_get_virtual_method = nullptr;
 static fn_il2cpp_class_get_methods g_pfn_class_get_methods = nullptr;
 static fn_il2cpp_method_get_name g_pfn_method_get_name = nullptr;
+typedef void* (*fn_il2cpp_class_get_nested_types)(void* klass, void** iter);
+typedef const char* (*fn_il2cpp_class_get_name)(void* klass);
+static fn_il2cpp_class_get_nested_types g_pfn_class_get_nested_types = nullptr;
+static fn_il2cpp_class_get_name g_pfn_class_get_name = nullptr;
 
 static std::atomic<bool> g_initialized{ false };
 static std::atomic<bool> g_watcherRunning{ false };
@@ -1229,6 +1233,79 @@ static void Hooked_ApplyAuthenticationTicketParameters(void* self, void* arg1, v
     }
 }
 
+// Photon / Fusion Custom Authentication HTTP Checker Bypass
+typedef void* (*fn_CheckAuthenticationViaHTTP_t)(void* self, void* auth, void* method);
+static fn_CheckAuthenticationViaHTTP_t g_orig_CheckAuthenticationViaHTTP = nullptr;
+
+typedef bool (*fn_CheckAuthCoroutine_MoveNext_t)(void* self, void* method);
+static fn_CheckAuthCoroutine_MoveNext_t g_orig_CheckAuthCoroutine_MoveNext = nullptr;
+
+static int g_offset_Status_PhotonAuth = 0;
+
+static bool Hooked_CheckAuthCoroutine_MoveNext(void* self, void* method) {
+    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+        if (self) {
+            void* parent = *(void**)((char*)self + 0x20);
+            if (parent && g_offset_Status_PhotonAuth > 0) {
+                *(int32_t*)((char*)parent + g_offset_Status_PhotonAuth) = 2; // Success
+                ReFixLog("[Photon IL2CPP] Coroutine MoveNext: forced Status_PhotonAuthentication = 2 (Success)");
+            }
+            void* authObj = *(void**)((char*)self + 0x28);
+            if (authObj && g_pfn_string_new) {
+                void* dummyToken = g_pfn_string_new("refix_photon_token");
+                *(void**)((char*)authObj + 0x20) = dummyToken;
+            }
+        }
+        return false;
+    }
+    return g_orig_CheckAuthCoroutine_MoveNext ? g_orig_CheckAuthCoroutine_MoveNext(self, method) : false;
+}
+
+static void* Hooked_CheckAuthenticationViaHTTP(void* self, void* auth, void* method) {
+    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+        ReFixLog("[Photon IL2CPP] CheckAuthenticationViaHTTP called, forcing Status = 2 (Success)");
+        if (self && g_offset_Status_PhotonAuth > 0) {
+            *(int32_t*)((char*)self + g_offset_Status_PhotonAuth) = 2;
+        }
+        if (auth && g_pfn_string_new) {
+            void* dummyToken = g_pfn_string_new("refix_photon_token");
+            *(void**)((char*)auth + 0x20) = dummyToken;
+        }
+    }
+    void* coro = g_orig_CheckAuthenticationViaHTTP ? g_orig_CheckAuthenticationViaHTTP(self, auth, method) : nullptr;
+    if (coro && (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true))) {
+        // IL2CPP IEnumerator state is stored at offset 0x10; -1 indicates finished/disposed.
+        *(int32_t*)((char*)coro + 0x10) = -1;
+        ReFixLog("[Photon IL2CPP] Marked coroutine %p as completed (state = -1)", coro);
+    }
+    return coro;
+}
+
+typedef bool (*fn_Platform_InternetCheck_t)(void* self, void* method);
+static fn_Platform_InternetCheck_t g_orig_Platform_InternetCheck = nullptr;
+
+static bool Hooked_Platform_InternetCheck(void* self, void* method) {
+    ReFixLog("[IL2CPP] Platform InternetCheck called -> returning true (connected)");
+    return true;
+}
+
+typedef void (*fn_InternetCheckFailed_t)(void* self, bool fatal, void* message, bool retry, void* method);
+static fn_InternetCheckFailed_t g_orig_InternetCheckFailed = nullptr;
+
+static void Hooked_InternetCheckFailed(void* self, bool fatal, void* message, bool retry, void* method) {
+    ReFixLog("[IL2CPP] CheckInternetConnection.InternetCheckFailed called! fatal=%d, retry=%d", fatal, retry);
+    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+        if (self && g_offset_Status_PhotonAuth > 0) {
+            *(int32_t*)((char*)self + g_offset_Status_PhotonAuth) = 2; // Force success
+        }
+        ReFixLog("[IL2CPP] Suppressed InternetCheckFailed, forced Status_PhotonAuthentication = 2");
+        return;
+    }
+    if (g_orig_InternetCheckFailed) {
+        g_orig_InternetCheckFailed(self, fatal, message, retry, method);
+    }
+}
+
 static void Hooked_SelectServer_OnApplyButtonClick(void* self, void* method) {
     if (self) g_pSelectServerPaneUiInstance.store(self);
     ReFixLog("[IL2CPP] >>> SelectServerPaneUi.OnApplyButtonClick (Confirm) clicked! <<<");
@@ -1331,6 +1408,8 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     g_pfn_object_get_virtual_method = (fn_il2cpp_object_get_virtual_method)GetProcAddress(hGA, "il2cpp_object_get_virtual_method");
     g_pfn_class_get_methods = (fn_il2cpp_class_get_methods)GetProcAddress(hGA, "il2cpp_class_get_methods");
     g_pfn_method_get_name = (fn_il2cpp_method_get_name)GetProcAddress(hGA, "il2cpp_method_get_name");
+    g_pfn_class_get_nested_types = (fn_il2cpp_class_get_nested_types)GetProcAddress(hGA, "il2cpp_class_get_nested_types");
+    g_pfn_class_get_name = (fn_il2cpp_class_get_name)GetProcAddress(hGA, "il2cpp_class_get_name");
 
     if (!g_pfn_domain_get || !g_pfn_thread_attach || !g_pfn_domain_get_assemblies ||
         !g_pfn_assembly_get_image || !g_pfn_class_from_name || !g_pfn_class_get_method_from_name) {
@@ -1486,6 +1565,92 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
             if (pCode && MH_CreateHook(pCode, (void*)Hooked_ApplyAuthenticationTicketParameters, (void**)&g_orig_ApplyAuthenticationTicketParameters) == MH_OK) {
                 MH_EnableHook(pCode);
                 ReFixLog("[IL2CPP] Hooked NetworkService.ApplyAuthenticationTicketParameters at %p", pCode);
+            }
+        }
+    }
+
+    // Hook Photon custom authentication checkers (e.g. CheckInternetConnection.CheckAuthenticationViaHTTP)
+    void* klassCIC = FindClassAcrossImages("SG.Airlock.UI.TitleScreen", "CheckInternetConnection");
+    if (!klassCIC) klassCIC = FindClassAcrossImages("", "CheckInternetConnection");
+    if (klassCIC) {
+        void* fldStatus = g_pfn_class_get_field_from_name(klassCIC, "Status_PhotonAuthentication");
+        if (!fldStatus) fldStatus = g_pfn_class_get_field_from_name(klassCIC, "m_statusPhotonAuthentication");
+        if (!fldStatus) fldStatus = g_pfn_class_get_field_from_name(klassCIC, "status_PhotonAuthentication");
+        if (fldStatus && g_pfn_field_get_offset) {
+            g_offset_Status_PhotonAuth = g_pfn_field_get_offset(fldStatus);
+            ReFixLog("[IL2CPP] Found Status_PhotonAuthentication offset: 0x%x", g_offset_Status_PhotonAuth);
+        } else {
+            g_offset_Status_PhotonAuth = 0x4d0;
+        }
+
+        void* mCheckAuth = g_pfn_class_get_method_from_name(klassCIC, "CheckAuthenticationViaHTTP", 1);
+        if (!mCheckAuth) mCheckAuth = g_pfn_class_get_method_from_name(klassCIC, "CheckAuthenticationViaHTTP", 0);
+        if (!mCheckAuth) mCheckAuth = g_pfn_class_get_method_from_name(klassCIC, "CheckAuthenticationViaHTTP", 2);
+        if (mCheckAuth) {
+            void* pCode = ResolveRealCodePointer(*(void**)mCheckAuth);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_CheckAuthenticationViaHTTP, (void**)&g_orig_CheckAuthenticationViaHTTP) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked CheckAuthenticationViaHTTP at %p", pCode);
+            }
+        }
+
+        void* mCheckFailed = g_pfn_class_get_method_from_name(klassCIC, "InternetCheckFailed", 3);
+        if (mCheckFailed) {
+            void* pCode = ResolveRealCodePointer(*(void**)mCheckFailed);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_InternetCheckFailed, (void**)&g_orig_InternetCheckFailed) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked InternetCheckFailed at %p", pCode);
+            }
+        }
+
+        // Search nested types on CheckInternetConnection for coroutines
+        if (g_pfn_class_get_nested_types && g_pfn_class_get_name) {
+            void* iterNested = nullptr;
+            void* nestedKlass = nullptr;
+            while ((nestedKlass = g_pfn_class_get_nested_types(klassCIC, &iterNested)) != nullptr) {
+                const char* nName = g_pfn_class_get_name(nestedKlass);
+                if (nName && strstr(nName, "CheckAuthenticationViaHTTP")) {
+                    void* mMoveNext = g_pfn_class_get_method_from_name(nestedKlass, "MoveNext", 0);
+                    if (mMoveNext) {
+                        void* pCode = ResolveRealCodePointer(*(void**)mMoveNext);
+                        if (pCode && MH_CreateHook(pCode, (void*)Hooked_CheckAuthCoroutine_MoveNext, (void**)&g_orig_CheckAuthCoroutine_MoveNext) == MH_OK) {
+                            MH_EnableHook(pCode);
+                            ReFixLog("[IL2CPP] Hooked nested %s.MoveNext at %p", nName, pCode);
+                        }
+                    }
+                }
+            }
+        }
+
+        void* klassAuthCoro = FindClassAcrossImages("SG.Airlock.UI.TitleScreen", "<CheckAuthenticationViaHTTP>d__201");
+        if (!klassAuthCoro) klassAuthCoro = FindClassAcrossImages("", "<CheckAuthenticationViaHTTP>d__201");
+        if (klassAuthCoro) {
+            void* mMoveNext = g_pfn_class_get_method_from_name(klassAuthCoro, "MoveNext", 0);
+            if (mMoveNext) {
+                void* pCode = ResolveRealCodePointer(*(void**)mMoveNext);
+                if (pCode && MH_CreateHook(pCode, (void*)Hooked_CheckAuthCoroutine_MoveNext, (void**)&g_orig_CheckAuthCoroutine_MoveNext) == MH_OK) {
+                    MH_EnableHook(pCode);
+                    ReFixLog("[IL2CPP] Hooked <CheckAuthenticationViaHTTP>d__201.MoveNext at %p", pCode);
+                }
+            }
+        }
+    }
+
+    // Generic platform InternetCheck hooks (e.g. SteamUser, User, etc.)
+    const char* userClasses[] = { "SteamUser", "User", "PlatformUser", "NetworkUser" };
+    const char* userNamespaces[] = { "SG.Platform.Steam", "SG.Platform", "Platform", "" };
+    for (const char* ns : userNamespaces) {
+        for (const char* cls : userClasses) {
+            void* klassUser = FindClassAcrossImages(ns, cls);
+            if (klassUser) {
+                void* mCheck = g_pfn_class_get_method_from_name(klassUser, "InternetCheck", 0);
+                if (mCheck) {
+                    void* pCode = ResolveRealCodePointer(*(void**)mCheck);
+                    if (pCode && MH_CreateHook(pCode, (void*)Hooked_Platform_InternetCheck, (void**)&g_orig_Platform_InternetCheck) == MH_OK) {
+                        MH_EnableHook(pCode);
+                        ReFixLog("[IL2CPP] Hooked %s.%s.InternetCheck at %p", ns, cls, pCode);
+                    }
+                }
             }
         }
     }

@@ -18,6 +18,7 @@
 #include "../eos_module.h"
 #include "../net/steam_backend.h"
 #include "../core/refix_config.h"
+#include "../core/eos_jwt.h"
 
 using namespace refix;
 
@@ -205,7 +206,27 @@ EOS_DECLARE_FUNC(EOS_EResult) EOS_Auth_CopyIdToken(EOS_HAuth Handle, const EOS_A
     }
 
     auto* block = new IdTokenBlock();
-    block->Jwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.e30.";
+    {
+        // Same shape as a real Epic account ID token, so a title that decodes
+        // the payload finds the subject and expiry it expects.
+        PlatformImpl* platform = CurrentPlatform();
+        const UserRecord& user = Identity::Get().LocalUser();
+        jwt::Claims c;
+        c.Issuer       = "https://api.epicgames.dev/epic/oauth/v1";
+        c.Subject      = IdRegistry::ToString(localId) ? IdRegistry::ToString(localId) : user.Eaid;
+        c.Audience     = platform ? platform->ClientId : std::string();
+        c.ProductId    = platform ? platform->ProductId : std::string();
+        c.SandboxId    = platform ? platform->SandboxId : std::string();
+        c.DeploymentId = platform ? platform->DeploymentId : std::string();
+        c.HasAccount   = user.External.Valid;
+        if (c.HasAccount) {
+            c.AccountType = jwt::ExternalAccountTypeClaim(user.External.Type);
+            c.AccountId   = user.External.AccountId;
+        }
+        c.IssuedAt  = UnixSeconds();
+        c.ExpiresAt = c.IssuedAt + 365LL * 24 * 3600;
+        block->Jwt = jwt::Build(c);
+    }
     std::memset(&block->Info, 0, sizeof(block->Info));
     block->Info.ApiVersion = EOS_AUTH_IDTOKEN_API_LATEST;
     block->Info.AccountId = localId;

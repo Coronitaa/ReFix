@@ -66,6 +66,7 @@ EOS_DECLARE_FUNC(EOS_HPlatform) EOS_Platform_Create(const EOS_Platform_Options* 
         if (Options->ProductId)    g_platform->ProductId    = Options->ProductId;
         if (Options->SandboxId)    g_platform->SandboxId    = Options->SandboxId;
         if (Options->DeploymentId) g_platform->DeploymentId = Options->DeploymentId;
+        if (Options->ClientCredentials.ClientId) g_platform->ClientId = Options->ClientCredentials.ClientId;
     }
     RFLOG(Platform, "EOS_Platform_Create: product='%s' sandbox='%s' deployment='%s'",
           g_platform->ProductId.c_str(), g_platform->SandboxId.c_str(),

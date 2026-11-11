@@ -17,6 +17,7 @@
 #include "../core/eos_ids.h"
 #include "../core/eos_identity.h"
 #include "../core/eos_dispatch.h"
+#include "../core/eos_jwt.h"
 #include "../eos_module.h"
 #include "../net/lobby_directory.h"
 #include "../net/steam_backend.h"
@@ -96,6 +97,37 @@ const UserRecord* UserFor(EOS_ProductUserId id) {
     const char* s = IdRegistry::ToString(id);
     if (!s) return nullptr;
     return Identity::Get().FindByPuid(s);
+}
+
+// Allocated per EOS_Connect_CopyIdToken and released through
+// EOS_Connect_IdToken_Release, same ownership model as the account blocks.
+struct ConnectIdTokenBlock {
+    EOS_Connect_IdToken Info;
+    std::string         Jwt;
+};
+
+std::mutex                                         g_idTokensMutex;
+std::map<EOS_Connect_IdToken*, ConnectIdTokenBlock*> g_idTokens;
+
+std::string BuildConnectIdToken(const UserRecord& user) {
+    PlatformImpl* platform = CurrentPlatform();
+    jwt::Claims c;
+    c.Issuer       = "https://api.epicgames.dev/auth/v1/oauth";
+    c.Subject      = user.Puid;
+    c.Audience     = platform ? platform->ClientId : std::string();
+    c.ProductId    = platform ? platform->ProductId : std::string();
+    c.SandboxId    = platform ? platform->SandboxId : std::string();
+    c.DeploymentId = platform ? platform->DeploymentId : std::string();
+    c.HasAccount   = user.External.Valid;
+    if (c.HasAccount) {
+        c.AccountType = jwt::ExternalAccountTypeClaim(user.External.Type);
+        c.AccountId   = user.External.AccountId;
+    }
+    c.IssuedAt  = UnixSeconds();
+    // Local credentials never expire (EOS_Connect_AddNotifyAuthExpiration never
+    // fires), so the token must not look stale to a title that reads "exp".
+    c.ExpiresAt = c.IssuedAt + 365LL * 24 * 3600;
+    return jwt::Build(c);
 }
 
 } // namespace
@@ -222,6 +254,114 @@ EOS_DECLARE_FUNC(EOS_ProductUserId) EOS_Connect_GetLoggedInUserByIndex(EOS_HConn
 EOS_DECLARE_FUNC(EOS_ELoginStatus) EOS_Connect_GetLoginStatus(EOS_HConnect Handle, EOS_ProductUserId LocalUserId) {
     if (!Identity::Get().HasLocalUser()) return ELS::EOS_LS_NotLoggedIn;
     return LocalUserId == Identity::Get().LocalPuid() ? ELS::EOS_LS_LoggedIn : ELS::EOS_LS_NotLoggedIn;
+}
+
+// ---------------------------------------------------------------------------
+// ID tokens
+// ---------------------------------------------------------------------------
+// Titles commonly finish their login by copying the player's ID token and
+// handing it to another service (Photon custom auth, their own backend, voice
+// chat). A missing token is reported by the title as a failed EOS connection,
+// so a logged-in local user always gets one.
+EOS_DECLARE_FUNC(EOS_EResult) EOS_Connect_CopyIdToken(EOS_HConnect Handle, const EOS_Connect_CopyIdTokenOptions* Options, EOS_Connect_IdToken** OutIdToken) {
+    if (!Options || !OutIdToken) return ER::EOS_InvalidParameters;
+    *OutIdToken = nullptr;
+    if (!Identity::Get().HasLocalUser()) {
+        RFLOG(Auth, "EOS_Connect_CopyIdToken -> NotFound (no user logged in)");
+        return ER::EOS_NotFound;
+    }
+
+    // Only the local player has a token to copy, as with real EOS. A null id
+    // is taken to mean the local player.
+    EOS_ProductUserId local = Identity::Get().LocalPuid();
+    if (Options->LocalUserId && Options->LocalUserId != local) {
+        const char* asked = IdRegistry::ToString(Options->LocalUserId);
+        if (!asked || Identity::Get().LocalUser().Puid != asked) {
+            RFLOG(Auth, "EOS_Connect_CopyIdToken(%s) -> NotFound (not the local user)", asked ? asked : "?");
+            return ER::EOS_NotFound;
+        }
+    }
+
+    const UserRecord& user = Identity::Get().LocalUser();
+    auto* block = new ConnectIdTokenBlock();
+    block->Jwt = BuildConnectIdToken(user);
+    std::memset(&block->Info, 0, sizeof(block->Info));
+    block->Info.ApiVersion    = EOS_CONNECT_IDTOKEN_API_LATEST;
+    block->Info.ProductUserId = local;
+    block->Info.JsonWebToken  = block->Jwt.c_str();
+    {
+        std::lock_guard<std::mutex> lock(g_idTokensMutex);
+        g_idTokens[&block->Info] = block;
+    }
+    *OutIdToken = &block->Info;
+    RFLOG(Auth, "EOS_Connect_CopyIdToken -> local JWT for PUID=%s (%zu bytes)",
+          user.Puid.c_str(), block->Jwt.size());
+    return ER::EOS_Success;
+}
+
+EOS_DECLARE_FUNC(void) EOS_Connect_IdToken_Release(EOS_Connect_IdToken* IdToken) {
+    if (!IdToken) return;
+    ConnectIdTokenBlock* block = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_idTokensMutex);
+        auto it = g_idTokens.find(IdToken);
+        if (it == g_idTokens.end()) return;   // not ours - ignore rather than crash
+        block = it->second;
+        g_idTokens.erase(it);
+    }
+    delete block;
+}
+
+// Titles that act as a server verify the ID tokens their peers send. Every
+// peer's token was minted by a ReFix emulator, so the check is that it names a
+// ProductUserId; what we know about that player is reported back.
+EOS_DECLARE_FUNC(void) EOS_Connect_VerifyIdToken(EOS_HConnect Handle, const EOS_Connect_VerifyIdTokenOptions* Options, void* ClientData, const EOS_Connect_OnVerifyIdTokenCallback CompletionDelegate) {
+    if (!CompletionDelegate) return;
+
+    EOS_EResult       result = ER::EOS_Success;
+    EOS_ProductUserId puid   = nullptr;
+    bool              hasAccount = false;
+    EOS_EExternalAccountType accountType = EAT::EOS_EAT_STEAM;
+    std::string       accountId;
+
+    if (!Options || !Options->IdToken || !Options->IdToken->JsonWebToken ||
+        !*Options->IdToken->JsonWebToken) {
+        result = ER::EOS_InvalidParameters;
+    } else if (!IdRegistry::IsValidPuid(Options->IdToken->ProductUserId)) {
+        result = ER::EOS_InvalidUser;
+    } else {
+        puid = Options->IdToken->ProductUserId;
+        if (const UserRecord* user = UserFor(puid)) {
+            hasAccount  = user->External.Valid;
+            accountType = user->External.Type;
+            accountId   = user->External.AccountId;
+        }
+    }
+    RFLOG(Auth, "EOS_Connect_VerifyIdToken(%s) -> %d",
+          puid ? IdRegistry::ToString(puid) : "?", (int)result);
+
+    PlatformImpl* platform = CurrentPlatform();
+    std::string clientId     = platform ? platform->ClientId : std::string();
+    std::string productId    = platform ? platform->ProductId : std::string();
+    std::string sandboxId    = platform ? platform->SandboxId : std::string();
+    std::string deploymentId = platform ? platform->DeploymentId : std::string();
+
+    Dispatcher::Get().Post([=]() {
+        EOS_Connect_VerifyIdTokenCallbackInfo info{};
+        info.ResultCode            = result;
+        info.ClientData            = ClientData;
+        info.ProductUserId         = puid;
+        info.bIsAccountInfoPresent = hasAccount ? EOS_TRUE : EOS_FALSE;
+        info.AccountIdType         = accountType;
+        info.AccountId             = accountId.c_str();
+        info.Platform              = "other";
+        info.DeviceType            = "PC";
+        info.ClientId              = clientId.c_str();
+        info.ProductId             = productId.c_str();
+        info.SandboxId             = sandboxId.c_str();
+        info.DeploymentId          = deploymentId.c_str();
+        CompletionDelegate(&info);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +532,9 @@ void RegisterConnectApi(Registrar& reg) {
     REFIX_BIND(reg, EOS_Connect_GetLoggedInUsersCount);
     REFIX_BIND(reg, EOS_Connect_GetLoggedInUserByIndex);
     REFIX_BIND(reg, EOS_Connect_GetLoginStatus);
+    REFIX_BIND(reg, EOS_Connect_CopyIdToken);
+    REFIX_BIND(reg, EOS_Connect_IdToken_Release);
+    REFIX_BIND(reg, EOS_Connect_VerifyIdToken);
     REFIX_BIND(reg, EOS_Connect_GetProductUserExternalAccountCount);
     REFIX_BIND(reg, EOS_Connect_CopyProductUserInfo);
     REFIX_BIND(reg, EOS_Connect_CopyProductUserExternalAccountByIndex);

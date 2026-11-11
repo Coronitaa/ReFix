@@ -43,6 +43,7 @@ public:
     std::string ProductId;
     std::string SandboxId;
     std::string DeploymentId;
+    std::string ClientId;      // the "aud" of the ID tokens handed to the title
 
     EOS_EApplicationStatus ApplicationStatus = EOS_EApplicationStatus::EOS_AS_Foreground;
     EOS_ENetworkStatus     NetworkStatus     = EOS_ENetworkStatus::EOS_NS_Online;

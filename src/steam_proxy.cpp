@@ -5286,8 +5286,11 @@ static void ReFixInitializePre() {
     }
 }
 
+static std::atomic<bool> s_refixInitializedPost{ false };
+
 static void ReFixInitializePost(bool success) {
     if (!success) return;
+    if (s_refixInitializedPost.exchange(true)) return;
     
     g_steamInitTick = GetTickCount();
     CapturePersonaName();
@@ -5316,6 +5319,12 @@ static void ReFixInitializePost(bool success) {
 
     if (!ReFix::NetworkModeManager::IsOnline()) ReFix_MultiInstanceOnSteamInit();
     InstallVTableHooks();
+}
+
+static void EnsureReFixPostInitialized() {
+    if (s_refixInitializedPost.load()) return;
+    ReFixInitializePre();
+    ReFixInitializePost(true);
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_Init() {
@@ -5687,6 +5696,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
 
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_Init() {
     ReFixLog("SteamAPI_ManualDispatch_Init called");
+    EnsureReFixPostInitialized();
     if (!ReFix::NetworkModeManager::IsOnline()) {
         UnrealSteamEmu::ManualDispatch_Init();
     }
@@ -5694,6 +5704,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_Init() {
 
 static int s_manualRunFrameLogged = 0;
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t hSteamPipe) {
+    EnsureReFixPostInitialized();
     if (s_manualRunFrameLogged++ < 3) {
         ReFixLog("SteamAPI_ManualDispatch_RunFrame called (pipe=%u, frame=%d)", hSteamPipe, s_manualRunFrameLogged);
     }
