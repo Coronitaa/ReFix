@@ -242,6 +242,7 @@ void InitialiseModule() {
     RegisterSessionsApi(reg);
     RegisterP2PApi(reg);
     RegisterStorageApi(reg);
+    RegisterAntiCheatApi(reg);
 
     RFLOG(Core, "ReFix EOS v3 online: %d exports, %d implemented, %d unresolved names "
                 "(SDK headers %d.%d.%d, ini=%s)",

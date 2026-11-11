@@ -1001,6 +1001,17 @@ static void* eos_GetKWSInterface(void* h)                { return HANDLE_KWS; }
 static void* eos_GetProgressionSnapshotInterface(void* h){ return HANDLE_PROGRESSION; }
 static void* eos_GetIntegratedPlatformInterface(void* h) { return HANDLE_INTEGRATED_PLATFORM; }
 
+// --- AntiCheat Interface Stubs ---
+static EOS_NotificationId eos_AntiCheat_AddNotify(void* H, void* O, void* C, void* Cb) { return s_nextNotifId++; }
+static void eos_AntiCheat_RemoveNotify(void* H, EOS_NotificationId Id) { }
+static EOS_EResult eos_AntiCheat_SuccessResult(void* H, void* O) { return EOS_Success; }
+static EOS_EResult eos_AntiCheat_PollStatus(void* H, void* O, void* OutType, char* OutMsg) { return EOS_NotFound; }
+static EOS_EResult eos_AntiCheat_ProtectMessage(void* H, void* O, void* OutBuf, uint32_t* OutWritten) { return EOS_Success; }
+static EOS_EResult eos_AntiCheat_GetOutputLength(void* H, void* O, uint32_t* OutLen) {
+    if (OutLen) *OutLen = 0;
+    return EOS_Success;
+}
+
 // --- IntegratedPlatform Interface ---
 static EOS_NotificationId eos_IntegratedPlatform_AddNotifyUserLoginStatusChanged(void* H, void* O, void* C, void* Cb) {
     return s_nextNotifId++;
@@ -3841,6 +3852,61 @@ static void SetupEmulatedFunctions() {
     Override("EOS_Platform_GetSanctionsInterface",          (void*)eos_GetSanctionsInterface);
     Override("EOS_Platform_GetAntiCheatClientInterface",    (void*)eos_GetAntiCheatClientInterface);
     Override("EOS_Platform_GetAntiCheatServerInterface",    (void*)eos_GetAntiCheatServerInterface);
+
+    // AntiCheat Client & Server
+    Override("EOS_AntiCheatClient_AddExternalIntegrityCatalog",       (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_AddNotifyClientIntegrityViolated",  (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatClient_AddNotifyMessageToPeer",            (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatClient_AddNotifyMessageToServer",         (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatClient_AddNotifyPeerActionRequired",       (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatClient_AddNotifyPeerAuthStatusChanged",     (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatClient_BeginSession",                      (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_EndSession",                        (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_GetModuleBuildId",                  (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_GetProtectMessageOutputLength",     (void*)eos_AntiCheat_GetOutputLength);
+    Override("EOS_AntiCheatClient_PollStatus",                        (void*)eos_AntiCheat_PollStatus);
+    Override("EOS_AntiCheatClient_ProtectMessage",                    (void*)eos_AntiCheat_ProtectMessage);
+    Override("EOS_AntiCheatClient_ReceiveMessageFromPeer",            (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_ReceiveMessageFromServer",          (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_RegisterPeer",                      (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_RemoveNotifyClientIntegrityViolated", (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatClient_RemoveNotifyMessageToPeer",         (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatClient_RemoveNotifyMessageToServer",      (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatClient_RemoveNotifyPeerActionRequired",    (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatClient_RemoveNotifyPeerAuthStatusChanged",  (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatClient_Reserved01",                        (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_Reserved02",                        (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatClient_UnprotectMessage",                  (void*)eos_AntiCheat_ProtectMessage);
+    Override("EOS_AntiCheatClient_UnregisterPeer",                    (void*)eos_AntiCheat_SuccessResult);
+
+    Override("EOS_AntiCheatServer_AddNotifyClientActionRequired",     (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatServer_AddNotifyClientAuthStatusChanged",   (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatServer_AddNotifyMessageToClient",          (void*)eos_AntiCheat_AddNotify);
+    Override("EOS_AntiCheatServer_BeginSession",                      (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_EndSession",                        (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_GetProtectMessageOutputLength",     (void*)eos_AntiCheat_GetOutputLength);
+    Override("EOS_AntiCheatServer_LogEvent",                          (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogGameRoundEnd",                   (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogGameRoundStart",                 (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogPlayerDespawn",                  (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogPlayerRevive",                   (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogPlayerSpawn",                    (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogPlayerTakeDamage",               (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogPlayerTick",                     (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogPlayerUseAbility",               (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_LogPlayerUseWeapon",                (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_ProtectMessage",                    (void*)eos_AntiCheat_ProtectMessage);
+    Override("EOS_AntiCheatServer_ReceiveMessageFromClient",          (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_RegisterClient",                    (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_RegisterEvent",                     (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_RemoveNotifyClientActionRequired",  (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatServer_RemoveNotifyClientAuthStatusChanged", (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatServer_RemoveNotifyMessageToClient",       (void*)eos_AntiCheat_RemoveNotify);
+    Override("EOS_AntiCheatServer_SetClientDetails",                  (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_SetClientNetworkState",             (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_SetGameSessionId",                  (void*)eos_AntiCheat_SuccessResult);
+    Override("EOS_AntiCheatServer_UnprotectMessage",                  (void*)eos_AntiCheat_ProtectMessage);
+    Override("EOS_AntiCheatServer_UnregisterClient",                  (void*)eos_AntiCheat_SuccessResult);
     Override("EOS_Platform_GetCustomInvitesInterface",      (void*)eos_GetCustomInvitesInterface);
     Override("EOS_Platform_GetPlayerDataStorageInterface",  (void*)eos_GetPlayerDataStorageInterface);
     Override("EOS_Platform_GetTitleStorageInterface",       (void*)eos_GetTitleStorageInterface);
