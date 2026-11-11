@@ -220,6 +220,7 @@ uninstall() {
         rm -f "$d/RedboneEOS.dll"
     done < <({ dirs_with EOSSDK_original.dll; dirs_with RedboneEOS.dll; } | sort -u)
     while IFS= read -r d; do restore_one "$d" winmm_o.dll winmm.dll; done < <(dirs_with winmm_o.dll)
+    while IFS= read -r d; do restore_one "$d" winhttp_original.dll winhttp.dll; done < <(dirs_with winhttp_original.dll)
     find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" -o -name "refix_steamlink64.dll" -o -name "refix_steamlink.dll" -o -name "refix_steamhost64.exe" -o -name "refix_steamhost.exe" -o -name "ReFixFusionShared.log" \) -delete 2>/dev/null || true
     # ReFix support tools (Photon Fusion Shared server): only the folder holding ReFix's own server, then its
     # ReFix parent if nothing else is left in it.
@@ -293,6 +294,22 @@ deploy_eos() {
         ok "Deployed ReFix EOSSDK-Win64-Shipping.dll to $d"
         if [ -f "$d/RedboneEOS.dll" ]; then cp -f "$redbone" "$d/RedboneEOS.dll"; ok "Deployed RedboneEOS.dll to $d"; fi
     done < <({ dirs_with EOSSDK-Win64-Shipping.dll; dirs_with EOSSDK_original.dll; } | sort -u)
+}
+
+deploy_eac() {
+    local src="$PRODUCT_BIN/winhttp.dll"
+    [ -f "$src" ] || src="$BIN/lan/winhttp.dll"
+    [ -f "$src" ] || return 0
+    local eac
+    eac="$(find "$GAME_DIR" -type f \( -iname '*easyanticheat*' -o -iname '*start_protected_game*' \) -print -quit 2>/dev/null)"
+    [ -n "$eac" ] || return 0
+    local d="$EXE_DIR"
+    if [ -f "$d/winhttp.dll" ] && [ ! -f "$d/winhttp_original.dll" ] && ! is_refix "$d/winhttp.dll"; then
+        mv -f "$d/winhttp.dll" "$d/winhttp_original.dll"
+        ok "Backed up original winhttp.dll -> winhttp_original.dll in $d"
+    fi
+    cp -f "$src" "$d/winhttp.dll"
+    ok "Deployed ReFix winhttp.dll Anti-Cheat bypass proxy to $d"
 }
 
 # ReFix LAN has no winmm loader: drop a ReFix Online winmm.dll left by an earlier Online deploy.
@@ -495,6 +512,7 @@ info "AppID:  $APP_ID"
 deploy_steam_x64
 deploy_steam_x86
 deploy_eos
+deploy_eac
 clean_online_winmm
 write_ini
 install_mods

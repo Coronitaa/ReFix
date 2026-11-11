@@ -17,7 +17,7 @@ $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
 $required = @(
-    "bin\lan\steam_api64.dll", "bin\lan\EOSSDK-Win64-Shipping.dll", "bin\lan\RedboneEOS.dll",
+    "bin\lan\steam_api64.dll", "bin\lan\EOSSDK-Win64-Shipping.dll", "bin\lan\RedboneEOS.dll", "bin\lan\winhttp.dll",
     "bin\lan\x86\steam_api.dll", "bin\lan_offline\steam_api64.dll", "bin\lan_offline\x86\steam_api.dll",
     "bin\online\steam_api64.dll", "bin\online\winmm.dll", "bin\online\EOSSDK-Win64-Shipping.dll",
     "bin\online\x86\steam_api.dll",

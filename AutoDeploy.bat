@@ -97,6 +97,7 @@ if exist "%BIN_DIR%\detect_game.ps1" (
         if /i "%%A"=="GAME_EXE_PATH" set "GAME_EXE_PATH=%%B"
         if /i "%%A"=="GAME_NAME" set "DEFAULT_GAME_NAME=%%B"
         if /i "%%A"=="DETECTED_APPID" set "DETECTED_APPID=%%B"
+        if /i "%%A"=="HAS_EAC" set "HAS_EAC=%%B"
         if /i "%%A"=="CANDIDATE_EXES" set "CANDIDATE_EXES=%%B"
     )
 )
@@ -109,6 +110,7 @@ echo [DETECTION] Detected Engine Type: %ENGINE_TYPE%
 echo [DETECTION] Executable Location: "%EXE_DIR%"
 if not "%GAME_EXE_PATH%"=="" echo [DETECTION] Game Executable: "%GAME_EXE_PATH%"
 if not "%DETECTED_APPID%"=="" echo [DETECTION] Detected Steam AppID: %DETECTED_APPID%
+if /i "%HAS_EAC%"=="True" echo [DETECTION] Detected Anti-Cheat: EasyAntiCheat (EAC)
 echo:
 
 :: Executable Location and Selection Prompt

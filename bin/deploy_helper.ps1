@@ -2265,6 +2265,58 @@ if ($eosDirs.Count -gt 0 -and (Test-Path -LiteralPath $eosProxyPath)) {
 }
 
 # ============================================================
+# Step 5b: Universal EasyAntiCheat (EAC) & winhttp.dll Proxy Deployment
+# ============================================================
+Write-Host "[5b/6] Checking for EasyAntiCheat (EAC) / Anti-Cheat protection..." -ForegroundColor Cyan
+
+$eacDirs = Get-ChildItem -LiteralPath $TargetDir -Filter "*EasyAntiCheat*" -Recurse -Directory -ErrorAction SilentlyContinue
+$eacFiles = Get-ChildItem -LiteralPath $TargetDir -Filter "*EasyAntiCheat*" -Recurse -File -ErrorAction SilentlyContinue
+$eacProtected = Get-ChildItem -LiteralPath $TargetDir -Filter "*start_protected_game*" -Recurse -File -ErrorAction SilentlyContinue
+
+$isEacPresent = (($eacDirs.Count -gt 0) -or ($eacFiles.Count -gt 0) -or ($eacProtected.Count -gt 0))
+
+$winhttpProxy = Join-Path $ProductBinDir "winhttp.dll"
+if (-not (Test-Path -LiteralPath $winhttpProxy)) {
+    $winhttpProxy = Join-Path $BinDir "lan\winhttp.dll"
+}
+if (-not (Test-Path -LiteralPath $winhttpProxy)) {
+    $winhttpProxy = Join-Path $BinDir "winhttp.dll"
+}
+
+if ($isEacPresent -and (Test-Path -LiteralPath $winhttpProxy)) {
+    Write-Host "  [DETECTION] EasyAntiCheat (EAC) detected in game directory." -ForegroundColor Yellow
+    $proxyWinhttpSize = (Get-Item -LiteralPath $winhttpProxy).Length
+
+    # Directories needing winhttp.dll proxy:
+    # 1. ExeDir (where the actual game binary executes)
+    # 2. TargetDir / launcher directory if start_protected_game.exe is located there
+    $deployDirs = @($ExeDir)
+    foreach ($pExe in $eacProtected) {
+        if ($deployDirs -notcontains $pExe.DirectoryName) {
+            $deployDirs += $pExe.DirectoryName
+        }
+    }
+
+    foreach ($d in $deployDirs) {
+        $targetWinhttp = Join-Path $d "winhttp.dll"
+        $targetWinhttpOrig = Join-Path $d "winhttp_original.dll"
+
+        if (Test-Path -LiteralPath $targetWinhttp) {
+            $curWSize = (Get-Item -LiteralPath $targetWinhttp).Length
+            if ($curWSize -ne $proxyWinhttpSize -and (-not (Test-Path -LiteralPath $targetWinhttpOrig))) {
+                Rename-Item -LiteralPath $targetWinhttp -NewName "winhttp_original.dll" -Force
+                Write-Host "  [OK] Preserved original winhttp.dll -> winhttp_original.dll in $d" -ForegroundColor Green
+            }
+        }
+
+        Copy-Item -LiteralPath $winhttpProxy -Destination $targetWinhttp -Force -ErrorAction Stop
+        Write-Host "  [OK] Deployed ReFix winhttp.dll Anti-Cheat bypass proxy to $d" -ForegroundColor Green
+    }
+} else {
+    Write-Host "  [INFO] No EasyAntiCheat (EAC) detected. winhttp proxy not required." -ForegroundColor Gray
+}
+
+# ============================================================
 # Step 6: Final Verification & Post-Deploy Validation (FASE 6)
 # ============================================================
 function Verify-ReFixDeployment {
@@ -2402,6 +2454,28 @@ function Verify-ReFixDeployment {
                     $errors += "winmm.dll in $ExeDir size mismatch (Expected $expectedWSize, got $wSize)"
                 } else {
                     Write-Host "  [VERIFY OK] winmm.dll proxy verified in $ExeDir ($wSize bytes)" -ForegroundColor Green
+                }
+            }
+        }
+    }
+
+    # 5b. Anti-Cheat winhttp.dll verification
+    $eacCheck = Get-ChildItem -LiteralPath $TargetDir -Filter "*EasyAntiCheat*" -Recurse -File -ErrorAction SilentlyContinue
+    $eacExes = Get-ChildItem -LiteralPath $TargetDir -Filter "*start_protected_game*" -Recurse -File -ErrorAction SilentlyContinue
+    if (($eacCheck.Count -gt 0 -or $eacExes.Count -gt 0) -and (-not $IsX86)) {
+        $winhttpPath = Join-Path $ProductBinDir "winhttp.dll"
+        if (-not (Test-Path -LiteralPath $winhttpPath)) { $winhttpPath = Join-Path $BinDir "lan\winhttp.dll" }
+        if (Test-Path -LiteralPath $winhttpPath) {
+            $destWinhttp = Join-Path $ExeDir "winhttp.dll"
+            if (-not (Test-Path -LiteralPath $destWinhttp)) {
+                $errors += "Anti-Cheat proxy winhttp.dll missing in $ExeDir (required for EAC bypass)"
+            } else {
+                $expectedWhSize = (Get-Item -LiteralPath $winhttpPath).Length
+                $whSize = (Get-Item -LiteralPath $destWinhttp).Length
+                if ($whSize -ne $expectedWhSize) {
+                    $errors += "winhttp.dll in $ExeDir size mismatch (Expected $expectedWhSize, got $whSize)"
+                } else {
+                    Write-Host "  [VERIFY OK] winhttp.dll Anti-Cheat bypass proxy verified in $ExeDir ($whSize bytes)" -ForegroundColor Green
                 }
             }
         }

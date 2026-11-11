@@ -1304,8 +1304,27 @@ typedef bool (*fn_Platform_InternetCheck_t)(void* self, void* method);
 static fn_Platform_InternetCheck_t g_orig_Platform_InternetCheck = nullptr;
 
 static bool Hooked_Platform_InternetCheck(void* self, void* method) {
-    ReFixLog("[IL2CPP] Platform InternetCheck called -> returning true (connected)");
+    static bool s_logged = false;
+    if (!s_logged) {
+        s_logged = true;
+        ReFixLog("[IL2CPP] Platform InternetCheck called -> returning true (connected) [further calls throttled]");
+    }
     return true;
+}
+
+typedef void* (*fn_AirlockPeer_PhotonAuth_t)(void* self, void* args, bool requireAuthentication, void* photonAuth, void* method);
+static fn_AirlockPeer_PhotonAuth_t g_orig_AirlockPeer_PhotonAuth = nullptr;
+
+static void* Hooked_AirlockPeer_PhotonAuth(void* self, void* args, bool requireAuthentication, void* photonAuth, void* method) {
+    ReFixLog("[Photon IL2CPP] AirlockPeer.PhotonAuth called (requireAuthentication=%d)", (int)requireAuthentication);
+    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+        requireAuthentication = false;
+        ReFixLog("[Photon IL2CPP] AirlockPeer.PhotonAuth: Overriding requireAuthentication to false for LAN/Offline host/join");
+    }
+    if (g_orig_AirlockPeer_PhotonAuth) {
+        return g_orig_AirlockPeer_PhotonAuth(self, args, requireAuthentication, photonAuth, method);
+    }
+    return nullptr;
 }
 
 typedef void (*fn_InternetCheckFailed_t)(void* self, bool fatal, void* message, bool retry, void* method);
@@ -1736,6 +1755,20 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
                     MH_EnableHook(pCode);
                     ReFixLog("[IL2CPP] Hooked <CheckAuthenticationViaHTTP>d__201.MoveNext at %p", pCode);
                 }
+            }
+        }
+    }
+
+    // Hook Photon custom authentication in peer/runner (e.g. SG.Airlock.Network.AirlockPeer.PhotonAuth)
+    void* klassAirlockPeer = FindClassAcrossImages("SG.Airlock.Network", "AirlockPeer");
+    if (!klassAirlockPeer) klassAirlockPeer = FindClassAcrossImages("", "AirlockPeer");
+    if (klassAirlockPeer) {
+        void* mPhotonAuth = FindClassMethod(klassAirlockPeer, "PhotonAuth");
+        if (mPhotonAuth) {
+            void* pCode = ResolveRealCodePointer(*(void**)mPhotonAuth);
+            if (pCode && MH_CreateHook(pCode, (void*)Hooked_AirlockPeer_PhotonAuth, (void**)&g_orig_AirlockPeer_PhotonAuth) == MH_OK) {
+                MH_EnableHook(pCode);
+                ReFixLog("[IL2CPP] Hooked AirlockPeer.PhotonAuth at %p", pCode);
             }
         }
     }

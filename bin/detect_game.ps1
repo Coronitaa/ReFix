@@ -221,6 +221,15 @@ if ($eosFiles.Count -gt 0) { $hasEos = $true }
 $redpointFolders = Get-ChildItem -LiteralPath $target -Filter "*Redpoint*" -Recurse -Directory -ErrorAction SilentlyContinue
 if ($redpointFolders.Count -gt 0) { $hasEos = $true }
 
+# 4b. Check for presence of EasyAntiCheat (EAC)
+$hasEac = $false
+$eacDirs = Get-ChildItem -LiteralPath $target -Filter "*EasyAntiCheat*" -Recurse -Directory -ErrorAction SilentlyContinue
+$eacFiles = Get-ChildItem -LiteralPath $target -Filter "*EasyAntiCheat*" -Recurse -File -ErrorAction SilentlyContinue
+$eacSetup = Get-ChildItem -LiteralPath $target -Filter "*start_protected_game*" -Recurse -File -ErrorAction SilentlyContinue
+if (($eacDirs.Count -gt 0) -or ($eacFiles.Count -gt 0) -or ($eacSetup.Count -gt 0)) {
+    $hasEac = $true
+}
+
 # 5. Architecture detection (x86 vs x64)
 # A game is flagged as x86 when it ships steam_api.dll (32-bit) without steam_api64.dll,
 # or when Unity Plugins\x86 subfolder is present.
@@ -250,5 +259,6 @@ Write-Output "GAME_NAME=$gameName"
 Write-Output "DETECTED_APPID=$detectedAppId"
 Write-Output "HAS_STEAM=$hasSteam"
 Write-Output "HAS_EOS=$hasEos"
+Write-Output "HAS_EAC=$hasEac"
 Write-Output "IS_X86=$isX86"
 Write-Output "CANDIDATE_EXES=$candidateListStr"
