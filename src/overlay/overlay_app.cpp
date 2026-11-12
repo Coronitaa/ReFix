@@ -312,6 +312,7 @@ void App::PollInvites() {
             UnrealSteamEmu::SimulatePeerEndpoint(inv.from, ipStr, from->port);
         }
         if (inv.lobbyId) {
+            UnrealSteamEmu::PreseedInviteLobby(inv.lobbyId, inv.from, inv.connect);
             LobbyInvite_t cb = {};
             cb.m_ulSteamIDUser = inv.from;
             cb.m_ulSteamIDLobby = inv.lobbyId;
@@ -413,21 +414,27 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
 }
 
 void App::Join(const net::RemotePlayer& p) {
+    if (p.ip != 0) {
+        SteamP2PHook::RegisterPeer(p.steamId, p.ip, p.port);
+        char ipStr[32];
+        snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
+                 (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF,
+                 (p.ip >> 8) & 0xFF, p.ip & 0xFF);
+        UnrealSteamEmu::SimulatePeerEndpoint(p.steamId, ipStr, p.port);
+    }
     if (p.lobbyId != 0) {
-        // P1.b: ONLY dispatch GameLobbyJoinRequested_t (callback 333).
-        // Let CS:GO call JoinLobby and perform its handshake natively without competing JoinLobby calls.
+        UnrealSteamEmu::PreseedInviteLobby(p.lobbyId, p.steamId, p.connect);
         GameLobbyJoinRequested_t cb = {};
         cb.m_steamIDLobby = CSteamID(p.lobbyId);
         cb.m_steamIDFriend = CSteamID(p.steamId);
         UnrealSteamEmu::PostCallback(GameLobbyJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-    } else if (!p.connect.empty()) {
-        // P1.b: ONLY dispatch GameRichPresenceJoinRequested_t (callback 337).
-        // Do NOT execute +gcconnectG... as an engine console command and do not call engine from overlay thread.
+    }
+    if (!p.connect.empty()) {
         GameRichPresenceJoinRequested_t cb = {};
         cb.m_steamIDFriend = CSteamID(p.steamId);
         strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
         UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-    } else if (p.ip != 0) {
+    } else if (p.lobbyId == 0 && p.ip != 0) {
         // Direct IP connect without rich presence connect string: queue to main thread (satisfies R5)
         char ipBuf[64];
         snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:%u",
@@ -555,6 +562,9 @@ bool App::DeleteProfile(const std::wstring& id) {
 }
 
 void App::AcceptInvite(const net::Invite& inv) {
+    if (inv.lobbyId != 0) {
+        UnrealSteamEmu::PreseedInviteLobby(inv.lobbyId, inv.from, inv.connect);
+    }
     const net::RemotePlayer* from = FindPlayer(inv.from);
     net::RemotePlayer p;
     if (from) {

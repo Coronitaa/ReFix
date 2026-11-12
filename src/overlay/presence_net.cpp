@@ -190,9 +190,34 @@ void OnPresence(Reader& r, uint32_t fromIp, const uint8_t* rawBuf, size_t rawLen
     p.ip = fromIp;
     p.lastSeen = GetTickCount64();
 #if REFIX_STEAM_LINK
-    if (!steamlink::IsVirtual(fromIp) && steamlink::GetState() == steamlink::State::Online) {
-        if (p.steamOnlineId == 0 || p.steamOnlineId == steamlink::LocalSteamId()) {
-            steamlink::ForwardFromLan(fromIp, p.port, rawBuf, rawLen, kPresencePort);
+    if (steamlink::IsVirtual(fromIp) && rawBuf && rawLen > 0) {
+        // Repeat to loopback alternate ports so secondary local instances hear our Steam friend
+        for (uint16_t alt = 47691; alt <= 47698; ++alt) {
+            sockaddr_in loop{};
+            loop.sin_family = AF_INET;
+            loop.sin_addr.s_addr = htonl(0x7F000001);
+            loop.sin_port = htons(alt);
+            sendto(g_bcast, (const char*)rawBuf, (int)rawLen, 0, (const sockaddr*)&loop, sizeof(loop));
+        }
+    } else if (!steamlink::IsVirtual(fromIp)) {
+        uint64_t targetSid = 0;
+        if (p.steamOnlineId != 0 && p.steamOnlineId != steamlink::LocalSteamId()) {
+            targetSid = p.steamOnlineId;
+        } else {
+            for (const auto& fr : steamlink::Friends()) {
+                if (fr.steamId == p.steamId || (!fr.name.empty() && _stricmp(fr.name.c_str(), p.name.c_str()) == 0)) {
+                    if (fr.steamId != steamlink::LocalSteamId()) targetSid = fr.steamId;
+                    break;
+                }
+            }
+        }
+        if (targetSid != 0) {
+            uint32_t virt = steamlink::VirtualIp(targetSid);
+            if (virt != 0) p.ip = virt;
+        } else if (steamlink::GetState() == steamlink::State::Online) {
+            if (p.steamOnlineId == 0 || p.steamOnlineId == steamlink::LocalSteamId()) {
+                steamlink::ForwardFromLan(fromIp, p.port, rawBuf, rawLen, kPresencePort);
+            }
         }
     }
 #endif
@@ -498,6 +523,14 @@ std::vector<RemotePlayer> Players() {
     for (const auto& p : allPeers) {
         uint64_t sid = p.externalId.numericId;
         if (sid == 0 || sid == g_local.steamId) continue; // P1.a: forbid peerId.low as SteamID fallback
+#if REFIX_STEAM_LINK
+        if (steamlink::IsBridgePort(p.endpoint.port)) continue;
+        bool isFriend = false;
+        for (const auto& fr : steamlink::Friends()) {
+            if (fr.steamId == sid) { isFriend = true; break; }
+        }
+        if (isFriend) continue;
+#endif
         if (g_players.count(sid) == 0) {
             RemotePlayer rp;
             rp.steamId = sid;

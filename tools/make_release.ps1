@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.4.5" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.4.6" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -74,7 +74,7 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.4.5 - LAN / Online
+ReFix 2.4.6 - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.

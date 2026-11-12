@@ -1048,11 +1048,19 @@ namespace UnrealSteamEmu {
         int sent = 0;
         if (rec) {
             const auto self = core.Identity().GetLocalPeerId();
+            if (rec->ownerPeerId != self) {
+                auto ownerPeer = core.Peers().FindByPeerId(rec->ownerPeerId);
+                refix::lan::LanEndpoint ep = (ownerPeer && ownerPeer->endpoint.IsValid()) ? ownerPeer->endpoint : rec->hostEndpoint;
+                if (ep.IsValid() &&
+                    core.Transport().SendReliable(rec->ownerPeerId, ep, kLobbyChatChannel, wire.data(), wire.size()))
+                    ++sent;
+            }
             for (const auto& m : rec->members) {
-                if (m.peerId == self) continue;
+                if (m.peerId == self || m.peerId == rec->ownerPeerId) continue;
                 auto peer = core.Peers().FindByPeerId(m.peerId);
-                if (peer && peer->endpoint.IsValid() &&
-                    core.Transport().SendReliable(m.peerId, peer->endpoint, kLobbyChatChannel, wire.data(), wire.size()))
+                refix::lan::LanEndpoint ep = (peer && peer->endpoint.IsValid()) ? peer->endpoint : m.endpoint;
+                if (ep.IsValid() &&
+                    core.Transport().SendReliable(m.peerId, ep, kLobbyChatChannel, wire.data(), wire.size()))
                     ++sent;
             }
         }
@@ -4944,11 +4952,33 @@ namespace UnrealSteamEmu {
                 }
             }
             if (!found) {
+                auto allLobs = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+                for (const auto& lobRec : allLobs) {
+                    uint64_t candidateId = refix::steam::ComputeLobbySteamID(lobRec.lobbyId);
+                    if (candidateId == lID || refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(lobRec.lobbyId) == lID) {
+                        refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(lobRec.lobbyId, lID);
+                        found = true;
+                        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                        LobbyInfo& lob = g_lobbies[lID];
+                        lob.id = lID;
+                        lob.maxMembers = lobRec.maxMembers;
+                        lob.joinable = lobRec.joinable;
+                        for (const auto& [k, v] : lobRec.attributes) {
+                            if (k.rfind("__", 0) != 0) lob.data[k] = v.asString;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!found) {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                 auto it = g_lobbies.find(lID);
                 if (it != g_lobbies.end()) {
                     found = true;
                 }
+            }
+            if (!found) {
+                refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
             }
 
             LobbyDataUpdate_t resp = {};
@@ -8248,6 +8278,37 @@ namespace UnrealSteamEmu {
         change.m_nChangeFlags = k_EPersonaChangeName;
         PostCallback(PersonaStateChange_t::k_iCallback, &change, sizeof(change));
         ReFixLog("[UnrealSteam] Persona name changed by the overlay: '%s'", name.c_str());
+    }
+
+    void PreseedInviteLobby(uint64_t lobbyId, uint64_t senderSteamId, const std::string& connect) {
+        if (lobbyId == 0) return;
+        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+        LobbyInfo& lob = g_lobbies[lobbyId];
+        lob.id = lobbyId;
+        if (lob.owner == 0) lob.owner = senderSteamId;
+        lob.joinable = true;
+        if (lob.maxMembers == 0) lob.maxMembers = 16;
+        if (!connect.empty() && lob.data.find("connect") == lob.data.end()) {
+            lob.data["connect"] = connect;
+        }
+        if (senderSteamId != 0) {
+            if (std::find(lob.members.begin(), lob.members.end(), senderSteamId) == lob.members.end()) {
+                lob.members.push_back(senderSteamId);
+            }
+        }
+        auto allLobs = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+        for (const auto& r : allLobs) {
+            uint64_t sId = refix::steam::ComputeLobbySteamID(r.lobbyId);
+            if (sId == lobbyId || refix::steam::SteamLobbyRegistry::Get().GetSteamLobbyId(r.lobbyId) == lobbyId) {
+                refix::steam::SteamLobbyRegistry::Get().EnsureSteamLobbyID(r.lobbyId, lobbyId);
+                lob.maxMembers = r.maxMembers;
+                lob.joinable = r.joinable;
+                for (const auto& [k, v] : r.attributes) {
+                    if (k.rfind("__", 0) != 0) lob.data[k] = v.asString;
+                }
+                break;
+            }
+        }
     }
     const char* GetFriendPersonaName(uint64_t steamIDFriend) {
         return g_steamFriendsInstance.GetFriendPersonaName(CSteamID(steamIDFriend));

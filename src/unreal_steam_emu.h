@@ -186,6 +186,7 @@ namespace UnrealSteamEmu {
     bool Matchmaking_SendLobbyChatMsg(uint64_t steamIDLobby, const void* pvMsgBody, int cubMsgBody);
     int Matchmaking_GetLobbyChatEntry(uint64_t steamIDLobby, int iChatID, uint64_t* pSteamIDUser, void* pvData, int cubData, int* peChatEntryType);
     bool Matchmaking_RequestLobbyData(uint64_t steamIDLobby);
+    void PreseedInviteLobby(uint64_t lobbyId, uint64_t senderSteamId, const std::string& connect);
     void Matchmaking_SetLobbyGameServer(uint64_t steamIDLobby, uint32_t unGameServerIP, uint16_t unGameServerPort, uint64_t steamIDGameServer);
     bool Matchmaking_GetLobbyGameServer(uint64_t steamIDLobby, uint32_t* punGameServerIP, uint16_t* punGameServerPort, uint64_t* psteamIDGameServer);
 

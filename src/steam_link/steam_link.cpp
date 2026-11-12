@@ -702,6 +702,12 @@ std::vector<Friend> Friends() {
     return g_state == State::Online ? g_friendList : std::vector<Friend>();
 }
 
+uint32_t VirtualIp(uint64_t steamId) {
+    if (!steamId) return 0;
+    std::lock_guard<std::mutex> lock(g_mu);
+    return VirtualIpLocked(steamId);
+}
+
 uint64_t SteamIdOf(uint32_t virtIp) {
     std::lock_guard<std::mutex> lock(g_mu);
     auto it = g_idOf.find(virtIp);

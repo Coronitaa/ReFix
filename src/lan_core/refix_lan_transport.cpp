@@ -518,7 +518,8 @@ bool LanTransport::RewriteAdvertisedEndpoint(uint8_t* wire, size_t len, uint32_t
     if (hdr->magic != REFIX_WIRE_MAGIC || hdr->version != REFIX_WIRE_VERSION) return false;
     const auto type = static_cast<MsgType>(hdr->msgType);
     const bool join = type == MsgType::LobbyJoinReq;
-    if (!join && type != MsgType::DiscoveryBeacon && type != MsgType::DiscoveryQuery && type != MsgType::DiscoveryResponse)
+    const bool lobbyAnnounce = type == MsgType::LobbyAnnouncement;
+    if (!join && !lobbyAnnounce && type != MsgType::DiscoveryBeacon && type != MsgType::DiscoveryQuery && type != MsgType::DiscoveryResponse)
         return false;
     const size_t end = (std::min)(len, sizeof(WireHeader) + hdr->payloadLen);
     size_t off = sizeof(WireHeader);
@@ -530,6 +531,20 @@ bool LanTransport::RewriteAdvertisedEndpoint(uint8_t* wire, size_t len, uint32_t
         off += 4 + n;
         return true;
     };
+    if (lobbyAnnounce) {
+        if (!skipString()) return false;          // scope
+        off += 16;                                // sender peer id
+        if (off > end || !skipString()) return false; // lobby id
+        off += 16;                                // owner peer id
+        off += 4;                                 // maxMembers
+        off += 1;                                 // permission
+        off += 1;                                 // joinable
+        off += 4;                                 // revision
+        if (off + 6 > end) return false;
+        memcpy(wire + off, &ip, 4);               // WriteEndpoint: u32 + u16, little-endian
+        memcpy(wire + off + 4, &port, 2);
+        return true;
+    }
     if (!skipString()) return false;          // scope
     off += 16;                                // peer id
     if (join) {

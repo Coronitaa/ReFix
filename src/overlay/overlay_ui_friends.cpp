@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace refix::overlay {
 namespace {
@@ -306,21 +307,31 @@ float App::DrawSyncButton(float right, float cy) {
 }
 
 const PlayerRow* App::FriendRow(const steamlink::Friend& fr) const {
-    if (!fr.refix || !fr.virtIp) return nullptr;
+    if (!fr.refix) return nullptr;
+    for (const PlayerRow& r : rows_) {
+        if (r.p.steamId == fr.steamId) return &r;
+        if (!r.p.name.empty() && _stricmp(r.p.name.c_str(), fr.name.c_str()) == 0) return &r;
+    }
+    if (fr.virtIp) {
+        for (const PlayerRow& r : rows_) {
+            if (r.p.ip == fr.virtIp) return &r;
+        }
+    }
     for (const PlayerRow& r : rows_) {
         if (!steamlink::IsVirtual(r.p.ip)) continue;
-        if (r.p.ip == fr.virtIp || r.p.steamId == fr.steamId || steamlink::SteamIdOf(r.p.ip) == fr.steamId) return &r;
+        if (steamlink::SteamIdOf(r.p.ip) == fr.steamId) return &r;
     }
     return nullptr;
 }
 
 std::vector<const PlayerRow*> App::LinkedProfilesFor(const steamlink::Friend& fr) const {
     std::vector<const PlayerRow*> res;
-    if (!fr.refix) return res;
     for (const PlayerRow& r : rows_) {
+        if (r.p.steamId == fr.steamId) continue;
+        if (!r.p.name.empty() && _stricmp(r.p.name.c_str(), fr.name.c_str()) == 0) continue;
         if (!steamlink::IsVirtual(r.p.ip)) continue;
         uint64_t ownerSteamId = steamlink::SteamIdOf(r.p.ip);
-        if (ownerSteamId == fr.steamId || (r.p.steamOnlineId != 0 && r.p.steamOnlineId == fr.steamId) || r.p.steamId == fr.steamId) {
+        if (ownerSteamId == fr.steamId || (r.p.steamOnlineId != 0 && r.p.steamOnlineId == fr.steamId)) {
             if (r.p.steamOnlineId != 0 && r.p.steamOnlineId != fr.steamId) continue;
             res.push_back(&r);
         }
@@ -328,20 +339,32 @@ std::vector<const PlayerRow*> App::LinkedProfilesFor(const steamlink::Friend& fr
     return res;
 }
 
-void App::DrawLinkedProfileRow(const steamlink::Friend& fr, const PlayerRow& row, float width) {
+void App::DrawLinkedProfileRow(const steamlink::Friend* fr, const PlayerRow& row, float width, bool isSubList) {
     const ui::Fonts& f = ui::F();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
-    const ImVec2 p1(p0.x + width, p0.y + ui::S(kRowH));
-    dl->AddRectFilled(p0, p1, ui::Fade(ui::color::Accent, 0.08f), ui::S(10));
-    dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.35f), ui::S(10));
-    const float cy = p0.y + ui::S(kRowH) * 0.5f;
-    const ImVec2 ac(p0.x + ui::S(12) + ui::S(kAvatarR), cy);
-    const ImU32 col = PersonaColor(fr);
+    const float indent = isSubList ? ui::S(18) : 0.0f;
+    const float rowW = width - indent;
+    const ImVec2 cardP0(p0.x + indent, p0.y);
+    const ImVec2 cardP1(cardP0.x + rowW, cardP0.y + ui::S(kRowH));
+
+    if (isSubList) {
+        // Tree connector branch
+        const float midY = cardP0.y + ui::S(kRowH) * 0.5f;
+        const float branchX = p0.x + indent * 0.45f;
+        dl->AddLine(ImVec2(branchX, p0.y - ui::S(6)), ImVec2(branchX, midY), ui::Fade(ui::color::SteamBlue, 0.45f), 1.5f);
+        dl->AddLine(ImVec2(branchX, midY), ImVec2(cardP0.x - ui::S(4), midY), ui::Fade(ui::color::SteamBlue, 0.45f), 1.5f);
+    }
+
+    dl->AddRectFilled(cardP0, cardP1, ui::Fade(ui::color::PanelRaised, 0.70f), ui::S(10));
+    dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::SteamBlue, 0.30f), ui::S(10));
+    const float cy = cardP0.y + ui::S(kRowH) * 0.5f;
+    const ImVec2 ac(cardP0.x + ui::S(12) + ui::S(kAvatarR), cy);
+    const ImU32 col = fr ? PersonaColor(*fr) : ui::color::SteamOnline;
     ui::DrawAvatar(dl, ac, ui::S(kAvatarR), PlayerAvatar(row.p));
     dl->AddCircle(ac, ui::S(kAvatarR) + ui::S(2), col, 32, ui::S(2));   // Steam's coloured frame
 
-    float right = p1.x - ui::S(8);
+    float right = cardP1.x - ui::S(8);
     if (row.sameGame) {
         const float d = ui::S(36);
         ImGui::PushID((const void*)(uintptr_t)row.p.steamId);
@@ -377,19 +400,58 @@ void App::DrawLinkedProfileRow(const steamlink::Friend& fr, const PlayerRow& row
         ImGui::PopID();
         right -= ui::S(6);
     }
-    const float textX = p0.x + ui::S(12 + 2 * kAvatarR + 14);
+
+    const float textX = cardP0.x + ui::S(12 + 2 * kAvatarR + 14);
     const float textW = std::max(ui::S(40), right - textX);
+
+    // Tunnel pill tag: [vía <FriendName>]
+    std::string tag = std::string(T("via ", "vía ")) + (fr ? fr->name : "Steam");
+    const ImVec2 tagSz = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, tag.c_str());
+    const float pillPadH = ui::S(5), pillPadV = ui::S(2);
+    const float pillW = tagSz.x + pillPadH * 2.0f;
+    const float pillH = tagSz.y + pillPadV * 2.0f;
+    const float maxNameW = std::max(ui::S(30), textW - pillW - ui::S(8));
+
     ImGui::PushFont(f.strong);
-    const std::string name = ui::Ellipsize(row.p.name, textW);
+    const std::string name = ui::Ellipsize(row.p.name, maxNameW);
+    const float actualNameW = f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, 0, name.c_str()).x;
     ImGui::PopFont();
-    std::string baseLabel = PersonaLabel(fr, appId_);
-    std::string viaLabel = baseLabel + " (" + T("via ", "vía ") + fr.name + ")";
-    ImGui::PushFont(f.caption);
-    const std::string status = ui::Ellipsize(viaLabel, textW);
-    ImGui::PopFont();
+
+    // Render name
     dl->AddText(f.strong, f.strong->FontSize, ImVec2(textX, cy - f.strong->FontSize), ui::color::Text, name.c_str());
-    dl->AddText(f.caption, f.caption->FontSize, ImVec2(textX, cy + ui::S(2)), col, status.c_str());
-    ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + ui::S(6)));
+
+    // Render tag pill immediately next to name
+    const float pillX = textX + actualNameW + ui::S(6);
+    const float pillY = cy - f.strong->FontSize + (f.strong->FontSize - pillH) * 0.5f;
+    const ImVec2 pillMin(pillX, pillY);
+    const ImVec2 pillMax(pillX + pillW, pillY + pillH);
+    dl->AddRectFilled(pillMin, pillMax, ui::Fade(ui::color::SteamBlue, 0.18f), ui::S(4));
+    dl->AddRect(pillMin, pillMax, ui::Fade(ui::color::SteamBlue, 0.50f), ui::S(4), 0, 1.0f);
+    dl->AddText(f.caption, f.caption->FontSize, ImVec2(pillX + pillPadH, pillY + pillPadV), ui::color::SteamOnline, tag.c_str());
+
+    // Game / Lobby status as subtitle (WITHOUT "via ..." tag inside it)
+    std::string statusText;
+    if (row.sameGame) {
+        if (row.p.lobbyId != 0) {
+            statusText = row.p.joinable ? T("In an open lobby", "En una sala abierta")
+                                        : T("In a private lobby", "En una sala cerrada");
+        } else {
+            statusText = T("In this game", "En este juego");
+        }
+    } else if (!row.p.game.empty()) {
+        statusText = std::string(T("Playing ", "Jugando a ")) + row.p.game;
+    } else if (fr) {
+        statusText = PersonaLabel(*fr, appId_);
+    } else {
+        statusText = T("Playing with ReFix", "Jugando con ReFix");
+    }
+
+    ImGui::PushFont(f.caption);
+    const std::string status = ui::Ellipsize(statusText, textW);
+    ImGui::PopFont();
+    dl->AddText(f.caption, f.caption->FontSize, ImVec2(textX, cy + ui::S(2)), ui::color::Muted, status.c_str());
+
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, cardP1.y + ui::S(4)));
     ImGui::Dummy(ImVec2(width, 0));
 }
 
@@ -489,7 +551,7 @@ void App::DrawFriends(ImVec2 pos, ImVec2 size) {
     for (const auto& fr : friends) {
         if (fr.refix) {
             auto linked = LinkedProfilesFor(fr);
-            if (linked.size() > 1) online += (int)(linked.size() - 1);
+            online += (int)linked.size();
         }
     }
 
@@ -540,26 +602,53 @@ void App::DrawFriends(ImVec2 pos, ImVec2 size) {
     ImGui::BeginChild("##friendlist", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     const float width = ImGui::GetContentRegionAvail().x;
 
-    // 1. Online in ReFix (with active LAN profile rows linked to that Steam friend)
+    // 1. Online in ReFix (Steam friends + LAN profiles linked through them)
     {
+        std::set<uint64_t> drawnProfiles;
         int n = 0;
         for (const auto& fr : friends) {
             if (!fr.refix) continue;
+            ++n;
             auto linked = LinkedProfilesFor(fr);
-            n += linked.empty() ? 1 : (int)linked.size();
+            for (const PlayerRow* lr : linked) {
+                if (drawnProfiles.insert(lr->p.steamId).second) ++n;
+            }
         }
+        // Standalone virtual profiles whose Steam gateway friend is offline or not in refix
+        for (const PlayerRow& r : rows_) {
+            if (!steamlink::IsVirtual(r.p.ip)) continue;
+            if (drawnProfiles.count(r.p.steamId)) continue;
+            bool belongsToOnline = false;
+            uint64_t owner = steamlink::SteamIdOf(r.p.ip);
+            for (const auto& fr : friends) {
+                if (fr.refix && (fr.steamId == owner || fr.steamId == r.p.steamId)) { belongsToOnline = true; break; }
+            }
+            if (!belongsToOnline) ++n;
+        }
+
         if (n > 0) {
             ui::SectionLabel(T("Online in ReFix", "En línea en ReFix"), n);
+            drawnProfiles.clear();
             for (const auto& fr : friends) {
                 if (!fr.refix) continue;
+                DrawFriendRow(fr, width);
                 auto linked = LinkedProfilesFor(fr);
-                if (linked.empty()) {
-                    DrawFriendRow(fr, width);
-                } else {
-                    for (const PlayerRow* lr : linked) {
-                        DrawLinkedProfileRow(fr, *lr, width);
+                for (const PlayerRow* lr : linked) {
+                    if (drawnProfiles.insert(lr->p.steamId).second) {
+                        DrawLinkedProfileRow(&fr, *lr, width, true);
                     }
                 }
+            }
+            for (const PlayerRow& r : rows_) {
+                if (!steamlink::IsVirtual(r.p.ip)) continue;
+                if (drawnProfiles.count(r.p.steamId)) continue;
+                uint64_t owner = steamlink::SteamIdOf(r.p.ip);
+                const steamlink::Friend* ownerFr = nullptr;
+                for (const auto& fr : friends) {
+                    if (fr.steamId == owner) { ownerFr = &fr; break; }
+                }
+                DrawLinkedProfileRow(ownerFr, r, width, false);
+                drawnProfiles.insert(r.p.steamId);
             }
             ImGui::Dummy(ImVec2(0, ui::S(6)));
         }

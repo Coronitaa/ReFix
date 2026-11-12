@@ -346,9 +346,15 @@ int App::DrawWaitingFriends(float width) {
 }
 
 void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
-    const size_t lanCount = std::count_if(rows_.begin(), rows_.end(), [](const PlayerRow& r) {
-        return !steamlink::IsVirtual(r.p.ip);
-    });
+    auto isLanPlayer = [](const PlayerRow& r) {
+        if (steamlink::IsVirtual(r.p.ip)) return false;
+        if (steamlink::IsBridgePort(r.p.port)) return false;
+        for (const auto& fr : steamlink::Friends()) {
+            if (fr.steamId == r.p.steamId) return false;
+        }
+        return true;
+    };
+    const size_t lanCount = std::count_if(rows_.begin(), rows_.end(), isLanPlayer);
 
     if (pickerStyle) {
         ImGui::SetCursorScreenPos(pos);
@@ -396,13 +402,13 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
     };
     if (pickerStyle) {
         section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite; });
-        section(i18n::T("On the LAN", "En la LAN"), [](const PlayerRow& r) { return !r.favorite && !steamlink::IsVirtual(r.p.ip); });
-        section(i18n::T("Through Steam", "Por Steam"), [](const PlayerRow& r) { return !r.favorite && steamlink::IsVirtual(r.p.ip); });
+        section(i18n::T("On the LAN", "En la LAN"), [&](const PlayerRow& r) { return !r.favorite && isLanPlayer(r); });
+        section(i18n::T("Through Steam", "Por Steam"), [&](const PlayerRow& r) { return !r.favorite && !isLanPlayer(r); });
         if (const int n = DrawWaitingFriends(width)) shown += n;
     } else {
-        section(i18n::T("Favourites", "Favoritos"), [](const PlayerRow& r) { return r.favorite && !steamlink::IsVirtual(r.p.ip); });
-        section(i18n::T("In this game", "En este juego"), [](const PlayerRow& r) { return !r.favorite && !steamlink::IsVirtual(r.p.ip) && r.sameGame; });
-        section(i18n::T("In other games", "En otros juegos"), [](const PlayerRow& r) { return !r.favorite && !steamlink::IsVirtual(r.p.ip) && !r.sameGame; });
+        section(i18n::T("Favourites", "Favoritos"), [&](const PlayerRow& r) { return r.favorite && isLanPlayer(r); });
+        section(i18n::T("In this game", "En este juego"), [&](const PlayerRow& r) { return !r.favorite && isLanPlayer(r) && r.sameGame; });
+        section(i18n::T("In other games", "En otros juegos"), [&](const PlayerRow& r) { return !r.favorite && isLanPlayer(r) && !r.sameGame; });
     }
     if (shown == 0) {
         ImGui::Dummy(ImVec2(0, ui::S(36)));

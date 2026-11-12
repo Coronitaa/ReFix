@@ -72,6 +72,7 @@ struct Friend {
     uint32_t virtIp = 0;             // its address on the tunnel, 0 when not a ReFix peer
 };
 std::vector<Friend> Friends();       // empty while the link is not Online
+uint32_t VirtualIp(uint64_t steamId); // virtual IP allocated or looked up for this Steam ID
 uint64_t SteamIdOf(uint32_t virtIp); // 0 when unknown
 // RGBA8 pixels of a Steam image handle (Friend::avatar). False while Steam has not downloaded it.
 bool AvatarRgba(int image, int& width, int& height, std::vector<uint8_t>& rgba);
