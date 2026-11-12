@@ -349,9 +349,6 @@ void App::DrawPlayers(ImVec2 pos, ImVec2 size, bool pickerStyle) {
     auto isLanPlayer = [](const PlayerRow& r) {
         if (steamlink::IsVirtual(r.p.ip)) return false;
         if (steamlink::IsBridgePort(r.p.port)) return false;
-        for (const auto& fr : steamlink::Friends()) {
-            if (fr.steamId == r.p.steamId) return false;
-        }
         return true;
     };
     const size_t lanCount = std::count_if(rows_.begin(), rows_.end(), isLanPlayer);
@@ -449,7 +446,9 @@ void App::DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle) {
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const ImVec2 p1(p0.x + width, p0.y + h);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImGui::PushID((const void*)(uintptr_t)p.steamId);
+    ImGui::PushID((int)(p.steamId & 0x7FFFFFFF));
+    ImGui::PushID(pickerStyle ? "pick_row" : "lan_row");
+    ImGui::PushID((int)p.port);
 
     const bool hover = ImGui::IsMouseHoveringRect(p0, p1) && ImGui::IsWindowHovered();
     dl->AddRectFilled(p0, p1, hover ? ui::color::RowHover : ui::color::Row, ui::S(12));
@@ -551,6 +550,8 @@ void App::DrawPlayerRow(const PlayerRow& row, float width, bool pickerStyle) {
     TextAt(dl, f.caption, ImVec2(tx, ty + f.strong->FontSize + ui::S(2)),
            waiting ? ui::color::Invite : row.sameGame ? ui::color::InGame : ui::color::Muted, status);
 
+    ImGui::PopID();
+    ImGui::PopID();
     ImGui::PopID();
     ImGui::SetCursorScreenPos(p0);
     ImGui::Dummy(ImVec2(width, h + ui::S(kRowGap)));

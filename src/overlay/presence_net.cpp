@@ -200,21 +200,30 @@ void OnPresence(Reader& r, uint32_t fromIp, const uint8_t* rawBuf, size_t rawLen
             sendto(g_bcast, (const char*)rawBuf, (int)rawLen, 0, (const sockaddr*)&loop, sizeof(loop));
         }
     } else if (!steamlink::IsVirtual(fromIp)) {
-        uint64_t targetSid = 0;
-        if (p.steamOnlineId != 0 && p.steamOnlineId != steamlink::LocalSteamId()) {
-            targetSid = p.steamOnlineId;
-        } else {
-            for (const auto& fr : steamlink::Friends()) {
-                if (fr.steamId == p.steamId || (!fr.name.empty() && _stricmp(fr.name.c_str(), p.name.c_str()) == 0)) {
-                    if (fr.steamId != steamlink::LocalSteamId()) targetSid = fr.steamId;
-                    break;
+        // Packets received on physical LAN or loopback.
+        // If the packet arrived on loopback (127.0.0.1) and was repeated by another instance for an external Steam friend:
+        if (fromIp == 0x7F000001u) {
+            uint64_t targetSid = 0;
+            if (p.steamOnlineId != 0 && p.steamOnlineId != steamlink::LocalSteamId()) {
+                targetSid = p.steamOnlineId;
+            } else {
+                for (const auto& fr : steamlink::Friends()) {
+                    if (fr.steamId == p.steamId || (!fr.name.empty() && _stricmp(fr.name.c_str(), p.name.c_str()) == 0)) {
+                        if (fr.steamId != steamlink::LocalSteamId()) targetSid = fr.steamId;
+                        break;
+                    }
                 }
             }
+            if (targetSid != 0) {
+                uint32_t virt = steamlink::VirtualIp(targetSid);
+                if (virt != 0) p.ip = virt;
+            }
         }
-        if (targetSid != 0) {
-            uint32_t virt = steamlink::VirtualIp(targetSid);
-            if (virt != 0) p.ip = virt;
-        } else if (steamlink::GetState() == steamlink::State::Online) {
+
+        // Forward to Steam friends if we are online and this profile belongs to this PC/LAN tunnel.
+        // If another PC on LAN has its own Steam account (p.steamOnlineId != LocalSteamId() && != 0),
+        // it is excluded from our tunnel forwarding so it links to its own Steam account.
+        if (steamlink::GetState() == steamlink::State::Online) {
             if (p.steamOnlineId == 0 || p.steamOnlineId == steamlink::LocalSteamId()) {
                 steamlink::ForwardFromLan(fromIp, p.port, rawBuf, rawLen, kPresencePort);
             }
@@ -525,11 +534,7 @@ std::vector<RemotePlayer> Players() {
         if (sid == 0 || sid == g_local.steamId) continue; // P1.a: forbid peerId.low as SteamID fallback
 #if REFIX_STEAM_LINK
         if (steamlink::IsBridgePort(p.endpoint.port)) continue;
-        bool isFriend = false;
-        for (const auto& fr : steamlink::Friends()) {
-            if (fr.steamId == sid) { isFriend = true; break; }
-        }
-        if (isFriend) continue;
+        if (steamlink::IsVirtual(p.endpoint.ipv4)) continue;
 #endif
         if (g_players.count(sid) == 0) {
             RemotePlayer rp;
