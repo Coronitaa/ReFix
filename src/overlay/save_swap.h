@@ -36,6 +36,8 @@ void SwitchTo(const Profile& active, const std::vector<Profile>& all);
 // Another process of this game's executable is running on this PC.
 bool OtherInstanceRunning();
 
+void EnableMultiInstanceRedirection(const std::vector<Location>& locations, const Profile& active);
+
 std::wstring GetActiveSaveDir(const std::wstring& label = L"");
 
 // A deleted profile no longer owns any folder; whatever is in place is treated as data from before profiles.

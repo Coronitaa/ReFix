@@ -44,12 +44,27 @@ echo [*] Collecting binaries into bin\online\ ...
 if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%OUT%\x86" mkdir "%OUT%\x86"
 
-for %%F in (steam_api64.dll winmm.dll EOSSDK-Win64-Shipping.dll RedboneEOS.dll) do (
+for %%F in (steam_api64.dll winmm.dll) do (
     if exist "%WT%\build\%%F" (
         copy /Y "%WT%\build\%%F" "%OUT%\%%F" >nul
         echo   - bin\online\%%F
     ) else (
         echo [!] Missing build output: %%F & exit /b 1
+    )
+)
+
+REM EOS SDK in ReFix is universal (supports both LAN and Online via ReFix.ini config and has the latest DeviceIdAuth and VerifyIdToken hooks)
+for %%F in (EOSSDK-Win64-Shipping.dll RedboneEOS.dll) do (
+    if exist "%ROOT%bin\lan\%%F" (
+        copy /Y "%ROOT%bin\lan\%%F" "%OUT%\%%F" >nul
+        echo   - bin\online\%%F [Universal EOS v3 with DeviceIdAuth + VerifyIdToken]
+    ) else (
+        if exist "%WT%\build\%%F" (
+            copy /Y "%WT%\build\%%F" "%OUT%\%%F" >nul
+            echo   - bin\online\%%F
+        ) else (
+            echo [!] Missing build output: %%F & exit /b 1
+        )
     )
 )
 

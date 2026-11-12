@@ -5697,9 +5697,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_Init() {
     ReFixLog("SteamAPI_ManualDispatch_Init called");
     EnsureReFixPostInitialized();
-    if (!ReFix::NetworkModeManager::IsOnline()) {
-        UnrealSteamEmu::ManualDispatch_Init();
-    }
+    UnrealSteamEmu::ManualDispatch_Init();
 }
 
 static int s_manualRunFrameLogged = 0;
@@ -5710,7 +5708,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
     }
     if (g_pfn_ManualDispatch_RunFrame) {
         g_pfn_ManualDispatch_RunFrame(hSteamPipe);
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+    } else {
         UnrealSteamEmu::ManualDispatch_RunFrame(hSteamPipe);
     }
     DispatchPendingAuthCallbacks();
@@ -5761,24 +5759,23 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
             }
             return true;
         }
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
-        bool res = UnrealSteamEmu::ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
-        if (res) {
-            s_lastManualCallbackWasSynthetic.store(false);
-            if (pCallbackMsg) {
-                auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
-                if (msg->m_iCallback == 703 && msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamAPICallCompleted_t)) {
-                    auto* pCallComp = (ReFix_SteamAPICallCompleted_t*)msg->m_pubParam;
-                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 703 (SteamAPICallCompleted_t) -> hAsyncCall=%llu, iCallback=%d",
-                             pCallComp->m_hAsyncCall, pCallComp->m_iCallback);
-                } else if (msg->m_iCallback == 504) {
-                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 504 (LobbyEnter_t)");
-                } else if (msg->m_iCallback == 513) {
-                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 513 (LobbyCreated_t)");
-                }
+    }
+    bool res = UnrealSteamEmu::ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
+    if (res) {
+        s_lastManualCallbackWasSynthetic.store(false);
+        if (pCallbackMsg) {
+            auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+            if (msg->m_iCallback == 703 && msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamAPICallCompleted_t)) {
+                auto* pCallComp = (ReFix_SteamAPICallCompleted_t*)msg->m_pubParam;
+                ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 703 (SteamAPICallCompleted_t) -> hAsyncCall=%llu, iCallback=%d",
+                         pCallComp->m_hAsyncCall, pCallComp->m_iCallback);
+            } else if (msg->m_iCallback == 504) {
+                ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 504 (LobbyEnter_t)");
+            } else if (msg->m_iCallback == 513) {
+                ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 513 (LobbyCreated_t)");
             }
-            return true;
         }
+        return true;
     }
     if (g_syntheticRelayPending.exchange(false) && pCallbackMsg) {
         s_lastManualCallbackWasSynthetic.store(true);
@@ -5805,7 +5802,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(u
     }
     if (g_pfn_ManualDispatch_FreeLastCallback) {
         g_pfn_ManualDispatch_FreeLastCallback(hSteamPipe);
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+    } else {
         UnrealSteamEmu::ManualDispatch_FreeLastCallback(hSteamPipe);
     }
 }
@@ -5821,7 +5818,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(
     bool res = false;
     if (g_pfn_ManualDispatch_GetAPICallResult) {
         res = g_pfn_ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+    } else {
         res = UnrealSteamEmu::ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
     }
     bool bFailedVal = pbFailed ? *pbFailed : false;

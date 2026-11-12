@@ -10,6 +10,9 @@
 #include <tlhelp32.h>
 #include <algorithm>
 #include <fstream>
+#include <mutex>
+#include <vector>
+#include "../minhook/MinHook.h"
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -230,15 +233,33 @@ bool DetectUnreal(Location& out) {
     return true;
 }
 
-// <exe dir>\<exe name>_Data\app.info: company on the first line, product on the second (UTF-8).
-bool DetectUnity(Location& out) {
+// Locate and read <exe dir>\<exe name>_Data\app.info (with fallback to any *_Data\app.info)
+bool FindUnityAppInfo(std::string& company, std::string& product) {
     const std::wstring exe = ExePath();
     std::wstring name = Leaf(exe);
     const size_t dot = name.find_last_of(L'.');
     if (dot != std::wstring::npos) name.resize(dot);
-    std::ifstream f(Parent(exe) + L"\\" + name + L"_Data\\app.info", std::ios::binary);
+
+    std::wstring appInfoPath = Parent(exe) + L"\\" + name + L"_Data\\app.info";
+    if (GetFileAttributesW(appInfoPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW((Parent(exe) + L"\\*_Data").c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    std::wstring cand = Parent(exe) + L"\\" + fd.cFileName + L"\\app.info";
+                    if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        appInfoPath = cand;
+                        break;
+                    }
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+    }
+
+    std::ifstream f(appInfoPath, std::ios::binary);
     if (!f) return false;
-    std::string company, product;
     std::getline(f, company);
     std::getline(f, product);
     auto clean = [](std::string& s) {
@@ -247,6 +268,13 @@ bool DetectUnity(Location& out) {
     };
     clean(company);
     clean(product);
+    return !product.empty();
+}
+
+// <exe dir>\<exe name>_Data\app.info: company on the first line, product on the second (UTF-8).
+bool DetectUnity(Location& out) {
+    std::string company, product;
+    if (!FindUnityAppInfo(company, product)) return false;
     if (company.empty() || product.empty()) return false;
     const std::wstring low = KnownFolder(FOLDERID_LocalAppDataLow);
     if (low.empty()) return false;
@@ -255,6 +283,89 @@ bool DetectUnity(Location& out) {
     out.live = low + L"\\" + wc + L"\\" + wp;
     // Unity has its log open from the first frame; its analytics cache is not a save.
     out.keepLive = { L"Player.log", L"Player-prev.log", L"output_log.txt", L"Unity", L"sentry-unity.lock", L"*.lock", L"*.log", L"*.tmp", L"Sentry", L"SentryNative", L"eventcache" };
+    return true;
+}
+
+// Many Unity games (such as 7 Days to Die, RimWorld, etc.) store world saves in %APPDATA%\<Product>\Saves.
+bool DetectUnityRoaming(Location& out) {
+    std::string company, product;
+    if (!FindUnityAppInfo(company, product)) return false;
+    if (product.empty()) return false;
+
+    const std::wstring roaming = KnownFolder(FOLDERID_RoamingAppData);
+    if (roaming.empty()) return false;
+
+    const std::wstring wc = FromUtf8(company);
+    const std::wstring wp = FromUtf8(product);
+
+    std::wstring wpNoSpace = wp;
+    wpNoSpace.erase(std::remove_if(wpNoSpace.begin(), wpNoSpace.end(), iswspace), wpNoSpace.end());
+
+    std::wstring targetSaveDir;
+    std::wstring labelPart;
+
+    if (IsDir(roaming + L"\\" + wpNoSpace + L"\\Saves")) {
+        targetSaveDir = roaming + L"\\" + wpNoSpace + L"\\Saves";
+        labelPart = wpNoSpace;
+    } else if (IsDir(roaming + L"\\" + wp + L"\\Saves")) {
+        targetSaveDir = roaming + L"\\" + wp + L"\\Saves";
+        labelPart = wp;
+    } else if (!wc.empty() && IsDir(roaming + L"\\" + wc + L"\\" + wp + L"\\Saves")) {
+        targetSaveDir = roaming + L"\\" + wc + L"\\" + wp + L"\\Saves";
+        labelPart = wc + L"_" + wp;
+    } else if (IsDir(roaming + L"\\" + wpNoSpace)) {
+        targetSaveDir = roaming + L"\\" + wpNoSpace + L"\\Saves";
+        labelPart = wpNoSpace;
+    } else if (IsDir(roaming + L"\\" + wp)) {
+        targetSaveDir = roaming + L"\\" + wp + L"\\Saves";
+        labelPart = wp;
+    } else {
+        return false;
+    }
+
+    if (!IsDir(targetSaveDir) && !IsDir(Parent(targetSaveDir))) {
+        return false;
+    }
+
+    out.label = L"Unity_Roaming_" + Sanitize(labelPart) + L"_Saves";
+    out.live = targetSaveDir;
+    out.keepLive = { L"*.lock", L"*.log", L"*.tmp" };
+    return true;
+}
+
+bool DetectUnityRoamingLocal(Location& out) {
+    std::string company, product;
+    if (!FindUnityAppInfo(company, product)) return false;
+    if (product.empty()) return false;
+
+    const std::wstring roaming = KnownFolder(FOLDERID_RoamingAppData);
+    if (roaming.empty()) return false;
+
+    const std::wstring wc = FromUtf8(company);
+    const std::wstring wp = FromUtf8(product);
+
+    std::wstring wpNoSpace = wp;
+    wpNoSpace.erase(std::remove_if(wpNoSpace.begin(), wpNoSpace.end(), iswspace), wpNoSpace.end());
+
+    std::wstring targetSaveDir;
+    std::wstring labelPart;
+
+    if (IsDir(roaming + L"\\" + wpNoSpace + L"\\SavesLocal")) {
+        targetSaveDir = roaming + L"\\" + wpNoSpace + L"\\SavesLocal";
+        labelPart = wpNoSpace;
+    } else if (IsDir(roaming + L"\\" + wp + L"\\SavesLocal")) {
+        targetSaveDir = roaming + L"\\" + wp + L"\\SavesLocal";
+        labelPart = wp;
+    } else if (!wc.empty() && IsDir(roaming + L"\\" + wc + L"\\" + wp + L"\\SavesLocal")) {
+        targetSaveDir = roaming + L"\\" + wc + L"\\" + wp + L"\\SavesLocal";
+        labelPart = wc + L"_" + wp;
+    } else {
+        return false;
+    }
+
+    out.label = L"Unity_Roaming_" + Sanitize(labelPart) + L"_SavesLocal";
+    out.live = targetSaveDir;
+    out.keepLive = { L"*.lock", L"*.log", L"*.tmp" };
     return true;
 }
 
@@ -374,6 +485,10 @@ std::vector<Location> DetectLocations() {
     if (DetectUnreal(loc)) out.push_back(loc);
     loc = Location{};
     if (DetectUnity(loc)) out.push_back(loc);
+    loc = Location{};
+    if (DetectUnityRoaming(loc)) out.push_back(loc);
+    loc = Location{};
+    if (DetectUnityRoamingLocal(loc)) out.push_back(loc);
     return out;
 }
 
@@ -433,11 +548,413 @@ bool InheritOriginalSaves(const std::wstring& profileId) {
     return anyInherited;
 }
 
+namespace {
+
+struct SaveRedirectRule {
+    std::wstring livePrefix;
+    std::wstring stashPrefix;
+};
+
+static std::vector<SaveRedirectRule> g_redirectRules;
+static std::mutex g_redirectMutex;
+static bool g_hooksInstalled = false;
+
+std::wstring NormalizePath(const wchar_t* in) {
+    if (!in || !*in) return L"";
+    std::wstring s = in;
+    if (s.rfind(L"\\\\?\\", 0) == 0) s = s.substr(4);
+    for (auto& c : s) {
+        if (c == L'/') c = L'\\';
+    }
+    return s;
+}
+
+bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
+    if (!originalPath || !*originalPath) return false;
+    std::wstring s = originalPath;
+    bool hasLong = false;
+    if (s.rfind(L"\\\\?\\", 0) == 0) {
+        s = s.substr(4);
+        hasLong = true;
+    }
+    for (auto& c : s) {
+        if (c == L'/') c = L'\\';
+    }
+    std::lock_guard<std::mutex> lock(g_redirectMutex);
+    for (const auto& rule : g_redirectRules) {
+        if (s.size() >= rule.livePrefix.size()) {
+            if (_wcsnicmp(s.c_str(), rule.livePrefix.c_str(), rule.livePrefix.size()) == 0) {
+                if (s.size() == rule.livePrefix.size() || s[rule.livePrefix.size()] == L'\\') {
+                    std::wstring rest = s.substr(rule.livePrefix.size());
+                    out = (hasLong ? L"\\\\?\\" : L"") + rule.stashPrefix + rest;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool CheckAndRedirectA(const char* originalPath, std::string& out) {
+    if (!originalPath || !*originalPath) return false;
+    std::wstring w = FromUtf8(originalPath);
+    std::wstring wOut;
+    if (CheckAndRedirect(w.c_str(), wOut)) {
+        out = ToUtf8(wOut);
+        return true;
+    }
+    return false;
+}
+
+static HANDLE (WINAPI* TrueCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) = nullptr;
+static HANDLE WINAPI HookCreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        if (dwCreationDisposition == CREATE_NEW || dwCreationDisposition == CREATE_ALWAYS || dwCreationDisposition == OPEN_ALWAYS) {
+            EnsureDir(Parent(redir));
+        }
+        return TrueCreateFileW(redir.c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+    }
+    return TrueCreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+}
+
+static HANDLE (WINAPI* TrueCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) = nullptr;
+static HANDLE WINAPI HookCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        if (dwCreationDisposition == CREATE_NEW || dwCreationDisposition == CREATE_ALWAYS || dwCreationDisposition == OPEN_ALWAYS) {
+            EnsureDir(Parent(FromUtf8(redir)));
+        }
+        return TrueCreateFileA(redir.c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+    }
+    return TrueCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+}
+
+static HANDLE (WINAPI* TrueFindFirstFileW)(LPCWSTR, LPWIN32_FIND_DATAW) = nullptr;
+static HANDLE WINAPI HookFindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindFileData) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        return TrueFindFirstFileW(redir.c_str(), lpFindFileData);
+    }
+    return TrueFindFirstFileW(lpFileName, lpFindFileData);
+}
+
+static HANDLE (WINAPI* TrueFindFirstFileA)(LPCSTR, LPWIN32_FIND_DATAA) = nullptr;
+static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        return TrueFindFirstFileA(redir.c_str(), lpFindFileData);
+    }
+    return TrueFindFirstFileA(lpFileName, lpFindFileData);
+}
+
+static HANDLE (WINAPI* TrueFindFirstFileExW)(LPCWSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD) = nullptr;
+static HANDLE WINAPI HookFindFirstFileExW(LPCWSTR lpFileName, FINDEX_INFO_LEVELS fInfoLevelId, LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp, LPVOID lpSearchFilter, DWORD dwAdditionalFlags) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        return TrueFindFirstFileExW(redir.c_str(), fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+    }
+    return TrueFindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+}
+
+static HANDLE (WINAPI* TrueFindFirstFileExA)(LPCSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD) = nullptr;
+static HANDLE WINAPI HookFindFirstFileExA(LPCSTR lpFileName, FINDEX_INFO_LEVELS fInfoLevelId, LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp, LPVOID lpSearchFilter, DWORD dwAdditionalFlags) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        return TrueFindFirstFileExA(redir.c_str(), fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+    }
+    return TrueFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+}
+
+static DWORD (WINAPI* TrueGetFileAttributesW)(LPCWSTR) = nullptr;
+static DWORD WINAPI HookGetFileAttributesW(LPCWSTR lpFileName) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        return TrueGetFileAttributesW(redir.c_str());
+    }
+    return TrueGetFileAttributesW(lpFileName);
+}
+
+static DWORD (WINAPI* TrueGetFileAttributesA)(LPCSTR) = nullptr;
+static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        return TrueGetFileAttributesA(redir.c_str());
+    }
+    return TrueGetFileAttributesA(lpFileName);
+}
+
+static BOOL (WINAPI* TrueGetFileAttributesExW)(LPCWSTR, GET_FILEEX_INFO_LEVELS, LPVOID) = nullptr;
+static BOOL WINAPI HookGetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId, LPVOID lpFileInformation) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        return TrueGetFileAttributesExW(redir.c_str(), fInfoLevelId, lpFileInformation);
+    }
+    return TrueGetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
+}
+
+static BOOL (WINAPI* TrueGetFileAttributesExA)(LPCSTR, GET_FILEEX_INFO_LEVELS, LPVOID) = nullptr;
+static BOOL WINAPI HookGetFileAttributesExA(LPCSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId, LPVOID lpFileInformation) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        return TrueGetFileAttributesExA(redir.c_str(), fInfoLevelId, lpFileInformation);
+    }
+    return TrueGetFileAttributesExA(lpFileName, fInfoLevelId, lpFileInformation);
+}
+
+static BOOL (WINAPI* TrueCreateDirectoryW)(LPCWSTR, LPSECURITY_ATTRIBUTES) = nullptr;
+static BOOL WINAPI HookCreateDirectoryW(LPCWSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpPathName, redir)) {
+        EnsureDir(Parent(redir));
+        return TrueCreateDirectoryW(redir.c_str(), lpSecurityAttributes);
+    }
+    return TrueCreateDirectoryW(lpPathName, lpSecurityAttributes);
+}
+
+static BOOL (WINAPI* TrueCreateDirectoryA)(LPCSTR, LPSECURITY_ATTRIBUTES) = nullptr;
+static BOOL WINAPI HookCreateDirectoryA(LPCSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    std::string redir;
+    if (CheckAndRedirectA(lpPathName, redir)) {
+        EnsureDir(Parent(FromUtf8(redir)));
+        return TrueCreateDirectoryA(redir.c_str(), lpSecurityAttributes);
+    }
+    return TrueCreateDirectoryA(lpPathName, lpSecurityAttributes);
+}
+
+static BOOL (WINAPI* TrueRemoveDirectoryW)(LPCWSTR) = nullptr;
+static BOOL WINAPI HookRemoveDirectoryW(LPCWSTR lpPathName) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpPathName, redir)) {
+        return TrueRemoveDirectoryW(redir.c_str());
+    }
+    return TrueRemoveDirectoryW(lpPathName);
+}
+
+static BOOL (WINAPI* TrueRemoveDirectoryA)(LPCSTR) = nullptr;
+static BOOL WINAPI HookRemoveDirectoryA(LPCSTR lpPathName) {
+    std::string redir;
+    if (CheckAndRedirectA(lpPathName, redir)) {
+        return TrueRemoveDirectoryA(redir.c_str());
+    }
+    return TrueRemoveDirectoryA(lpPathName);
+}
+
+static BOOL (WINAPI* TrueDeleteFileW)(LPCWSTR) = nullptr;
+static BOOL WINAPI HookDeleteFileW(LPCWSTR lpFileName) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        return TrueDeleteFileW(redir.c_str());
+    }
+    return TrueDeleteFileW(lpFileName);
+}
+
+static BOOL (WINAPI* TrueDeleteFileA)(LPCSTR) = nullptr;
+static BOOL WINAPI HookDeleteFileA(LPCSTR lpFileName) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        return TrueDeleteFileA(redir.c_str());
+    }
+    return TrueDeleteFileA(lpFileName);
+}
+
+static BOOL (WINAPI* TrueMoveFileExW)(LPCWSTR, LPCWSTR, DWORD) = nullptr;
+static BOOL WINAPI HookMoveFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, DWORD dwFlags) {
+    std::wstring redirExist, redirNew;
+    LPCWSTR existPath = lpExistingFileName;
+    LPCWSTR newPath = lpNewFileName;
+    if (CheckAndRedirect(lpExistingFileName, redirExist)) existPath = redirExist.c_str();
+    if (CheckAndRedirect(lpNewFileName, redirNew)) {
+        EnsureDir(Parent(redirNew));
+        newPath = redirNew.c_str();
+    }
+    return TrueMoveFileExW(existPath, newPath, dwFlags);
+}
+
+static BOOL (WINAPI* TrueMoveFileW)(LPCWSTR, LPCWSTR) = nullptr;
+static BOOL WINAPI HookMoveFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName) {
+    return HookMoveFileExW(lpExistingFileName, lpNewFileName, 0);
+}
+
+static BOOL (WINAPI* TrueCopyFileW)(LPCWSTR, LPCWSTR, BOOL) = nullptr;
+static BOOL WINAPI HookCopyFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, BOOL bFailIfExists) {
+    std::wstring redirExist, redirNew;
+    LPCWSTR existPath = lpExistingFileName;
+    LPCWSTR newPath = lpNewFileName;
+    if (CheckAndRedirect(lpExistingFileName, redirExist)) existPath = redirExist.c_str();
+    if (CheckAndRedirect(lpNewFileName, redirNew)) {
+        EnsureDir(Parent(redirNew));
+        newPath = redirNew.c_str();
+    }
+    return TrueCopyFileW(existPath, newPath, bFailIfExists);
+}
+
+static BOOL (WINAPI* TrueCopyFileExW)(LPCWSTR, LPCWSTR, LPPROGRESS_ROUTINE, LPVOID, LPBOOL, DWORD) = nullptr;
+static BOOL WINAPI HookCopyFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, LPPROGRESS_ROUTINE lpProgressRoutine, LPVOID lpData, LPBOOL pbCancel, DWORD dwCopyFlags) {
+    std::wstring redirExist, redirNew;
+    LPCWSTR existPath = lpExistingFileName;
+    LPCWSTR newPath = lpNewFileName;
+    if (CheckAndRedirect(lpExistingFileName, redirExist)) existPath = redirExist.c_str();
+    if (CheckAndRedirect(lpNewFileName, redirNew)) {
+        EnsureDir(Parent(redirNew));
+        newPath = redirNew.c_str();
+    }
+    return TrueCopyFileExW(existPath, newPath, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+}
+
+static BOOL (WINAPI* TrueMoveFileExA)(LPCSTR, LPCSTR, DWORD) = nullptr;
+static BOOL WINAPI HookMoveFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, DWORD dwFlags) {
+    std::string redirExist, redirNew;
+    LPCSTR existPath = lpExistingFileName;
+    LPCSTR newPath = lpNewFileName;
+    if (CheckAndRedirectA(lpExistingFileName, redirExist)) existPath = redirExist.c_str();
+    if (CheckAndRedirectA(lpNewFileName, redirNew)) {
+        EnsureDir(Parent(FromUtf8(redirNew)));
+        newPath = redirNew.c_str();
+    }
+    return TrueMoveFileExA(existPath, newPath, dwFlags);
+}
+
+static BOOL (WINAPI* TrueMoveFileA)(LPCSTR, LPCSTR) = nullptr;
+static BOOL WINAPI HookMoveFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName) {
+    return HookMoveFileExA(lpExistingFileName, lpNewFileName, 0);
+}
+
+static BOOL (WINAPI* TrueCopyFileA)(LPCSTR, LPCSTR, BOOL) = nullptr;
+static BOOL WINAPI HookCopyFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, BOOL bFailIfExists) {
+    std::string redirExist, redirNew;
+    LPCSTR existPath = lpExistingFileName;
+    LPCSTR newPath = lpNewFileName;
+    if (CheckAndRedirectA(lpExistingFileName, redirExist)) existPath = redirExist.c_str();
+    if (CheckAndRedirectA(lpNewFileName, redirNew)) {
+        EnsureDir(Parent(FromUtf8(redirNew)));
+        newPath = redirNew.c_str();
+    }
+    return TrueCopyFileA(existPath, newPath, bFailIfExists);
+}
+
+static BOOL (WINAPI* TrueCopyFileExA)(LPCSTR, LPCSTR, LPPROGRESS_ROUTINE, LPVOID, LPBOOL, DWORD) = nullptr;
+static BOOL WINAPI HookCopyFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, LPPROGRESS_ROUTINE lpProgressRoutine, LPVOID lpData, LPBOOL pbCancel, DWORD dwCopyFlags) {
+    std::string redirExist, redirNew;
+    LPCSTR existPath = lpExistingFileName;
+    LPCSTR newPath = lpNewFileName;
+    if (CheckAndRedirectA(lpExistingFileName, redirExist)) existPath = redirExist.c_str();
+    if (CheckAndRedirectA(lpNewFileName, redirNew)) {
+        EnsureDir(Parent(FromUtf8(redirNew)));
+        newPath = redirNew.c_str();
+    }
+    return TrueCopyFileExA(existPath, newPath, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+}
+
+static BOOL (WINAPI* TrueSetFileAttributesW)(LPCWSTR, DWORD) = nullptr;
+static BOOL WINAPI HookSetFileAttributesW(LPCWSTR lpFileName, DWORD dwFileAttributes) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        return TrueSetFileAttributesW(redir.c_str(), dwFileAttributes);
+    }
+    return TrueSetFileAttributesW(lpFileName, dwFileAttributes);
+}
+
+static BOOL (WINAPI* TrueSetFileAttributesA)(LPCSTR, DWORD) = nullptr;
+static BOOL WINAPI HookSetFileAttributesA(LPCSTR lpFileName, DWORD dwFileAttributes) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        return TrueSetFileAttributesA(redir.c_str(), dwFileAttributes);
+    }
+    return TrueSetFileAttributesA(lpFileName, dwFileAttributes);
+}
+
+static void HookExport(const char* name, void* hookFn, void** trueFn) {
+    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+    HMODULE hKBase = GetModuleHandleW(L"kernelbase.dll");
+    void* pK32 = hK32 ? (void*)GetProcAddress(hK32, name) : nullptr;
+    void* pKBase = hKBase ? (void*)GetProcAddress(hKBase, name) : nullptr;
+
+    void* chosen = pKBase ? pKBase : pK32;
+    if (chosen) {
+        MH_CreateHook(chosen, hookFn, trueFn);
+        MH_EnableHook(chosen);
+    }
+    if (pK32 && pKBase && pK32 != pKBase) {
+        void* dummy = nullptr;
+        MH_CreateHook(pK32, hookFn, &dummy);
+        MH_EnableHook(pK32);
+    }
+}
+
+void InstallFileSystemHooks() {
+    if (g_hooksInstalled) return;
+    MH_Initialize();
+
+#define HOOK_API(fn) HookExport(#fn, (void*)Hook##fn, (void**)&True##fn)
+    HOOK_API(CreateFileW);
+    HOOK_API(CreateFileA);
+    HOOK_API(FindFirstFileW);
+    HOOK_API(FindFirstFileA);
+    HOOK_API(FindFirstFileExW);
+    HOOK_API(FindFirstFileExA);
+    HOOK_API(GetFileAttributesW);
+    HOOK_API(GetFileAttributesA);
+    HOOK_API(GetFileAttributesExW);
+    HOOK_API(GetFileAttributesExA);
+    HOOK_API(CreateDirectoryW);
+    HOOK_API(CreateDirectoryA);
+    HOOK_API(RemoveDirectoryW);
+    HOOK_API(RemoveDirectoryA);
+    HOOK_API(DeleteFileW);
+    HOOK_API(DeleteFileA);
+    HOOK_API(MoveFileExW);
+    HOOK_API(MoveFileExA);
+    HOOK_API(MoveFileW);
+    HOOK_API(MoveFileA);
+    HOOK_API(CopyFileW);
+    HOOK_API(CopyFileA);
+    HOOK_API(CopyFileExW);
+    HOOK_API(CopyFileExA);
+    HOOK_API(SetFileAttributesW);
+    HOOK_API(SetFileAttributesA);
+#undef HOOK_API
+
+    g_hooksInstalled = true;
+    ReFixLog("[Saves] Multi-instance filesystem redirection hooks installed successfully");
+}
+
+} // namespace
+
+void EnableMultiInstanceRedirection(const std::vector<Location>& locations, const Profile& active) {
+    {
+        std::lock_guard<std::mutex> lock(g_redirectMutex);
+        g_redirectRules.clear();
+        for (const auto& loc : locations) {
+            std::wstring stash = StashDir(active.id, loc.label);
+            EnsureDir(stash);
+
+            if (active.nativeSaves) {
+                std::wstring pcStash = StashDir(kPcOwner, loc.label);
+                if (!HasEntries(stash, {}) && HasEntries(pcStash, {})) {
+                    CopyTree(pcStash, stash);
+                    ReFixLog("[Saves] Profile %s inherited original saves in multi-instance stash", ToUtf8(active.id).c_str());
+                }
+            }
+
+            SaveRedirectRule rule;
+            rule.livePrefix = NormalizePath(loc.live.c_str());
+            rule.stashPrefix = stash;
+            g_redirectRules.push_back(rule);
+            ReFixLog("[Saves] Multi-instance redirect: '%s' -> '%s'",
+                     ToUtf8(rule.livePrefix).c_str(), ToUtf8(rule.stashPrefix).c_str());
+        }
+    }
+    InstallFileSystemHooks();
+}
+
 void SwitchTo(const Profile& active, const std::vector<Profile>& all) {
     const std::vector<Location> locations = DetectLocations();
     if (locations.empty()) return;
     if (OtherInstanceRunning()) {
-        ReFixLog("[Saves] Another instance of this game is running: save folders left as they are");
+        ReFixLog("[Saves] Another instance of this game is running: enabling filesystem redirection for profile %s",
+                 ToUtf8(active.id).c_str());
+        EnableMultiInstanceRedirection(locations, active);
         return;
     }
     for (const Location& loc : locations) {
@@ -448,12 +965,24 @@ void SwitchTo(const Profile& active, const std::vector<Profile>& all) {
 
 std::wstring StashOf(const std::wstring& profileId, const std::wstring& label) { return StashDir(profileId, label); }
 
-// Folder of a label recorded before [Paths] existed: UE_<Project>, Unity_<Company>_<Product>.
+// Folder of a label recorded before [Paths] existed: UE_<Project>, Unity_<Company>_<Product>, Unity_Roaming_<Product>_Saves.
 static std::wstring DerivePath(const std::wstring& label) {
     wchar_t buf[MAX_PATH] = {};
     if (label.rfind(L"UE_", 0) == 0) {
         if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH)) return {};
         return std::wstring(buf) + L"\\" + label.substr(3) + L"\\Saved\\SaveGames";
+    }
+    if (label.rfind(L"Unity_Roaming_", 0) == 0 && GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH)) {
+        std::wstring rest = label.substr(14);
+        if (rest.size() > 6 && rest.substr(rest.size() - 6) == L"_Saves") {
+            rest = rest.substr(0, rest.size() - 6);
+            return std::wstring(buf) + L"\\" + rest + L"\\Saves";
+        }
+        if (rest.size() > 11 && rest.substr(rest.size() - 11) == L"_SavesLocal") {
+            rest = rest.substr(0, rest.size() - 11);
+            return std::wstring(buf) + L"\\" + rest + L"\\SavesLocal";
+        }
+        return std::wstring(buf) + L"\\" + rest + L"\\Saves";
     }
     if (label.rfind(L"Unity_", 0) == 0 && GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH)) {
         const std::wstring rest = label.substr(6), base = std::wstring(buf) + L"\\AppData\\LocalLow\\";
