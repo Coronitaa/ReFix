@@ -304,12 +304,7 @@ void App::PollInvites() {
             continue;
         }
         if (from && from->ip != 0) {
-            SteamP2PHook::RegisterPeer(inv.from, from->ip, from->port);
-            char ipStr[32];
-            snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
-                     (from->ip >> 24) & 0xFF, (from->ip >> 16) & 0xFF,
-                     (from->ip >> 8) & 0xFF, from->ip & 0xFF);
-            UnrealSteamEmu::SimulatePeerEndpoint(inv.from, ipStr, from->port);
+            SteamP2PHook::RegisterOverlayEndpoint(inv.from, from->ip, from->port);
         }
         if (inv.lobbyId) {
             UnrealSteamEmu::PreseedInviteLobby(inv.lobbyId, inv.from, inv.connect);
@@ -415,12 +410,7 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
 
 void App::Join(const net::RemotePlayer& p) {
     if (p.ip != 0) {
-        SteamP2PHook::RegisterPeer(p.steamId, p.ip, p.port);
-        char ipStr[32];
-        snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
-                 (p.ip >> 24) & 0xFF, (p.ip >> 16) & 0xFF,
-                 (p.ip >> 8) & 0xFF, p.ip & 0xFF);
-        UnrealSteamEmu::SimulatePeerEndpoint(p.steamId, ipStr, p.port);
+        SteamP2PHook::RegisterOverlayEndpoint(p.steamId, p.ip, p.port);
     }
     if (p.lobbyId != 0) {
         UnrealSteamEmu::PreseedInviteLobby(p.lobbyId, p.steamId, p.connect);

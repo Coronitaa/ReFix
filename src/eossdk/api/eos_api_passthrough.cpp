@@ -44,6 +44,8 @@ static EOS_Connect_CopyProductUserInfo_Fn g_orig_EOS_Connect_CopyProductUserInfo
 static EOS_Connect_ExternalAccountInfo_Release_Fn g_orig_EOS_Connect_ExternalAccountInfo_Release = nullptr;
 static EOS_Connect_VerifyIdToken_Fn g_orig_EOS_Connect_VerifyIdToken = nullptr;
 static EOS_ProductUserId g_localProductUserId = nullptr;
+static std::mutex g_puidMutex;
+static std::map<EOS_ProductUserId, std::string> g_puidToSteamId;
 
 std::string DllDirectory() {
     char buf[MAX_PATH] = { 0 };
@@ -112,17 +114,45 @@ std::string GetPlayerDisplayName() {
 }
 
 std::string GetPlayerSteamId() {
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (hSteam) {
+        typedef uint64_t (*fn_GetSteamID)();
+        fn_GetSteamID pfn = (fn_GetSteamID)GetProcAddress(hSteam, "ReFix_GetLocalSteamID");
+        if (pfn) {
+            uint64_t sid = pfn();
+            if (sid != 0) return std::to_string(sid);
+        }
+    }
+
     uint64_t id = SteamBackend::Get().LocalSteamId();
     if (id != 0) return std::to_string(id);
-
-    std::string sid = Config::Get().GetString("User", "SteamID", "");
-    if (!sid.empty()) return sid;
 
     char envBuf[128] = { 0 };
     if (GetEnvironmentVariableA("REFIX_STEAM_USER_ID", envBuf, sizeof(envBuf)) > 0 && envBuf[0]) {
         return envBuf;
     }
-    return "76561197960287930";
+    if (GetEnvironmentVariableA("REFIX_ACTIVE_PROFILE", envBuf, sizeof(envBuf)) > 0 && envBuf[0]) {
+        uint64_t profId = _strtoui64(envBuf, nullptr, 10);
+        if (profId > 70000000000000000ULL) {
+            return std::to_string(profId);
+        }
+    }
+
+    std::string sid = Config::Get().GetString("User", "SteamID", "");
+    if (!sid.empty() && sid != "76561197960287930" && sid != "76561198000000001") return sid;
+
+    int slot = 0;
+    char slotBuf[16] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_MULTI_SLOT", slotBuf, sizeof(slotBuf)) > 0) {
+        slot = atoi(slotBuf);
+    } else if (hSteam) {
+        typedef int (*fn_GetSlot)();
+        fn_GetSlot pfnSlot = (fn_GetSlot)GetProcAddress(hSteam, "ReFix_GetInstanceSlot");
+        if (pfnSlot) slot = pfnSlot();
+    }
+
+    uint64_t fallback = 0x0110000100000000ULL | (0x10000ULL + (uint64_t)(slot * 1000 + (GetCurrentProcessId() & 0x3FF)));
+    return std::to_string(fallback);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +271,10 @@ static void EOS_CALL OnDeviceIdLoginCallback(const EOS_Connect_LoginCallbackInfo
     if (res == (int)EOS_EResult::EOS_Success) {
         RFLOG(Auth, "[Passthrough] EOS_Connect_Login succeeded via DeviceId! LocalUserId = %p", Data->LocalUserId);
         g_localProductUserId = Data->LocalUserId;
+        {
+            std::lock_guard<std::mutex> lg(g_puidMutex);
+            g_puidToSteamId[g_localProductUserId] = GetPlayerSteamId();
+        }
         if (ctx->OriginalCompletionDelegate) {
             EOS_Connect_LoginCallbackInfo cbInfo = *Data;
             cbInfo.ClientData = ctx->OriginalClientData;
@@ -286,6 +320,10 @@ static void EOS_CALL OnCreateUserCallback(const EOS_Connect_CreateUserCallbackIn
     if (res == (int)EOS_EResult::EOS_Success) {
         RFLOG(Auth, "[Passthrough] User created successfully! Minted LocalUserId = %p", Data->LocalUserId);
         g_localProductUserId = Data->LocalUserId;
+        {
+            std::lock_guard<std::mutex> lg(g_puidMutex);
+            g_puidToSteamId[g_localProductUserId] = GetPlayerSteamId();
+        }
         if (ctx->OriginalCompletionDelegate) {
             EOS_Connect_LoginCallbackInfo loginInfo{};
             loginInfo.ResultCode = EOS_EResult::EOS_Success;
@@ -488,6 +526,11 @@ static void EOS_CALL OnVerifyIdTokenCallback(const EOS_Connect_VerifyIdTokenCall
     EOS_Connect_VerifyIdTokenCallbackInfo info = *Data;
     info.ClientData = ctx->OriginalClientData;
 
+    if (info.ProductUserId && !ctx->SteamId.empty()) {
+        std::lock_guard<std::mutex> lg(g_puidMutex);
+        g_puidToSteamId[info.ProductUserId] = ctx->SteamId;
+    }
+
     // Check if account info is missing or operation failed.
     // When DeviceIdAuth is used (or if genuine EOS SDK returned bIsAccountInfoPresent == EOS_FALSE or ResultCode != Success),
     // synthesize the external Steam account info so that Unity / EOS games (e.g. 7 Days to Die) can complete platform user mapping.
@@ -526,7 +569,18 @@ EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_VerifyIdToken(
     ctx->OriginalCompletionDelegate = CompletionDelegate;
     ctx->TargetPuid = (Options && Options->IdToken) ? Options->IdToken->ProductUserId : g_localProductUserId;
     if (!ctx->TargetPuid) ctx->TargetPuid = g_localProductUserId;
-    ctx->SteamId = GetPlayerSteamId();
+
+    std::string sid = GetPlayerSteamId();
+    if (ctx->TargetPuid) {
+        std::lock_guard<std::mutex> lg(g_puidMutex);
+        auto it = g_puidToSteamId.find(ctx->TargetPuid);
+        if (it != g_puidToSteamId.end()) {
+            sid = it->second;
+        } else {
+            g_puidToSteamId[ctx->TargetPuid] = sid;
+        }
+    }
+    ctx->SteamId = sid;
     ctx->Platform = "STEAM";
     ctx->DeviceType = "PC";
 

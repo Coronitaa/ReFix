@@ -6796,9 +6796,21 @@ REFIX_LEGACY_ACCESSOR(SteamGameServerApps, "STEAMAPPS_INTERFACE_VERSION", "STEAM
 REFIX_LEGACY_ACCESSOR(SteamGameServerUGC, "STEAMUGC_INTERFACE_VERSION", "STEAMUGC_INTERFACE_VERSION010", true)
 #undef REFIX_LEGACY_ACCESSOR
 
+extern "C" __declspec(dllexport) uint64_t ReFix_GetLocalSteamID() {
+    return UnrealSteamEmu::GetLocalSteamID();
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_GetGameServerSteamID() {
+    return UnrealSteamEmu::GameServer_GetSteamID();
+}
+
+extern "C" __declspec(dllexport) int ReFix_GetInstanceSlot() {
+    return UnrealSteamEmu::GetInstanceSlot();
+}
+
 extern "C" __declspec(dllexport) uint64_t SteamGameServer_GetSteamID() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        return UnrealSteamEmu::GetLocalSteamID();
+        return UnrealSteamEmu::GameServer_GetSteamID();
     }
     if (EnsureOriginal()) {
         typedef uint64_t (*fn_t)();

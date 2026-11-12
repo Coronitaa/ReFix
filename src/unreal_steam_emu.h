@@ -20,10 +20,12 @@ namespace UnrealSteamEmu {
     bool IsInitialized();
     void FlushUserStats();
     bool RequestCurrentStats();
+    int GetInstanceSlot();
 
     // GameServer Lifecycle
     bool GameServer_Init(uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort, int eServerMode, const char* pchVersionString);
     bool GameServer_InitSafe();
+    uint64_t GameServer_GetSteamID();
 
     // Callbacks & CallResults
     void RunCallbacks();

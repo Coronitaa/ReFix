@@ -222,6 +222,7 @@ void RestoreLaunchEnvironment() {
 namespace ReFixOverlay {
 
 void ArmEarly() {
+    saves::InitEarly();
     CaptureLaunchEnvironment();
     LoadConfig(FindIni());
     // Independent of the ReFix overlay: Enabled=false + BlockSteamOverlay=true means no overlay at all,
@@ -276,6 +277,7 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     const bool otherInstance = saves::OtherInstanceRunning();
     std::optional<Profile> chosen = PickProfile(mine, otherInstance, steamProfile);
     if (!chosen) {
+        saves::SetGateActive(true);
         if (otherInstance) {
             ReFixLog("[Overlay] Another instance is running; showing profile picker");
             chosen = App::Get().RunDialog(DialogKind::Picker);
@@ -287,6 +289,12 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
                 all = profiles::LoadAll();
             } else {
                 ReFixLog("[Overlay] First run for this game: booting directly with machine identity (Shift+Tab to configure profile)");
+                Profile machineGuest;
+                machineGuest.guest = true;
+                machineGuest.id = L"Guest_Slot" + std::to_wstring(UnrealSteamEmu::GetInstanceSlot());
+                machineGuest.name = L"Guest";
+                if (g_cfg.isolateSaves) saves::SwitchTo(machineGuest, profiles::ForGame(all, game));
+                saves::SignalProfileGate();
                 return false;
             }
         } else {
@@ -296,17 +304,29 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
         }
     }
     if (!chosen) {
-        ReFixLog("[Overlay] Playing without a profile (machine identity)");
+        ReFixLog("[Overlay] Playing without a profile (guest slot identity)");
+        Profile guest;
+        guest.guest = true;
+        guest.id = L"Guest_Slot" + std::to_wstring(UnrealSteamEmu::GetInstanceSlot());
+        guest.name = L"Guest";
+        if (g_cfg.isolateSaves) saves::SwitchTo(guest, profiles::ForGame(all, game));
+        saves::SignalProfileGate();
         return false;
     }
     Profile p = *chosen;
-    if (!p.guest) {
+    if (p.guest) {
+        p.id = L"Guest_Slot" + std::to_wstring(UnrealSteamEmu::GetInstanceSlot());
+        if (p.name.empty()) p.name = L"Guest";
+        if (g_cfg.isolateSaves) saves::SwitchTo(p, profiles::ForGame(all, game));
+        saves::SignalProfileGate();
+    } else {
         profiles::Touch(p);
         profiles::AddGame(p, game, profiles::DefaultGameName(), false);
         profiles::Save(p);
         profiles::SetLastProfileId(p.id, game);
         sync::Begin(p);   // a newer package from another PC lands before the save folders switch
         if (g_cfg.isolateSaves) saves::SwitchTo(p, profiles::ForGame(all, game));
+        saves::SignalProfileGate();
     }
     {
         std::lock_guard<std::mutex> lock(g_mu);

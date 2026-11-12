@@ -207,6 +207,13 @@ namespace UnrealSteamEmu {
         return 0;
     }
 
+    int GetInstanceSlot() {
+        if (g_hSlotMutex == NULL) {
+            AcquireInstanceSlot(g_appID);
+        }
+        return g_instanceSlot;
+    }
+
     // Helper: generate stable deterministic SteamID (aligned with deploy_helper.ps1 MachineGuid MD5)
     static uint64_t GenerateDeterministicSteamID() {
         char guidBuf[128] = { 0 };
@@ -898,8 +905,22 @@ namespace UnrealSteamEmu {
         }
         item.triggerTime = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(delaySeconds * 1000.0));
         item.isGameServer = false;
+        if (delaySeconds <= 0.0) {
+            item.manualQueued = true;
+            g_manualCallbackQueue.push_back(item);
+        }
 
         g_callbackQueue.push_back(item);
+
+        // Cross-pipe dispatch for callbacks relevant to both client and game server (1202: P2PSessionRequest, 201: GSClientApprove, 143: GSClientDeny)
+        if (g_bGameServerInitialized && (iCallback == 1202 || iCallback == 201 || iCallback == 143)) {
+            QueuedCallbackItem sItem = item;
+            sItem.isGameServer = true;
+            if (delaySeconds <= 0.0) {
+                g_manualServerCallbackQueue.push_back(sItem);
+            }
+            g_callbackQueue.push_back(sItem);
+        }
     }
 
     void PostGameServerCallback(int iCallback, const void* pData, size_t dataSize, double delaySeconds) {
@@ -909,7 +930,21 @@ namespace UnrealSteamEmu {
         if (pData && dataSize > 0) item.data.assign((const uint8_t*)pData, (const uint8_t*)pData + dataSize);
         item.triggerTime = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(delaySeconds * 1000.0));
         item.isGameServer = true;
+        if (delaySeconds <= 0.0) {
+            item.manualQueued = true;
+            g_manualServerCallbackQueue.push_back(item);
+        }
         g_callbackQueue.push_back(item);
+
+        // Cross-pipe dispatch to client pipe
+        if (iCallback == 1202 || iCallback == 201 || iCallback == 143) {
+            QueuedCallbackItem cItem = item;
+            cItem.isGameServer = false;
+            if (delaySeconds <= 0.0) {
+                g_manualCallbackQueue.push_back(cItem);
+            }
+            g_callbackQueue.push_back(cItem);
+        }
     }
 
     static void DrainPendingSearches(bool forceAll = false);
@@ -4316,10 +4351,12 @@ namespace UnrealSteamEmu {
 
     // A listen server started here: publish "refix:server" = "ip:port" so LAN players can find and join it.
     static void PublishLocalServer(uint16_t port) {
+        uint16_t effectivePort = SteamP2PHook::GetRemappedPort(port);
+        if (!effectivePort) effectivePort = port;
         uint32_t ip = refix::lan::ResolveLocalIpv4();
         char addr[32];
         snprintf(addr, sizeof(addr), "%u.%u.%u.%u:%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
-                 port ? port : 27015);
+                 effectivePort ? effectivePort : 27015);
         g_steamFriendsInstance.SetRichPresence("refix:server", addr);
     }
 
@@ -4654,6 +4691,12 @@ namespace UnrealSteamEmu {
             // (HostAddress, SERVER_IP...), so GRAIN ROT's public server list stayed empty.
             refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "__server_ip", refix::lan::AttributeValue(localIpStr));
             refix::lan::ILanCore::Get().Lobby().SetJoinable(coreLobbyId, true);
+            if (g_bGameServerInitialized) {
+                uint64_t gsSteamId = GameServer_GetSteamID();
+                if (gsSteamId != 0) {
+                    refix::lan::ILanCore::Get().Lobby().SetLobbyData(coreLobbyId, "__refix_gs_steamid", refix::lan::AttributeValue(std::to_string(gsSteamId)));
+                }
+            }
 
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -4887,70 +4930,18 @@ namespace UnrealSteamEmu {
         virtual const char *GetLobbyData(CSteamID steamIDLobby, const char *pchKey) override {
             if (!pchKey) return "";
             const char* value = GetLobbyDataExact(steamIDLobby, pchKey);
-            if (!*value) {
-                // Steam lobby keys are case-insensitive: Left 4 Dead stores "Game:mode" and its browser
-                // reads "game:mode". A case-sensitive miss made every LAN lobby look empty and hidden.
-                const auto view = LobbyDataView(steamIDLobby.ConvertToUint64());
-                for (const auto& [k, v] : view) {
-                    if (_stricmp(k.c_str(), pchKey) == 0) {
-                        thread_local char buf[16384];
-                        strncpy_s(buf, sizeof(buf), v.c_str(), _TRUNCATE);
-                        value = buf;
-                        break;
-                    }
-                }
-            }
             if (TraceLobbyReads())
                 ReFixLog("[LobbyRead] GetLobbyData(%llu, '%s') -> '%s'", steamIDLobby.ConvertToUint64(), pchKey, value);
             return value;
         }
 
         const char *GetLobbyDataExact(CSteamID steamIDLobby, const char *pchKey) {
-            uint64_t lID = steamIDLobby.ConvertToUint64();
-            std::string coreLobbyId = GetCoreLobbyId(lID);
-            if (!coreLobbyId.empty()) {
-                auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
-                if (rec) {
-                    if (_stricmp(pchKey, "IP") == 0 || _stricmp(pchKey, "ServerIP") == 0 || _stricmp(pchKey, "ConnectIP") == 0) {
-                        if (rec->ownerPeerId != refix::lan::ILanCore::Get().Identity().GetLocalPeerId()) {
-                            std::string endpointIp;
-                            if (rec->hostEndpoint.IsValid()) endpointIp = rec->hostEndpoint.ToIpString();
-                            auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(rec->ownerPeerId);
-                            if (endpointIp.empty() && pInfo.has_value() && pInfo->endpoint.IsValid()) {
-                                endpointIp = pInfo->endpoint.ToIpString();
-                            }
-                            bool isSameMachine = (rec->hostEndpoint.ipv4 == 0x7F000001);
-                            if (pInfo.has_value()) {
-                                if (pInfo->endpoint.ipv4 == 0x7F000001 ||
-                                    pInfo->machineId == refix::lan::ILanCore::Get().Identity().GetMachineId() ||
-                                    (refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint().ipv4 != 0 &&
-                                     pInfo->endpoint.ipv4 == refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint().ipv4)) {
-                                    isSameMachine = true;
-                                }
-                            }
-                            if (isSameMachine) endpointIp = "127.0.0.1";
-                            if (!endpointIp.empty()) {
-                                thread_local char buf[128];
-                                strncpy_s(buf, sizeof(buf), endpointIp.c_str(), _TRUNCATE);
-                                return buf;
-                            }
-                        }
-                    }
-                    auto it = rec->attributes.find(pchKey);
-                    if (it != rec->attributes.end()) {
-                        thread_local char buf[16384];
-                        strncpy_s(buf, sizeof(buf), it->second.asString.c_str(), _TRUNCATE);
-                        return buf;
-                    }
-                }
-            }
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_lobbies.find(lID);
-            if (it != g_lobbies.end()) {
-                auto dIt = it->second.data.find(pchKey);
-                if (dIt != it->second.data.end()) {
+            if (!pchKey) return "";
+            const auto view = LobbyDataView(steamIDLobby.ConvertToUint64());
+            for (const auto& [k, v] : view) {
+                if (_stricmp(k.c_str(), pchKey) == 0) {
                     thread_local char buf[16384];
-                    strncpy_s(buf, sizeof(buf), dIt->second.c_str(), _TRUNCATE);
+                    strncpy_s(buf, sizeof(buf), v.c_str(), _TRUNCATE);
                     return buf;
                 }
             }
@@ -4960,6 +4951,26 @@ namespace UnrealSteamEmu {
         virtual bool SetLobbyData(CSteamID steamIDLobby, const char *pchKey, const char *pchValue) override {
             if (!pchKey) return false;
             uint64_t lID = steamIDLobby.ConvertToUint64();
+
+            std::string actualValue = pchValue ? pchValue : "";
+            if (pchValue && (_stricmp(pchKey, "Port") == 0 || _stricmp(pchKey, "GamePort") == 0 || _stricmp(pchKey, "ServerPort") == 0)) {
+                uint16_t origPort = (uint16_t)atoi(pchValue);
+                if (origPort != 0) {
+                    uint16_t remapped = SteamP2PHook::GetRemappedPort(origPort);
+                    if (remapped != 0 && remapped != origPort) {
+                        actualValue = std::to_string(remapped);
+                        pchValue = actualValue.c_str();
+                    }
+                }
+            }
+            if (pchValue && _stricmp(pchKey, "SteamID") == 0) {
+                uint64_t gsId = _strtoui64(pchValue, nullptr, 10);
+                if (gsId != 0 && gsId != g_localSteamID) {
+                    SteamP2PHook::RegisterPeerAlias(gsId, g_localSteamID);
+                    SteamP2PHook::RegisterPeerAlias(g_localSteamID, gsId);
+                }
+            }
+
             std::string coreLobbyId = GetCoreLobbyId(lID);
             if (!coreLobbyId.empty()) {
                 if (pchValue) {
@@ -5016,44 +5027,98 @@ namespace UnrealSteamEmu {
         static std::map<std::string, std::string> LobbyDataView(uint64_t lID) {
             std::map<std::string, std::string> view;
             std::string coreLobbyId = GetCoreLobbyId(lID);
+            uint64_t ownerSteamId = 0;
+            std::optional<refix::lan::LobbyRecord> recOpt;
             if (!coreLobbyId.empty()) {
-                auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
-                if (rec) {
-                    for (const auto& [k, v] : rec->attributes) {
+                recOpt = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
+                if (recOpt) {
+                    for (const auto& [k, v] : recOpt->attributes) {
                         if (k.rfind("__", 0) != 0) view[k] = v.asString; // "__" keys are ReFix bookkeeping
                     }
-                    if (rec->ownerPeerId != refix::lan::ILanCore::Get().Identity().GetLocalPeerId()) {
-                        std::string endpointIp;
-                        if (rec->hostEndpoint.IsValid()) endpointIp = rec->hostEndpoint.ToIpString();
-                        auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(rec->ownerPeerId);
-                        if (endpointIp.empty() && pInfo.has_value() && pInfo->endpoint.IsValid()) {
-                            endpointIp = pInfo->endpoint.ToIpString();
-                        }
-                        bool isSameMachine = (rec->hostEndpoint.ipv4 == 0x7F000001);
-                        if (pInfo.has_value()) {
-                            if (pInfo->endpoint.ipv4 == 0x7F000001 ||
-                                pInfo->machineId == refix::lan::ILanCore::Get().Identity().GetMachineId() ||
-                                (refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint().ipv4 != 0 &&
-                                 pInfo->endpoint.ipv4 == refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint().ipv4)) {
-                                isSameMachine = true;
-                            }
-                        }
-                        if (isSameMachine) endpointIp = "127.0.0.1";
-                        if (!endpointIp.empty()) {
-                            for (auto& [k, v] : view) {
-                                if (_stricmp(k.c_str(), "IP") == 0 || _stricmp(k.c_str(), "ServerIP") == 0 || _stricmp(k.c_str(), "ConnectIP") == 0) {
-                                    v = endpointIp;
-                                }
-                            }
-                        }
+                    auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(recOpt->ownerPeerId);
+                    if (pInfo && pInfo->externalId.numericId != 0) {
+                        ownerSteamId = pInfo->externalId.numericId;
                     }
                 }
             }
-            std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
-            auto it = g_lobbies.find(lID);
-            if (it != g_lobbies.end()) {
-                for (const auto& [k, v] : it->second.data) {
-                    if (k.rfind("__", 0) != 0) view[k] = v;
+
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                if (it != g_lobbies.end()) {
+                    if (ownerSteamId == 0) ownerSteamId = it->second.owner;
+                    for (const auto& [k, v] : it->second.data) {
+                        if (k.rfind("__", 0) != 0) view[k] = v;
+                    }
+                }
+            }
+
+            // Post-merge unified generic rewriting and endpoint registration
+            if (ownerSteamId != 0 && ownerSteamId != g_localSteamID) {
+                // 1. Discover GameServer SteamID and bind bidirectional aliases in SteamP2PHook
+                for (const auto& [k, v] : view) {
+                    if (_stricmp(k.c_str(), "SteamID") == 0 || _stricmp(k.c_str(), "GameServerSteamID") == 0) {
+                        uint64_t gsId = _strtoui64(v.c_str(), nullptr, 10);
+                        if (gsId != 0 && gsId != ownerSteamId) {
+                            SteamP2PHook::RegisterPeerAlias(gsId, ownerSteamId);
+                            SteamP2PHook::RegisterPeerAlias(ownerSteamId, gsId);
+                        }
+                    }
+                }
+                if (recOpt) {
+                    auto itGs = recOpt->attributes.find("__refix_gs_steamid");
+                    if (itGs != recOpt->attributes.end()) {
+                        uint64_t gsId = _strtoui64(itGs->second.asString.c_str(), nullptr, 10);
+                        if (gsId != 0 && gsId != ownerSteamId) {
+                            SteamP2PHook::RegisterPeerAlias(gsId, ownerSteamId);
+                            SteamP2PHook::RegisterPeerAlias(ownerSteamId, gsId);
+                        }
+                    }
+                }
+
+                // 2. Determine target IP: loopback (same machine) vs LAN vs P2P
+                bool isSameMachine = SteamP2PHook::IsLocalMachine(ownerSteamId);
+                std::string endpointIp;
+                if (recOpt) {
+                    if (recOpt->hostEndpoint.IsValid()) endpointIp = recOpt->hostEndpoint.ToIpString();
+                    auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(recOpt->ownerPeerId);
+                    if (endpointIp.empty() && pInfo.has_value() && pInfo->endpoint.IsValid()) {
+                        endpointIp = pInfo->endpoint.ToIpString();
+                    }
+                    if (recOpt->hostEndpoint.ipv4 == 0x7F000001) isSameMachine = true;
+                    if (pInfo.has_value()) {
+                        if (pInfo->endpoint.ipv4 == 0x7F000001 ||
+                            pInfo->machineId == refix::lan::ILanCore::Get().Identity().GetMachineId() ||
+                            (refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint().ipv4 != 0 &&
+                             pInfo->endpoint.ipv4 == refix::lan::ILanCore::Get().Transport().GetLocalDataEndpoint().ipv4)) {
+                            isSameMachine = true;
+                        }
+                    }
+                }
+                if (isSameMachine) {
+                    endpointIp = "127.0.0.1";
+                }
+
+                // 3. Rewrite IP and Port in view
+                for (auto& [k, v] : view) {
+                    if (_stricmp(k.c_str(), "IP") == 0 || _stricmp(k.c_str(), "ServerIP") == 0 ||
+                        _stricmp(k.c_str(), "ConnectIP") == 0 || _stricmp(k.c_str(), "HostIP") == 0) {
+                        if (!v.empty()) {
+                            SteamP2PHook::RegisterWanEndpoint(ownerSteamId, v.c_str(), 0);
+                        }
+                        if (!endpointIp.empty()) {
+                            v = endpointIp;
+                        }
+                    } else if (_stricmp(k.c_str(), "Port") == 0 || _stricmp(k.c_str(), "GamePort") == 0 ||
+                               _stricmp(k.c_str(), "ServerPort") == 0) {
+                        uint16_t origPort = (uint16_t)atoi(v.c_str());
+                        if (origPort != 0) {
+                            uint16_t remapped = SteamP2PHook::GetRemappedPort(origPort);
+                            if (remapped != 0 && remapped != origPort) {
+                                v = std::to_string(remapped);
+                            }
+                        }
+                    }
                 }
             }
             return view;
@@ -5092,7 +5157,26 @@ namespace UnrealSteamEmu {
                     auto dIt = uIt->second.find(pchKey);
                     if (dIt != uIt->second.end()) {
                         thread_local char buf[16384];
-                        strncpy_s(buf, sizeof(buf), dIt->second.c_str(), _TRUNCATE);
+                        std::string val = dIt->second;
+                        if (steamIDUser.ConvertToUint64() != g_localSteamID) {
+                            if (_stricmp(pchKey, "IP") == 0 || _stricmp(pchKey, "ServerIP") == 0 ||
+                                _stricmp(pchKey, "ConnectIP") == 0 || _stricmp(pchKey, "HostIP") == 0) {
+                                if (!val.empty()) SteamP2PHook::RegisterWanEndpoint(steamIDUser.ConvertToUint64(), val.c_str(), 0);
+                                if (SteamP2PHook::IsLocalMachine(steamIDUser.ConvertToUint64())) {
+                                    val = "127.0.0.1";
+                                }
+                            } else if (_stricmp(pchKey, "Port") == 0 || _stricmp(pchKey, "GamePort") == 0 ||
+                                       _stricmp(pchKey, "ServerPort") == 0) {
+                                uint16_t origPort = (uint16_t)atoi(val.c_str());
+                                if (origPort != 0) {
+                                    uint16_t remapped = SteamP2PHook::GetRemappedPort(origPort);
+                                    if (remapped != 0 && remapped != origPort) {
+                                        val = std::to_string(remapped);
+                                    }
+                                }
+                            }
+                        }
+                        strncpy_s(buf, sizeof(buf), val.c_str(), _TRUNCATE);
                         return buf;
                     }
                 }
@@ -7388,7 +7472,14 @@ namespace UnrealSteamEmu {
         virtual bool InitGameServer(uint32 unIP, uint16 usGamePort, uint16 usQueryPort, uint32 unFlags, AppId_t nGameAppId, const char *pchVersion) override {
             ReFixLog("[UnrealSteam] InitGameServer: port=%u, queryPort=%u, appID=%u", usGamePort, usQueryPort, nGameAppId);
             g_bGameServerInitialized = true;
-            PublishLocalServer(usGamePort);
+            uint16_t effectivePort = SteamP2PHook::GetRemappedPort(usGamePort);
+            if (!effectivePort) effectivePort = usGamePort;
+            uint64_t gsSteamId = this->GetSteamID().ConvertToUint64();
+            SteamP2PHook::RegisterPeerAlias(gsSteamId, g_localSteamID);
+            SteamP2PHook::RegisterPeerAlias(g_localSteamID, gsSteamId);
+            SteamP2PHook::RegisterGameServerPort(g_localSteamID, effectivePort);
+            SteamP2PHook::RegisterGameServerPort(gsSteamId, effectivePort);
+            PublishLocalServer(effectivePort);
             return true;
         }
         virtual void SetProduct(const char *pszProduct) override {}
@@ -7444,12 +7535,7 @@ namespace UnrealSteamEmu {
             resp.m_SteamID = clientID;
             resp.m_OwnerSteamID = clientID;
 
-            QueuedCallbackItem item;
-            item.iCallback = GSClientApprove_t::k_iCallback;
-            item.data.assign((uint8_t*)&resp, (uint8_t*)&resp + sizeof(resp));
-            item.isGameServer = true;
-            item.triggerTime = std::chrono::steady_clock::now();
-            g_callbackQueue.push_back(item);
+            PostGameServerCallback(GSClientApprove_t::k_iCallback, &resp, sizeof(resp), 0.0);
 
             ReFixLog("[UnrealSteam] SendUserConnectAndAuthenticate: Approved client %llu", clientID.ConvertToUint64());
             refix::gc::OnGameServerClientAuth(clientID.ConvertToUint64(), 1);
@@ -9634,12 +9720,23 @@ namespace UnrealSteamEmu {
                  unIP, usGamePort, usQueryPort, eServerMode, pchVersionString ? pchVersionString : "null");
         bool ok = Initialize();
         g_bGameServerInitialized = true;
-        PublishLocalServer(usGamePort);
+        uint16_t effectivePort = SteamP2PHook::GetRemappedPort(usGamePort);
+        if (!effectivePort) effectivePort = usGamePort;
+        uint64_t gsSteamId = g_steamGameServerInstance.GetSteamID().ConvertToUint64();
+        SteamP2PHook::RegisterPeerAlias(gsSteamId, g_localSteamID);
+        SteamP2PHook::RegisterPeerAlias(g_localSteamID, gsSteamId);
+        SteamP2PHook::RegisterGameServerPort(g_localSteamID, effectivePort);
+        SteamP2PHook::RegisterGameServerPort(gsSteamId, effectivePort);
+        PublishLocalServer(effectivePort);
         return ok;
     }
 
     bool GameServer_InitSafe() {
         return Initialize();
+    }
+
+    uint64_t GameServer_GetSteamID() {
+        return g_steamGameServerInstance.GetSteamID().ConvertToUint64();
     }
 
     uint32_t GetAuthSessionTicket(void* pTicket, int cbMaxTicket, uint32_t* pcbTicket, const void* pSteamNetworkingIdentity) {

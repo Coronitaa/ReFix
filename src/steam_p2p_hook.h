@@ -30,6 +30,22 @@ namespace SteamP2PHook {
     // Call whenever a new lobby member is detected (LobbyDataUpdate, LobbyChatUpdate).
     void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port = 0);
 
+    // Explicit endpoint registration to avoid overwriting data endpoints with presence ports
+    void RegisterLanDataEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port);
+    void RegisterGameServerPort(uint64_t steamID, uint16_t port);
+    void RegisterOverlayEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port);
+    void RegisterWanEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port);
+    void RegisterWanEndpoint(uint64_t steamID, const char* ipStr, uint16_t port);
+
+    // Bidirectional peer alias registration (e.g. GameServerSteamID <-> HostUserSteamID)
+    void RegisterPeerAlias(uint64_t aliasSteamID, uint64_t realSteamID);
+    uint64_t ResolvePeerAlias(uint64_t steamID);
+
+    // Query physical network interface and local peer classification
+    uint32_t GetLocalLanIp();
+    bool IsLocalMachine(uint64_t steamID);
+    uint16_t GetRemappedPort(uint16_t originalPort);
+
     // Remove a peer mapping (e.g. when they leave the lobby).
     void UnregisterPeer(uint64_t steamID);
 

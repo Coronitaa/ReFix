@@ -9,6 +9,9 @@ EXPORTS
     ReFix_GetValveDllLoadCount
     ReFix_ResetEnsureOriginalCallCount
     ReFix_GetLanCore
+    ReFix_GetLocalSteamID
+    ReFix_GetGameServerSteamID
+    ReFix_GetInstanceSlot
     GetHSteamPipe
     GetHSteamUser
     SteamAPI_GetHSteamPipe

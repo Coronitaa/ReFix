@@ -21,6 +21,7 @@ using namespace refix::overlay;
 using namespace refix::overlay::saves;
 
 int main() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
     printf("[*] Running Multi-Instance Save Redirection Unit Test...\n");
 
     // 1. Detect locations

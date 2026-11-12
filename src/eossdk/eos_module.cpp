@@ -18,6 +18,7 @@
 #include "core/eos_dispatch.h"
 #include "eos_module.h"
 #include "api/eos_api_passthrough.h"
+#include "core/eos_registry_redirect.h"
 
 HMODULE g_hDllModule = nullptr;
 
@@ -200,6 +201,8 @@ void Registrar::Bind(const char* name, void* fn) {
 void InitialiseModule() {
     if (g_initialised) return;
     g_initialised = true;
+
+    InstallRegistryRedirectHooks();
 
     BuildStubs();
     for (int i = 0; i < kExportCount; i++)

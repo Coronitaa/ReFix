@@ -22,10 +22,36 @@ namespace {
 constexpr wchar_t kPcOwner[] = L"_pc";
 
 std::wstring KnownFolder(REFKNOWNFOLDERID id) {
+    // Fast path: check environment variables first to avoid Shell/COM RPC hangs
+    if (IsEqualGUID(id, FOLDERID_RoamingAppData)) {
+        wchar_t buf[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH) > 0) return buf;
+    } else if (IsEqualGUID(id, FOLDERID_LocalAppData)) {
+        wchar_t buf[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH) > 0) return buf;
+    } else if (IsEqualGUID(id, FOLDERID_LocalAppDataLow)) {
+        wchar_t buf[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH) > 0) {
+            return std::wstring(buf) + L"\\AppData\\LocalLow";
+        }
+    } else if (IsEqualGUID(id, FOLDERID_SavedGames)) {
+        wchar_t buf[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH) > 0) {
+            return std::wstring(buf) + L"\\Saved Games";
+        }
+    } else if (IsEqualGUID(id, FOLDERID_Documents)) {
+        wchar_t buf[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH) > 0) {
+            return std::wstring(buf) + L"\\Documents";
+        }
+    }
+
     PWSTR p = nullptr;
     std::wstring out;
-    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &p)) && p) out = p;
+    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) out = p;
     if (p) CoTaskMemFree(p);
+    if (hrCo == S_OK) CoUninitialize();
     return out;
 }
 
@@ -229,7 +255,7 @@ bool DetectUnreal(Location& out) {
     const std::wstring local = KnownFolder(FOLDERID_LocalAppData);
     if (local.empty()) return false;
     out.label = L"UE_" + Sanitize(project);
-    out.live = local + L"\\" + project + L"\\Saved\\SaveGames";
+    out.live = local + L"\\" + project;
     return true;
 }
 
@@ -286,7 +312,7 @@ bool DetectUnity(Location& out) {
     return true;
 }
 
-// Many Unity games (such as 7 Days to Die, RimWorld, etc.) store world saves in %APPDATA%\<Product>\Saves.
+// Intercepts entire application root under %APPDATA%\<Product> or %APPDATA%\<Company>\<Product>
 bool DetectUnityRoaming(Location& out) {
     std::string company, product;
     if (!FindUnityAppInfo(company, product)) return false;
@@ -304,67 +330,76 @@ bool DetectUnityRoaming(Location& out) {
     std::wstring targetSaveDir;
     std::wstring labelPart;
 
-    if (IsDir(roaming + L"\\" + wpNoSpace + L"\\Saves")) {
-        targetSaveDir = roaming + L"\\" + wpNoSpace + L"\\Saves";
-        labelPart = wpNoSpace;
-    } else if (IsDir(roaming + L"\\" + wp + L"\\Saves")) {
-        targetSaveDir = roaming + L"\\" + wp + L"\\Saves";
-        labelPart = wp;
-    } else if (!wc.empty() && IsDir(roaming + L"\\" + wc + L"\\" + wp + L"\\Saves")) {
-        targetSaveDir = roaming + L"\\" + wc + L"\\" + wp + L"\\Saves";
-        labelPart = wc + L"_" + wp;
-    } else if (IsDir(roaming + L"\\" + wpNoSpace)) {
-        targetSaveDir = roaming + L"\\" + wpNoSpace + L"\\Saves";
+    if (IsDir(roaming + L"\\" + wpNoSpace)) {
+        targetSaveDir = roaming + L"\\" + wpNoSpace;
         labelPart = wpNoSpace;
     } else if (IsDir(roaming + L"\\" + wp)) {
-        targetSaveDir = roaming + L"\\" + wp + L"\\Saves";
+        targetSaveDir = roaming + L"\\" + wp;
         labelPart = wp;
+    } else if (!wc.empty() && IsDir(roaming + L"\\" + wc + L"\\" + wp)) {
+        targetSaveDir = roaming + L"\\" + wc + L"\\" + wp;
+        labelPart = wc + L"_" + wp;
     } else {
-        return false;
+        targetSaveDir = roaming + L"\\" + wp;
+        labelPart = wp;
     }
 
-    if (!IsDir(targetSaveDir) && !IsDir(Parent(targetSaveDir))) {
-        return false;
-    }
-
-    out.label = L"Unity_Roaming_" + Sanitize(labelPart) + L"_Saves";
+    out.label = L"Unity_Roaming_" + Sanitize(labelPart);
     out.live = targetSaveDir;
     out.keepLive = { L"*.lock", L"*.log", L"*.tmp" };
     return true;
 }
 
-bool DetectUnityRoamingLocal(Location& out) {
+// Detects %USERPROFILE%\Saved Games\<Game>
+bool DetectSavedGames(Location& out) {
     std::string company, product;
-    if (!FindUnityAppInfo(company, product)) return false;
-    if (product.empty()) return false;
-
-    const std::wstring roaming = KnownFolder(FOLDERID_RoamingAppData);
-    if (roaming.empty()) return false;
-
-    const std::wstring wc = FromUtf8(company);
-    const std::wstring wp = FromUtf8(product);
-
-    std::wstring wpNoSpace = wp;
-    wpNoSpace.erase(std::remove_if(wpNoSpace.begin(), wpNoSpace.end(), iswspace), wpNoSpace.end());
-
-    std::wstring targetSaveDir;
-    std::wstring labelPart;
-
-    if (IsDir(roaming + L"\\" + wpNoSpace + L"\\SavesLocal")) {
-        targetSaveDir = roaming + L"\\" + wpNoSpace + L"\\SavesLocal";
-        labelPart = wpNoSpace;
-    } else if (IsDir(roaming + L"\\" + wp + L"\\SavesLocal")) {
-        targetSaveDir = roaming + L"\\" + wp + L"\\SavesLocal";
-        labelPart = wp;
-    } else if (!wc.empty() && IsDir(roaming + L"\\" + wc + L"\\" + wp + L"\\SavesLocal")) {
-        targetSaveDir = roaming + L"\\" + wc + L"\\" + wp + L"\\SavesLocal";
-        labelPart = wc + L"_" + wp;
+    std::wstring gameName;
+    if (FindUnityAppInfo(company, product)) {
+        gameName = FromUtf8(product);
     } else {
-        return false;
+        const std::wstring exe = ExePath();
+        std::wstring name = Leaf(exe);
+        const size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos) name.resize(dot);
+        gameName = name;
     }
+    if (gameName.empty()) return false;
 
-    out.label = L"Unity_Roaming_" + Sanitize(labelPart) + L"_SavesLocal";
-    out.live = targetSaveDir;
+    const std::wstring savedGames = KnownFolder(FOLDERID_SavedGames);
+    if (savedGames.empty()) return false;
+
+    std::wstring targetDir = savedGames + L"\\" + gameName;
+    if (!IsDir(targetDir)) return false;
+
+    out.label = L"SavedGames_" + Sanitize(gameName);
+    out.live = targetDir;
+    out.keepLive = { L"*.lock", L"*.log", L"*.tmp" };
+    return true;
+}
+
+// Detects Documents\My Games\<Game>
+bool DetectMyGames(Location& out) {
+    std::string company, product;
+    std::wstring gameName;
+    if (FindUnityAppInfo(company, product)) {
+        gameName = FromUtf8(product);
+    } else {
+        const std::wstring exe = ExePath();
+        std::wstring name = Leaf(exe);
+        const size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos) name.resize(dot);
+        gameName = name;
+    }
+    if (gameName.empty()) return false;
+
+    const std::wstring docs = KnownFolder(FOLDERID_Documents);
+    if (docs.empty()) return false;
+
+    std::wstring targetDir = docs + L"\\My Games\\" + gameName;
+    if (!IsDir(targetDir)) return false;
+
+    out.label = L"MyGames_" + Sanitize(gameName);
+    out.live = targetDir;
     out.keepLive = { L"*.lock", L"*.log", L"*.tmp" };
     return true;
 }
@@ -488,7 +523,9 @@ std::vector<Location> DetectLocations() {
     loc = Location{};
     if (DetectUnityRoaming(loc)) out.push_back(loc);
     loc = Location{};
-    if (DetectUnityRoamingLocal(loc)) out.push_back(loc);
+    if (DetectSavedGames(loc)) out.push_back(loc);
+    loc = Location{};
+    if (DetectMyGames(loc)) out.push_back(loc);
     return out;
 }
 
@@ -558,6 +595,9 @@ struct SaveRedirectRule {
 static std::vector<SaveRedirectRule> g_redirectRules;
 static std::mutex g_redirectMutex;
 static bool g_hooksInstalled = false;
+static HANDLE g_profileGateEvent = nullptr;
+static std::atomic<bool> g_gateActive{ false };
+static std::wstring g_activeProfileId;
 
 std::wstring NormalizePath(const wchar_t* in) {
     if (!in || !*in) return L"";
@@ -568,6 +608,71 @@ std::wstring NormalizePath(const wchar_t* in) {
     }
     return s;
 }
+
+static std::wstring GetRoamingBase() {
+    static std::wstring s = NormalizePath(KnownFolder(FOLDERID_RoamingAppData).c_str());
+    return s;
+}
+static std::wstring GetLocalBase() {
+    static std::wstring s = NormalizePath(KnownFolder(FOLDERID_LocalAppData).c_str());
+    return s;
+}
+static std::wstring GetLocalLowBase() {
+    static std::wstring s = NormalizePath(KnownFolder(FOLDERID_LocalAppDataLow).c_str());
+    return s;
+}
+static std::wstring GetSavedGamesBase() {
+    static std::wstring s = NormalizePath(KnownFolder(FOLDERID_SavedGames).c_str());
+    return s;
+}
+static std::wstring GetDocumentsBase() {
+    static std::wstring s = NormalizePath(KnownFolder(FOLDERID_Documents).c_str());
+    return s;
+}
+
+static bool IsExcludedRoot(const std::wstring& folder) {
+    static const wchar_t* const exclusions[] = {
+        L"refix", L"steam", L"valve", L"epic", L"epic games", L"nvidia", L"microsoft",
+        L"temp", L"packages", L"crashdumps", L"d3dscache", L"amd", L"intel", L"discord",
+        L"unity", L"windows", nullptr
+    };
+    for (int i = 0; exclusions[i]; ++i) {
+        if (_wcsicmp(folder.c_str(), exclusions[i]) == 0) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+void SetGateActive(bool active) {
+    g_gateActive.store(active);
+    if (active) {
+        if (!g_profileGateEvent) {
+            g_profileGateEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        } else {
+            ResetEvent(g_profileGateEvent);
+        }
+    } else {
+        if (g_profileGateEvent) SetEvent(g_profileGateEvent);
+    }
+}
+
+void SignalProfileGate() {
+    g_gateActive.store(false);
+    if (g_profileGateEvent) {
+        SetEvent(g_profileGateEvent);
+    }
+}
+
+void WaitForProfileGate() {
+    if (g_gateActive.load() && g_profileGateEvent) {
+        ReFixLog("[Saves] Pre-Game Profile Gate: waiting for profile selection...");
+        WaitForSingleObject(g_profileGateEvent, 30000);
+        ReFixLog("[Saves] Pre-Game Profile Gate: unblocked, proceeding with file access");
+    }
+}
+
+namespace {
 
 bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
     if (!originalPath || !*originalPath) return false;
@@ -580,18 +685,91 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
     for (auto& c : s) {
         if (c == L'/') c = L'\\';
     }
-    std::lock_guard<std::mutex> lock(g_redirectMutex);
-    for (const auto& rule : g_redirectRules) {
-        if (s.size() >= rule.livePrefix.size()) {
-            if (_wcsnicmp(s.c_str(), rule.livePrefix.c_str(), rule.livePrefix.size()) == 0) {
-                if (s.size() == rule.livePrefix.size() || s[rule.livePrefix.size()] == L'\\') {
-                    std::wstring rest = s.substr(rule.livePrefix.size());
-                    out = (hasLong ? L"\\\\?\\" : L"") + rule.stashPrefix + rest;
-                    return true;
+
+    // 1. Fast path: check already registered rules
+    {
+        std::lock_guard<std::mutex> lock(g_redirectMutex);
+        for (const auto& rule : g_redirectRules) {
+            if (s.size() >= rule.livePrefix.size()) {
+                if (_wcsnicmp(s.c_str(), rule.livePrefix.c_str(), rule.livePrefix.size()) == 0) {
+                    if (s.size() == rule.livePrefix.size() || s[rule.livePrefix.size()] == L'\\') {
+                        std::wstring rest = s.substr(rule.livePrefix.size());
+                        out = (hasLong ? L"\\\\?\\" : L"") + rule.stashPrefix + rest;
+                        return true;
+                    }
                 }
             }
         }
     }
+
+    // 2. Generic application root check under known base folders
+    struct BaseFolderInfo {
+        std::wstring base;
+        const wchar_t* label;
+    };
+    const BaseFolderInfo bases[] = {
+        { GetRoamingBase(), L"Roaming" },
+        { GetLocalLowBase(), L"LocalLow" },
+        { GetSavedGamesBase(), L"SavedGames" },
+        { GetLocalBase(), L"Local" },
+        { GetDocumentsBase(), L"Documents" },
+    };
+
+    for (const auto& bf : bases) {
+        if (bf.base.empty()) continue;
+        if (s.size() > bf.base.size() && _wcsnicmp(s.c_str(), bf.base.c_str(), bf.base.size()) == 0) {
+            if (s[bf.base.size()] == L'\\') {
+                std::wstring sub = s.substr(bf.base.size() + 1);
+                size_t slash = sub.find(L'\\');
+                std::wstring firstPart = (slash == std::wstring::npos) ? sub : sub.substr(0, slash);
+                if (firstPart.empty() || IsExcludedRoot(firstPart)) continue;
+
+                // Candidate save path: wait for profile gate if active
+                if (g_gateActive.load()) {
+                    refix::overlay::saves::WaitForProfileGate();
+                }
+
+                // Query active profile
+                std::wstring profileId = g_activeProfileId;
+                if (profileId.empty()) {
+                    profileId = ReFixOverlay::ActiveProfileId();
+                }
+                if (profileId.empty()) {
+                    wchar_t envId[64] = {};
+                    if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", envId, 64) > 0) profileId = envId;
+                }
+                if (profileId.empty()) {
+                    wchar_t slotBuf[16] = {};
+                    int slot = 0;
+                    if (GetEnvironmentVariableW(L"REFIX_INSTANCE_SLOT", slotBuf, 16) > 0) {
+                        slot = wcstol(slotBuf, nullptr, 10);
+                    }
+                    profileId = L"Guest_Slot" + std::to_wstring(slot);
+                }
+
+                std::wstring livePrefix = bf.base + L"\\" + firstPart;
+                std::wstring stashPrefix = profiles::ProfileDir(profileId) + L"\\Saves\\" + bf.label + L"_" + Sanitize(firstPart);
+                EnsureDir(stashPrefix);
+
+                SaveRedirectRule rule;
+                rule.livePrefix = livePrefix;
+                rule.stashPrefix = stashPrefix;
+
+                {
+                    std::lock_guard<std::mutex> lock(g_redirectMutex);
+                    g_redirectRules.push_back(rule);
+                }
+
+                ReFixLog("[Saves] Generic root redirection activated: '%s' -> '%s' (profile: %s)",
+                         ToUtf8(livePrefix).c_str(), ToUtf8(stashPrefix).c_str(), ToUtf8(profileId).c_str());
+
+                std::wstring rest = s.substr(livePrefix.size());
+                out = (hasLong ? L"\\\\?\\" : L"") + stashPrefix + rest;
+                return true;
+            }
+        }
+    }
+
     return false;
 }
 
@@ -864,6 +1042,74 @@ static BOOL WINAPI HookSetFileAttributesA(LPCSTR lpFileName, DWORD dwFileAttribu
     return TrueSetFileAttributesA(lpFileName, dwFileAttributes);
 }
 
+static BOOL (WINAPI* TrueCreateDirectoryExW)(LPCWSTR, LPCWSTR, LPSECURITY_ATTRIBUTES) = nullptr;
+static BOOL WINAPI HookCreateDirectoryExW(LPCWSTR lpTemplateDirectory, LPCWSTR lpNewDirectory, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    std::wstring redirTemplate, redirNew;
+    LPCWSTR templ = lpTemplateDirectory;
+    LPCWSTR newDir = lpNewDirectory;
+    if (lpTemplateDirectory && CheckAndRedirect(lpTemplateDirectory, redirTemplate)) templ = redirTemplate.c_str();
+    if (CheckAndRedirect(lpNewDirectory, redirNew)) {
+        EnsureDir(Parent(redirNew));
+        newDir = redirNew.c_str();
+    }
+    return TrueCreateDirectoryExW(templ, newDir, lpSecurityAttributes);
+}
+
+static BOOL (WINAPI* TrueCreateDirectoryExA)(LPCSTR, LPCSTR, LPSECURITY_ATTRIBUTES) = nullptr;
+static BOOL WINAPI HookCreateDirectoryExA(LPCSTR lpTemplateDirectory, LPCSTR lpNewDirectory, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    std::string redirTemplate, redirNew;
+    LPCSTR templ = lpTemplateDirectory;
+    LPCSTR newDir = lpNewDirectory;
+    if (lpTemplateDirectory && CheckAndRedirectA(lpTemplateDirectory, redirTemplate)) templ = redirTemplate.c_str();
+    if (CheckAndRedirectA(lpNewDirectory, redirNew)) {
+        EnsureDir(Parent(FromUtf8(redirNew)));
+        newDir = redirNew.c_str();
+    }
+    return TrueCreateDirectoryExA(templ, newDir, lpSecurityAttributes);
+}
+
+static BOOL (WINAPI* TrueReplaceFileW)(LPCWSTR, LPCWSTR, LPCWSTR, DWORD, LPVOID, LPVOID) = nullptr;
+static BOOL WINAPI HookReplaceFileW(LPCWSTR lpReplacedFileName, LPCWSTR lpReplacementFileName, LPCWSTR lpBackupFileName, DWORD dwReplaceFlags, LPVOID lpExclude, LPVOID lpReserved) {
+    std::wstring redirReplaced, redirReplacement, redirBackup;
+    LPCWSTR replaced = lpReplacedFileName;
+    LPCWSTR replacement = lpReplacementFileName;
+    LPCWSTR backup = lpBackupFileName;
+    if (CheckAndRedirect(lpReplacedFileName, redirReplaced)) replaced = redirReplaced.c_str();
+    if (CheckAndRedirect(lpReplacementFileName, redirReplacement)) replacement = redirReplacement.c_str();
+    if (lpBackupFileName && CheckAndRedirect(lpBackupFileName, redirBackup)) backup = redirBackup.c_str();
+    return TrueReplaceFileW(replaced, replacement, backup, dwReplaceFlags, lpExclude, lpReserved);
+}
+
+static BOOL (WINAPI* TrueReplaceFileA)(LPCSTR, LPCSTR, LPCSTR, DWORD, LPVOID, LPVOID) = nullptr;
+static BOOL WINAPI HookReplaceFileA(LPCSTR lpReplacedFileName, LPCSTR lpReplacementFileName, LPCSTR lpBackupFileName, DWORD dwReplaceFlags, LPVOID lpExclude, LPVOID lpReserved) {
+    std::string redirReplaced, redirReplacement, redirBackup;
+    LPCSTR replaced = lpReplacedFileName;
+    LPCSTR replacement = lpReplacementFileName;
+    LPCSTR backup = lpBackupFileName;
+    if (CheckAndRedirectA(lpReplacedFileName, redirReplaced)) replaced = redirReplaced.c_str();
+    if (CheckAndRedirectA(lpReplacementFileName, redirReplacement)) replacement = redirReplacement.c_str();
+    if (lpBackupFileName && CheckAndRedirectA(lpBackupFileName, redirBackup)) backup = redirBackup.c_str();
+    return TrueReplaceFileA(replaced, replacement, backup, dwReplaceFlags, lpExclude, lpReserved);
+}
+
+static DWORD (WINAPI* TrueGetFullPathNameW)(LPCWSTR, DWORD, LPWSTR, LPWSTR*) = nullptr;
+static DWORD WINAPI HookGetFullPathNameW(LPCWSTR lpFileName, DWORD nBufferLength, LPWSTR lpBuffer, LPWSTR* lpFilePart) {
+    std::wstring redir;
+    if (CheckAndRedirect(lpFileName, redir)) {
+        return TrueGetFullPathNameW(redir.c_str(), nBufferLength, lpBuffer, lpFilePart);
+    }
+    return TrueGetFullPathNameW(lpFileName, nBufferLength, lpBuffer, lpFilePart);
+}
+
+static DWORD (WINAPI* TrueGetFullPathNameA)(LPCSTR, DWORD, LPSTR, LPSTR*) = nullptr;
+static DWORD WINAPI HookGetFullPathNameA(LPCSTR lpFileName, DWORD nBufferLength, LPSTR lpBuffer, LPSTR* lpFilePart) {
+    std::string redir;
+    if (CheckAndRedirectA(lpFileName, redir)) {
+        return TrueGetFullPathNameA(redir.c_str(), nBufferLength, lpBuffer, lpFilePart);
+    }
+    return TrueGetFullPathNameA(lpFileName, nBufferLength, lpBuffer, lpFilePart);
+}
+
 static void HookExport(const char* name, void* hookFn, void** trueFn) {
     HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
     HMODULE hKBase = GetModuleHandleW(L"kernelbase.dll");
@@ -882,6 +1128,8 @@ static void HookExport(const char* name, void* hookFn, void** trueFn) {
     }
 }
 
+} // namespace
+
 void InstallFileSystemHooks() {
     if (g_hooksInstalled) return;
     MH_Initialize();
@@ -899,6 +1147,8 @@ void InstallFileSystemHooks() {
     HOOK_API(GetFileAttributesExA);
     HOOK_API(CreateDirectoryW);
     HOOK_API(CreateDirectoryA);
+    HOOK_API(CreateDirectoryExW);
+    HOOK_API(CreateDirectoryExA);
     HOOK_API(RemoveDirectoryW);
     HOOK_API(RemoveDirectoryA);
     HOOK_API(DeleteFileW);
@@ -911,17 +1161,27 @@ void InstallFileSystemHooks() {
     HOOK_API(CopyFileA);
     HOOK_API(CopyFileExW);
     HOOK_API(CopyFileExA);
+    HOOK_API(ReplaceFileW);
+    HOOK_API(ReplaceFileA);
     HOOK_API(SetFileAttributesW);
     HOOK_API(SetFileAttributesA);
+    HOOK_API(GetFullPathNameW);
+    HOOK_API(GetFullPathNameA);
 #undef HOOK_API
 
     g_hooksInstalled = true;
     ReFixLog("[Saves] Multi-instance filesystem redirection hooks installed successfully");
 }
 
-} // namespace
+void InitEarly() {
+    if (!g_profileGateEvent) {
+        g_profileGateEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    }
+    InstallFileSystemHooks();
+}
 
 void EnableMultiInstanceRedirection(const std::vector<Location>& locations, const Profile& active) {
+    g_activeProfileId = active.id;
     {
         std::lock_guard<std::mutex> lock(g_redirectMutex);
         g_redirectRules.clear();
@@ -929,38 +1189,23 @@ void EnableMultiInstanceRedirection(const std::vector<Location>& locations, cons
             std::wstring stash = StashDir(active.id, loc.label);
             EnsureDir(stash);
 
-            if (active.nativeSaves) {
-                std::wstring pcStash = StashDir(kPcOwner, loc.label);
-                if (!HasEntries(stash, {}) && HasEntries(pcStash, {})) {
-                    CopyTree(pcStash, stash);
-                    ReFixLog("[Saves] Profile %s inherited original saves in multi-instance stash", ToUtf8(active.id).c_str());
-                }
-            }
-
             SaveRedirectRule rule;
             rule.livePrefix = NormalizePath(loc.live.c_str());
             rule.stashPrefix = stash;
             g_redirectRules.push_back(rule);
-            ReFixLog("[Saves] Multi-instance redirect: '%s' -> '%s'",
-                     ToUtf8(rule.livePrefix).c_str(), ToUtf8(rule.stashPrefix).c_str());
+            ReFixLog("[Saves] Profile save redirect: '%s' -> '%s' (profile: %s)",
+                     ToUtf8(rule.livePrefix).c_str(), ToUtf8(rule.stashPrefix).c_str(), ToUtf8(active.id).c_str());
         }
     }
     InstallFileSystemHooks();
 }
 
 void SwitchTo(const Profile& active, const std::vector<Profile>& all) {
+    (void)all;
+    g_activeProfileId = active.id;
     const std::vector<Location> locations = DetectLocations();
-    if (locations.empty()) return;
-    if (OtherInstanceRunning()) {
-        ReFixLog("[Saves] Another instance of this game is running: enabling filesystem redirection for profile %s",
-                 ToUtf8(active.id).c_str());
-        EnableMultiInstanceRedirection(locations, active);
-        return;
-    }
-    for (const Location& loc : locations) {
-        WritePrivateProfileStringW(L"Paths", loc.label.c_str(), loc.live.c_str(), OwnersIni().c_str());
-        SwitchOne(loc, active, all);
-    }
+    EnableMultiInstanceRedirection(locations, active);
+    SignalProfileGate();
 }
 
 std::wstring StashOf(const std::wstring& profileId, const std::wstring& label) { return StashDir(profileId, label); }
@@ -1039,19 +1284,6 @@ std::wstring GetActiveSaveDir(const std::wstring& label) {
 
     std::wstring stash = StashDir(activeId, targetLabel);
     EnsureDir(stash);
-
-    bool allowNative = false;
-    if (activeId == kPcOwner) {
-        allowNative = true;
-    } else if (auto p = profiles::Load(activeId)) {
-        allowNative = p->nativeSaves;
-    }
-
-    if (allowNative && !HasEntries(stash, {}) && !livePath.empty() && HasEntries(livePath, keepList)) {
-        CopyTreeWithKeep(livePath, stash, keepList);
-        ReFixLog("[Saves] Seeded isolated saves for profile %s from %s", ToUtf8(activeId).c_str(), ToUtf8(livePath).c_str());
-    }
-
     return stash;
 }
 
