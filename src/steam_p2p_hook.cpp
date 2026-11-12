@@ -222,7 +222,7 @@ struct SocketContext {
 };
 
 // Global socket table and pending queues
-static std::mutex g_socketMutex;
+static std::recursive_mutex g_socketMutex;
 static std::unordered_map<SOCKET, SocketContext> g_socketContexts;
 static std::deque<RecvPacket> g_pendingGamePackets;
 static std::deque<RecvPacket> g_pendingVoicePackets;
@@ -241,7 +241,7 @@ struct BufferedHoldPacket {
     DWORD                timestampMs = 0; // GetTickCount()
 };
 
-static std::mutex g_holdBufferMutex;
+static std::recursive_mutex g_holdBufferMutex;
 static std::vector<BufferedHoldPacket> g_holdBuffer;
 static const DWORD k_holdBufferTtlMs = 3000;   // 3000 ms TTL
 static const size_t k_maxHoldBufferSize = 512; // cap buffered datagrams
@@ -256,7 +256,7 @@ static std::atomic<bool> g_pumpRunning{ false };
 static HANDLE g_pumpThread       = nullptr;
 static std::atomic<uint16_t> g_virtualizedGamePort{ 0 };
 
-static std::mutex g_peerMutex;
+static std::recursive_mutex g_peerMutex;
 static std::unordered_map<uint32_t, uint64_t> g_ipToSteamID;
 static std::unordered_map<uint64_t, uint32_t> g_steamIDToIP;
 static std::unordered_map<uint64_t, uint16_t> g_steamIDToPort;
@@ -332,7 +332,7 @@ namespace SteamP2PHook {
     }
 
     uint64_t ResolvePeerAlias(uint64_t steamID) {
-        std::lock_guard<std::mutex> lg(g_peerMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
         auto it = g_peerAliases.find(steamID);
         if (it != g_peerAliases.end()) return it->second;
         return steamID;
@@ -340,13 +340,13 @@ namespace SteamP2PHook {
 
     void RegisterPeerAlias(uint64_t aliasSteamID, uint64_t realSteamID) {
         if (!aliasSteamID || !realSteamID || aliasSteamID == realSteamID) return;
-        std::lock_guard<std::mutex> lg(g_peerMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
         g_peerAliases[aliasSteamID] = realSteamID;
         Log("RegisterPeerAlias: Alias %llu -> Real %llu", aliasSteamID, realSteamID);
     }
 
     bool IsLocalMachine(uint64_t steamID) {
-        std::lock_guard<std::mutex> lg(g_peerMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
         uint64_t resolved = steamID;
         auto itA = g_peerAliases.find(steamID);
         if (itA != g_peerAliases.end()) resolved = itA->second;
@@ -356,7 +356,7 @@ namespace SteamP2PHook {
     }
 
     uint16_t GetRemappedPort(uint16_t originalPort) {
-        std::lock_guard<std::mutex> lg(g_peerMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
         auto it = g_portRemap.find(originalPort);
         if (it != g_portRemap.end()) return it->second;
         return 0;
@@ -390,37 +390,42 @@ static bool ExtractIpv4FromSockaddr(const sockaddr* sa, int sa_len, uint32_t& ou
 
 static void SetSockaddrIpv4(sockaddr* sa, int sa_len, uint32_t newIpv4Host, uint16_t newPort, bool wasV6Mapped) {
     if (!sa) return;
-    if (wasV6Mapped && sa->sa_family == AF_INET6 && sa_len >= (int)sizeof(sockaddr_in6)) {
+    if (wasV6Mapped && sa_len >= (int)sizeof(sockaddr_in6)) {
         auto* sin6 = reinterpret_cast<sockaddr_in6*>(sa);
+        sin6->sin6_family = AF_INET6;
         sin6->sin6_port = htons(newPort);
+        memset(&sin6->sin6_addr, 0, 10);
+        sin6->sin6_addr.s6_addr[10] = 0xFF;
+        sin6->sin6_addr.s6_addr[11] = 0xFF;
         uint32_t ipNet = htonl(newIpv4Host);
         memcpy(&sin6->sin6_addr.s6_addr[12], &ipNet, 4);
-    } else if (sa->sa_family == AF_INET && sa_len >= (int)sizeof(sockaddr_in)) {
+    } else if (sa_len >= (int)sizeof(sockaddr_in)) {
         auto* sin = reinterpret_cast<sockaddr_in*>(sa);
+        sin->sin_family = AF_INET;
         sin->sin_port = htons(newPort);
         sin->sin_addr.s_addr = htonl(newIpv4Host);
     }
 }
 
-static std::mutex g_internalSocketsMutex;
+static std::recursive_mutex g_internalSocketsMutex;
 static std::unordered_set<SOCKET> g_internalSockets;
 
 namespace SteamP2PHook {
     void RegisterInternalSocket(uintptr_t s) {
         if (s == (uintptr_t)INVALID_SOCKET || s == 0) return;
-        std::lock_guard<std::mutex> lock(g_internalSocketsMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_internalSocketsMutex);
         g_internalSockets.insert((SOCKET)s);
     }
 
     void UnregisterInternalSocket(uintptr_t s) {
         if (s == (uintptr_t)INVALID_SOCKET || s == 0) return;
-        std::lock_guard<std::mutex> lock(g_internalSocketsMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_internalSocketsMutex);
         g_internalSockets.erase((SOCKET)s);
     }
 
     bool IsInternalSocket(uintptr_t s) {
         if (s == (uintptr_t)INVALID_SOCKET || s == 0) return false;
-        std::lock_guard<std::mutex> lock(g_internalSocketsMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_internalSocketsMutex);
         return g_internalSockets.find((SOCKET)s) != g_internalSockets.end();
     }
 }
@@ -607,7 +612,7 @@ static void* ResolveSteamNetworking() {
 // Packet Dispatch & Queue Routing (V-01 Hardening)
 // =============================================================================
 static void RouteIncomingPacket(RecvPacket pkt) {
-    std::lock_guard<std::mutex> lg(g_socketMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
     SOCKET targetSocket = INVALID_SOCKET;
 
     if (pkt.service == SocketServiceType::Voice) {
@@ -709,7 +714,7 @@ static bool SendP2PWithEnvelope(uint64_t steamID, SOCKET s, const uint8_t* paylo
     // Determine local / source port
     uint16_t srcPort = 0;
     {
-        std::lock_guard<std::mutex> lg(g_socketMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
         auto it = g_socketContexts.find(s);
         if (it != g_socketContexts.end()) {
             srcPort = it->second.virtualPort ? it->second.virtualPort : it->second.localPort;
@@ -750,7 +755,7 @@ static bool SendP2PWithEnvelope(uint64_t steamID, SOCKET s, const uint8_t* paylo
 // Pre-Lobby Hold Buffer Flush (V-02 Hardening)
 // =============================================================================
 void SteamP2PHook::FlushHoldBuffer() {
-    std::lock_guard<std::mutex> lg(g_holdBufferMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_holdBufferMutex);
     if (g_holdBuffer.empty()) return;
 
     DWORD now = GetTickCount();
@@ -758,7 +763,7 @@ void SteamP2PHook::FlushHoldBuffer() {
     while (it != g_holdBuffer.end()) {
         uint64_t targetSteamID = 0;
         {
-            std::lock_guard<std::mutex> lgPeer(g_peerMutex);
+            std::lock_guard<std::recursive_mutex> lgPeer(g_peerMutex);
             auto itPeer = g_ipToSteamID.find(it->destIP);
             if (itPeer != g_ipToSteamID.end()) {
                 targetSteamID = itPeer->second;
@@ -825,7 +830,7 @@ static bool P2PPumpStep() {
 
                     // Ensure this peer is registered in synthetic IP mapping
                     {
-                        std::lock_guard<std::mutex> lg(g_peerMutex);
+                        std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
                         if (g_steamIDToIP.find(fromID) == g_steamIDToIP.end()) {
                             uint32_t syntheticIP = 0x7F000001u | (uint32_t)(fromID & 0x00FFFFFFu);
                             g_steamIDToIP[fromID]   = syntheticIP;
@@ -888,7 +893,7 @@ static bool TranslatePeerDestination(const sockaddr* originalTo, int tolen, sock
     outSteamId = 0;
     outTolen = tolen;
     if (!originalTo || tolen <= 0) return false;
-    memcpy(&outTranslated, originalTo, tolen);
+    memcpy(&outTranslated, originalTo, (std::min)(tolen, (int)sizeof(outTranslated)));
 
     uint32_t destIP = 0;
     uint16_t destPort = 0;
@@ -897,25 +902,26 @@ static bool TranslatePeerDestination(const sockaddr* originalTo, int tolen, sock
         return false;
     }
 
-    std::lock_guard<std::mutex> lg(g_peerMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
     auto it = g_ipToSteamID.find(destIP);
     if (it != g_ipToSteamID.end()) {
-        uint64_t resolvedId = SteamP2PHook::ResolvePeerAlias(it->second);
+        uint64_t resolvedId = it->second;
+        auto aliasIt = g_peerAliases.find(resolvedId);
+        if (aliasIt != g_peerAliases.end()) resolvedId = aliasIt->second;
+
         if (resolvedId != UnrealSteamEmu::GetLocalSteamID()) {
             outSteamId = resolvedId;
             auto pIt = g_peersBySteamID.find(resolvedId);
             if (pIt != g_peersBySteamID.end()) {
                 const auto& peer = pIt->second;
+                uint16_t targetPort = peer.gameServerPort ? peer.gameServerPort : destPort;
+                auto itRemap = g_portRemap.find(targetPort);
+                if (itRemap != g_portRemap.end()) targetPort = itRemap->second;
+
                 if (peer.isLocalMachine) {
-                    uint16_t targetPort = peer.gameServerPort ? peer.gameServerPort : destPort;
-                    uint16_t remapped = SteamP2PHook::GetRemappedPort(targetPort);
-                    if (remapped) targetPort = remapped;
                     SetSockaddrIpv4((sockaddr*)&outTranslated, tolen, 0x7F000001u, targetPort, wasV6);
                     return true;
                 } else if (destIP == peer.wanIP) {
-                    uint16_t targetPort = peer.gameServerPort ? peer.gameServerPort : destPort;
-                    uint16_t remapped = SteamP2PHook::GetRemappedPort(targetPort);
-                    if (remapped) targetPort = remapped;
                     if (peer.lanDataIP != 0) {
                         SetSockaddrIpv4((sockaddr*)&outTranslated, tolen, peer.lanDataIP, targetPort, wasV6);
                         return true;
@@ -931,9 +937,9 @@ static bool TranslatePeerDestination(const sockaddr* originalTo, int tolen, sock
 
     // Direct loopback remapping for same-machine multi-instance
     if (destIP == 0x7F000001u) {
-        uint16_t remapped = SteamP2PHook::GetRemappedPort(destPort);
-        if (remapped != 0 && remapped != destPort) {
-            SetSockaddrIpv4((sockaddr*)&outTranslated, tolen, 0x7F000001u, remapped, wasV6);
+        auto itRemap = g_portRemap.find(destPort);
+        if (itRemap != g_portRemap.end() && itRemap->second != destPort) {
+            SetSockaddrIpv4((sockaddr*)&outTranslated, tolen, 0x7F000001u, itRemap->second, wasV6);
             return true;
         }
     }
@@ -944,103 +950,110 @@ static bool TranslatePeerDestination(const sockaddr* originalTo, int tolen, sock
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen)
 {
-    // 1. Bypass any registered internal sockets (LanTransport, UnrealSteamEmu)
-    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
-        return g_orig_sendto(s, buf, len, flags, to, tolen);
-    }
-
-    // 2. Defense-in-depth: If payload is already an internal ReFix wire frame or P2P envelope, never intercept
-    if (len >= 4 && buf != nullptr) {
-        uint32_t magic = *reinterpret_cast<const uint32_t*>(buf);
-        if (magic == 0x52464958 || magic == 0x58464552) { // 'RFIX' (0x52464958) or 'REFX' (0x58464552)
+    try {
+        // 1. Bypass any registered internal sockets (LanTransport, UnrealSteamEmu)
+        if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
             return g_orig_sendto(s, buf, len, flags, to, tolen);
         }
-    }
 
-    sockaddr_storage connectedPeer{};
-    int peerLen = sizeof(connectedPeer);
-    if (!to && s != INVALID_SOCKET) {
-        if (getpeername(s, (sockaddr*)&connectedPeer, &peerLen) == 0) {
-            to = (const sockaddr*)&connectedPeer;
-            tolen = peerLen;
-        }
-    }
-
-    sockaddr_storage translatedTo;
-    int translatedLen = tolen;
-    uint64_t targetSteamId = 0;
-    bool wasTranslated = TranslatePeerDestination(to, tolen, translatedTo, translatedLen, targetSteamId);
-    const sockaddr* effectiveTo = wasTranslated ? (const sockaddr*)&translatedTo : to;
-
-    if (effectiveTo && len > 0) {
-        uint32_t destIP = 0;
-        uint16_t destPort = 0;
-        bool wasV6 = false;
-        ExtractIpv4FromSockaddr(effectiveTo, translatedLen, destIP, destPort, wasV6);
-
-        // Bypass internal emulator discovery and broadcast ports (all slots 47584..47599, plus 47600)
-        if (destPort >= 47584 && destPort <= 47600) {
-            return g_orig_sendto(s, buf, len, flags, effectiveTo, translatedLen);
-        }
-
-        SocketServiceType service = ClassifyPort(destPort);
-
-        // Update SocketContext
-        {
-            std::lock_guard<std::mutex> lg(g_socketMutex);
-            auto& ctx = g_socketContexts[s];
-            ctx.socket = s;
-            if (ctx.serviceType == SocketServiceType::Unknown) {
-                ctx.serviceType = service;
+        // 2. Defense-in-depth: If payload is already an internal ReFix wire frame or P2P envelope, never intercept
+        if (len >= 4 && buf != nullptr) {
+            uint32_t magic = *reinterpret_cast<const uint32_t*>(buf);
+            if (magic == 0x52464958 || magic == 0x58464552) { // 'RFIX' (0x52464958) or 'REFX' (0x58464552)
+                return g_orig_sendto(s, buf, len, flags, to, tolen);
             }
-            ctx.lastRemotePort = destPort;
-            ctx.lastActivity = GetTickCount();
-            if (ctx.localPort == 0) {
-                sockaddr_in localAddr{};
-                int localLen = sizeof(localAddr);
-                if (getsockname(s, (sockaddr*)&localAddr, &localLen) == 0) {
-                    ctx.localPort = ntohs(localAddr.sin_port);
+        }
+
+        sockaddr_storage connectedPeer{};
+        int peerLen = sizeof(connectedPeer);
+        if (!to && s != INVALID_SOCKET) {
+            if (getpeername(s, (sockaddr*)&connectedPeer, &peerLen) == 0) {
+                to = (const sockaddr*)&connectedPeer;
+                tolen = peerLen;
+            }
+        }
+
+        sockaddr_storage translatedTo;
+        int translatedLen = tolen;
+        uint64_t targetSteamId = 0;
+        bool wasTranslated = TranslatePeerDestination(to, tolen, translatedTo, translatedLen, targetSteamId);
+        const sockaddr* effectiveTo = wasTranslated ? (const sockaddr*)&translatedTo : to;
+
+        if (effectiveTo && len > 0) {
+            uint32_t destIP = 0;
+            uint16_t destPort = 0;
+            bool wasV6 = false;
+            ExtractIpv4FromSockaddr(effectiveTo, translatedLen, destIP, destPort, wasV6);
+
+            // Bypass internal emulator discovery and broadcast ports (all slots 47584..47599, plus 47600)
+            if (destPort >= 47584 && destPort <= 47600) {
+                return g_orig_sendto(s, buf, len, flags, effectiveTo, translatedLen);
+            }
+
+            SocketServiceType service = ClassifyPort(destPort);
+
+            // Update SocketContext
+            {
+                std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
+                auto& ctx = g_socketContexts[s];
+                ctx.socket = s;
+                if (ctx.serviceType == SocketServiceType::Unknown) {
+                    ctx.serviceType = service;
+                }
+                ctx.lastRemotePort = destPort;
+                ctx.lastActivity = GetTickCount();
+                if (ctx.localPort == 0) {
+                    sockaddr_in localAddr{};
+                    int localLen = sizeof(localAddr);
+                    if (getsockname(s, (sockaddr*)&localAddr, &localLen) == 0) {
+                        ctx.localPort = ntohs(localAddr.sin_port);
+                    }
+                }
+            }
+
+            if (kRedirectRawUdpToRelay && targetSteamId != 0 && targetSteamId != UnrealSteamEmu::GetLocalSteamID()) {
+                if (SendP2PWithEnvelope(targetSteamId, s, (const uint8_t*)buf, (uint32_t)len, destPort, service)) {
+                    return len;
+                }
+                return SOCKET_ERROR;
+            }
+
+            // Enforce Internet-Zero BEFORE buffering into Pre-Lobby Hold Buffer
+            if (!ReFix::NetworkModeManager::IsInternetEgressAllowed() && !IsAllowedLanEndpoint(effectiveTo) && !IsPhotonEgressAllowed(destPort)) {
+                refix::lan::LanFirewall::Get().RecordBlockedEgress();
+                uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
+                SteamP2PHook::Log("[Internet-Zero] BLOCKED sendto to external endpoint %u.%u.%u.%u:%u (synthetic_success, total_blocked=%llu)",
+                    (destIP >> 24) & 0xFF, (destIP >> 16) & 0xFF, (destIP >> 8) & 0xFF, destIP & 0xFF, destPort, totalBlocked);
+                return len; // Synthetic success: drop packet under Internet-Zero
+            }
+
+            if (kRedirectRawUdpToRelay && (service != SocketServiceType::Unknown || IsGamePort(destPort))) {
+                std::lock_guard<std::recursive_mutex> lg(g_holdBufferMutex);
+                if (g_holdBuffer.size() < k_maxHoldBufferSize) {
+                    BufferedHoldPacket hpkt;
+                    hpkt.s = s;
+                    hpkt.data.assign((const uint8_t*)buf, (const uint8_t*)buf + len);
+                    hpkt.flags = flags;
+                    if (effectiveTo->sa_family == AF_INET) {
+                        hpkt.destAddr = *reinterpret_cast<const sockaddr_in*>(effectiveTo);
+                    }
+                    hpkt.destIP = destIP;
+                    hpkt.destPort = destPort;
+                    hpkt.service = (service != SocketServiceType::Unknown) ? service : SocketServiceType::Game;
+                    hpkt.timestampMs = GetTickCount();
+                    g_holdBuffer.push_back(std::move(hpkt));
+                    return len; // Synthetic success: held in buffer
                 }
             }
         }
 
-        if (kRedirectRawUdpToRelay && targetSteamId != 0 && targetSteamId != UnrealSteamEmu::GetLocalSteamID()) {
-            if (SendP2PWithEnvelope(targetSteamId, s, (const uint8_t*)buf, (uint32_t)len, destPort, service)) {
-                return len;
-            }
-            return SOCKET_ERROR;
-        }
-
-        // Enforce Internet-Zero BEFORE buffering into Pre-Lobby Hold Buffer
-        if (!ReFix::NetworkModeManager::IsInternetEgressAllowed() && !IsAllowedLanEndpoint(effectiveTo) && !IsPhotonEgressAllowed(destPort)) {
-            refix::lan::LanFirewall::Get().RecordBlockedEgress();
-            uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
-            SteamP2PHook::Log("[Internet-Zero] BLOCKED sendto to external endpoint %u.%u.%u.%u:%u (synthetic_success, total_blocked=%llu)",
-                (destIP >> 24) & 0xFF, (destIP >> 16) & 0xFF, (destIP >> 8) & 0xFF, destIP & 0xFF, destPort, totalBlocked);
-            return len; // Synthetic success: drop packet under Internet-Zero
-        }
-
-        if (kRedirectRawUdpToRelay && (service != SocketServiceType::Unknown || IsGamePort(destPort))) {
-            std::lock_guard<std::mutex> lg(g_holdBufferMutex);
-            if (g_holdBuffer.size() < k_maxHoldBufferSize) {
-                BufferedHoldPacket hpkt;
-                hpkt.s = s;
-                hpkt.data.assign((const uint8_t*)buf, (const uint8_t*)buf + len);
-                hpkt.flags = flags;
-                if (effectiveTo->sa_family == AF_INET) {
-                    hpkt.destAddr = *reinterpret_cast<const sockaddr_in*>(effectiveTo);
-                }
-                hpkt.destIP = destIP;
-                hpkt.destPort = destPort;
-                hpkt.service = (service != SocketServiceType::Unknown) ? service : SocketServiceType::Game;
-                hpkt.timestampMs = GetTickCount();
-                g_holdBuffer.push_back(std::move(hpkt));
-                return len; // Synthetic success: held in buffer
-            }
-        }
+        return g_orig_sendto(s, buf, len, flags, effectiveTo, translatedLen);
+    } catch (const std::exception& e) {
+        SteamP2PHook::Log("[P2PHook] Exception in Hook_sendto: %s", e.what());
+    } catch (...) {
+        SteamP2PHook::Log("[P2PHook] Unknown exception in Hook_sendto");
     }
-
-    return g_orig_sendto(s, buf, len, flags, effectiveTo, translatedLen);
+    return g_orig_sendto ? g_orig_sendto(s, buf, len, flags, to, tolen) : SOCKET_ERROR;
 }
 
 // ------ WSASendTo ------------------------------------------------------------
@@ -1048,45 +1061,51 @@ static int WSAAPI Hook_WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCou
     LPDWORD lpNumberOfBytesSent, DWORD dwFlags, const struct sockaddr* lpTo, int iTolen,
     LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
 {
-    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
-        return g_orig_WSASendTo ? g_orig_WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
-    }
+    try {
+        if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+            return g_orig_WSASendTo ? g_orig_WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
+        }
 
-    DWORD totalBytes = 0;
-    for (DWORD i = 0; i < dwBufferCount; ++i) {
-        if (lpBuffers && lpBuffers[i].buf) totalBytes += lpBuffers[i].len;
-    }
-
-    sockaddr_storage translatedTo;
-    int translatedLen = iTolen;
-    uint64_t targetSteamId = 0;
-    bool wasTranslated = TranslatePeerDestination(lpTo, iTolen, translatedTo, translatedLen, targetSteamId);
-    const sockaddr* effectiveTo = wasTranslated ? (const sockaddr*)&translatedTo : lpTo;
-
-    if (kRedirectRawUdpToRelay && targetSteamId != 0 && totalBytes > 0) {
-        std::vector<uint8_t> linearBuf(totalBytes);
-        size_t offset = 0;
+        DWORD totalBytes = 0;
         for (DWORD i = 0; i < dwBufferCount; ++i) {
-            if (lpBuffers && lpBuffers[i].buf && lpBuffers[i].len > 0) {
-                memcpy(linearBuf.data() + offset, lpBuffers[i].buf, lpBuffers[i].len);
-                offset += lpBuffers[i].len;
+            if (lpBuffers && lpBuffers[i].buf) totalBytes += lpBuffers[i].len;
+        }
+
+        sockaddr_storage translatedTo;
+        int translatedLen = iTolen;
+        uint64_t targetSteamId = 0;
+        bool wasTranslated = TranslatePeerDestination(lpTo, iTolen, translatedTo, translatedLen, targetSteamId);
+        const sockaddr* effectiveTo = wasTranslated ? (const sockaddr*)&translatedTo : lpTo;
+
+        if (kRedirectRawUdpToRelay && targetSteamId != 0 && totalBytes > 0) {
+            std::vector<uint8_t> linearBuf(totalBytes);
+            size_t offset = 0;
+            for (DWORD i = 0; i < dwBufferCount; ++i) {
+                if (lpBuffers && lpBuffers[i].buf && lpBuffers[i].len > 0) {
+                    memcpy(linearBuf.data() + offset, lpBuffers[i].buf, lpBuffers[i].len);
+                    offset += lpBuffers[i].len;
+                }
+            }
+            uint32_t destIP = 0;
+            uint16_t destPort = 0;
+            bool wasV6 = false;
+            ExtractIpv4FromSockaddr(effectiveTo, translatedLen, destIP, destPort, wasV6);
+            SocketServiceType service = ClassifyPort(destPort);
+            if (SendP2PWithEnvelope(targetSteamId, s, linearBuf.data(), (uint32_t)totalBytes, destPort, service)) {
+                if (lpNumberOfBytesSent) *lpNumberOfBytesSent = totalBytes;
+                return 0;
             }
         }
-        uint32_t destIP = 0;
-        uint16_t destPort = 0;
-        bool wasV6 = false;
-        ExtractIpv4FromSockaddr(effectiveTo, translatedLen, destIP, destPort, wasV6);
-        SocketServiceType service = ClassifyPort(destPort);
-        if (SendP2PWithEnvelope(targetSteamId, s, linearBuf.data(), (uint32_t)totalBytes, destPort, service)) {
-            if (lpNumberOfBytesSent) *lpNumberOfBytesSent = totalBytes;
-            return 0;
-        }
-    }
 
-    if (g_orig_WSASendTo) {
-        return g_orig_WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, effectiveTo, translatedLen, lpOverlapped, lpCompletionRoutine);
+        if (g_orig_WSASendTo) {
+            return g_orig_WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, effectiveTo, translatedLen, lpOverlapped, lpCompletionRoutine);
+        }
+    } catch (const std::exception& e) {
+        SteamP2PHook::Log("[P2PHook] Exception in Hook_WSASendTo: %s", e.what());
+    } catch (...) {
+        SteamP2PHook::Log("[P2PHook] Unknown exception in Hook_WSASendTo");
     }
-    return SOCKET_ERROR;
+    return g_orig_WSASendTo ? g_orig_WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
 }
 
 // ------ send -----------------------------------------------------------------
@@ -1120,51 +1139,57 @@ static int WSAAPI Hook_WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount
 static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
     struct sockaddr* from, int* fromlen)
 {
-    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+    try {
+        if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+            return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
+        }
+
+        RecvPacket pkt;
+        bool hasPkt = false;
+
+        {
+            std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
+            auto it = g_socketContexts.find(s);
+            if (it != g_socketContexts.end() && !it->second.recvQueue.empty()) {
+                pkt = std::move(it->second.recvQueue.front());
+                it->second.recvQueue.pop_front();
+                it->second.lastActivity = GetTickCount();
+                hasPkt = true;
+            }
+        }
+
+        if (hasPkt) {
+            int copyLen = (int)pkt.data.size();
+            if (copyLen > len) copyLen = len;
+            memcpy(buf, pkt.data.data(), copyLen);
+
+            if (from && fromlen) {
+                uint16_t srcPort = pkt.fromPort ? pkt.fromPort : (pkt.service == SocketServiceType::Voice ? 5058 : 7777);
+                uint32_t srcIP = 0x7F000001u;
+                {
+                    std::lock_guard<std::recursive_mutex> lgPeer(g_peerMutex);
+                    auto it = g_steamIDToIP.find(pkt.fromSteamID);
+                    if (it != g_steamIDToIP.end()) srcIP = it->second;
+                }
+                if (*fromlen >= (int)sizeof(sockaddr_in6) && (from->sa_family == AF_INET6 || from->sa_family != AF_INET)) {
+                    SetSockaddrIpv4(from, *fromlen, srcIP, srcPort, true);
+                    *fromlen = sizeof(sockaddr_in6);
+                } else if (*fromlen >= (int)sizeof(sockaddr_in)) {
+                    SetSockaddrIpv4(from, *fromlen, srcIP, srcPort, false);
+                    *fromlen = sizeof(sockaddr_in);
+                }
+            }
+
+            return copyLen;
+        }
+
         return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
+    } catch (const std::exception& e) {
+        SteamP2PHook::Log("[P2PHook] Exception in Hook_recvfrom: %s", e.what());
+    } catch (...) {
+        SteamP2PHook::Log("[P2PHook] Unknown exception in Hook_recvfrom");
     }
-
-    RecvPacket pkt;
-    bool hasPkt = false;
-
-    {
-        std::lock_guard<std::mutex> lg(g_socketMutex);
-        auto it = g_socketContexts.find(s);
-        if (it != g_socketContexts.end() && !it->second.recvQueue.empty()) {
-            pkt = std::move(it->second.recvQueue.front());
-            it->second.recvQueue.pop_front();
-            it->second.lastActivity = GetTickCount();
-            hasPkt = true;
-        }
-    }
-
-    if (hasPkt) {
-        int copyLen = (int)pkt.data.size();
-        if (copyLen > len) copyLen = len;
-        memcpy(buf, pkt.data.data(), copyLen);
-
-        if (from && fromlen) {
-            uint16_t srcPort = pkt.fromPort ? pkt.fromPort : (pkt.service == SocketServiceType::Voice ? 5058 : 7777);
-            uint32_t srcIP = 0x7F000001u;
-            {
-                std::lock_guard<std::mutex> lgPeer(g_peerMutex);
-                auto it = g_steamIDToIP.find(pkt.fromSteamID);
-                if (it != g_steamIDToIP.end()) srcIP = it->second;
-            }
-            if (*fromlen >= (int)sizeof(sockaddr_in6) && from->sa_family == AF_INET6) {
-                SetSockaddrIpv4(from, *fromlen, srcIP, srcPort, true);
-                *fromlen = sizeof(sockaddr_in6);
-            } else if (*fromlen >= (int)sizeof(sockaddr_in)) {
-                from->sa_family = AF_INET;
-                SetSockaddrIpv4(from, *fromlen, srcIP, srcPort, false);
-                *fromlen = sizeof(sockaddr_in);
-            }
-        }
-
-        return copyLen;
-    }
-
-    return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
+    return g_orig_recvfrom ? g_orig_recvfrom(s, buf, len, flags, from, fromlen) : SOCKET_ERROR;
 }
 
 // ------ WSARecvFrom ----------------------------------------------------------
@@ -1172,63 +1197,68 @@ static int WSAAPI Hook_WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferC
     LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags, struct sockaddr* lpFrom, LPINT lpFromlen,
     LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
 {
-    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
-        return g_orig_WSARecvFrom ? g_orig_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
-    }
-
-    RecvPacket pkt;
-    bool hasPkt = false;
-    {
-        std::lock_guard<std::mutex> lg(g_socketMutex);
-        auto it = g_socketContexts.find(s);
-        if (it != g_socketContexts.end() && !it->second.recvQueue.empty()) {
-            pkt = std::move(it->second.recvQueue.front());
-            it->second.recvQueue.pop_front();
-            it->second.lastActivity = GetTickCount();
-            hasPkt = true;
+    try {
+        if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+            return g_orig_WSARecvFrom ? g_orig_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
         }
-    }
 
-    if (hasPkt) {
-        DWORD copied = 0;
-        DWORD remaining = (DWORD)pkt.data.size();
-        const uint8_t* src = pkt.data.data();
-        for (DWORD i = 0; i < dwBufferCount && remaining > 0; ++i) {
-            DWORD chunk = (std::min)(lpBuffers[i].len, remaining);
-            if (chunk > 0 && lpBuffers[i].buf) {
-                memcpy(lpBuffers[i].buf, src, chunk);
-                src += chunk;
-                remaining -= chunk;
-                copied += chunk;
+        RecvPacket pkt;
+        bool hasPkt = false;
+        {
+            std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
+            auto it = g_socketContexts.find(s);
+            if (it != g_socketContexts.end() && !it->second.recvQueue.empty()) {
+                pkt = std::move(it->second.recvQueue.front());
+                it->second.recvQueue.pop_front();
+                it->second.lastActivity = GetTickCount();
+                hasPkt = true;
             }
         }
-        if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = copied;
-        if (lpFlags) *lpFlags = 0;
 
-        if (lpFrom && lpFromlen) {
-            uint16_t srcPort = pkt.fromPort ? pkt.fromPort : (pkt.service == SocketServiceType::Voice ? 5058 : 7777);
-            uint32_t srcIP = 0x7F000001u;
-            {
-                std::lock_guard<std::mutex> lgPeer(g_peerMutex);
-                auto it = g_steamIDToIP.find(pkt.fromSteamID);
-                if (it != g_steamIDToIP.end()) srcIP = it->second;
+        if (hasPkt) {
+            DWORD copied = 0;
+            DWORD remaining = (DWORD)pkt.data.size();
+            const uint8_t* src = pkt.data.data();
+            for (DWORD i = 0; i < dwBufferCount && remaining > 0; ++i) {
+                DWORD chunk = (std::min)(lpBuffers[i].len, remaining);
+                if (chunk > 0 && lpBuffers[i].buf) {
+                    memcpy(lpBuffers[i].buf, src, chunk);
+                    src += chunk;
+                    remaining -= chunk;
+                    copied += chunk;
+                }
             }
-            if (*lpFromlen >= (int)sizeof(sockaddr_in6) && lpFrom->sa_family == AF_INET6) {
-                SetSockaddrIpv4(lpFrom, *lpFromlen, srcIP, srcPort, true);
-                *lpFromlen = sizeof(sockaddr_in6);
-            } else if (*lpFromlen >= (int)sizeof(sockaddr_in)) {
-                lpFrom->sa_family = AF_INET;
-                SetSockaddrIpv4(lpFrom, *lpFromlen, srcIP, srcPort, false);
-                *lpFromlen = sizeof(sockaddr_in);
+            if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = copied;
+            if (lpFlags) *lpFlags = 0;
+
+            if (lpFrom && lpFromlen) {
+                uint16_t srcPort = pkt.fromPort ? pkt.fromPort : (pkt.service == SocketServiceType::Voice ? 5058 : 7777);
+                uint32_t srcIP = 0x7F000001u;
+                {
+                    std::lock_guard<std::recursive_mutex> lgPeer(g_peerMutex);
+                    auto it = g_steamIDToIP.find(pkt.fromSteamID);
+                    if (it != g_steamIDToIP.end()) srcIP = it->second;
+                }
+                if (*lpFromlen >= (int)sizeof(sockaddr_in6) && (lpFrom->sa_family == AF_INET6 || lpFrom->sa_family != AF_INET)) {
+                    SetSockaddrIpv4(lpFrom, *lpFromlen, srcIP, srcPort, true);
+                    *lpFromlen = sizeof(sockaddr_in6);
+                } else if (*lpFromlen >= (int)sizeof(sockaddr_in)) {
+                    SetSockaddrIpv4(lpFrom, *lpFromlen, srcIP, srcPort, false);
+                    *lpFromlen = sizeof(sockaddr_in);
+                }
             }
+            return 0; // Success
         }
-        return 0; // Success
-    }
 
-    if (g_orig_WSARecvFrom) {
-        return g_orig_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine);
+        if (g_orig_WSARecvFrom) {
+            return g_orig_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine);
+        }
+    } catch (const std::exception& e) {
+        SteamP2PHook::Log("[P2PHook] Exception in Hook_WSARecvFrom: %s", e.what());
+    } catch (...) {
+        SteamP2PHook::Log("[P2PHook] Unknown exception in Hook_WSARecvFrom");
     }
-    return SOCKET_ERROR;
+    return g_orig_WSARecvFrom ? g_orig_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
 }
 
 // ------ recv -----------------------------------------------------------------
@@ -1247,36 +1277,50 @@ static int WSAAPI Hook_WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount
 // ------ connect --------------------------------------------------------------
 static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namelen)
 {
-    sockaddr_storage translated;
-    int translatedLen = namelen;
-    uint64_t targetSteamId = 0;
-    bool translatedOk = TranslatePeerDestination(name, namelen, translated, translatedLen, targetSteamId);
-    const sockaddr* effectiveName = translatedOk ? (const sockaddr*)&translated : name;
+    try {
+        sockaddr_storage translated;
+        int translatedLen = namelen;
+        uint64_t targetSteamId = 0;
+        bool translatedOk = TranslatePeerDestination(name, namelen, translated, translatedLen, targetSteamId);
+        const sockaddr* effectiveName = translatedOk ? (const sockaddr*)&translated : name;
 
-    if (targetSteamId != 0 && g_pSteamNetworking) {
-        ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, targetSteamId);
+        if (targetSteamId != 0 && g_pSteamNetworking) {
+            ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, targetSteamId);
+        }
+
+        return g_orig_connect(s, effectiveName, translatedLen);
+    } catch (const std::exception& e) {
+        SteamP2PHook::Log("[P2PHook] Exception in Hook_connect: %s", e.what());
+    } catch (...) {
+        SteamP2PHook::Log("[P2PHook] Unknown exception in Hook_connect");
     }
-
-    return g_orig_connect(s, effectiveName, translatedLen);
+    return g_orig_connect ? g_orig_connect(s, name, namelen) : SOCKET_ERROR;
 }
 
 // ------ WSAConnect -----------------------------------------------------------
 static int WSAAPI Hook_WSAConnect(SOCKET s, const struct sockaddr* name, int namelen,
     LPWSABUF lpCallerData, LPWSABUF lpCalleeData, LPQOS lpSQOS, LPQOS lpGQOS)
 {
-    sockaddr_storage translated;
-    int translatedLen = namelen;
-    uint64_t targetSteamId = 0;
-    bool translatedOk = TranslatePeerDestination(name, namelen, translated, translatedLen, targetSteamId);
-    const sockaddr* effectiveName = translatedOk ? (const sockaddr*)&translated : name;
+    try {
+        sockaddr_storage translated;
+        int translatedLen = namelen;
+        uint64_t targetSteamId = 0;
+        bool translatedOk = TranslatePeerDestination(name, namelen, translated, translatedLen, targetSteamId);
+        const sockaddr* effectiveName = translatedOk ? (const sockaddr*)&translated : name;
 
-    if (targetSteamId != 0 && g_pSteamNetworking) {
-        ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, targetSteamId);
+        if (targetSteamId != 0 && g_pSteamNetworking) {
+            ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, targetSteamId);
+        }
+        if (g_orig_WSAConnect) {
+            return g_orig_WSAConnect(s, effectiveName, translatedLen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS);
+        }
+        return g_orig_connect ? g_orig_connect(s, effectiveName, translatedLen) : SOCKET_ERROR;
+    } catch (const std::exception& e) {
+        SteamP2PHook::Log("[P2PHook] Exception in Hook_WSAConnect: %s", e.what());
+    } catch (...) {
+        SteamP2PHook::Log("[P2PHook] Unknown exception in Hook_WSAConnect");
     }
-    if (g_orig_WSAConnect) {
-        return g_orig_WSAConnect(s, effectiveName, translatedLen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS);
-    }
-    return g_orig_connect ? g_orig_connect(s, effectiveName, translatedLen) : SOCKET_ERROR;
+    return g_orig_WSAConnect ? g_orig_WSAConnect(s, name, namelen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS) : SOCKET_ERROR;
 }
 
 // ------ select ---------------------------------------------------------------
@@ -1295,7 +1339,7 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
     int p2pReadyCount = 0;
 
     if (hasInRead) {
-        std::lock_guard<std::mutex> lg(g_socketMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
         for (u_int i = 0; i < inRead.fd_count; ++i) {
             SOCKET s = inRead.fd_array[i];
             if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) continue;
@@ -1361,7 +1405,7 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
                     SetSockaddrIpv4((sockaddr*)&retryAddr, namelen, 0, newPort, wasV6);
                     if (g_orig_bind(s, reinterpret_cast<const struct sockaddr*>(&retryAddr), namelen) == 0) {
                         {
-                            std::lock_guard<std::mutex> lg(g_peerMutex);
+                            std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
                             g_portRemap[requestedPort] = newPort;
                         }
                         g_virtualizedGamePort.store(newPort);
@@ -1370,7 +1414,7 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 
                         ReFix_OnGamePortVirtualized(newPort);
 
-                        std::lock_guard<std::mutex> lg(g_socketMutex);
+                        std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
                         auto& ctx = g_socketContexts[s];
                         ctx.socket = s;
                         ctx.localPort = newPort;
@@ -1397,7 +1441,7 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
             }
         }
         {
-            std::lock_guard<std::mutex> lg(g_socketMutex);
+            std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
             auto& ctx = g_socketContexts[s];
             ctx.socket = s;
             ctx.localPort = actualPort;
@@ -1416,11 +1460,13 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 // ------ closesocket ----------------------------------------------------------
 static int WSAAPI Hook_closesocket(SOCKET s)
 {
-    SteamP2PHook::UnregisterInternalSocket((uintptr_t)s);
-    {
-        std::lock_guard<std::mutex> lg(g_socketMutex);
-        g_socketContexts.erase(s);
-    }
+    try {
+        SteamP2PHook::UnregisterInternalSocket((uintptr_t)s);
+        {
+            std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
+            g_socketContexts.erase(s);
+        }
+    } catch (...) {}
     if (g_orig_closesocket) {
         return g_orig_closesocket(s);
     }
@@ -1436,7 +1482,7 @@ namespace SteamP2PHook {
 uint16_t GetBoundGamePort() {
     uint16_t v = g_virtualizedGamePort.load();
     if (v != 0) return v;
-    std::lock_guard<std::mutex> lg(g_socketMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
     for (const auto& kv : g_socketContexts) {
         if (kv.second.serviceType == SocketServiceType::Game && kv.second.localPort != 0) {
             return kv.second.localPort;
@@ -1599,13 +1645,13 @@ void Uninstall() {
     g_hooksInstalled = false;
 
     {
-        std::lock_guard<std::mutex> lg(g_socketMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
         g_socketContexts.clear();
         g_pendingGamePackets.clear();
         g_pendingVoicePackets.clear();
     }
     {
-        std::lock_guard<std::mutex> lg(g_holdBufferMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_holdBufferMutex);
         g_holdBuffer.clear();
     }
     g_virtualizedGamePort.store(0);
@@ -1616,7 +1662,7 @@ void RegisterLanDataEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port
     if (steamID == UnrealSteamEmu::GetLocalSteamID()) return;
 
     {
-        std::lock_guard<std::mutex> lg(g_peerMutex);
+        std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
         auto& peer = g_peersBySteamID[steamID];
         peer.steamID = steamID;
         peer.lanDataIP = ipv4_host;
@@ -1645,7 +1691,7 @@ void RegisterLanDataEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port
 
 void RegisterGameServerPort(uint64_t steamID, uint16_t port) {
     if (!steamID || !port) return;
-    std::lock_guard<std::mutex> lg(g_peerMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
     auto& peer = g_peersBySteamID[steamID];
     peer.steamID = steamID;
     peer.gameServerPort = port;
@@ -1654,7 +1700,7 @@ void RegisterGameServerPort(uint64_t steamID, uint16_t port) {
 
 void RegisterOverlayEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     if (!steamID) return;
-    std::lock_guard<std::mutex> lg(g_peerMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
     auto& peer = g_peersBySteamID[steamID];
     peer.steamID = steamID;
     peer.overlayIP = ipv4_host;
@@ -1665,7 +1711,7 @@ void RegisterOverlayEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port
 
 void RegisterWanEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     if (!steamID || !ipv4_host) return;
-    std::lock_guard<std::mutex> lg(g_peerMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
     auto& peer = g_peersBySteamID[steamID];
     peer.steamID = steamID;
     peer.wanIP = ipv4_host;
@@ -1697,7 +1743,7 @@ void RegisterPeer(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
 }
 
 void UnregisterPeer(uint64_t steamID) {
-    std::lock_guard<std::mutex> lg(g_peerMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
     auto it = g_steamIDToIP.find(steamID);
     if (it != g_steamIDToIP.end()) {
         g_ipToSteamID.erase(it->second);
@@ -1716,7 +1762,7 @@ void UnregisterPeer(uint64_t steamID) {
 }
 
 std::vector<uint64_t> GetRegisteredPeers() {
-    std::lock_guard<std::mutex> lg(g_peerMutex);
+    std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
     std::vector<uint64_t> result;
     result.reserve(g_steamIDToIP.size());
     for (const auto& kv : g_steamIDToIP) {

@@ -154,7 +154,11 @@ void LanFirewall::ParseAndAddSubnets(std::string_view list) {
             unsigned int a, b, c, d, prefix = 32;
             size_t slash = token.find('/');
             if (slash != std::string::npos) {
-                prefix = std::stoul(token.substr(slash + 1));
+                try {
+                    prefix = std::stoul(token.substr(slash + 1));
+                } catch (...) {
+                    prefix = 32;
+                }
                 token = token.substr(0, slash);
             }
             if (sscanf(token.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {

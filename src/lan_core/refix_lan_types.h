@@ -91,9 +91,13 @@ struct LanEndpoint {
         if (colon == std::string_view::npos) return {};
         std::string host(hostPort.substr(0, colon));
         std::string pstr(hostPort.substr(colon + 1));
-        unsigned int a, b, c, d, p;
+        unsigned int a, b, c, d, p = 0;
         if (sscanf(host.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return {};
-        p = std::stoul(pstr);
+        try {
+            p = std::stoul(pstr);
+        } catch (...) {
+            return {};
+        }
         LanEndpoint ep;
         ep.ipv4 = ((a & 0xFF) << 24) | ((b & 0xFF) << 16) | ((c & 0xFF) << 8) | (d & 0xFF);
         ep.port = static_cast<uint16_t>(p);
