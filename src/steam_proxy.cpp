@@ -40,6 +40,7 @@
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
 #include "overlay/refix_overlay.h"
+#include "overlay/save_swap.h"
 #if REFIX_LAN_EDITION
 #include "mods/mod_host.h"
 #endif
@@ -4713,6 +4714,9 @@ static bool EnsureOriginal() {
     g_ensureOriginalCallCount.fetch_add(1, std::memory_order_relaxed);
     if (!ReFix::NetworkModeManager::IsOnline()) {
         InitializeLanForwardTable();
+#if REFIX_LAN_EDITION
+        refix::overlay::saves::InitEarly();
+#endif
         return true;
     }
     if (g_hOriginalDll) return true;

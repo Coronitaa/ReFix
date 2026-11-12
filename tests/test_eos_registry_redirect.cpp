@@ -1,8 +1,19 @@
 #include "../src/eossdk/core/eos_registry_redirect.h"
+#include "../src/eossdk/core/refix_log.h"
 #include <windows.h>
 #include <cassert>
 #include <cstdio>
 #include <string>
+
+namespace refix {
+void LogWrite(LogArea, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    printf("\n");
+    va_end(args);
+}
+}
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);

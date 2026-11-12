@@ -222,7 +222,6 @@ void RestoreLaunchEnvironment() {
 namespace ReFixOverlay {
 
 void ArmEarly() {
-    saves::InitEarly();
     CaptureLaunchEnvironment();
     LoadConfig(FindIni());
     // Independent of the ReFix overlay: Enabled=false + BlockSteamOverlay=true means no overlay at all,
@@ -275,6 +274,16 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
 #endif
     const std::vector<Profile> mine = profiles::ForGame(all, game);
     const bool otherInstance = saves::OtherInstanceRunning();
+
+    // Ensure save isolation is active immediately before any dialog could block
+    if (g_cfg.isolateSaves) {
+        Profile initialGuest;
+        initialGuest.guest = true;
+        initialGuest.id = L"Guest_Slot" + std::to_wstring(UnrealSteamEmu::GetInstanceSlot());
+        initialGuest.name = L"Guest";
+        saves::SwitchTo(initialGuest, mine);
+    }
+
     std::optional<Profile> chosen = PickProfile(mine, otherInstance, steamProfile);
     if (!chosen) {
         saves::SetGateActive(true);

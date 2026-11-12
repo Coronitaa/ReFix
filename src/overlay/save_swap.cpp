@@ -55,14 +55,19 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id) {
     return out;
 }
 
+static DWORD (WINAPI* TrueGetFileAttributesW)(LPCWSTR) = nullptr;
+static BOOL (WINAPI* TrueCreateDirectoryW)(LPCWSTR, LPSECURITY_ATTRIBUTES) = nullptr;
+
 bool IsDir(const std::wstring& p) {
-    const DWORD a = GetFileAttributesW(p.c_str());
+    auto pfnAttr = TrueGetFileAttributesW ? TrueGetFileAttributesW : GetFileAttributesW;
+    const DWORD a = pfnAttr(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 void EnsureDir(const std::wstring& path) {
+    auto pfnCreate = TrueCreateDirectoryW ? TrueCreateDirectoryW : CreateDirectoryW;
     for (size_t i = 3; i <= path.size(); ++i) {
-        if (i == path.size() || path[i] == L'\\') CreateDirectoryW(path.substr(0, i).c_str(), nullptr);
+        if (i == path.size() || path[i] == L'\\') pfnCreate(path.substr(0, i).c_str(), nullptr);
     }
 }
 
@@ -593,10 +598,11 @@ struct SaveRedirectRule {
 };
 
 static std::vector<SaveRedirectRule> g_redirectRules;
-static std::mutex g_redirectMutex;
+static std::recursive_mutex g_redirectMutex;
 static bool g_hooksInstalled = false;
 static HANDLE g_profileGateEvent = nullptr;
 static std::atomic<bool> g_gateActive{ false };
+static std::atomic<DWORD> g_gateOwnerThreadId{ 0 };
 static std::wstring g_activeProfileId;
 
 std::wstring NormalizePath(const wchar_t* in) {
@@ -645,6 +651,7 @@ static bool IsExcludedRoot(const std::wstring& folder) {
 } // namespace
 
 void SetGateActive(bool active) {
+    g_gateOwnerThreadId.store(active ? GetCurrentThreadId() : 0);
     g_gateActive.store(active);
     if (active) {
         if (!g_profileGateEvent) {
@@ -659,6 +666,7 @@ void SetGateActive(bool active) {
 
 void SignalProfileGate() {
     g_gateActive.store(false);
+    g_gateOwnerThreadId.store(0);
     if (g_profileGateEvent) {
         SetEvent(g_profileGateEvent);
     }
@@ -666,8 +674,12 @@ void SignalProfileGate() {
 
 void WaitForProfileGate() {
     if (g_gateActive.load() && g_profileGateEvent) {
+        // NEVER wait if the current thread is the one that set the gate (e.g. main/UI thread)
+        if (g_gateOwnerThreadId.load() == GetCurrentThreadId()) {
+            return;
+        }
         ReFixLog("[Saves] Pre-Game Profile Gate: waiting for profile selection...");
-        WaitForSingleObject(g_profileGateEvent, 30000);
+        WaitForSingleObject(g_profileGateEvent, 3000);
         ReFixLog("[Saves] Pre-Game Profile Gate: unblocked, proceeding with file access");
     }
 }
@@ -688,7 +700,7 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
 
     // 1. Fast path: check already registered rules
     {
-        std::lock_guard<std::mutex> lock(g_redirectMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_redirectMutex);
         for (const auto& rule : g_redirectRules) {
             if (s.size() >= rule.livePrefix.size()) {
                 if (_wcsnicmp(s.c_str(), rule.livePrefix.c_str(), rule.livePrefix.size()) == 0) {
@@ -756,7 +768,7 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
                 rule.stashPrefix = stashPrefix;
 
                 {
-                    std::lock_guard<std::mutex> lock(g_redirectMutex);
+                    std::lock_guard<std::recursive_mutex> lock(g_redirectMutex);
                     g_redirectRules.push_back(rule);
                 }
 
@@ -784,8 +796,24 @@ bool CheckAndRedirectA(const char* originalPath, std::string& out) {
     return false;
 }
 
+static thread_local bool t_inFsHook = false;
+struct FsHookGuard {
+    bool active = false;
+    FsHookGuard() {
+        if (!t_inFsHook) {
+            t_inFsHook = true;
+            active = true;
+        }
+    }
+    ~FsHookGuard() {
+        if (active) t_inFsHook = false;
+    }
+};
+
 static HANDLE (WINAPI* TrueCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) = nullptr;
 static HANDLE WINAPI HookCreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
+    if (t_inFsHook) return TrueCreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpFileName, redir)) {
         if (dwCreationDisposition == CREATE_NEW || dwCreationDisposition == CREATE_ALWAYS || dwCreationDisposition == OPEN_ALWAYS) {
@@ -798,6 +826,8 @@ static HANDLE WINAPI HookCreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, 
 
 static HANDLE (WINAPI* TrueCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) = nullptr;
 static HANDLE WINAPI HookCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
+    if (t_inFsHook) return TrueCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpFileName, redir)) {
         if (dwCreationDisposition == CREATE_NEW || dwCreationDisposition == CREATE_ALWAYS || dwCreationDisposition == OPEN_ALWAYS) {
@@ -810,6 +840,8 @@ static HANDLE WINAPI HookCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, D
 
 static HANDLE (WINAPI* TrueFindFirstFileW)(LPCWSTR, LPWIN32_FIND_DATAW) = nullptr;
 static HANDLE WINAPI HookFindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindFileData) {
+    if (t_inFsHook) return TrueFindFirstFileW(lpFileName, lpFindFileData);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpFileName, redir)) {
         return TrueFindFirstFileW(redir.c_str(), lpFindFileData);
@@ -819,6 +851,8 @@ static HANDLE WINAPI HookFindFirstFileW(LPCWSTR lpFileName, LPWIN32_FIND_DATAW l
 
 static HANDLE (WINAPI* TrueFindFirstFileA)(LPCSTR, LPWIN32_FIND_DATAA) = nullptr;
 static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData) {
+    if (t_inFsHook) return TrueFindFirstFileA(lpFileName, lpFindFileData);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpFileName, redir)) {
         return TrueFindFirstFileA(redir.c_str(), lpFindFileData);
@@ -828,6 +862,8 @@ static HANDLE WINAPI HookFindFirstFileA(LPCSTR lpFileName, LPWIN32_FIND_DATAA lp
 
 static HANDLE (WINAPI* TrueFindFirstFileExW)(LPCWSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD) = nullptr;
 static HANDLE WINAPI HookFindFirstFileExW(LPCWSTR lpFileName, FINDEX_INFO_LEVELS fInfoLevelId, LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp, LPVOID lpSearchFilter, DWORD dwAdditionalFlags) {
+    if (t_inFsHook) return TrueFindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpFileName, redir)) {
         return TrueFindFirstFileExW(redir.c_str(), fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
@@ -837,6 +873,8 @@ static HANDLE WINAPI HookFindFirstFileExW(LPCWSTR lpFileName, FINDEX_INFO_LEVELS
 
 static HANDLE (WINAPI* TrueFindFirstFileExA)(LPCSTR, FINDEX_INFO_LEVELS, LPVOID, FINDEX_SEARCH_OPS, LPVOID, DWORD) = nullptr;
 static HANDLE WINAPI HookFindFirstFileExA(LPCSTR lpFileName, FINDEX_INFO_LEVELS fInfoLevelId, LPVOID lpFindFileData, FINDEX_SEARCH_OPS fSearchOp, LPVOID lpSearchFilter, DWORD dwAdditionalFlags) {
+    if (t_inFsHook) return TrueFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpFileName, redir)) {
         return TrueFindFirstFileExA(redir.c_str(), fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
@@ -844,8 +882,9 @@ static HANDLE WINAPI HookFindFirstFileExA(LPCSTR lpFileName, FINDEX_INFO_LEVELS 
     return TrueFindFirstFileExA(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
 }
 
-static DWORD (WINAPI* TrueGetFileAttributesW)(LPCWSTR) = nullptr;
 static DWORD WINAPI HookGetFileAttributesW(LPCWSTR lpFileName) {
+    if (t_inFsHook) return TrueGetFileAttributesW(lpFileName);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpFileName, redir)) {
         return TrueGetFileAttributesW(redir.c_str());
@@ -855,6 +894,8 @@ static DWORD WINAPI HookGetFileAttributesW(LPCWSTR lpFileName) {
 
 static DWORD (WINAPI* TrueGetFileAttributesA)(LPCSTR) = nullptr;
 static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName) {
+    if (t_inFsHook) return TrueGetFileAttributesA(lpFileName);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpFileName, redir)) {
         return TrueGetFileAttributesA(redir.c_str());
@@ -864,6 +905,8 @@ static DWORD WINAPI HookGetFileAttributesA(LPCSTR lpFileName) {
 
 static BOOL (WINAPI* TrueGetFileAttributesExW)(LPCWSTR, GET_FILEEX_INFO_LEVELS, LPVOID) = nullptr;
 static BOOL WINAPI HookGetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId, LPVOID lpFileInformation) {
+    if (t_inFsHook) return TrueGetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpFileName, redir)) {
         return TrueGetFileAttributesExW(redir.c_str(), fInfoLevelId, lpFileInformation);
@@ -873,6 +916,8 @@ static BOOL WINAPI HookGetFileAttributesExW(LPCWSTR lpFileName, GET_FILEEX_INFO_
 
 static BOOL (WINAPI* TrueGetFileAttributesExA)(LPCSTR, GET_FILEEX_INFO_LEVELS, LPVOID) = nullptr;
 static BOOL WINAPI HookGetFileAttributesExA(LPCSTR lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId, LPVOID lpFileInformation) {
+    if (t_inFsHook) return TrueGetFileAttributesExA(lpFileName, fInfoLevelId, lpFileInformation);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpFileName, redir)) {
         return TrueGetFileAttributesExA(redir.c_str(), fInfoLevelId, lpFileInformation);
@@ -880,8 +925,9 @@ static BOOL WINAPI HookGetFileAttributesExA(LPCSTR lpFileName, GET_FILEEX_INFO_L
     return TrueGetFileAttributesExA(lpFileName, fInfoLevelId, lpFileInformation);
 }
 
-static BOOL (WINAPI* TrueCreateDirectoryW)(LPCWSTR, LPSECURITY_ATTRIBUTES) = nullptr;
 static BOOL WINAPI HookCreateDirectoryW(LPCWSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    if (t_inFsHook) return TrueCreateDirectoryW(lpPathName, lpSecurityAttributes);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpPathName, redir)) {
         EnsureDir(Parent(redir));
@@ -892,6 +938,8 @@ static BOOL WINAPI HookCreateDirectoryW(LPCWSTR lpPathName, LPSECURITY_ATTRIBUTE
 
 static BOOL (WINAPI* TrueCreateDirectoryA)(LPCSTR, LPSECURITY_ATTRIBUTES) = nullptr;
 static BOOL WINAPI HookCreateDirectoryA(LPCSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    if (t_inFsHook) return TrueCreateDirectoryA(lpPathName, lpSecurityAttributes);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpPathName, redir)) {
         EnsureDir(Parent(FromUtf8(redir)));
@@ -902,6 +950,8 @@ static BOOL WINAPI HookCreateDirectoryA(LPCSTR lpPathName, LPSECURITY_ATTRIBUTES
 
 static BOOL (WINAPI* TrueRemoveDirectoryW)(LPCWSTR) = nullptr;
 static BOOL WINAPI HookRemoveDirectoryW(LPCWSTR lpPathName) {
+    if (t_inFsHook) return TrueRemoveDirectoryW(lpPathName);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpPathName, redir)) {
         return TrueRemoveDirectoryW(redir.c_str());
@@ -911,6 +961,8 @@ static BOOL WINAPI HookRemoveDirectoryW(LPCWSTR lpPathName) {
 
 static BOOL (WINAPI* TrueRemoveDirectoryA)(LPCSTR) = nullptr;
 static BOOL WINAPI HookRemoveDirectoryA(LPCSTR lpPathName) {
+    if (t_inFsHook) return TrueRemoveDirectoryA(lpPathName);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpPathName, redir)) {
         return TrueRemoveDirectoryA(redir.c_str());
@@ -920,6 +972,8 @@ static BOOL WINAPI HookRemoveDirectoryA(LPCSTR lpPathName) {
 
 static BOOL (WINAPI* TrueDeleteFileW)(LPCWSTR) = nullptr;
 static BOOL WINAPI HookDeleteFileW(LPCWSTR lpFileName) {
+    if (t_inFsHook) return TrueDeleteFileW(lpFileName);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpFileName, redir)) {
         return TrueDeleteFileW(redir.c_str());
@@ -929,6 +983,8 @@ static BOOL WINAPI HookDeleteFileW(LPCWSTR lpFileName) {
 
 static BOOL (WINAPI* TrueDeleteFileA)(LPCSTR) = nullptr;
 static BOOL WINAPI HookDeleteFileA(LPCSTR lpFileName) {
+    if (t_inFsHook) return TrueDeleteFileA(lpFileName);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpFileName, redir)) {
         return TrueDeleteFileA(redir.c_str());
@@ -938,6 +994,8 @@ static BOOL WINAPI HookDeleteFileA(LPCSTR lpFileName) {
 
 static BOOL (WINAPI* TrueMoveFileExW)(LPCWSTR, LPCWSTR, DWORD) = nullptr;
 static BOOL WINAPI HookMoveFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, DWORD dwFlags) {
+    if (t_inFsHook) return TrueMoveFileExW(lpExistingFileName, lpNewFileName, dwFlags);
+    FsHookGuard guard;
     std::wstring redirExist, redirNew;
     LPCWSTR existPath = lpExistingFileName;
     LPCWSTR newPath = lpNewFileName;
@@ -956,6 +1014,8 @@ static BOOL WINAPI HookMoveFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileNa
 
 static BOOL (WINAPI* TrueCopyFileW)(LPCWSTR, LPCWSTR, BOOL) = nullptr;
 static BOOL WINAPI HookCopyFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, BOOL bFailIfExists) {
+    if (t_inFsHook) return TrueCopyFileW(lpExistingFileName, lpNewFileName, bFailIfExists);
+    FsHookGuard guard;
     std::wstring redirExist, redirNew;
     LPCWSTR existPath = lpExistingFileName;
     LPCWSTR newPath = lpNewFileName;
@@ -969,6 +1029,8 @@ static BOOL WINAPI HookCopyFileW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileNa
 
 static BOOL (WINAPI* TrueCopyFileExW)(LPCWSTR, LPCWSTR, LPPROGRESS_ROUTINE, LPVOID, LPBOOL, DWORD) = nullptr;
 static BOOL WINAPI HookCopyFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFileName, LPPROGRESS_ROUTINE lpProgressRoutine, LPVOID lpData, LPBOOL pbCancel, DWORD dwCopyFlags) {
+    if (t_inFsHook) return TrueCopyFileExW(lpExistingFileName, lpNewFileName, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+    FsHookGuard guard;
     std::wstring redirExist, redirNew;
     LPCWSTR existPath = lpExistingFileName;
     LPCWSTR newPath = lpNewFileName;
@@ -982,6 +1044,8 @@ static BOOL WINAPI HookCopyFileExW(LPCWSTR lpExistingFileName, LPCWSTR lpNewFile
 
 static BOOL (WINAPI* TrueMoveFileExA)(LPCSTR, LPCSTR, DWORD) = nullptr;
 static BOOL WINAPI HookMoveFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, DWORD dwFlags) {
+    if (t_inFsHook) return TrueMoveFileExA(lpExistingFileName, lpNewFileName, dwFlags);
+    FsHookGuard guard;
     std::string redirExist, redirNew;
     LPCSTR existPath = lpExistingFileName;
     LPCSTR newPath = lpNewFileName;
@@ -1000,6 +1064,8 @@ static BOOL WINAPI HookMoveFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName
 
 static BOOL (WINAPI* TrueCopyFileA)(LPCSTR, LPCSTR, BOOL) = nullptr;
 static BOOL WINAPI HookCopyFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, BOOL bFailIfExists) {
+    if (t_inFsHook) return TrueCopyFileA(lpExistingFileName, lpNewFileName, bFailIfExists);
+    FsHookGuard guard;
     std::string redirExist, redirNew;
     LPCSTR existPath = lpExistingFileName;
     LPCSTR newPath = lpNewFileName;
@@ -1013,6 +1079,8 @@ static BOOL WINAPI HookCopyFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName
 
 static BOOL (WINAPI* TrueCopyFileExA)(LPCSTR, LPCSTR, LPPROGRESS_ROUTINE, LPVOID, LPBOOL, DWORD) = nullptr;
 static BOOL WINAPI HookCopyFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, LPPROGRESS_ROUTINE lpProgressRoutine, LPVOID lpData, LPBOOL pbCancel, DWORD dwCopyFlags) {
+    if (t_inFsHook) return TrueCopyFileExA(lpExistingFileName, lpNewFileName, lpProgressRoutine, lpData, pbCancel, dwCopyFlags);
+    FsHookGuard guard;
     std::string redirExist, redirNew;
     LPCSTR existPath = lpExistingFileName;
     LPCSTR newPath = lpNewFileName;
@@ -1026,6 +1094,8 @@ static BOOL WINAPI HookCopyFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileNa
 
 static BOOL (WINAPI* TrueSetFileAttributesW)(LPCWSTR, DWORD) = nullptr;
 static BOOL WINAPI HookSetFileAttributesW(LPCWSTR lpFileName, DWORD dwFileAttributes) {
+    if (t_inFsHook) return TrueSetFileAttributesW(lpFileName, dwFileAttributes);
+    FsHookGuard guard;
     std::wstring redir;
     if (CheckAndRedirect(lpFileName, redir)) {
         return TrueSetFileAttributesW(redir.c_str(), dwFileAttributes);
@@ -1035,6 +1105,8 @@ static BOOL WINAPI HookSetFileAttributesW(LPCWSTR lpFileName, DWORD dwFileAttrib
 
 static BOOL (WINAPI* TrueSetFileAttributesA)(LPCSTR, DWORD) = nullptr;
 static BOOL WINAPI HookSetFileAttributesA(LPCSTR lpFileName, DWORD dwFileAttributes) {
+    if (t_inFsHook) return TrueSetFileAttributesA(lpFileName, dwFileAttributes);
+    FsHookGuard guard;
     std::string redir;
     if (CheckAndRedirectA(lpFileName, redir)) {
         return TrueSetFileAttributesA(redir.c_str(), dwFileAttributes);
@@ -1044,6 +1116,8 @@ static BOOL WINAPI HookSetFileAttributesA(LPCSTR lpFileName, DWORD dwFileAttribu
 
 static BOOL (WINAPI* TrueCreateDirectoryExW)(LPCWSTR, LPCWSTR, LPSECURITY_ATTRIBUTES) = nullptr;
 static BOOL WINAPI HookCreateDirectoryExW(LPCWSTR lpTemplateDirectory, LPCWSTR lpNewDirectory, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    if (t_inFsHook) return TrueCreateDirectoryExW(lpTemplateDirectory, lpNewDirectory, lpSecurityAttributes);
+    FsHookGuard guard;
     std::wstring redirTemplate, redirNew;
     LPCWSTR templ = lpTemplateDirectory;
     LPCWSTR newDir = lpNewDirectory;
@@ -1057,6 +1131,8 @@ static BOOL WINAPI HookCreateDirectoryExW(LPCWSTR lpTemplateDirectory, LPCWSTR l
 
 static BOOL (WINAPI* TrueCreateDirectoryExA)(LPCSTR, LPCSTR, LPSECURITY_ATTRIBUTES) = nullptr;
 static BOOL WINAPI HookCreateDirectoryExA(LPCSTR lpTemplateDirectory, LPCSTR lpNewDirectory, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    if (t_inFsHook) return TrueCreateDirectoryExA(lpTemplateDirectory, lpNewDirectory, lpSecurityAttributes);
+    FsHookGuard guard;
     std::string redirTemplate, redirNew;
     LPCSTR templ = lpTemplateDirectory;
     LPCSTR newDir = lpNewDirectory;
@@ -1070,6 +1146,8 @@ static BOOL WINAPI HookCreateDirectoryExA(LPCSTR lpTemplateDirectory, LPCSTR lpN
 
 static BOOL (WINAPI* TrueReplaceFileW)(LPCWSTR, LPCWSTR, LPCWSTR, DWORD, LPVOID, LPVOID) = nullptr;
 static BOOL WINAPI HookReplaceFileW(LPCWSTR lpReplacedFileName, LPCWSTR lpReplacementFileName, LPCWSTR lpBackupFileName, DWORD dwReplaceFlags, LPVOID lpExclude, LPVOID lpReserved) {
+    if (t_inFsHook) return TrueReplaceFileW(lpReplacedFileName, lpReplacementFileName, lpBackupFileName, dwReplaceFlags, lpExclude, lpReserved);
+    FsHookGuard guard;
     std::wstring redirReplaced, redirReplacement, redirBackup;
     LPCWSTR replaced = lpReplacedFileName;
     LPCWSTR replacement = lpReplacementFileName;
@@ -1082,6 +1160,8 @@ static BOOL WINAPI HookReplaceFileW(LPCWSTR lpReplacedFileName, LPCWSTR lpReplac
 
 static BOOL (WINAPI* TrueReplaceFileA)(LPCSTR, LPCSTR, LPCSTR, DWORD, LPVOID, LPVOID) = nullptr;
 static BOOL WINAPI HookReplaceFileA(LPCSTR lpReplacedFileName, LPCSTR lpReplacementFileName, LPCSTR lpBackupFileName, DWORD dwReplaceFlags, LPVOID lpExclude, LPVOID lpReserved) {
+    if (t_inFsHook) return TrueReplaceFileA(lpReplacedFileName, lpReplacementFileName, lpBackupFileName, dwReplaceFlags, lpExclude, lpReserved);
+    FsHookGuard guard;
     std::string redirReplaced, redirReplacement, redirBackup;
     LPCSTR replaced = lpReplacedFileName;
     LPCSTR replacement = lpReplacementFileName;
@@ -1092,39 +1172,17 @@ static BOOL WINAPI HookReplaceFileA(LPCSTR lpReplacedFileName, LPCSTR lpReplacem
     return TrueReplaceFileA(replaced, replacement, backup, dwReplaceFlags, lpExclude, lpReserved);
 }
 
-static DWORD (WINAPI* TrueGetFullPathNameW)(LPCWSTR, DWORD, LPWSTR, LPWSTR*) = nullptr;
-static DWORD WINAPI HookGetFullPathNameW(LPCWSTR lpFileName, DWORD nBufferLength, LPWSTR lpBuffer, LPWSTR* lpFilePart) {
-    std::wstring redir;
-    if (CheckAndRedirect(lpFileName, redir)) {
-        return TrueGetFullPathNameW(redir.c_str(), nBufferLength, lpBuffer, lpFilePart);
-    }
-    return TrueGetFullPathNameW(lpFileName, nBufferLength, lpBuffer, lpFilePart);
-}
-
-static DWORD (WINAPI* TrueGetFullPathNameA)(LPCSTR, DWORD, LPSTR, LPSTR*) = nullptr;
-static DWORD WINAPI HookGetFullPathNameA(LPCSTR lpFileName, DWORD nBufferLength, LPSTR lpBuffer, LPSTR* lpFilePart) {
-    std::string redir;
-    if (CheckAndRedirectA(lpFileName, redir)) {
-        return TrueGetFullPathNameA(redir.c_str(), nBufferLength, lpBuffer, lpFilePart);
-    }
-    return TrueGetFullPathNameA(lpFileName, nBufferLength, lpBuffer, lpFilePart);
-}
-
 static void HookExport(const char* name, void* hookFn, void** trueFn) {
-    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
     HMODULE hKBase = GetModuleHandleW(L"kernelbase.dll");
-    void* pK32 = hK32 ? (void*)GetProcAddress(hK32, name) : nullptr;
-    void* pKBase = hKBase ? (void*)GetProcAddress(hKBase, name) : nullptr;
+    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+    void* target = hKBase ? (void*)GetProcAddress(hKBase, name) : nullptr;
+    if (!target && hK32) target = (void*)GetProcAddress(hK32, name);
 
-    void* chosen = pKBase ? pKBase : pK32;
-    if (chosen) {
-        MH_CreateHook(chosen, hookFn, trueFn);
-        MH_EnableHook(chosen);
-    }
-    if (pK32 && pKBase && pK32 != pKBase) {
-        void* dummy = nullptr;
-        MH_CreateHook(pK32, hookFn, &dummy);
-        MH_EnableHook(pK32);
+    if (target) {
+        MH_STATUS st = MH_CreateHook(target, hookFn, trueFn);
+        if (st == MH_OK || st == MH_ERROR_ALREADY_CREATED) {
+            MH_EnableHook(target);
+        }
     }
 }
 
@@ -1165,8 +1223,6 @@ void InstallFileSystemHooks() {
     HOOK_API(ReplaceFileA);
     HOOK_API(SetFileAttributesW);
     HOOK_API(SetFileAttributesA);
-    HOOK_API(GetFullPathNameW);
-    HOOK_API(GetFullPathNameA);
 #undef HOOK_API
 
     g_hooksInstalled = true;
@@ -1183,7 +1239,7 @@ void InitEarly() {
 void EnableMultiInstanceRedirection(const std::vector<Location>& locations, const Profile& active) {
     g_activeProfileId = active.id;
     {
-        std::lock_guard<std::mutex> lock(g_redirectMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_redirectMutex);
         g_redirectRules.clear();
         for (const auto& loc : locations) {
             std::wstring stash = StashDir(active.id, loc.label);
