@@ -25,6 +25,7 @@ struct Presence {
     uint8_t members = 0;
     uint8_t maxMembers = 0;
     std::string connect;         // rich presence "connect" string, when the game sets one
+    uint64_t steamOnlineId = 0;  // 0 when Steam online services are off, or LocalSteamId() when on
 };
 
 struct RemotePlayer : Presence {

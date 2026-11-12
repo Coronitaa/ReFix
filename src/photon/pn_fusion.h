@@ -20,7 +20,8 @@ constexpr uint8_t P_FUSION_DATA = 245;
 // 4 Disconnect, 5 Start, 6 Snapshot, 7 HostMigration, 8 PlayerRefMapping, 9 ChangeMasterClient,
 // 10 DummyTrafficSync.
 constexpr uint8_t MSG_JOIN = 1, MSG_NETWORK_CONFIG_SYNC = 2, MSG_REFLEXIVE_INFO = 3, MSG_START = 5,
-                  MSG_PLAYER_REF_MAPPING = 8;
+                  MSG_SNAPSHOT = 6, MSG_PLAYER_REF_MAPPING = 8;
+constexpr uint8_t SNAPSHOT_DATA = 1, SNAPSHOT_CONFIRMATION = 2; // Snapshot.SnapshotType
 constexpr uint8_t SYNC_REQUEST = 1, SYNC_RESPONSE = 2, SYNC_OVERRIDE = 3; // NetworkConfigSync.SyncType
 constexpr int32_t JOIN_REQUEST_NETWORK_CONFIG = 2, JOIN_REQUEST_REFLEXIVE_INFO = 4,
                   JOIN_REQUEST_DISABLE_NAT_PUNCH = 8; // Join.JoinRequests flags
@@ -82,6 +83,18 @@ struct PlayerRefMapping {
     OptionalBytes uniqueId;
 };
 
+// Snapshot message (id 6) exchanged between server/host and plugin/clients:
+// [Tick:32][NetworkID:32][SnapshotType:8][dummy:32][CRC:64][TotalSize:32][Data:OptionalBytes][Footer]
+struct Snapshot {
+    int32_t tick = 0;
+    uint32_t networkId = 0;
+    uint8_t snapshotType = 0;
+    int32_t dummy = 0;
+    uint64_t crc = 0;
+    int32_t totalSize = 0;
+    OptionalBytes data;
+};
+
 // Message id of the first message in the buffer, or -1 when the buffer is empty or truncated.
 int FirstMessageId(const std::string& buffer);
 
@@ -93,6 +106,8 @@ bool ParseReflexiveInfo(const std::string& buffer, Header& header, ReflexiveInfo
 std::string BuildReflexiveInfo(const Header& header, const ReflexiveInfo& info);
 bool ParsePlayerRefMapping(const std::string& buffer, Header& header, PlayerRefMapping& mapping);
 std::string BuildPlayerRefMapping(const Header& header, const PlayerRefMapping& mapping);
+bool ParseSnapshot(const std::string& buffer, Header& header, Snapshot& snap);
+std::string BuildSnapshotConfirmation(const Header& header, int32_t tick, uint32_t networkId);
 
 // NetworkConfigSync: [Type:8][NetworkConfig: string, same presence-bit/16-bit-length form as byte[]]. The plugin
 // asks the host for its config (Request) and forwards the host's Response to clients that asked in their Join.

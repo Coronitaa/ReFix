@@ -335,7 +335,7 @@ int App::DrawWaitingFriends(float width) {
     const std::string filter = Lower(filter_);
     std::vector<steamlink::Friend> friends = steamlink::Friends();
     friends.erase(std::remove_if(friends.begin(), friends.end(), [&](const steamlink::Friend& x) {
-                      return !friendWait_.count(x.steamId) || FriendRow(x) || Lower(x.name).find(filter) == std::string::npos;
+                      return !friendWait_.count(x.steamId) || FriendRow(x) || !LinkedProfilesFor(x).empty() || Lower(x.name).find(filter) == std::string::npos;
                   }),
                   friends.end());
     if (friends.empty()) return 0;

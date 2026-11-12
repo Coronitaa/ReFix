@@ -67,6 +67,7 @@ public:
     std::string Str8() { return Str(U8()); }
     std::string Str16() { return Str(U16()); }
     const uint8_t* Rest(size_t& n) { n = ok_ ? n_ - off_ : 0; return p_ + off_; }
+    size_t Remaining() const { return ok_ && off_ <= n_ ? n_ - off_ : 0; }
     bool Ok(size_t n = 0) { if (off_ + n > n_) ok_ = false; return ok_; }
 private:
     void Raw(void* v, size_t n) { if (Ok(n)) { memcpy(v, p_ + off_, n); off_ += n; } }
@@ -166,10 +167,11 @@ std::vector<uint8_t> BuildPresence() {
     w.Str8(g_local.name);
     w.Str8(g_local.game);
     w.Str16(g_local.connect);
+    w.U64(g_local.steamOnlineId);
     return w.Data();
 }
 
-void OnPresence(Reader& r, uint32_t fromIp) {
+void OnPresence(Reader& r, uint32_t fromIp, const uint8_t* rawBuf, size_t rawLen) {
     RemotePlayer p;
     p.steamId = r.U64();
     p.port = r.U16();
@@ -183,9 +185,17 @@ void OnPresence(Reader& r, uint32_t fromIp) {
     p.name = r.Str8();
     p.game = r.Str8();
     p.connect = r.Str16();
+    if (r.Remaining() >= 8) p.steamOnlineId = r.U64();
     if (!r.Ok() || p.steamId == 0 || p.name.empty()) return;
     p.ip = fromIp;
     p.lastSeen = GetTickCount64();
+#if REFIX_STEAM_LINK
+    if (!steamlink::IsVirtual(fromIp) && steamlink::GetState() == steamlink::State::Online) {
+        if (p.steamOnlineId == 0 || p.steamOnlineId == steamlink::LocalSteamId()) {
+            steamlink::ForwardFromLan(fromIp, p.port, rawBuf, rawLen, kPresencePort);
+        }
+    }
+#endif
     std::lock_guard<std::mutex> lock(g_mu);
     if (p.steamId == g_local.steamId && p.port == g_ucastPort) return;
     uint64_t playerKey = p.steamId;
@@ -259,7 +269,13 @@ void OnInvite(Reader& r, uint32_t fromIp) {
     if (!r.Ok()) return;
     {
         std::lock_guard<std::mutex> lock(g_mu);
-        if (to != g_local.steamId) return;
+        bool forMe = (to == g_local.steamId);
+#if REFIX_STEAM_LINK
+        if (!forMe && steamlink::GetState() == steamlink::State::Online && to == steamlink::LocalSteamId()) {
+            forMe = true;
+        }
+#endif
+        if (!forMe) return;
         if (g_seenInvites.insert({ inv.from, inv.id }).second) g_inbox.push_back(inv);
     }
     Writer ack(Msg::InviteAck);
@@ -274,7 +290,7 @@ void OnInviteAck(Reader& r) {
     if (!r.Ok()) return;
     std::lock_guard<std::mutex> lock(g_mu);
     g_outbox.erase(std::remove_if(g_outbox.begin(), g_outbox.end(),
-                                  [&](const PendingInvite& p) { return p.invite.id == id && p.to == from; }),
+                                  [&](const PendingInvite& p) { return p.invite.id == id; }),
                    g_outbox.end());
 }
 
@@ -283,7 +299,7 @@ void Handle(const uint8_t* buf, size_t n, uint32_t ip) {
     Reader r(buf, n);
     if (r.U32() != kMagic || r.U8() != kVersion) return;
     switch ((Msg)r.U8()) {
-    case Msg::Presence: OnPresence(r, ip); break;
+    case Msg::Presence: OnPresence(r, ip, buf, n); break;
     case Msg::AvatarReq: OnAvatarReq(r, ip); break;
     case Msg::AvatarChunk: OnAvatarChunk(r); break;
     case Msg::Invite: OnInvite(r, ip); break;
@@ -500,6 +516,18 @@ std::vector<RemotePlayer> Players() {
 
 bool SendInvite(uint64_t to, uint64_t lobbyId, const std::string& connect) {
     std::lock_guard<std::mutex> lock(g_mu);
+    if (!g_players.count(to)) {
+#if REFIX_STEAM_LINK
+        for (const auto& [id, pl] : g_players) {
+            if (steamlink::IsVirtual(pl.ip)) {
+                if (steamlink::SteamIdOf(pl.ip) == to || (pl.steamOnlineId != 0 && pl.steamOnlineId == to)) {
+                    to = pl.steamId;
+                    break;
+                }
+            }
+        }
+#endif
+    }
     if (!g_players.count(to)) {
         auto pid = refix::lan::ILanCore::Get().Peers().FindBySteamId(to);
         if (pid) {

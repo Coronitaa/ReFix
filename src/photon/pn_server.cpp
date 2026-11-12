@@ -397,6 +397,7 @@ void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
     switch (PnFusion::FirstMessageId(buffer)) {
         case PnFusion::MSG_JOIN: HandleFusionJoin(peer, room, buffer); return;
         case PnFusion::MSG_NETWORK_CONFIG_SYNC: HandleFusionConfigSync(peer, room, buffer); return;
+        case PnFusion::MSG_SNAPSHOT: HandleFusionSnapshot(peer, room, buffer); return;
         case PnFusion::MSG_REFLEXIVE_INFO:
             if (peer.actor == room.fusionServer) {
                 room.fusionRelayInfo.clear(); // the host's own addresses replace the relay-only ones
@@ -475,6 +476,23 @@ void Emulator::HandleFusionConfigSync(Peer& peer, Room& room, const std::string&
         StartFusionPeer(room, actor, clientHeader);
         m_env.log("[Photon] Fusion: forwarded host NetworkConfig (%zu bytes) to actor %d and started it",
                   config.bytes.size(), actor);
+    }
+}
+
+void Emulator::HandleFusionSnapshot(Peer& peer, Room& room, const std::string& buffer) {
+    PnFusion::Header header;
+    PnFusion::Snapshot snap;
+    if (!PnFusion::ParseSnapshot(buffer, header, snap)) {
+        m_env.log("[Photon] Fusion: failed to parse snapshot from actor %d", peer.actor);
+        return;
+    }
+    m_env.log("[Photon] Fusion: snapshot from actor %d (type %u, tick %d, netId %u, size %d)",
+              peer.actor, (unsigned)snap.snapshotType, snap.tick, snap.networkId, snap.totalSize);
+    if (snap.snapshotType == PnFusion::SNAPSHOT_DATA) {
+        std::string reply = PnFusion::BuildSnapshotConfirmation(header, snap.tick, snap.networkId);
+        SendFusionMessage(room, peer.actor, reply);
+        m_env.log("[Photon] Fusion: confirmed snapshot tick %d (netId %u) to actor %d",
+                  snap.tick, snap.networkId, peer.actor);
     }
 }
 

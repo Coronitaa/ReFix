@@ -173,7 +173,7 @@ std::string AddressString(uint32_t ipHostOrder, uint16_t port) {
 
 void SendHello(uint64_t steamId, uint8_t which) {
     const char hello[4] = { (char)kHello, (char)which, 0, 0 };
-    ReFixSteamFlat::SendMessage(steamId, hello, sizeof(hello), g_channel);
+    ReFixSteamFlat::SendMessage(steamId, hello, sizeof(hello), g_channel, /*reliable=*/true);
 }
 
 uint64_t SteamIdPrefix(const std::string& name) {
@@ -236,7 +236,7 @@ void BroadcastRoomAnnounce(const std::string& roomName, bool open) {
         ann.append(roomName);
         ann.append(*rawProps);
         for (uint64_t peer : peers) {
-            ReFixSteamFlat::SendMessage(peer, ann.data(), (uint32_t)ann.size(), g_channel);
+            ReFixSteamFlat::SendMessage(peer, ann.data(), (uint32_t)ann.size(), g_channel, /*reliable=*/true);
         }
     } else {
         std::string ann;
@@ -247,7 +247,7 @@ void BroadcastRoomAnnounce(const std::string& roomName, bool open) {
         ann.push_back((char)(roomName.size() & 0xFF));
         ann.append(roomName);
         for (uint64_t peer : peers) {
-            ReFixSteamFlat::SendMessage(peer, ann.data(), (uint32_t)ann.size(), g_channel);
+            ReFixSteamFlat::SendMessage(peer, ann.data(), (uint32_t)ann.size(), g_channel, /*reliable=*/true);
         }
     }
 }
@@ -512,10 +512,32 @@ void LogTunnelStats(DWORD now) {
     }
 }
 
+bool IsReliableENet(const char* data, size_t size) {
+    if (size < 12) return false;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
+    uint8_t flags = p[2];
+    uint8_t count = p[3];
+    size_t offset = 12 + (flags == 204 ? 4 : 0);
+    while (count-- > 0 && offset + 12 <= size) {
+        uint8_t cmdType = p[offset];
+        uint8_t cmdFlags = p[offset + 2];
+        int32_t cmdSize = (int32_t)((uint32_t)p[offset + 4] << 24 | (uint32_t)p[offset + 5] << 16 |
+                                    (uint32_t)p[offset + 6] << 8 | (uint32_t)p[offset + 7]);
+        if (cmdType == 2 || cmdType == 3 || cmdType == 4 || cmdType == 6 || cmdType == 8 ||
+            cmdType == 14 || cmdType == 15 || (cmdFlags & 1)) {
+            return true;
+        }
+        if (cmdSize <= 0) break;
+        offset += cmdSize;
+    }
+    return false;
+}
+
 void SendSteam(uint64_t steamId, uint8_t kind, uint16_t clientPort, const char* data, size_t size) {
     std::string envelope{ (char)kind, (char)(clientPort >> 8), (char)clientPort };
     envelope.append(data, size);
-    bool sent = ReFixSteamFlat::SendMessage(steamId, envelope.data(), (uint32_t)envelope.size(), g_channel);
+    bool reliable = (kind != kToHost && kind != kToClient) || size > 300 || IsReliableENet(data, size);
+    bool sent = ReFixSteamFlat::SendMessage(steamId, envelope.data(), (uint32_t)envelope.size(), g_channel, reliable);
     {
         std::lock_guard<std::mutex> lock(g_discoveryMutex);
         TunnelStats& stats = g_tunnelStats[steamId];
@@ -649,7 +671,7 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
                     ann.push_back((char)(name.size() & 0xFF));
                     ann.append(name);
                     ann.append(rawProps);
-                    ReFixSteamFlat::SendMessage(from, ann.data(), (uint32_t)ann.size(), g_channel);
+                    ReFixSteamFlat::SendMessage(from, ann.data(), (uint32_t)ann.size(), g_channel, /*reliable=*/true);
                 }
             }
             return;

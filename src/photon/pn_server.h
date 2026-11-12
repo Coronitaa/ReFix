@@ -146,6 +146,7 @@ private:
     void HandleFusionProtocol(Peer& peer, const PnProto18::Raw& data);
     void HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer);
     void HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
+    void HandleFusionSnapshot(Peer& peer, Room& room, const std::string& buffer);
     void HandleFusionSharedJoin(Peer& peer, Room& room, const PnFusion::Header& header, PnFusion::Join join);
     void StartFusionSharedPeer(Room& room, int32_t actor, const PnFusion::Header& header);
     void PumpFusionShared(Room& room);

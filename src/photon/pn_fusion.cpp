@@ -239,4 +239,36 @@ std::string BuildPlayerRefMapping(const Header& header, const PlayerRefMapping& 
     return w.Finish();
 }
 
+bool ParseSnapshot(const std::string& buffer, Header& header, Snapshot& snap) {
+    BitReader r(buffer);
+    if (r.U8() != MSG_SNAPSHOT) return false;
+    ReadHeader(r, header);
+    snap = Snapshot();
+    snap.tick = r.I32();
+    snap.networkId = r.Bits(32);
+    snap.snapshotType = r.U8();
+    snap.dummy = r.I32();
+    uint64_t crcLow = r.Bits(32);
+    snap.crc = crcLow | ((uint64_t)r.Bits(32) << 32);
+    snap.totalSize = r.I32();
+    r.Optional(snap.data);
+    return r.ok;
+}
+
+std::string BuildSnapshotConfirmation(const Header& header, int32_t tick, uint32_t networkId) {
+    BitWriter w;
+    w.U8(MSG_SNAPSHOT);
+    WriteHeader(w, header);
+    w.I32(tick);
+    w.Bits(networkId, 32);
+    w.U8(SNAPSHOT_CONFIRMATION);
+    w.I32(0);
+    w.Bits(0, 32);
+    w.Bits(0, 32);
+    w.I32(0);
+    w.Optional({ false, "" });
+    WriteFooter(w, header);
+    return w.Finish();
+}
+
 } // namespace PnFusion

@@ -307,8 +307,90 @@ float App::DrawSyncButton(float right, float cy) {
 
 const PlayerRow* App::FriendRow(const steamlink::Friend& fr) const {
     if (!fr.refix || !fr.virtIp) return nullptr;
-    for (const PlayerRow& r : rows_) if (r.p.ip == fr.virtIp || r.p.steamId == fr.steamId) return &r;
+    for (const PlayerRow& r : rows_) {
+        if (!steamlink::IsVirtual(r.p.ip)) continue;
+        if (r.p.ip == fr.virtIp || r.p.steamId == fr.steamId || steamlink::SteamIdOf(r.p.ip) == fr.steamId) return &r;
+    }
     return nullptr;
+}
+
+std::vector<const PlayerRow*> App::LinkedProfilesFor(const steamlink::Friend& fr) const {
+    std::vector<const PlayerRow*> res;
+    if (!fr.refix) return res;
+    for (const PlayerRow& r : rows_) {
+        if (!steamlink::IsVirtual(r.p.ip)) continue;
+        uint64_t ownerSteamId = steamlink::SteamIdOf(r.p.ip);
+        if (ownerSteamId == fr.steamId || (r.p.steamOnlineId != 0 && r.p.steamOnlineId == fr.steamId) || r.p.steamId == fr.steamId) {
+            if (r.p.steamOnlineId != 0 && r.p.steamOnlineId != fr.steamId) continue;
+            res.push_back(&r);
+        }
+    }
+    return res;
+}
+
+void App::DrawLinkedProfileRow(const steamlink::Friend& fr, const PlayerRow& row, float width) {
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p1(p0.x + width, p0.y + ui::S(kRowH));
+    dl->AddRectFilled(p0, p1, ui::Fade(ui::color::Accent, 0.08f), ui::S(10));
+    dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.35f), ui::S(10));
+    const float cy = p0.y + ui::S(kRowH) * 0.5f;
+    const ImVec2 ac(p0.x + ui::S(12) + ui::S(kAvatarR), cy);
+    const ImU32 col = PersonaColor(fr);
+    ui::DrawAvatar(dl, ac, ui::S(kAvatarR), PlayerAvatar(row.p));
+    dl->AddCircle(ac, ui::S(kAvatarR) + ui::S(2), col, 32, ui::S(2));   // Steam's coloured frame
+
+    float right = p1.x - ui::S(8);
+    if (row.sameGame) {
+        const float d = ui::S(36);
+        ImGui::PushID((const void*)(uintptr_t)row.p.steamId);
+        right -= d;
+        ImGui::SetCursorScreenPos(ImVec2(right, cy - d * 0.5f));
+        switch (InviteStateFor(row)) {
+        case InviteState::InLobby:
+            ui::IconButton("inv", ui::icon::Check, T("Already in your lobby", "Ya está en tu sala"), ui::color::Accent, false, d);
+            break;
+        case InviteState::Fresh:
+            ui::IconButton("inv", ui::icon::Check, T("Invite sent", "Invitación enviada"), ui::color::Accent, false, d);
+            break;
+        case InviteState::Pending:
+            if (ui::IconButton("inv", ui::icon::Refresh, T("Invited, not here yet: invite again", "Invitado, todavía no se unió: reenviar"),
+                               ui::color::Invite, true, d))
+                Invite(row.p);
+            break;
+        case InviteState::NoLobby:
+            ui::IconButton("inv", ui::icon::Invite, T("Create or join a lobby to invite", "Crea o únete a una sala para invitar"),
+                           ui::color::Invite, false, d);
+            break;
+        case InviteState::Ready:
+            if (ui::IconButton("inv", ui::icon::Invite, T("Invite to my lobby", "Invitar a mi sala"), ui::color::Invite, true, d))
+                Invite(row.p);
+            break;
+        }
+        if (CanJoin(row, localLobby_)) {
+            right -= d + ui::S(6);
+            ImGui::SetCursorScreenPos(ImVec2(right, cy - d * 0.5f));
+            if (ui::IconButton("join", ui::icon::Join, T("Join their match", "Unirse a su partida"), ui::color::Accent, true, d))
+                Join(row.p);
+        }
+        ImGui::PopID();
+        right -= ui::S(6);
+    }
+    const float textX = p0.x + ui::S(12 + 2 * kAvatarR + 14);
+    const float textW = std::max(ui::S(40), right - textX);
+    ImGui::PushFont(f.strong);
+    const std::string name = ui::Ellipsize(row.p.name, textW);
+    ImGui::PopFont();
+    std::string baseLabel = PersonaLabel(fr, appId_);
+    std::string viaLabel = baseLabel + " (" + T("via ", "vía ") + fr.name + ")";
+    ImGui::PushFont(f.caption);
+    const std::string status = ui::Ellipsize(viaLabel, textW);
+    ImGui::PopFont();
+    dl->AddText(f.strong, f.strong->FontSize, ImVec2(textX, cy - f.strong->FontSize), ui::color::Text, name.c_str());
+    dl->AddText(f.caption, f.caption->FontSize, ImVec2(textX, cy + ui::S(2)), col, status.c_str());
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + ui::S(6)));
+    ImGui::Dummy(ImVec2(width, 0));
 }
 
 void App::DrawFriendRow(const steamlink::Friend& fr, float width) {
@@ -403,7 +485,13 @@ void App::DrawFriends(ImVec2 pos, ImVec2 size) {
         if (ra != rb) return ra < rb;
         return _stricmp(a.name.c_str(), b.name.c_str()) < 0;
     });
-    const int online = (int)std::count_if(friends.begin(), friends.end(), [](const steamlink::Friend& x) { return x.personaState != 0; });
+    int online = (int)std::count_if(friends.begin(), friends.end(), [](const steamlink::Friend& x) { return x.personaState != 0; });
+    for (const auto& fr : friends) {
+        if (fr.refix) {
+            auto linked = LinkedProfilesFor(fr);
+            if (linked.size() > 1) online += (int)(linked.size() - 1);
+        }
+    }
 
     ui::BeginCard("##friends", pos, size);
     const ImVec2 hp = ImGui::GetCursorScreenPos();
@@ -451,6 +539,32 @@ void App::DrawFriends(ImVec2 pos, ImVec2 size) {
 
     ImGui::BeginChild("##friendlist", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     const float width = ImGui::GetContentRegionAvail().x;
+
+    // 1. Online in ReFix (with active LAN profile rows linked to that Steam friend)
+    {
+        int n = 0;
+        for (const auto& fr : friends) {
+            if (!fr.refix) continue;
+            auto linked = LinkedProfilesFor(fr);
+            n += linked.empty() ? 1 : (int)linked.size();
+        }
+        if (n > 0) {
+            ui::SectionLabel(T("Online in ReFix", "En línea en ReFix"), n);
+            for (const auto& fr : friends) {
+                if (!fr.refix) continue;
+                auto linked = LinkedProfilesFor(fr);
+                if (linked.empty()) {
+                    DrawFriendRow(fr, width);
+                } else {
+                    for (const PlayerRow* lr : linked) {
+                        DrawLinkedProfileRow(fr, *lr, width);
+                    }
+                }
+            }
+            ImGui::Dummy(ImVec2(0, ui::S(6)));
+        }
+    }
+
     auto section = [&](const char* label, auto&& pick) {
         int n = 0;
         for (const auto& fr : friends) n += pick(fr) ? 1 : 0;
@@ -459,7 +573,6 @@ void App::DrawFriends(ImVec2 pos, ImVec2 size) {
         for (const auto& fr : friends) if (pick(fr)) DrawFriendRow(fr, width);
         ImGui::Dummy(ImVec2(0, ui::S(6)));
     };
-    section(T("Online in ReFix", "En línea en ReFix"), [](const steamlink::Friend& x) { return x.refix; });
     section(T("In-Game", "En partida"), [](const steamlink::Friend& x) { return !x.refix && x.playing; });
     section(T("Online", "Conectados"), [](const steamlink::Friend& x) { return !x.refix && !x.playing && x.personaState != 0; });
     section(T("Offline", "Desconectados"), [](const steamlink::Friend& x) { return !x.refix && x.personaState == 0; });

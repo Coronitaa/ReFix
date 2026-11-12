@@ -193,7 +193,7 @@ void SendFrom(SOCKET s, uint32_t ip, uint16_t port, const std::vector<uint8_t>& 
 // (its own unreachable LAN address) replaced by the bridge's. `broadcast`: a LanCore discovery broadcast,
 // repeated on the discovery ports; anything else is not repeated.
 void BridgeToLan(uint64_t from, uint16_t srcPort, uint32_t ip, uint16_t port, const uint8_t* data, size_t n, bool broadcast) {
-    const uint32_t lanIp = g_lanIp;
+    const uint32_t lanIp = g_lanIp ? g_lanIp.load() : 0x7F000001u;
     if (!lanIp) return;
     std::vector<uint8_t> copy(data, data + n);
     std::lock_guard<std::mutex> lock(g_bridgeMu);
@@ -623,14 +623,14 @@ void SetLanSide(uint32_t lanIp, LanRewriter rewriter) {
 
 void SetSocketCallback(SocketCallback cb) { g_sockCb = cb; }
 
-void ForwardFromLan(uint32_t ip, uint16_t port, const void* wire, size_t len) {
+void ForwardFromLan(uint32_t ip, uint16_t port, const void* wire, size_t len, uint16_t dstPort) {
     if (g_state != State::Online || IsVirtual(ip)) return;
     std::vector<uint64_t> peers;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         for (const Friend& f : g_friendList) if (f.refix) peers.push_back(f.steamId);
     }
-    for (uint64_t id : peers) SendRaw(id, port, 0, kFlagBroadcast | kFlagFromLan, wire, len, ip);
+    for (uint64_t id : peers) SendRaw(id, port, dstPort, kFlagBroadcast | kFlagFromLan, wire, len, ip);
 }
 
 bool BridgeEndpoint(uint32_t virtIp, uint16_t port, uint32_t& lanIp, uint16_t& lanPort) {
@@ -705,7 +705,10 @@ std::vector<Friend> Friends() {
 uint64_t SteamIdOf(uint32_t virtIp) {
     std::lock_guard<std::mutex> lock(g_mu);
     auto it = g_idOf.find(virtIp);
-    return it == g_idOf.end() ? 0 : it->second;
+    if (it != g_idOf.end()) return it->second;
+    auto r = g_relayOf.find(virtIp);
+    if (r != g_relayOf.end()) return r->second.gateway;
+    return 0;
 }
 
 } // namespace refix::steamlink

@@ -51,7 +51,7 @@ using LanRewriter = bool (*)(uint8_t* wire, size_t len, uint32_t ip, uint16_t po
 using SocketCallback = void (*)(uintptr_t socket, bool created);
 void SetLanSide(uint32_t lanIp, LanRewriter rewriter);   // LanTransport: its LAN address and payload rewriter
 void SetSocketCallback(SocketCallback cb);                // bridge sockets are ReFix's own (Winsock hooks skip them)
-void ForwardFromLan(uint32_t ip, uint16_t port, const void* wire, size_t len);   // LAN discovery -> friends
+void ForwardFromLan(uint32_t ip, uint16_t port, const void* wire, size_t len, uint16_t dstPort = 0);   // LAN discovery -> friends
 bool BridgeEndpoint(uint32_t virtIp, uint16_t port, uint32_t& lanIp, uint16_t& lanPort);  // friend -> LAN address
 bool IsBridgePort(uint16_t port);                         // a datagram we repeated on the LAN ourselves
 // LAN player behind a friend (or behind the gateway of a relayed sender) -> virtual address. The friend's own

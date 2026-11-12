@@ -223,6 +223,8 @@ private:
     bool steamConfirm_ = false;
     void DrawFriends(ImVec2 pos, ImVec2 size);
     void DrawFriendRow(const steamlink::Friend& fr, float width);
+    std::vector<const PlayerRow*> LinkedProfilesFor(const steamlink::Friend& fr) const;
+    void DrawLinkedProfileRow(const steamlink::Friend& fr, const PlayerRow& row, float width);
     const PlayerRow* FriendRow(const steamlink::Friend& fr) const;   // its tunnel presence, if any
     int DrawWaitingFriends(float width);   // invite picker: ReFix friends in this game not reached yet
     void DrawAchievementToast(ImDrawList* dl, const Toast& t, ImVec2 p0, ImVec2 p1, float alpha);

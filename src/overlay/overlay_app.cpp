@@ -18,6 +18,8 @@
 
 #include "../include/steam/steam_api.h"
 #include "../unreal_steam_emu.h"
+#include "../steam_p2p_hook.h"
+#include "../steam_link/steam_link.h"
 
 #include <shellapi.h>
 #include <algorithm>
@@ -286,6 +288,9 @@ void App::PublishPresence() {
     p.members = (uint8_t)std::min<uint32_t>(lobby.members, 255);
     p.maxMembers = (uint8_t)std::min<uint32_t>(lobby.maxMembers, 255);
     p.connect = localConnect_;
+#if REFIX_STEAM_LINK
+    p.steamOnlineId = (steamlink::GetState() == steamlink::State::Online) ? steamlink::LocalSteamId() : 0;
+#endif
     net::SetLocal(p);
 }
 
@@ -297,6 +302,14 @@ void App::PollInvites() {
         if (inv.appId != appId_) {
             ShowInfo(who + i18n::T(" invited you", " te invita"), i18n::T("to a match of another game.", "a una partida de otro juego."));
             continue;
+        }
+        if (from && from->ip != 0) {
+            SteamP2PHook::RegisterPeer(inv.from, from->ip, from->port);
+            char ipStr[32];
+            snprintf(ipStr, sizeof(ipStr), "%u.%u.%u.%u",
+                     (from->ip >> 24) & 0xFF, (from->ip >> 16) & 0xFF,
+                     (from->ip >> 8) & 0xFF, from->ip & 0xFF);
+            UnrealSteamEmu::SimulatePeerEndpoint(inv.from, ipStr, from->port);
         }
         if (inv.lobbyId) {
             LobbyInvite_t cb = {};
@@ -542,10 +555,17 @@ bool App::DeleteProfile(const std::wstring& id) {
 }
 
 void App::AcceptInvite(const net::Invite& inv) {
+    const net::RemotePlayer* from = FindPlayer(inv.from);
     net::RemotePlayer p;
-    p.steamId = inv.from;
-    p.lobbyId = inv.lobbyId;
-    p.connect = inv.connect;
+    if (from) {
+        p = *from;
+    } else {
+        p.steamId = inv.from;
+        p.lobbyId = inv.lobbyId;
+        p.connect = inv.connect;
+    }
+    if (inv.lobbyId != 0) p.lobbyId = inv.lobbyId;
+    if (!inv.connect.empty()) p.connect = inv.connect;
     Join(p);
 }
 
