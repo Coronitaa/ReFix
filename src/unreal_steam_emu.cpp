@@ -3304,13 +3304,18 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool GetEncryptedAppTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket) override {
-            if (pTicket && cbMaxTicket >= 128) {
-                memset(pTicket, 0xEE, 128);
-                if (pcbTicket) *pcbTicket = 128;
+            const uint32 kTicketSize = 128;
+            if (!pTicket || cbMaxTicket == 0) {
+                if (pcbTicket) *pcbTicket = kTicketSize;
                 return true;
             }
-            if (pcbTicket) *pcbTicket = 0;
-            return false;
+            if (cbMaxTicket < (int)kTicketSize) {
+                if (pcbTicket) *pcbTicket = kTicketSize;
+                return false;
+            }
+            memset(pTicket, 0xEE, kTicketSize);
+            if (pcbTicket) *pcbTicket = kTicketSize;
+            return true;
         }
 
         virtual int GetGameBadgeLevel(int nSeries, bool bFoil) override { return 1; }

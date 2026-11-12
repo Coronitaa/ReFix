@@ -2283,34 +2283,56 @@ if (-not (Test-Path -LiteralPath $winhttpProxy)) {
     $winhttpProxy = Join-Path $BinDir "winhttp.dll"
 }
 
-if ($isEacPresent -and (Test-Path -LiteralPath $winhttpProxy)) {
+if ($isEacPresent) {
     Write-Host "  [DETECTION] EasyAntiCheat (EAC) detected in game directory." -ForegroundColor Yellow
-    $proxyWinhttpSize = (Get-Item -LiteralPath $winhttpProxy).Length
-
-    # Directories needing winhttp.dll proxy:
-    # 1. ExeDir (where the actual game binary executes)
-    # 2. TargetDir / launcher directory if start_protected_game.exe is located there
-    $deployDirs = @($ExeDir)
-    foreach ($pExe in $eacProtected) {
-        if ($deployDirs -notcontains $pExe.DirectoryName) {
-            $deployDirs += $pExe.DirectoryName
-        }
+    $proxyWinhttpSize = 0
+    if (Test-Path -LiteralPath $winhttpProxy) {
+        $proxyWinhttpSize = (Get-Item -LiteralPath $winhttpProxy).Length
     }
 
-    foreach ($d in $deployDirs) {
-        $targetWinhttp = Join-Path $d "winhttp.dll"
-        $targetWinhttpOrig = Join-Path $d "winhttp_original.dll"
-
+    # Check if ReFix is already hooked through Steam or EOS SDK
+    $hasNativeHook = ($pluginDirs.Count -gt 0 -or $pluginDirs32.Count -gt 0 -or $eosDirs.Count -gt 0)
+    if ($hasNativeHook) {
+        Write-Host "  [INFO] ReFix is already hooked via Steam / EOS SDK. winhttp.dll proxy is omitted to avoid EAC 0xc000007b conflict." -ForegroundColor Gray
+        # Purge any previously deployed winhttp.dll proxy in ExeDir to prevent EAC from blocking it with 0xc000007b
+        $targetWinhttp = Join-Path $ExeDir "winhttp.dll"
+        $targetWinhttpOrig = Join-Path $ExeDir "winhttp_original.dll"
         if (Test-Path -LiteralPath $targetWinhttp) {
             $curWSize = (Get-Item -LiteralPath $targetWinhttp).Length
-            if ($curWSize -ne $proxyWinhttpSize -and (-not (Test-Path -LiteralPath $targetWinhttpOrig))) {
-                Rename-Item -LiteralPath $targetWinhttp -NewName "winhttp_original.dll" -Force
-                Write-Host "  [OK] Preserved original winhttp.dll -> winhttp_original.dll in $d" -ForegroundColor Green
+            if ($curWSize -eq $proxyWinhttpSize -or (Test-Path -LiteralPath $targetWinhttpOrig)) {
+                Remove-Item -LiteralPath $targetWinhttp -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $targetWinhttpOrig) {
+                    Rename-Item -LiteralPath $targetWinhttpOrig -NewName "winhttp.dll" -Force -ErrorAction SilentlyContinue
+                    Write-Host "  [OK] Restored genuine winhttp.dll in $ExeDir" -ForegroundColor Green
+                } else {
+                    Write-Host "  [OK] Removed redundant winhttp.dll proxy from $ExeDir" -ForegroundColor Green
+                }
+            }
+        }
+    } elseif (Test-Path -LiteralPath $winhttpProxy) {
+        # Directories needing winhttp.dll proxy when no Steam/EOS hook exists:
+        $deployDirs = @($ExeDir)
+        foreach ($pExe in $eacProtected) {
+            if ($deployDirs -notcontains $pExe.DirectoryName) {
+                $deployDirs += $pExe.DirectoryName
             }
         }
 
-        Copy-Item -LiteralPath $winhttpProxy -Destination $targetWinhttp -Force -ErrorAction Stop
-        Write-Host "  [OK] Deployed ReFix winhttp.dll Anti-Cheat bypass proxy to $d" -ForegroundColor Green
+        foreach ($d in $deployDirs) {
+            $targetWinhttp = Join-Path $d "winhttp.dll"
+            $targetWinhttpOrig = Join-Path $d "winhttp_original.dll"
+
+            if (Test-Path -LiteralPath $targetWinhttp) {
+                $curWSize = (Get-Item -LiteralPath $targetWinhttp).Length
+                if ($curWSize -ne $proxyWinhttpSize -and (-not (Test-Path -LiteralPath $targetWinhttpOrig))) {
+                    Rename-Item -LiteralPath $targetWinhttp -NewName "winhttp_original.dll" -Force
+                    Write-Host "  [OK] Preserved original winhttp.dll -> winhttp_original.dll in $d" -ForegroundColor Green
+                }
+            }
+
+            Copy-Item -LiteralPath $winhttpProxy -Destination $targetWinhttp -Force -ErrorAction Stop
+            Write-Host "  [OK] Deployed ReFix winhttp.dll Anti-Cheat bypass proxy to $d" -ForegroundColor Green
+        }
     }
 } else {
     Write-Host "  [INFO] No EasyAntiCheat (EAC) detected. winhttp proxy not required." -ForegroundColor Gray
@@ -2459,10 +2481,11 @@ function Verify-ReFixDeployment {
         }
     }
 
-    # 5b. Anti-Cheat winhttp.dll verification
+    # 5b. Anti-Cheat winhttp.dll verification (only when no native Steam/EOS SDK hook exists)
+    $hasNativeHook = ($pluginDirs.Count -gt 0 -or $pluginDirs32.Count -gt 0 -or $eosDirs.Count -gt 0)
     $eacCheck = Get-ChildItem -LiteralPath $TargetDir -Filter "*EasyAntiCheat*" -Recurse -File -ErrorAction SilentlyContinue
     $eacExes = Get-ChildItem -LiteralPath $TargetDir -Filter "*start_protected_game*" -Recurse -File -ErrorAction SilentlyContinue
-    if (($eacCheck.Count -gt 0 -or $eacExes.Count -gt 0) -and (-not $IsX86)) {
+    if (($eacCheck.Count -gt 0 -or $eacExes.Count -gt 0) -and (-not $IsX86) -and (-not $hasNativeHook)) {
         $winhttpPath = Join-Path $ProductBinDir "winhttp.dll"
         if (-not (Test-Path -LiteralPath $winhttpPath)) { $winhttpPath = Join-Path $BinDir "lan\winhttp.dll" }
         if (Test-Path -LiteralPath $winhttpPath) {

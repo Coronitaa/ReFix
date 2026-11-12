@@ -31,7 +31,8 @@ $ignorePatterns = @(
 $deprioritizePatterns = @(
     "*dedicated*", "*nullrenderer*", "*server*", "*cmd.exe*", "*cli.exe*",
     "*benchmark*", "*test*.exe*", "*tool*.exe*", "*editor*", "*config*.exe*",
-    "*helper*.exe*", "*report*.exe*"
+    "*helper*.exe*", "*report*.exe*",
+    "*_eac.exe*", "*_eac_*.exe*", "*eac_launcher*.exe*", "*start_protected_game*.exe*"
 )
 
 # 1. Detect Engine Type
@@ -94,6 +95,11 @@ foreach ($exe in $validExes) {
             $score -= 200
             break
         }
+    }
+
+    # Heavily penalize anti-cheat wrappers / protected game starters if a real game binary exists
+    if ($exe.Name -match "(?i)(_eac\.exe|eac_launcher\.exe|start_protected_game\.exe)") {
+        $score -= 300
     }
 
     # Bonus if executable name closely matches the target folder name

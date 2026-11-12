@@ -336,6 +336,14 @@ EOS_DECLARE_FUNC(void) EOS_Connect_VerifyIdToken(EOS_HConnect Handle, const EOS_
             accountType = user->External.Type;
             accountId   = user->External.AccountId;
         }
+        if (!hasAccount || accountId.empty()) {
+            uint64_t sid = SteamBackend::Get().LocalSteamId();
+            if (sid != 0) {
+                accountId = std::to_string(sid);
+                hasAccount = true;
+                accountType = EAT::EOS_EAT_STEAM;
+            }
+        }
     }
     RFLOG(Auth, "EOS_Connect_VerifyIdToken(%s) -> %d",
           puid ? IdRegistry::ToString(puid) : "?", (int)result);

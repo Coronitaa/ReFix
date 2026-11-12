@@ -28,7 +28,9 @@ using EOS_Connect_CopyProductUserExternalAccountByAccountType_Fn = EOS_EResult (
 using EOS_Connect_CopyProductUserExternalAccountByIndex_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserExternalAccountByIndexOptions*, EOS_Connect_ExternalAccountInfo**);
 using EOS_Connect_CopyProductUserExternalAccountByAccountId_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserExternalAccountByAccountIdOptions*, EOS_Connect_ExternalAccountInfo**);
 using EOS_Connect_CopyProductUserInfo_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserInfoOptions*, EOS_Connect_ExternalAccountInfo**);
+using EOS_Connect_CopyUserInfo_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserInfoOptions*, EOS_Connect_ExternalAccountInfo**);
 using EOS_Connect_ExternalAccountInfo_Release_Fn = void (EOS_CALL*)(EOS_Connect_ExternalAccountInfo*);
+using EOS_Connect_VerifyIdToken_Fn = void (EOS_CALL*)(EOS_HConnect, const EOS_Connect_VerifyIdTokenOptions*, void*, const EOS_Connect_OnVerifyIdTokenCallback);
 
 static HMODULE g_hGenuineSdk = nullptr;
 static EOS_Connect_Login_Fn g_orig_EOS_Connect_Login = nullptr;
@@ -40,6 +42,7 @@ static EOS_Connect_CopyProductUserExternalAccountByIndex_Fn g_orig_EOS_Connect_C
 static EOS_Connect_CopyProductUserExternalAccountByAccountId_Fn g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountId = nullptr;
 static EOS_Connect_CopyProductUserInfo_Fn g_orig_EOS_Connect_CopyProductUserInfo = nullptr;
 static EOS_Connect_ExternalAccountInfo_Release_Fn g_orig_EOS_Connect_ExternalAccountInfo_Release = nullptr;
+static EOS_Connect_VerifyIdToken_Fn g_orig_EOS_Connect_VerifyIdToken = nullptr;
 static EOS_ProductUserId g_localProductUserId = nullptr;
 
 std::string DllDirectory() {
@@ -466,6 +469,86 @@ EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_ExternalAccountInfo_Release(EOS_C
     }
 }
 
+// ---------------------------------------------------------------------------
+// VerifyIdToken Interception & External Account Synthesis (7 Days to Die / Unity EOS)
+// ---------------------------------------------------------------------------
+struct VerifyIdTokenContext {
+    void* OriginalClientData = nullptr;
+    EOS_Connect_OnVerifyIdTokenCallback OriginalCompletionDelegate = nullptr;
+    EOS_ProductUserId TargetPuid = nullptr;
+    std::string SteamId;
+    std::string Platform;
+    std::string DeviceType;
+};
+
+static void EOS_CALL OnVerifyIdTokenCallback(const EOS_Connect_VerifyIdTokenCallbackInfo* Data) {
+    if (!Data || !Data->ClientData) return;
+    auto* ctx = static_cast<VerifyIdTokenContext*>(Data->ClientData);
+
+    EOS_Connect_VerifyIdTokenCallbackInfo info = *Data;
+    info.ClientData = ctx->OriginalClientData;
+
+    // Check if account info is missing or operation failed.
+    // When DeviceIdAuth is used (or if genuine EOS SDK returned bIsAccountInfoPresent == EOS_FALSE or ResultCode != Success),
+    // synthesize the external Steam account info so that Unity / EOS games (e.g. 7 Days to Die) can complete platform user mapping.
+    if (!info.bIsAccountInfoPresent || !info.AccountId || !info.AccountId[0] || info.ResultCode != EOS_EResult::EOS_Success) {
+        RFLOG(Auth, "[Passthrough] Synthesizing external Steam account info in VerifyIdToken callback (ResultCode was %d, bIsAccountInfoPresent was %d)",
+              (int)info.ResultCode, (int)info.bIsAccountInfoPresent);
+        info.ResultCode = EOS_EResult::EOS_Success;
+        info.bIsAccountInfoPresent = EOS_TRUE;
+        info.AccountIdType = EAT::EOS_EAT_STEAM;
+        info.AccountId = ctx->SteamId.c_str();
+        info.Platform = ctx->Platform.c_str();
+        info.DeviceType = ctx->DeviceType.c_str();
+        if (ctx->TargetPuid) {
+            info.ProductUserId = ctx->TargetPuid;
+        } else if (!info.ProductUserId && g_localProductUserId) {
+            info.ProductUserId = g_localProductUserId;
+        }
+    }
+
+    if (ctx->OriginalCompletionDelegate) {
+        ctx->OriginalCompletionDelegate(&info);
+    }
+    delete ctx;
+}
+
+EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_VerifyIdToken(
+    EOS_HConnect Handle,
+    const EOS_Connect_VerifyIdTokenOptions* Options,
+    void* ClientData,
+    const EOS_Connect_OnVerifyIdTokenCallback CompletionDelegate
+) {
+    if (!CompletionDelegate) return;
+
+    auto* ctx = new VerifyIdTokenContext();
+    ctx->OriginalClientData = ClientData;
+    ctx->OriginalCompletionDelegate = CompletionDelegate;
+    ctx->TargetPuid = (Options && Options->IdToken) ? Options->IdToken->ProductUserId : g_localProductUserId;
+    if (!ctx->TargetPuid) ctx->TargetPuid = g_localProductUserId;
+    ctx->SteamId = GetPlayerSteamId();
+    ctx->Platform = "STEAM";
+    ctx->DeviceType = "PC";
+
+    RFLOG(Auth, "[Passthrough] EOS_Connect_VerifyIdToken called for PUID %p (SteamID=%s)",
+          ctx->TargetPuid, ctx->SteamId.c_str());
+
+    if (g_orig_EOS_Connect_VerifyIdToken) {
+        g_orig_EOS_Connect_VerifyIdToken(Handle, Options, ctx, OnVerifyIdTokenCallback);
+    } else {
+        EOS_Connect_VerifyIdTokenCallbackInfo synthInfo{};
+        synthInfo.ResultCode = EOS_EResult::EOS_Success;
+        synthInfo.ClientData = ctx;
+        synthInfo.ProductUserId = ctx->TargetPuid;
+        synthInfo.bIsAccountInfoPresent = EOS_TRUE;
+        synthInfo.AccountIdType = EAT::EOS_EAT_STEAM;
+        synthInfo.AccountId = ctx->SteamId.c_str();
+        synthInfo.Platform = ctx->Platform.c_str();
+        synthInfo.DeviceType = ctx->DeviceType.c_str();
+        OnVerifyIdTokenCallback(&synthInfo);
+    }
+}
+
 } // namespace
 
 bool HasOriginalSdk() {
@@ -508,6 +591,7 @@ bool InitialisePassthrough(Registrar& reg) {
     g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountId = (EOS_Connect_CopyProductUserExternalAccountByAccountId_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyProductUserExternalAccountByAccountId");
     g_orig_EOS_Connect_CopyProductUserInfo = (EOS_Connect_CopyProductUserInfo_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyProductUserInfo");
     g_orig_EOS_Connect_ExternalAccountInfo_Release = (EOS_Connect_ExternalAccountInfo_Release_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_ExternalAccountInfo_Release");
+    g_orig_EOS_Connect_VerifyIdToken = (EOS_Connect_VerifyIdToken_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_VerifyIdToken");
 
     // Hook EOS_Connect_Login for DeviceIdAuth
     reg.Bind("EOS_Connect_Login", (void*)&Passthrough_EOS_Connect_Login);
@@ -519,6 +603,9 @@ bool InitialisePassthrough(Registrar& reg) {
     reg.Bind("EOS_Connect_CopyProductUserExternalAccountByAccountId", (void*)&Passthrough_EOS_Connect_CopyProductUserExternalAccountByAccountId);
     reg.Bind("EOS_Connect_CopyProductUserInfo", (void*)&Passthrough_EOS_Connect_CopyProductUserInfo);
     reg.Bind("EOS_Connect_ExternalAccountInfo_Release", (void*)&Passthrough_EOS_Connect_ExternalAccountInfo_Release);
+
+    // Hook VerifyIdToken for Unity / EOS platform user mapping (7 Days to Die, etc.)
+    reg.Bind("EOS_Connect_VerifyIdToken", (void*)&Passthrough_EOS_Connect_VerifyIdToken);
 
     return true;
 }
