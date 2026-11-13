@@ -6812,6 +6812,18 @@ extern "C" __declspec(dllexport) int ReFix_GetInstanceSlot() {
     return UnrealSteamEmu::GetInstanceSlot();
 }
 
+static std::atomic<uint64_t> g_lastRemoteClientSteamID{ 0 };
+
+extern "C" __declspec(dllexport) void ReFix_SetLastRemoteClientSteamID(uint64_t sid) {
+    if (sid != 0 && sid != UnrealSteamEmu::GetLocalSteamID()) {
+        g_lastRemoteClientSteamID.store(sid);
+    }
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_GetLastRemoteClientSteamID() {
+    return g_lastRemoteClientSteamID.load();
+}
+
 extern "C" __declspec(dllexport) uint64_t SteamGameServer_GetSteamID() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
         return UnrealSteamEmu::GameServer_GetSteamID();

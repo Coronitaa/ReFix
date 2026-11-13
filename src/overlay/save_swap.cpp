@@ -4,6 +4,7 @@
 #include "save_swap.h"
 #include "overlay_text.h"
 #include "refix_overlay.h"
+#include "../unreal_steam_emu.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -638,9 +639,16 @@ static std::wstring GetDocumentsBase() {
 
 static bool IsExcludedRoot(const std::wstring& folder) {
     static const wchar_t* const exclusions[] = {
-        L"refix", L"steam", L"valve", L"epic", L"epic games", L"nvidia", L"microsoft",
-        L"temp", L"packages", L"crashdumps", L"d3dscache", L"amd", L"intel", L"discord",
-        L"unity", L"windows", nullptr
+        // Drivers / Gráficos
+        L"nvidia", L"nvidia corporation", L"amd", L"ati", L"intel",
+        // Sistema / Temp
+        L"microsoft", L"windows", L"temp", L"packages", L"connecteddevicesplatform",
+        L"d3dscache", L"crashdumps", L"crashreportclient", L"backtrace",
+        // Engines y launchers
+        L"unity", L"unrealengine", L"steam", L"valve", L"epic", L"epic games",
+        L"epicgameslauncher", L"eos", L"discord",
+        // Rutas propias de ReFix
+        L"refix", L"cef", L"squirreltemp", nullptr
     };
     for (int i = 0; exclusions[i]; ++i) {
         if (_wcsicmp(folder.c_str(), exclusions[i]) == 0) return true;
@@ -735,6 +743,13 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
                 size_t slash = sub.find(L'\\');
                 std::wstring firstPart = (slash == std::wstring::npos) ? sub : sub.substr(0, slash);
                 if (firstPart.empty() || IsExcludedRoot(firstPart)) continue;
+
+                if (UnrealSteamEmu::GetAppID() != 730) {
+                    if (_wcsicmp(firstPart.c_str(), L"Counter-Strike Global Offensive") == 0 ||
+                        s.find(L"Counter-Strike Global Offensive") != std::wstring::npos) {
+                        continue;
+                    }
+                }
 
                 // Candidate save path: wait for profile gate if active
                 if (g_gateActive.load()) {

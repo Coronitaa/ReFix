@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_set>
 #include <mutex>
+#include <wincred.h>
 
 namespace refix {
 
@@ -15,13 +16,26 @@ static std::wstring GetProfileIdW() {
     if (GetEnvironmentVariableW(L"REFIX_ACTIVE_PROFILE", buf, 256) > 0 && buf[0]) {
         return buf;
     }
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (hSteam) {
+        typedef uint64_t (*fn_GetSteamID)();
+        fn_GetSteamID pfn = (fn_GetSteamID)GetProcAddress(hSteam, "ReFix_GetLocalSteamID");
+        if (pfn) {
+            uint64_t sid = pfn();
+            if (sid != 0) return std::to_wstring(sid);
+        }
+    }
+    char envBuf[128] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_STEAM_USER_ID", envBuf, sizeof(envBuf)) > 0 && envBuf[0]) {
+        uint64_t sid = _strtoui64(envBuf, nullptr, 10);
+        if (sid != 0) return std::to_wstring(sid);
+    }
     char slotBuf[16] = { 0 };
     int slot = 0;
     if (GetEnvironmentVariableA("REFIX_MULTI_SLOT", slotBuf, sizeof(slotBuf)) > 0) {
         slot = atoi(slotBuf);
         return L"Guest_Slot" + std::to_wstring(slot);
     }
-    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
     if (hSteam) {
         typedef int (*fn_GetSlot)();
         fn_GetSlot pfnSlot = (fn_GetSlot)GetProcAddress(hSteam, "ReFix_GetInstanceSlot");
@@ -38,13 +52,26 @@ static std::string GetProfileIdA() {
     if (GetEnvironmentVariableA("REFIX_ACTIVE_PROFILE", buf, sizeof(buf)) > 0 && buf[0]) {
         return buf;
     }
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (hSteam) {
+        typedef uint64_t (*fn_GetSteamID)();
+        fn_GetSteamID pfn = (fn_GetSteamID)GetProcAddress(hSteam, "ReFix_GetLocalSteamID");
+        if (pfn) {
+            uint64_t sid = pfn();
+            if (sid != 0) return std::to_string(sid);
+        }
+    }
+    char envBuf[128] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_STEAM_USER_ID", envBuf, sizeof(envBuf)) > 0 && envBuf[0]) {
+        uint64_t sid = _strtoui64(envBuf, nullptr, 10);
+        if (sid != 0) return std::to_string(sid);
+    }
     char slotBuf[16] = { 0 };
     int slot = 0;
     if (GetEnvironmentVariableA("REFIX_MULTI_SLOT", slotBuf, sizeof(slotBuf)) > 0) {
         slot = atoi(slotBuf);
         return "Guest_Slot" + std::to_string(slot);
     }
-    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
     if (hSteam) {
         typedef int (*fn_GetSlot)();
         fn_GetSlot pfnSlot = (fn_GetSlot)GetProcAddress(hSteam, "ReFix_GetInstanceSlot");
@@ -54,6 +81,36 @@ static std::string GetProfileIdA() {
         }
     }
     return "Guest_Slot0";
+}
+
+static uint64_t GetCurrentSteamId64() {
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (hSteam) {
+        typedef uint64_t (*fn_GetSteamID)();
+        fn_GetSteamID pfn = (fn_GetSteamID)GetProcAddress(hSteam, "ReFix_GetLocalSteamID");
+        if (pfn) {
+            uint64_t sid = pfn();
+            if (sid != 0) return sid;
+        }
+    }
+    char buf[128] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_STEAM_USER_ID", buf, sizeof(buf)) > 0 && buf[0]) {
+        uint64_t sid = _strtoui64(buf, nullptr, 10);
+        if (sid != 0) return sid;
+    }
+    if (GetEnvironmentVariableA("REFIX_ACTIVE_PROFILE", buf, sizeof(buf)) > 0 && buf[0]) {
+        uint64_t sid = _strtoui64(buf, nullptr, 10);
+        if (sid > 70000000000000000ULL) return sid;
+    }
+    int slot = 0;
+    if (GetEnvironmentVariableA("REFIX_MULTI_SLOT", buf, sizeof(buf)) > 0) {
+        slot = atoi(buf);
+    } else if (hSteam) {
+        typedef int (*fn_GetSlot)();
+        fn_GetSlot pfnSlot = (fn_GetSlot)GetProcAddress(hSteam, "ReFix_GetInstanceSlot");
+        if (pfnSlot) slot = pfnSlot();
+    }
+    return 0x0110000100000000ULL | (0x10000ULL + (uint64_t)(slot * 1000 + (GetCurrentProcessId() & 0x3FF)));
 }
 
 static bool RedirectRegistryPathW(HKEY hKey, const wchar_t* subKey, HKEY& outHKey, std::wstring& outRedirected) {
@@ -304,6 +361,59 @@ static LSTATUS APIENTRY Hook_RegCloseKey(HKEY hKey) {
     return g_orig_RegCloseKey(hKey);
 }
 
+// ------ Windows Credential Manager Hooks (EOS DeviceId isolation) -----------
+typedef BOOL(WINAPI* fn_CredReadW)(LPCWSTR TargetName, DWORD Type, DWORD Flags, PCREDENTIALW* Credential);
+static fn_CredReadW g_orig_CredReadW = nullptr;
+
+typedef BOOL(WINAPI* fn_CredWriteW)(PCREDENTIALW Credential, DWORD Flags);
+static fn_CredWriteW g_orig_CredWriteW = nullptr;
+
+typedef BOOL(WINAPI* fn_CredDeleteW)(LPCWSTR TargetName, DWORD Type, DWORD Flags);
+static fn_CredDeleteW g_orig_CredDeleteW = nullptr;
+
+static bool RedirectCredTargetW(LPCWSTR targetName, std::wstring& out) {
+    if (!targetName) return false;
+    std::wstring s(targetName);
+    std::wstring lower = s;
+    for (auto& c : lower) c = towlower(c);
+    if (lower.find(L"eos") == std::wstring::npos && lower.find(L"epic") == std::wstring::npos) {
+        return false;
+    }
+    std::wstring suffix = L"_" + std::to_wstring(GetCurrentSteamId64());
+    if (s.size() >= suffix.size() && s.substr(s.size() - suffix.size()) == suffix) {
+        return false;
+    }
+    out = s + suffix;
+    return true;
+}
+
+static BOOL WINAPI Hook_CredReadW(LPCWSTR TargetName, DWORD Type, DWORD Flags, PCREDENTIALW* Credential) {
+    std::wstring redir;
+    if (RedirectCredTargetW(TargetName, redir)) {
+        return g_orig_CredReadW(redir.c_str(), Type, Flags, Credential);
+    }
+    return g_orig_CredReadW(TargetName, Type, Flags, Credential);
+}
+
+static BOOL WINAPI Hook_CredWriteW(PCREDENTIALW Credential, DWORD Flags) {
+    if (!Credential) return g_orig_CredWriteW(Credential, Flags);
+    std::wstring redir;
+    if (RedirectCredTargetW(Credential->TargetName, redir)) {
+        CREDENTIALW copy = *Credential;
+        copy.TargetName = const_cast<LPWSTR>(redir.c_str());
+        return g_orig_CredWriteW(&copy, Flags);
+    }
+    return g_orig_CredWriteW(Credential, Flags);
+}
+
+static BOOL WINAPI Hook_CredDeleteW(LPCWSTR TargetName, DWORD Type, DWORD Flags) {
+    std::wstring redir;
+    if (RedirectCredTargetW(TargetName, redir)) {
+        return g_orig_CredDeleteW(redir.c_str(), Type, Flags);
+    }
+    return g_orig_CredDeleteW(TargetName, Type, Flags);
+}
+
 void InstallRegistryRedirectHooks() {
     static bool s_installed = false;
     if (s_installed) return;
@@ -335,8 +445,11 @@ void InstallRegistryRedirectHooks() {
     hook(hAdvapi, "RegDeleteKeyExW", (void*)&Hook_RegDeleteKeyExW, (void**)&g_orig_RegDeleteKeyExW);
     hook(hAdvapi, "RegDeleteKeyExA", (void*)&Hook_RegDeleteKeyExA, (void**)&g_orig_RegDeleteKeyExA);
     hook(hAdvapi, "RegCloseKey",     (void*)&Hook_RegCloseKey,     (void**)&g_orig_RegCloseKey);
+    hook(hAdvapi, "CredReadW",       (void*)&Hook_CredReadW,       (void**)&g_orig_CredReadW);
+    hook(hAdvapi, "CredWriteW",      (void*)&Hook_CredWriteW,      (void**)&g_orig_CredWriteW);
+    hook(hAdvapi, "CredDeleteW",     (void*)&Hook_CredDeleteW,     (void**)&g_orig_CredDeleteW);
 
-    RFLOG(Core, "[RegistryRedirect] EOS DeviceId registry redirection hooks installed (Profile: %s)", GetProfileIdA().c_str());
+    RFLOG(Core, "[RegistryRedirect] EOS DeviceId registry and Credential Manager redirection hooks installed (Profile: %s)", GetProfileIdA().c_str());
 }
 
 } // namespace refix

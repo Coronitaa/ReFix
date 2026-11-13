@@ -341,6 +341,8 @@ namespace SteamP2PHook {
     void RegisterPeerAlias(uint64_t aliasSteamID, uint64_t realSteamID) {
         if (!aliasSteamID || !realSteamID || aliasSteamID == realSteamID) return;
         std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
+        auto it = g_peerAliases.find(aliasSteamID);
+        if (it != g_peerAliases.end() && it->second == realSteamID) return;
         g_peerAliases[aliasSteamID] = realSteamID;
         Log("RegisterPeerAlias: Alias %llu -> Real %llu", aliasSteamID, realSteamID);
     }
@@ -1661,20 +1663,28 @@ void RegisterLanDataEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port
     if (!steamID || !ipv4_host) return;
     if (steamID == UnrealSteamEmu::GetLocalSteamID()) return;
 
+    bool alreadySame = false;
     {
         std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
-        auto& peer = g_peersBySteamID[steamID];
-        peer.steamID = steamID;
-        peer.lanDataIP = ipv4_host;
-        peer.lanDataPort = port;
-        if (ipv4_host == GetLocalLanIp() || ipv4_host == 0x7F000001u) {
-            peer.isLocalMachine = true;
-        }
+        auto it = g_peersBySteamID.find(steamID);
+        if (it != g_peersBySteamID.end() && it->second.lanDataIP == ipv4_host && it->second.lanDataPort == port) {
+            alreadySame = true;
+        } else {
+            auto& peer = g_peersBySteamID[steamID];
+            peer.steamID = steamID;
+            peer.lanDataIP = ipv4_host;
+            peer.lanDataPort = port;
+            if (ipv4_host == GetLocalLanIp() || ipv4_host == 0x7F000001u) {
+                peer.isLocalMachine = true;
+            }
 
-        g_steamIDToIP[steamID] = ipv4_host;
-        g_ipToSteamID[ipv4_host] = steamID;
-        if (port != 0) g_steamIDToPort[steamID] = port;
+            g_steamIDToIP[steamID] = ipv4_host;
+            g_ipToSteamID[ipv4_host] = steamID;
+            if (port != 0) g_steamIDToPort[steamID] = port;
+        }
     }
+
+    if (alreadySame) return;
 
     if (g_pSteamNetworking) {
         ISteamNetworking_AcceptP2PSessionWithUser(g_pSteamNetworking, steamID);
@@ -1692,6 +1702,10 @@ void RegisterLanDataEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port
 void RegisterGameServerPort(uint64_t steamID, uint16_t port) {
     if (!steamID || !port) return;
     std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
+    auto it = g_peersBySteamID.find(steamID);
+    if (it != g_peersBySteamID.end() && it->second.gameServerPort == port) {
+        return;
+    }
     auto& peer = g_peersBySteamID[steamID];
     peer.steamID = steamID;
     peer.gameServerPort = port;
@@ -1701,6 +1715,10 @@ void RegisterGameServerPort(uint64_t steamID, uint16_t port) {
 void RegisterOverlayEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     if (!steamID) return;
     std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
+    auto it = g_peersBySteamID.find(steamID);
+    if (it != g_peersBySteamID.end() && it->second.overlayIP == ipv4_host && it->second.overlayPort == port) {
+        return;
+    }
     auto& peer = g_peersBySteamID[steamID];
     peer.steamID = steamID;
     peer.overlayIP = ipv4_host;
@@ -1712,6 +1730,10 @@ void RegisterOverlayEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port
 void RegisterWanEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {
     if (!steamID || !ipv4_host) return;
     std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
+    auto it = g_peersBySteamID.find(steamID);
+    if (it != g_peersBySteamID.end() && it->second.wanIP == ipv4_host && it->second.wanPort == port) {
+        return;
+    }
     auto& peer = g_peersBySteamID[steamID];
     peer.steamID = steamID;
     peer.wanIP = ipv4_host;

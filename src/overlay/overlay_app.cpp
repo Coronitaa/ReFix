@@ -1,6 +1,12 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
 #include "overlay_app.h"
 #include "game_actions/overlay_actions.h"
 #include "avatar_image.h"
@@ -20,6 +26,7 @@
 #include "../unreal_steam_emu.h"
 #include "../steam_p2p_hook.h"
 #include "../steam_link/steam_link.h"
+#include "../lan_core/refix_lan_core.h"
 
 #include <shellapi.h>
 #include <algorithm>
@@ -412,19 +419,37 @@ void App::Join(const net::RemotePlayer& p) {
     if (p.ip != 0) {
         SteamP2PHook::RegisterOverlayEndpoint(p.steamId, p.ip, p.port);
     }
-    if (p.lobbyId != 0) {
-        UnrealSteamEmu::PreseedInviteLobby(p.lobbyId, p.steamId, p.connect);
+
+    uint64_t targetLobbyId = p.lobbyId;
+    if (targetLobbyId == 0) {
+        // Search in LanCore for an active lobby owned by p.steamId
+        auto allLobbies = refix::lan::ILanCore::Get().Lobby().GetAllKnownLobbies();
+        for (const auto& l : allLobbies) {
+            auto pInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(l.ownerPeerId);
+            if (pInfo && pInfo->externalId.numericId == p.steamId) {
+                targetLobbyId = UnrealSteamEmu::EnsureSteamLobbyID(l.lobbyId);
+                if (targetLobbyId != 0) {
+                    ReFixLog("[Overlay] Join: Resolved lobby %llu (coreId='%s') from LanCore for owner %llu",
+                             targetLobbyId, l.lobbyId.c_str(), p.steamId);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (targetLobbyId != 0) {
+        UnrealSteamEmu::ResetResidualLobbyState(targetLobbyId);
+        UnrealSteamEmu::PreseedInviteLobby(targetLobbyId, p.steamId, p.connect);
         GameLobbyJoinRequested_t cb = {};
-        cb.m_steamIDLobby = CSteamID(p.lobbyId);
+        cb.m_steamIDLobby = CSteamID(targetLobbyId);
         cb.m_steamIDFriend = CSteamID(p.steamId);
         UnrealSteamEmu::PostCallback(GameLobbyJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-    }
-    if (!p.connect.empty()) {
+    } else if (!p.connect.empty()) {
         GameRichPresenceJoinRequested_t cb = {};
         cb.m_steamIDFriend = CSteamID(p.steamId);
         strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
         UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-    } else if (p.lobbyId == 0 && p.ip != 0) {
+    } else if (p.ip != 0) {
         // Direct IP connect without rich presence connect string: queue to main thread (satisfies R5)
         char ipBuf[64];
         snprintf(ipBuf, sizeof(ipBuf), "connect %u.%u.%u.%u:%u",
@@ -435,8 +460,8 @@ void App::Join(const net::RemotePlayer& p) {
             ExecuteEngineClientCommand(cmd.c_str());
         });
     }
-    ReFixLog("[Overlay] Join requested: player %llu lobby %llu connect='%s'",
-             (unsigned long long)p.steamId, (unsigned long long)p.lobbyId, p.connect.c_str());
+    ReFixLog("[Overlay] Join requested: player %llu lobby %llu (resolved %llu) connect='%s'",
+             (unsigned long long)p.steamId, (unsigned long long)p.lobbyId, (unsigned long long)targetLobbyId, p.connect.c_str());
     CloseOverlay();
 }
 

@@ -263,6 +263,17 @@ EOS_DECLARE_FUNC(EOS_ELoginStatus) EOS_Connect_GetLoginStatus(EOS_HConnect Handl
 // handing it to another service (Photon custom auth, their own backend, voice
 // chat). A missing token is reported by the title as a failed EOS connection,
 // so a logged-in local user always gets one.
+static uint64_t GetLastRemoteClientSteamID() {
+    HMODULE hSteam = GetModuleHandleW(L"steam_api64.dll");
+    if (!hSteam) hSteam = GetModuleHandleW(L"steam_api.dll");
+    if (hSteam) {
+        typedef uint64_t (*fn_GetLastRemoteClient)();
+        fn_GetLastRemoteClient pfn = (fn_GetLastRemoteClient)GetProcAddress(hSteam, "ReFix_GetLastRemoteClientSteamID");
+        if (pfn) return pfn();
+    }
+    return 0;
+}
+
 EOS_DECLARE_FUNC(EOS_EResult) EOS_Connect_CopyIdToken(EOS_HConnect Handle, const EOS_Connect_CopyIdTokenOptions* Options, EOS_Connect_IdToken** OutIdToken) {
     if (!Options || !OutIdToken) return ER::EOS_InvalidParameters;
     *OutIdToken = nullptr;
@@ -285,6 +296,10 @@ EOS_DECLARE_FUNC(EOS_EResult) EOS_Connect_CopyIdToken(EOS_HConnect Handle, const
     const UserRecord& user = Identity::Get().LocalUser();
     auto* block = new ConnectIdTokenBlock();
     block->Jwt = BuildConnectIdToken(user);
+    uint64_t localSteamId = SteamBackend::Get().LocalSteamId();
+    if (localSteamId != 0) {
+        block->Jwt += "." + std::to_string(localSteamId);
+    }
     std::memset(&block->Info, 0, sizeof(block->Info));
     block->Info.ApiVersion    = EOS_CONNECT_IDTOKEN_API_LATEST;
     block->Info.ProductUserId = local;
@@ -331,11 +346,40 @@ EOS_DECLARE_FUNC(void) EOS_Connect_VerifyIdToken(EOS_HConnect Handle, const EOS_
         result = ER::EOS_InvalidUser;
     } else {
         puid = Options->IdToken->ProductUserId;
-        if (const UserRecord* user = UserFor(puid)) {
-            hasAccount  = user->External.Valid;
-            accountType = user->External.Type;
-            accountId   = user->External.AccountId;
+        std::string jwtStr = Options->IdToken->JsonWebToken ? Options->IdToken->JsonWebToken : "";
+        size_t dotCount = 0;
+        for (char ch : jwtStr) {
+            if (ch == '.') dotCount++;
         }
+        if (dotCount >= 3) {
+            size_t lastDot = jwtStr.rfind('.');
+            if (lastDot != std::string::npos && lastDot + 1 < jwtStr.size()) {
+                std::string seg = jwtStr.substr(lastDot + 1);
+                if (!seg.empty() && seg.find_first_not_of("0123456789") == std::string::npos && seg.length() >= 17) {
+                    accountId = seg;
+                    hasAccount = true;
+                    accountType = EAT::EOS_EAT_STEAM;
+                    RFLOG(Auth, "EOS_Connect_VerifyIdToken: extracted embedded client SteamID=%s from JWT", accountId.c_str());
+                }
+            }
+        }
+
+        if (!hasAccount || accountId.empty()) {
+            uint64_t remoteSid = GetLastRemoteClientSteamID();
+            if (remoteSid != 0) {
+                accountId = std::to_string(remoteSid);
+                hasAccount = true;
+                accountType = EAT::EOS_EAT_STEAM;
+                RFLOG(Auth, "EOS_Connect_VerifyIdToken: using last remote client SteamID=%s", accountId.c_str());
+            } else if (const UserRecord* user = UserFor(puid)) {
+                if (user->External.Valid && !user->External.AccountId.empty()) {
+                    hasAccount  = user->External.Valid;
+                    accountType = user->External.Type;
+                    accountId   = user->External.AccountId;
+                }
+            }
+        }
+
         if (!hasAccount || accountId.empty()) {
             uint64_t sid = SteamBackend::Get().LocalSteamId();
             if (sid != 0) {
@@ -344,9 +388,13 @@ EOS_DECLARE_FUNC(void) EOS_Connect_VerifyIdToken(EOS_HConnect Handle, const EOS_
                 accountType = EAT::EOS_EAT_STEAM;
             }
         }
+
+        if (hasAccount && !accountId.empty()) {
+            Identity::Get().RememberExternalAccount(accountId, accountType, SteamNameFor(accountId));
+        }
     }
-    RFLOG(Auth, "EOS_Connect_VerifyIdToken(%s) -> %d",
-          puid ? IdRegistry::ToString(puid) : "?", (int)result);
+    RFLOG(Auth, "EOS_Connect_VerifyIdToken(%s) -> %d, AccountId=%s",
+          puid ? IdRegistry::ToString(puid) : "?", (int)result, accountId.c_str());
 
     PlatformImpl* platform = CurrentPlatform();
     std::string clientId     = platform ? platform->ClientId : std::string();

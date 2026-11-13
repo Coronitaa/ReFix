@@ -12,6 +12,8 @@ EXPORTS
     ReFix_GetLocalSteamID
     ReFix_GetGameServerSteamID
     ReFix_GetInstanceSlot
+    ReFix_GetLastRemoteClientSteamID
+    ReFix_SetLastRemoteClientSteamID
     GetHSteamPipe
     GetHSteamUser
     SteamAPI_GetHSteamPipe
