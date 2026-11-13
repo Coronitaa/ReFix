@@ -101,6 +101,7 @@ static uint64_t ExtractOwnerSteamId(const uint8_t* data, size_t size) {
 } // namespace
 
 void HandleRelayPacket(const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
+    if (UnrealSteamEmu::GetAppID() != 730) return;
     if (!data || len < sizeof(GCRelayHeader)) return;
     const GCRelayHeader* hdr = reinterpret_cast<const GCRelayHeader*>(data);
     if (hdr->magic != kGCRelayMagic) return;
@@ -187,6 +188,8 @@ void HandleRelayPacket(const refix::lan::PeerId& sender, const uint8_t* data, si
 }
 
 void InitializeGCRelay() {
+    uint32_t appId = UnrealSteamEmu::GetAppID();
+    if (appId != 730 && appId != 4465480) return;
     std::lock_guard<std::mutex> lock(s_mutex);
     if (s_initialized) return;
     s_initialized = true;
@@ -205,6 +208,8 @@ void ShutdownGCRelay() {
 }
 
 void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
+    uint32_t appId = UnrealSteamEmu::GetAppID();
+    if (appId != 730 && appId != 4465480) return;
     uint64_t localSid = UnrealSteamEmu::GetLocalSteamID();
     if (clientSteamId == localSid) {
         ReFixLog("[GC] Host player SteamID %llu connected to local game server. Injecting local equipped cache...", localSid);
@@ -249,6 +254,7 @@ void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
 }
 
 void SendQuestProgress(uint64_t steamId, const std::vector<uint8_t>& playerQuestData) {
+    if (UnrealSteamEmu::GetAppID() != 730) return;
     std::optional<refix::lan::PeerId> peerId = refix::lan::ILanCore::Get().Peers().FindBySteamId(steamId);
     if (!peerId) {
         for (const auto& p : refix::lan::ILanCore::Get().Peers().GetAllPeers())
@@ -270,6 +276,7 @@ void SendQuestProgress(uint64_t steamId, const std::vector<uint8_t>& playerQuest
 }
 
 void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlot, const std::vector<uint8_t>& soUpdateBytes) {
+    if (UnrealSteamEmu::GetAppID() != 730) return;
     if (ReFixGC::IsGameServerActive()) {
         ReFixGC::SendToGameServer(26 /* k_ESOMsg_UpdateMultiple */, soUpdateBytes);
         ReFixLog("[GC] Host injected local UpdateMultiple (26) directly into game server");
@@ -294,6 +301,7 @@ void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlo
 
 
 void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes) {
+    if (UnrealSteamEmu::GetAppID() != 730) return;
     std::vector<uint8_t> packet(sizeof(GCRelayHeader) + reserveBytes.size());
     GCRelayHeader* hdr = reinterpret_cast<GCRelayHeader*>(packet.data());
     hdr->magic = kGCRelayMagic;
@@ -314,6 +322,7 @@ void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes) {
 }
 
 void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFound) {
+    if (UnrealSteamEmu::GetAppID() != 730) return;
     // Hosts advertise their listen server as rich presence "refix:server" = "ip:port" (see unreal_steam_emu).
     for (const auto& peer : UnrealSteamEmu::PeersWithPresence("refix:server")) {
         if (targetSteamId != 0 && peer.first != targetSteamId) continue;

@@ -20,10 +20,12 @@ namespace UnrealSteamEmu {
     bool IsInitialized();
     void FlushUserStats();
     bool RequestCurrentStats();
+    int GetInstanceSlot();
 
     // GameServer Lifecycle
     bool GameServer_Init(uint32_t unIP, uint16_t usGamePort, uint16_t usQueryPort, int eServerMode, const char* pchVersionString);
     bool GameServer_InitSafe();
+    uint64_t GameServer_GetSteamID();
 
     // Callbacks & CallResults
     void RunCallbacks();
@@ -69,6 +71,8 @@ namespace UnrealSteamEmu {
     void SetLocalPresence(const char* key, const char* value);
     std::string GetLocalPresence(const char* key);
     uint64_t GetActiveLobbyID(); // lobby the local user is in (0 when none)
+    uint64_t EnsureSteamLobbyID(const std::string& coreLobbyId, uint64_t fallbackId = 0);
+    void ResetResidualLobbyState(uint64_t lobbyId);
     void AdoptAppId(uint32_t appId);
     const char* GetPersonaName();
     const char* GetFriendPersonaName(uint64_t steamIDFriend);

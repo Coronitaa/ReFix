@@ -138,6 +138,23 @@ void RefreshBroadcasts() {
     if (GetAdaptersAddresses(AF_INET, flags, nullptr, aa, &size) == NO_ERROR) {
         for (auto* a = aa; a; a = a->Next) {
             if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+            if (a->FriendlyName || a->Description) {
+                std::wstring fn = a->FriendlyName ? a->FriendlyName : L"";
+                std::wstring desc = a->Description ? a->Description : L"";
+                for (auto& c : fn) c = towlower(c);
+                for (auto& c : desc) c = towlower(c);
+                const wchar_t* vkw[] = { L"vethernet", L"wsl", L"hyper-v", L"default switch", L"docker",
+                                         L"vmware", L"virtualbox", L"zerotier", L"hamachi", L"tap", L"tun",
+                                         L"tailscale", L"wireguard", L"host-only", nullptr };
+                bool isVirt = false;
+                for (int i = 0; vkw[i]; ++i) {
+                    if (fn.find(vkw[i]) != std::wstring::npos || desc.find(vkw[i]) != std::wstring::npos) {
+                        isVirt = true;
+                        break;
+                    }
+                }
+                if (isVirt) continue;
+            }
             for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
                 if (u->Address.lpSockaddr->sa_family != AF_INET) continue;
                 const uint32_t ip = ntohl(reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr)->sin_addr.s_addr);

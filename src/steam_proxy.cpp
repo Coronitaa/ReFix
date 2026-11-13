@@ -40,6 +40,7 @@
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
 #include "overlay/refix_overlay.h"
+#include "overlay/save_swap.h"
 #if REFIX_LAN_EDITION
 #include "mods/mod_host.h"
 #endif
@@ -1939,13 +1940,39 @@ static void LoadConfig() {
 
 #if REFIX_LAN_EDITION
     if (modsEnabled) {
-        std::string modsDir = modsDirBuf[0] != '\0' ? modsDirBuf : (GetExeDir() + "refix_mods");
-        refix::mods::ModHost::GetInstance().Initialize(modsDir, modsDevMode);
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::Boot);
-        refix::mods::ModHost::GetInstance().DiscoverAndLoad();
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PreRefix);
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PostRefix);
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::EngineReady);
+        std::string exeDir = GetExeDir();
+        std::string modsDir = modsDirBuf[0] != '\0' ? modsDirBuf : "";
+        if (modsDir.empty()) {
+            std::string candidateMods = exeDir + "mods";
+            std::string candidateRefixMods = exeDir + "refix_mods";
+            DWORD attrMods = GetFileAttributesA(candidateMods.c_str());
+            DWORD attrRefixMods = GetFileAttributesA(candidateRefixMods.c_str());
+            if (attrMods != INVALID_FILE_ATTRIBUTES && (attrMods & FILE_ATTRIBUTE_DIRECTORY)) {
+                modsDir = candidateMods;
+            } else if (attrRefixMods != INVALID_FILE_ATTRIBUTES && (attrRefixMods & FILE_ATTRIBUTE_DIRECTORY)) {
+                modsDir = candidateRefixMods;
+            }
+        }
+
+        bool hasMods = false;
+        if (!modsDir.empty()) {
+            std::string searchPattern = modsDir + "\\*.rfmod";
+            WIN32_FIND_DATAA fd;
+            HANDLE hFind = FindFirstFileA(searchPattern.c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                hasMods = true;
+                FindClose(hFind);
+            }
+        }
+
+        if (hasMods || modsDevMode) {
+            refix::mods::ModHost::GetInstance().Initialize(modsDir.empty() ? (exeDir + "mods") : modsDir, modsDevMode);
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::Boot);
+            refix::mods::ModHost::GetInstance().DiscoverAndLoad();
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PreRefix);
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PostRefix);
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::EngineReady);
+        }
     }
 #endif
 }
@@ -4713,6 +4740,9 @@ static bool EnsureOriginal() {
     g_ensureOriginalCallCount.fetch_add(1, std::memory_order_relaxed);
     if (!ReFix::NetworkModeManager::IsOnline()) {
         InitializeLanForwardTable();
+#if REFIX_LAN_EDITION
+        refix::overlay::saves::InitEarly();
+#endif
         return true;
     }
     if (g_hOriginalDll) return true;
@@ -5310,8 +5340,10 @@ static void ReFixInitializePost(bool success) {
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
         ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
-        refix::csgo::ApplyOperationPatch(); // CS:GO only: later operation missions, before the game reads items_game
-        CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
+        if (g_config.realAppIdNum == 730 || g_config.realAppIdNum == 4465480 || UnrealSteamEmu::GetAppID() == 730 || UnrealSteamEmu::GetAppID() == 4465480) {
+            refix::csgo::ApplyOperationPatch(); // CS:GO only: later operation missions, before the game reads items_game
+            CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
+        }
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
@@ -5697,9 +5729,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
 extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_Init() {
     ReFixLog("SteamAPI_ManualDispatch_Init called");
     EnsureReFixPostInitialized();
-    if (!ReFix::NetworkModeManager::IsOnline()) {
-        UnrealSteamEmu::ManualDispatch_Init();
-    }
+    UnrealSteamEmu::ManualDispatch_Init();
 }
 
 static int s_manualRunFrameLogged = 0;
@@ -5710,7 +5740,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
     }
     if (g_pfn_ManualDispatch_RunFrame) {
         g_pfn_ManualDispatch_RunFrame(hSteamPipe);
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+    } else {
         UnrealSteamEmu::ManualDispatch_RunFrame(hSteamPipe);
     }
     DispatchPendingAuthCallbacks();
@@ -5761,24 +5791,23 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
             }
             return true;
         }
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
-        bool res = UnrealSteamEmu::ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
-        if (res) {
-            s_lastManualCallbackWasSynthetic.store(false);
-            if (pCallbackMsg) {
-                auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
-                if (msg->m_iCallback == 703 && msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamAPICallCompleted_t)) {
-                    auto* pCallComp = (ReFix_SteamAPICallCompleted_t*)msg->m_pubParam;
-                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 703 (SteamAPICallCompleted_t) -> hAsyncCall=%llu, iCallback=%d",
-                             pCallComp->m_hAsyncCall, pCallComp->m_iCallback);
-                } else if (msg->m_iCallback == 504) {
-                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 504 (LobbyEnter_t)");
-                } else if (msg->m_iCallback == 513) {
-                    ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 513 (LobbyCreated_t)");
-                }
+    }
+    bool res = UnrealSteamEmu::ManualDispatch_GetNextCallback(hSteamPipe, pCallbackMsg);
+    if (res) {
+        s_lastManualCallbackWasSynthetic.store(false);
+        if (pCallbackMsg) {
+            auto* msg = (ReFix_CallbackMsg_t*)pCallbackMsg;
+            if (msg->m_iCallback == 703 && msg->m_pubParam && msg->m_cubParam >= (int32_t)sizeof(ReFix_SteamAPICallCompleted_t)) {
+                auto* pCallComp = (ReFix_SteamAPICallCompleted_t*)msg->m_pubParam;
+                ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 703 (SteamAPICallCompleted_t) -> hAsyncCall=%llu, iCallback=%d",
+                         pCallComp->m_hAsyncCall, pCallComp->m_iCallback);
+            } else if (msg->m_iCallback == 504) {
+                ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 504 (LobbyEnter_t)");
+            } else if (msg->m_iCallback == 513) {
+                ReFixLog("ManualDispatch_GetNextCallback (LAN): Callback 513 (LobbyCreated_t)");
             }
-            return true;
         }
+        return true;
     }
     if (g_syntheticRelayPending.exchange(false) && pCallbackMsg) {
         s_lastManualCallbackWasSynthetic.store(true);
@@ -5805,7 +5834,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_FreeLastCallback(u
     }
     if (g_pfn_ManualDispatch_FreeLastCallback) {
         g_pfn_ManualDispatch_FreeLastCallback(hSteamPipe);
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+    } else {
         UnrealSteamEmu::ManualDispatch_FreeLastCallback(hSteamPipe);
     }
 }
@@ -5821,7 +5850,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetAPICallResult(
     bool res = false;
     if (g_pfn_ManualDispatch_GetAPICallResult) {
         res = g_pfn_ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
-    } else if (!ReFix::NetworkModeManager::IsOnline()) {
+    } else {
         res = UnrealSteamEmu::ManualDispatch_GetAPICallResult(hSteamPipe, hSteamAPICall, pCallback, cubCallback, iCallbackExpected, pbFailed);
     }
     bool bFailedVal = pbFailed ? *pbFailed : false;
@@ -6799,9 +6828,33 @@ REFIX_LEGACY_ACCESSOR(SteamGameServerApps, "STEAMAPPS_INTERFACE_VERSION", "STEAM
 REFIX_LEGACY_ACCESSOR(SteamGameServerUGC, "STEAMUGC_INTERFACE_VERSION", "STEAMUGC_INTERFACE_VERSION010", true)
 #undef REFIX_LEGACY_ACCESSOR
 
+extern "C" __declspec(dllexport) uint64_t ReFix_GetLocalSteamID() {
+    return UnrealSteamEmu::GetLocalSteamID();
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_GetGameServerSteamID() {
+    return UnrealSteamEmu::GameServer_GetSteamID();
+}
+
+extern "C" __declspec(dllexport) int ReFix_GetInstanceSlot() {
+    return UnrealSteamEmu::GetInstanceSlot();
+}
+
+static std::atomic<uint64_t> g_lastRemoteClientSteamID{ 0 };
+
+extern "C" __declspec(dllexport) void ReFix_SetLastRemoteClientSteamID(uint64_t sid) {
+    if (sid != 0 && sid != UnrealSteamEmu::GetLocalSteamID()) {
+        g_lastRemoteClientSteamID.store(sid);
+    }
+}
+
+extern "C" __declspec(dllexport) uint64_t ReFix_GetLastRemoteClientSteamID() {
+    return g_lastRemoteClientSteamID.load();
+}
+
 extern "C" __declspec(dllexport) uint64_t SteamGameServer_GetSteamID() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        return UnrealSteamEmu::GetLocalSteamID();
+        return UnrealSteamEmu::GameServer_GetSteamID();
     }
     if (EnsureOriginal()) {
         typedef uint64_t (*fn_t)();

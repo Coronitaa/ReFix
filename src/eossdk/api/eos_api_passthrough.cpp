@@ -22,6 +22,9 @@ namespace {
 
 using EOS_Connect_Login_Fn = void (EOS_CALL*)(EOS_HConnect, const EOS_Connect_LoginOptions*, void*, const EOS_Connect_OnLoginCallback);
 using EOS_Connect_CreateDeviceId_Fn = void (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CreateDeviceIdOptions*, void*, const EOS_Connect_OnCreateDeviceIdCallback);
+using EOS_Connect_DeleteDeviceId_Fn = void (EOS_CALL*)(EOS_HConnect, const EOS_Connect_DeleteDeviceIdOptions*, void*, const EOS_Connect_OnDeleteDeviceIdCallback);
+using EOS_Connect_CopyIdToken_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyIdTokenOptions*, EOS_Connect_IdToken**);
+using EOS_Connect_IdToken_Release_Fn = void (EOS_CALL*)(EOS_Connect_IdToken*);
 using EOS_Connect_CreateUser_Fn = void (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CreateUserOptions*, void*, const EOS_Connect_OnCreateUserCallback);
 using EOS_Connect_GetProductUserExternalAccountCount_Fn = uint32_t (EOS_CALL*)(EOS_HConnect, const EOS_Connect_GetProductUserExternalAccountCountOptions*);
 using EOS_Connect_CopyProductUserExternalAccountByAccountType_Fn = EOS_EResult (EOS_CALL*)(EOS_HConnect, const EOS_Connect_CopyProductUserExternalAccountByAccountTypeOptions*, EOS_Connect_ExternalAccountInfo**);
@@ -35,6 +38,9 @@ using EOS_Connect_VerifyIdToken_Fn = void (EOS_CALL*)(EOS_HConnect, const EOS_Co
 static HMODULE g_hGenuineSdk = nullptr;
 static EOS_Connect_Login_Fn g_orig_EOS_Connect_Login = nullptr;
 static EOS_Connect_CreateDeviceId_Fn g_orig_EOS_Connect_CreateDeviceId = nullptr;
+static EOS_Connect_DeleteDeviceId_Fn g_orig_EOS_Connect_DeleteDeviceId = nullptr;
+static EOS_Connect_CopyIdToken_Fn g_orig_EOS_Connect_CopyIdToken = nullptr;
+static EOS_Connect_IdToken_Release_Fn g_orig_EOS_Connect_IdToken_Release = nullptr;
 static EOS_Connect_CreateUser_Fn g_orig_EOS_Connect_CreateUser = nullptr;
 static EOS_Connect_GetProductUserExternalAccountCount_Fn g_orig_EOS_Connect_GetProductUserExternalAccountCount = nullptr;
 static EOS_Connect_CopyProductUserExternalAccountByAccountType_Fn g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountType = nullptr;
@@ -44,6 +50,16 @@ static EOS_Connect_CopyProductUserInfo_Fn g_orig_EOS_Connect_CopyProductUserInfo
 static EOS_Connect_ExternalAccountInfo_Release_Fn g_orig_EOS_Connect_ExternalAccountInfo_Release = nullptr;
 static EOS_Connect_VerifyIdToken_Fn g_orig_EOS_Connect_VerifyIdToken = nullptr;
 static EOS_ProductUserId g_localProductUserId = nullptr;
+static std::mutex g_puidMutex;
+static std::map<EOS_ProductUserId, std::string> g_puidToSteamId;
+
+struct ExtendedTokenWrapper {
+    EOS_Connect_IdToken publicToken{};
+    std::string extendedJwt;
+    EOS_Connect_IdToken* realToken = nullptr;
+};
+static std::mutex g_extendedTokensMutex;
+static std::map<const EOS_Connect_IdToken*, ExtendedTokenWrapper*> g_extendedTokens;
 
 std::string DllDirectory() {
     char buf[MAX_PATH] = { 0 };
@@ -112,17 +128,45 @@ std::string GetPlayerDisplayName() {
 }
 
 std::string GetPlayerSteamId() {
+    HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+    if (hSteam) {
+        typedef uint64_t (*fn_GetSteamID)();
+        fn_GetSteamID pfn = (fn_GetSteamID)GetProcAddress(hSteam, "ReFix_GetLocalSteamID");
+        if (pfn) {
+            uint64_t sid = pfn();
+            if (sid != 0) return std::to_string(sid);
+        }
+    }
+
     uint64_t id = SteamBackend::Get().LocalSteamId();
     if (id != 0) return std::to_string(id);
-
-    std::string sid = Config::Get().GetString("User", "SteamID", "");
-    if (!sid.empty()) return sid;
 
     char envBuf[128] = { 0 };
     if (GetEnvironmentVariableA("REFIX_STEAM_USER_ID", envBuf, sizeof(envBuf)) > 0 && envBuf[0]) {
         return envBuf;
     }
-    return "76561197960287930";
+    if (GetEnvironmentVariableA("REFIX_ACTIVE_PROFILE", envBuf, sizeof(envBuf)) > 0 && envBuf[0]) {
+        uint64_t profId = _strtoui64(envBuf, nullptr, 10);
+        if (profId > 70000000000000000ULL) {
+            return std::to_string(profId);
+        }
+    }
+
+    std::string sid = Config::Get().GetString("User", "SteamID", "");
+    if (!sid.empty() && sid != "76561197960287930" && sid != "76561198000000001") return sid;
+
+    int slot = 0;
+    char slotBuf[16] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_MULTI_SLOT", slotBuf, sizeof(slotBuf)) > 0) {
+        slot = atoi(slotBuf);
+    } else if (hSteam) {
+        typedef int (*fn_GetSlot)();
+        fn_GetSlot pfnSlot = (fn_GetSlot)GetProcAddress(hSteam, "ReFix_GetInstanceSlot");
+        if (pfnSlot) slot = pfnSlot();
+    }
+
+    uint64_t fallback = 0x0110000100000000ULL | (0x10000ULL + (uint64_t)(slot * 1000 + (GetCurrentProcessId() & 0x3FF)));
+    return std::to_string(fallback);
 }
 
 // ---------------------------------------------------------------------------
@@ -137,11 +181,14 @@ struct DeviceIdAuthContext {
     EOS_Connect_UserLoginInfo UserLoginInfo{};
     EOS_Connect_LoginOptions LoginOptions{};
     EOS_Connect_CreateDeviceIdOptions CreateDeviceOptions{};
+    EOS_Connect_DeleteDeviceIdOptions DeleteDeviceOptions{};
     EOS_Connect_CreateUserOptions CreateUserOptions{};
     EOS_ContinuanceToken ContinuanceToken = nullptr;
+    bool DeletedOldDevice = false;
 };
 
 static void EOS_CALL OnCreateDeviceIdCallback(const EOS_Connect_CreateDeviceIdCallbackInfo* Data);
+static void EOS_CALL OnDeleteDeviceIdCallback(const EOS_Connect_DeleteDeviceIdCallbackInfo* Data);
 static void DoDeviceIdLogin(DeviceIdAuthContext* ctx);
 static void EOS_CALL OnDeviceIdLoginCallback(const EOS_Connect_LoginCallbackInfo* Data);
 static void EOS_CALL OnCreateUserCallback(const EOS_Connect_CreateUserCallbackInfo* Data);
@@ -188,12 +235,45 @@ EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_Login(
     }
 }
 
+static void EOS_CALL OnDeleteDeviceIdCallback(const EOS_Connect_DeleteDeviceIdCallbackInfo* Data) {
+    if (!Data || !Data->ClientData) return;
+    auto* ctx = static_cast<DeviceIdAuthContext*>(Data->ClientData);
+    RFLOG(Auth, "[Passthrough] EOS_Connect_DeleteDeviceId completed (res=%d); recreating fresh DeviceId for unique PUID...", (int)Data->ResultCode);
+    if (g_orig_EOS_Connect_CreateDeviceId) {
+        g_orig_EOS_Connect_CreateDeviceId(ctx->Handle, &ctx->CreateDeviceOptions, ctx, OnCreateDeviceIdCallback);
+    } else {
+        DoDeviceIdLogin(ctx);
+    }
+}
+
 static void EOS_CALL OnCreateDeviceIdCallback(const EOS_Connect_CreateDeviceIdCallbackInfo* Data) {
     if (!Data || !Data->ClientData) return;
     auto* ctx = static_cast<DeviceIdAuthContext*>(Data->ClientData);
 
     int res = (int)Data->ResultCode;
     RFLOG(Auth, "[Passthrough] Stage 1 EOS_Connect_CreateDeviceId result = %d", res);
+
+    int slot = 0;
+    char slotBuf[16] = { 0 };
+    if (GetEnvironmentVariableA("REFIX_MULTI_SLOT", slotBuf, sizeof(slotBuf)) > 0) {
+        slot = atoi(slotBuf);
+    } else {
+        HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+        if (hSteam) {
+            typedef int (*fn_GetSlot)();
+            fn_GetSlot pfnSlot = (fn_GetSlot)GetProcAddress(hSteam, "ReFix_GetInstanceSlot");
+            if (pfnSlot) slot = pfnSlot();
+        }
+    }
+
+    if ((res == (int)EOS_EResult::EOS_DuplicateNotAllowed || res == 24) && slot >= 1 && !ctx->DeletedOldDevice && g_orig_EOS_Connect_DeleteDeviceId) {
+        RFLOG(Auth, "[Passthrough] Slot %d duplicate DeviceId detected. Deleting old DeviceId to guarantee unique PUID...", slot);
+        ctx->DeletedOldDevice = true;
+        ctx->DeleteDeviceOptions = {};
+        ctx->DeleteDeviceOptions.ApiVersion = EOS_CONNECT_DELETEDEVICEID_API_LATEST;
+        g_orig_EOS_Connect_DeleteDeviceId(ctx->Handle, &ctx->DeleteDeviceOptions, ctx, OnDeleteDeviceIdCallback);
+        return;
+    }
 
     // EOS_Success (0) or EOS_DuplicateNotAllowed (24)
     if (res == (int)EOS_EResult::EOS_Success || res == (int)EOS_EResult::EOS_DuplicateNotAllowed || res == 24) {
@@ -241,6 +321,10 @@ static void EOS_CALL OnDeviceIdLoginCallback(const EOS_Connect_LoginCallbackInfo
     if (res == (int)EOS_EResult::EOS_Success) {
         RFLOG(Auth, "[Passthrough] EOS_Connect_Login succeeded via DeviceId! LocalUserId = %p", Data->LocalUserId);
         g_localProductUserId = Data->LocalUserId;
+        {
+            std::lock_guard<std::mutex> lg(g_puidMutex);
+            g_puidToSteamId[g_localProductUserId] = GetPlayerSteamId();
+        }
         if (ctx->OriginalCompletionDelegate) {
             EOS_Connect_LoginCallbackInfo cbInfo = *Data;
             cbInfo.ClientData = ctx->OriginalClientData;
@@ -286,6 +370,10 @@ static void EOS_CALL OnCreateUserCallback(const EOS_Connect_CreateUserCallbackIn
     if (res == (int)EOS_EResult::EOS_Success) {
         RFLOG(Auth, "[Passthrough] User created successfully! Minted LocalUserId = %p", Data->LocalUserId);
         g_localProductUserId = Data->LocalUserId;
+        {
+            std::lock_guard<std::mutex> lg(g_puidMutex);
+            g_puidToSteamId[g_localProductUserId] = GetPlayerSteamId();
+        }
         if (ctx->OriginalCompletionDelegate) {
             EOS_Connect_LoginCallbackInfo loginInfo{};
             loginInfo.ResultCode = EOS_EResult::EOS_Success;
@@ -470,6 +558,71 @@ EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_ExternalAccountInfo_Release(EOS_C
 }
 
 // ---------------------------------------------------------------------------
+// CopyIdToken & IdToken_Release Interception (Deterministic SteamID Propagation)
+// ---------------------------------------------------------------------------
+EOS_DECLARE_FUNC(EOS_EResult) Passthrough_EOS_Connect_CopyIdToken(
+    EOS_HConnect Handle,
+    const EOS_Connect_CopyIdTokenOptions* Options,
+    EOS_Connect_IdToken** OutIdToken
+) {
+    if (!OutIdToken) return EOS_EResult::EOS_InvalidParameters;
+    *OutIdToken = nullptr;
+
+    if (!g_orig_EOS_Connect_CopyIdToken) return EOS_EResult::EOS_NotFound;
+
+    EOS_Connect_IdToken* realToken = nullptr;
+    EOS_EResult res = g_orig_EOS_Connect_CopyIdToken(Handle, Options, &realToken);
+    if (res != EOS_EResult::EOS_Success || !realToken) {
+        return res;
+    }
+
+    std::string sid = GetPlayerSteamId();
+    auto* wrapper = new ExtendedTokenWrapper();
+    wrapper->realToken = realToken;
+    wrapper->extendedJwt = std::string(realToken->JsonWebToken ? realToken->JsonWebToken : "") + "." + sid;
+
+    wrapper->publicToken.ApiVersion = realToken->ApiVersion;
+    wrapper->publicToken.ProductUserId = realToken->ProductUserId;
+    wrapper->publicToken.JsonWebToken = wrapper->extendedJwt.c_str();
+
+    {
+        std::lock_guard<std::mutex> lg(g_extendedTokensMutex);
+        g_extendedTokens[&wrapper->publicToken] = wrapper;
+    }
+
+    *OutIdToken = &wrapper->publicToken;
+    RFLOG(Auth, "[Passthrough] EOS_Connect_CopyIdToken attached SteamID=%s to JWT (len=%zu)",
+          sid.c_str(), wrapper->extendedJwt.size());
+    return res;
+}
+
+EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_IdToken_Release(EOS_Connect_IdToken* IdToken) {
+    if (!IdToken) return;
+
+    ExtendedTokenWrapper* wrapper = nullptr;
+    {
+        std::lock_guard<std::mutex> lg(g_extendedTokensMutex);
+        auto it = g_extendedTokens.find(IdToken);
+        if (it != g_extendedTokens.end()) {
+            wrapper = it->second;
+            g_extendedTokens.erase(it);
+        }
+    }
+
+    if (wrapper) {
+        if (wrapper->realToken && g_orig_EOS_Connect_IdToken_Release) {
+            g_orig_EOS_Connect_IdToken_Release(wrapper->realToken);
+        }
+        delete wrapper;
+        return;
+    }
+
+    if (g_orig_EOS_Connect_IdToken_Release) {
+        g_orig_EOS_Connect_IdToken_Release(IdToken);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VerifyIdToken Interception & External Account Synthesis (7 Days to Die / Unity EOS)
 // ---------------------------------------------------------------------------
 struct VerifyIdTokenContext {
@@ -488,24 +641,26 @@ static void EOS_CALL OnVerifyIdTokenCallback(const EOS_Connect_VerifyIdTokenCall
     EOS_Connect_VerifyIdTokenCallbackInfo info = *Data;
     info.ClientData = ctx->OriginalClientData;
 
-    // Check if account info is missing or operation failed.
-    // When DeviceIdAuth is used (or if genuine EOS SDK returned bIsAccountInfoPresent == EOS_FALSE or ResultCode != Success),
-    // synthesize the external Steam account info so that Unity / EOS games (e.g. 7 Days to Die) can complete platform user mapping.
-    if (!info.bIsAccountInfoPresent || !info.AccountId || !info.AccountId[0] || info.ResultCode != EOS_EResult::EOS_Success) {
-        RFLOG(Auth, "[Passthrough] Synthesizing external Steam account info in VerifyIdToken callback (ResultCode was %d, bIsAccountInfoPresent was %d)",
-              (int)info.ResultCode, (int)info.bIsAccountInfoPresent);
-        info.ResultCode = EOS_EResult::EOS_Success;
-        info.bIsAccountInfoPresent = EOS_TRUE;
-        info.AccountIdType = EAT::EOS_EAT_STEAM;
-        info.AccountId = ctx->SteamId.c_str();
-        info.Platform = ctx->Platform.c_str();
-        info.DeviceType = ctx->DeviceType.c_str();
-        if (ctx->TargetPuid) {
-            info.ProductUserId = ctx->TargetPuid;
-        } else if (!info.ProductUserId && g_localProductUserId) {
-            info.ProductUserId = g_localProductUserId;
-        }
+    if (info.ProductUserId && !ctx->SteamId.empty()) {
+        std::lock_guard<std::mutex> lg(g_puidMutex);
+        g_puidToSteamId[info.ProductUserId] = ctx->SteamId;
     }
+
+    // Always enforce success and the connecting client's Steam account info (NEVER host's!)
+    info.ResultCode = EOS_EResult::EOS_Success;
+    info.bIsAccountInfoPresent = EOS_TRUE;
+    info.AccountIdType = EAT::EOS_EAT_STEAM;
+    info.AccountId = ctx->SteamId.c_str();
+    info.Platform = ctx->Platform.c_str();
+    info.DeviceType = ctx->DeviceType.c_str();
+    if (ctx->TargetPuid) {
+        info.ProductUserId = ctx->TargetPuid;
+    } else if (!info.ProductUserId && g_localProductUserId) {
+        info.ProductUserId = g_localProductUserId;
+    }
+
+    RFLOG(Auth, "[Passthrough] VerifyIdToken callback: enforced Client SteamID=%s for PUID %p",
+          ctx->SteamId.c_str(), info.ProductUserId);
 
     if (ctx->OriginalCompletionDelegate) {
         ctx->OriginalCompletionDelegate(&info);
@@ -526,15 +681,85 @@ EOS_DECLARE_FUNC(void) Passthrough_EOS_Connect_VerifyIdToken(
     ctx->OriginalCompletionDelegate = CompletionDelegate;
     ctx->TargetPuid = (Options && Options->IdToken) ? Options->IdToken->ProductUserId : g_localProductUserId;
     if (!ctx->TargetPuid) ctx->TargetPuid = g_localProductUserId;
-    ctx->SteamId = GetPlayerSteamId();
+
+    std::string clientSteamId64;
+    std::string cleanedJwt;
+    bool hasCleanedJwt = false;
+
+    if (Options && Options->IdToken && Options->IdToken->JsonWebToken) {
+        std::string rawJwt = Options->IdToken->JsonWebToken;
+        int dotCount = 0;
+        for (char c : rawJwt) {
+            if (c == '.') dotCount++;
+        }
+        // 4-segment token: <header>.<payload>.<signature>.<SteamID64> has 3 dots
+        if (dotCount >= 3) {
+            size_t lastDot = rawJwt.rfind('.');
+            if (lastDot != std::string::npos && lastDot + 1 < rawJwt.size()) {
+                std::string candidateId = rawJwt.substr(lastDot + 1);
+                if (!candidateId.empty() && candidateId.find_first_not_of("0123456789") == std::string::npos) {
+                    clientSteamId64 = candidateId;
+                    cleanedJwt = rawJwt.substr(0, lastDot);
+                    hasCleanedJwt = true;
+                    RFLOG(Auth, "[Passthrough] EOS_Connect_VerifyIdToken: extracted embedded SteamID %s from JWT", clientSteamId64.c_str());
+                }
+            }
+        }
+    }
+
+    if (clientSteamId64.empty()) {
+        HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+        if (hSteam) {
+            typedef uint64_t (*fn_GetLastRemoteClient)();
+            fn_GetLastRemoteClient pfn = (fn_GetLastRemoteClient)GetProcAddress(hSteam, "ReFix_GetLastRemoteClientSteamID");
+            if (pfn) {
+                uint64_t remoteSid = pfn();
+                if (remoteSid != 0) {
+                    clientSteamId64 = std::to_string(remoteSid);
+                    RFLOG(Auth, "[Passthrough] EOS_Connect_VerifyIdToken: resolved client SteamID %s from GameServer BeginAuthSession", clientSteamId64.c_str());
+                }
+            }
+        }
+    }
+
+    if (clientSteamId64.empty() && ctx->TargetPuid) {
+        std::lock_guard<std::mutex> lg(g_puidMutex);
+        auto it = g_puidToSteamId.find(ctx->TargetPuid);
+        if (it != g_puidToSteamId.end()) {
+            clientSteamId64 = it->second;
+        }
+    }
+
+    if (clientSteamId64.empty()) {
+        clientSteamId64 = GetPlayerSteamId();
+    }
+
+    if (ctx->TargetPuid && !clientSteamId64.empty()) {
+        std::lock_guard<std::mutex> lg(g_puidMutex);
+        g_puidToSteamId[ctx->TargetPuid] = clientSteamId64;
+    }
+
+    ctx->SteamId = clientSteamId64;
     ctx->Platform = "STEAM";
     ctx->DeviceType = "PC";
 
-    RFLOG(Auth, "[Passthrough] EOS_Connect_VerifyIdToken called for PUID %p (SteamID=%s)",
+    RFLOG(Auth, "[Passthrough] EOS_Connect_VerifyIdToken called for PUID %p (ClientSteamID=%s)",
           ctx->TargetPuid, ctx->SteamId.c_str());
 
+    EOS_Connect_VerifyIdTokenOptions cleanOptions;
+    EOS_Connect_IdToken cleanToken;
+    const EOS_Connect_VerifyIdTokenOptions* effectiveOptions = Options;
+
+    if (hasCleanedJwt && Options && Options->IdToken) {
+        cleanOptions = *Options;
+        cleanToken = *Options->IdToken;
+        cleanToken.JsonWebToken = cleanedJwt.c_str();
+        cleanOptions.IdToken = &cleanToken;
+        effectiveOptions = &cleanOptions;
+    }
+
     if (g_orig_EOS_Connect_VerifyIdToken) {
-        g_orig_EOS_Connect_VerifyIdToken(Handle, Options, ctx, OnVerifyIdTokenCallback);
+        g_orig_EOS_Connect_VerifyIdToken(Handle, effectiveOptions, ctx, OnVerifyIdTokenCallback);
     } else {
         EOS_Connect_VerifyIdTokenCallbackInfo synthInfo{};
         synthInfo.ResultCode = EOS_EResult::EOS_Success;
@@ -584,6 +809,9 @@ bool InitialisePassthrough(Registrar& reg) {
 
     g_orig_EOS_Connect_Login = (EOS_Connect_Login_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_Login");
     g_orig_EOS_Connect_CreateDeviceId = (EOS_Connect_CreateDeviceId_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CreateDeviceId");
+    g_orig_EOS_Connect_DeleteDeviceId = (EOS_Connect_DeleteDeviceId_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_DeleteDeviceId");
+    g_orig_EOS_Connect_CopyIdToken = (EOS_Connect_CopyIdToken_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyIdToken");
+    g_orig_EOS_Connect_IdToken_Release = (EOS_Connect_IdToken_Release_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_IdToken_Release");
     g_orig_EOS_Connect_CreateUser = (EOS_Connect_CreateUser_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CreateUser");
     g_orig_EOS_Connect_GetProductUserExternalAccountCount = (EOS_Connect_GetProductUserExternalAccountCount_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_GetProductUserExternalAccountCount");
     g_orig_EOS_Connect_CopyProductUserExternalAccountByAccountType = (EOS_Connect_CopyProductUserExternalAccountByAccountType_Fn)GetProcAddress(g_hGenuineSdk, "EOS_Connect_CopyProductUserExternalAccountByAccountType");
@@ -595,6 +823,10 @@ bool InitialisePassthrough(Registrar& reg) {
 
     // Hook EOS_Connect_Login for DeviceIdAuth
     reg.Bind("EOS_Connect_Login", (void*)&Passthrough_EOS_Connect_Login);
+
+    // Hook IdToken copy & release for deterministic SteamID propagation
+    reg.Bind("EOS_Connect_CopyIdToken", (void*)&Passthrough_EOS_Connect_CopyIdToken);
+    reg.Bind("EOS_Connect_IdToken_Release", (void*)&Passthrough_EOS_Connect_IdToken_Release);
 
     // Hook External Account synthesis for Unreal Engine OnlineSubsystemEOS
     reg.Bind("EOS_Connect_GetProductUserExternalAccountCount", (void*)&Passthrough_EOS_Connect_GetProductUserExternalAccountCount);

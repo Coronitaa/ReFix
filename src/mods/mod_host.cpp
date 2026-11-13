@@ -27,10 +27,13 @@ std::string ModHost::GetDefaultModsDirectory() const {
     char path[MAX_PATH];
     if (GetModuleFileNameA(NULL, path, MAX_PATH)) {
         stdfs::path p(path);
-        stdfs::path mod_dir = p.parent_path() / "refix_mods";
+        stdfs::path mod_dir = p.parent_path() / "mods";
+        if (stdfs::exists(mod_dir)) return mod_dir.string();
+        stdfs::path refix_mod_dir = p.parent_path() / "refix_mods";
+        if (stdfs::exists(refix_mod_dir)) return refix_mod_dir.string();
         return mod_dir.string();
     }
-    return "refix_mods";
+    return "mods";
 }
 
 bool ModHost::Initialize(const std::string& mods_root_dir, bool dev_mode) {
@@ -52,11 +55,15 @@ bool ModHost::Initialize(const std::string& mods_root_dir, bool dev_mode) {
     // Load Trust Store
     std::string err;
     if (!trust_store_.Load(err)) {
-        std::cerr << "[ModHost] Warning loading trust store: " << err << std::endl;
+        if (dev_mode_) {
+            std::cerr << "[ModHost] Warning loading trust store: " << err << std::endl;
+        }
     }
 
     is_initialized_ = true;
-    std::cout << "[ModHost] Subsystem initialized (DevMode=" << (dev_mode_ ? "1" : "0") << ", Dir=" << mods_root_dir_ << ")" << std::endl;
+    if (dev_mode_) {
+        std::cout << "[ModHost] Subsystem initialized (DevMode=1, Dir=" << mods_root_dir_ << ")" << std::endl;
+    }
     return true;
 }
 

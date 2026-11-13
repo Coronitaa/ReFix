@@ -57,7 +57,7 @@ if "%ENABLE_EOS_LEGACY%"=="1" (
     cl /nologo /O2 /EHsc /LD /Fobuild\ src\eos_proxy.cpp src\upnp_firewall.cpp build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll user32.lib kernel32.lib advapi32.lib ws2_32.lib wininet.lib ole32.lib oleaut32.lib /link /DEF:src\eos_proxy.def
 ) else (
     echo [*] Building EOSSDK-Win64-Shipping.dll and RedboneEOS.dll [ReFix EOS v3 emulator]...
-    cl /nologo /O2 /Zi /EHsc /std:c++17 /DEOS_MONOLITHIC=1 /Fobuild\ /Isrc /Isrc\lan_core /Isrc\eossdk /Isrc\include /Isrc\include\steam src\eossdk\eos_module.cpp src\eossdk\core\refix_common.cpp src\eossdk\core\refix_config.cpp src\eossdk\core\refix_log.cpp src\eossdk\core\refix_hash.cpp src\eossdk\core\eos_ids.cpp src\eossdk\core\eos_identity.cpp src\eossdk\core\eos_dispatch.cpp src\eossdk\core\lobby_model.cpp src\eossdk\core\eos_online.cpp src\eossdk\net\refix_transport.cpp src\eossdk\net\lobby_directory.cpp src\eossdk\net\steam_backend.cpp src\eossdk\api\eos_api_platform.cpp src\eossdk\api\eos_api_connect.cpp src\eossdk\api\eos_api_user.cpp src\eossdk\api\eos_api_lobby.cpp src\eossdk\api\eos_api_sessions.cpp src\eossdk\api\eos_api_p2p.cpp src\eossdk\api\eos_api_storage.cpp src\eossdk\api\eos_api_anticheat.cpp src\eossdk\api\eos_api_passthrough.cpp src\lan_core\refix_lan_firewall.cpp /LD build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll /Fdbuild\eos.pdb user32.lib kernel32.lib advapi32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib version.lib /link /DEF:src\eos_proxy.def /DEBUG /MAP:build\eos.map
+    cl /nologo /O2 /Zi /EHsc /std:c++17 /DEOS_MONOLITHIC=1 /Fobuild\ /Isrc /Isrc\lan_core /Isrc\eossdk /Isrc\include /Isrc\include\steam src\eossdk\eos_module.cpp src\eossdk\core\refix_common.cpp src\eossdk\core\refix_config.cpp src\eossdk\core\refix_log.cpp src\eossdk\core\refix_hash.cpp src\eossdk\core\eos_ids.cpp src\eossdk\core\eos_identity.cpp src\eossdk\core\eos_dispatch.cpp src\eossdk\core\lobby_model.cpp src\eossdk\core\eos_online.cpp src\eossdk\net\refix_transport.cpp src\eossdk\net\lobby_directory.cpp src\eossdk\net\steam_backend.cpp src\eossdk\api\eos_api_platform.cpp src\eossdk\api\eos_api_connect.cpp src\eossdk\api\eos_api_user.cpp src\eossdk\api\eos_api_lobby.cpp src\eossdk\api\eos_api_sessions.cpp src\eossdk\api\eos_api_p2p.cpp src\eossdk\api\eos_api_storage.cpp src\eossdk\api\eos_api_anticheat.cpp src\eossdk\api\eos_api_passthrough.cpp src\eossdk\core\eos_registry_redirect.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c src\lan_core\refix_lan_firewall.cpp /LD build\eos_fwd.obj /Febuild\EOSSDK-Win64-Shipping.dll /Fdbuild\eos.pdb user32.lib kernel32.lib advapi32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib version.lib /link /DEF:src\eos_proxy.def /DEBUG /MAP:build\eos.map
 )
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling EOSSDK-Win64-Shipping.dll & exit /b 1 )
 copy /Y build\EOSSDK-Win64-Shipping.dll build\RedboneEOS.dll >nul
@@ -103,6 +103,14 @@ if exist bin\ (
     if exist bin\online copy /Y build\winhttp.dll bin\online\winhttp.dll >nul
     copy /Y build\EOSSDK-Win64-Shipping.dll bin\lan\EOSSDK-Win64-Shipping.dll >nul
     copy /Y build\RedboneEOS.dll bin\lan\RedboneEOS.dll >nul
+    if exist bin\lan_offline (
+        copy /Y build\EOSSDK-Win64-Shipping.dll bin\lan_offline\EOSSDK-Win64-Shipping.dll >nul
+        copy /Y build\RedboneEOS.dll bin\lan_offline\RedboneEOS.dll >nul
+    )
+    if exist bin\online (
+        copy /Y build\EOSSDK-Win64-Shipping.dll bin\online\EOSSDK-Win64-Shipping.dll >nul
+        copy /Y build\RedboneEOS.dll bin\online\RedboneEOS.dll >nul
+    )
     copy /Y build\steam_api64.dll bin\lan\steam_api64.dll >nul
     copy /Y build\refix_steamhost64.exe bin\lan\refix_steamhost64.exe >nul
     copy /Y build\steam_api64.dll bin\steam_api64.dll >nul

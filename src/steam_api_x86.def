@@ -9,6 +9,8 @@ EXPORTS
     ReFix_GetValveDllLoadCount
     ReFix_ResetEnsureOriginalCallCount
     ReFix_GetLanCore
+    ReFix_GetLastRemoteClientSteamID
+    ReFix_SetLastRemoteClientSteamID
     GetHSteamPipe
     GetHSteamUser
     SteamAPI_GetHSteamPipe
