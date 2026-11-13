@@ -1940,13 +1940,39 @@ static void LoadConfig() {
 
 #if REFIX_LAN_EDITION
     if (modsEnabled) {
-        std::string modsDir = modsDirBuf[0] != '\0' ? modsDirBuf : (GetExeDir() + "refix_mods");
-        refix::mods::ModHost::GetInstance().Initialize(modsDir, modsDevMode);
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::Boot);
-        refix::mods::ModHost::GetInstance().DiscoverAndLoad();
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PreRefix);
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PostRefix);
-        refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::EngineReady);
+        std::string exeDir = GetExeDir();
+        std::string modsDir = modsDirBuf[0] != '\0' ? modsDirBuf : "";
+        if (modsDir.empty()) {
+            std::string candidateMods = exeDir + "mods";
+            std::string candidateRefixMods = exeDir + "refix_mods";
+            DWORD attrMods = GetFileAttributesA(candidateMods.c_str());
+            DWORD attrRefixMods = GetFileAttributesA(candidateRefixMods.c_str());
+            if (attrMods != INVALID_FILE_ATTRIBUTES && (attrMods & FILE_ATTRIBUTE_DIRECTORY)) {
+                modsDir = candidateMods;
+            } else if (attrRefixMods != INVALID_FILE_ATTRIBUTES && (attrRefixMods & FILE_ATTRIBUTE_DIRECTORY)) {
+                modsDir = candidateRefixMods;
+            }
+        }
+
+        bool hasMods = false;
+        if (!modsDir.empty()) {
+            std::string searchPattern = modsDir + "\\*.rfmod";
+            WIN32_FIND_DATAA fd;
+            HANDLE hFind = FindFirstFileA(searchPattern.c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                hasMods = true;
+                FindClose(hFind);
+            }
+        }
+
+        if (hasMods || modsDevMode) {
+            refix::mods::ModHost::GetInstance().Initialize(modsDir.empty() ? (exeDir + "mods") : modsDir, modsDevMode);
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::Boot);
+            refix::mods::ModHost::GetInstance().DiscoverAndLoad();
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PreRefix);
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::PostRefix);
+            refix::mods::ModHost::GetInstance().OnPhase(refix::mods::ModPhase::EngineReady);
+        }
     }
 #endif
 }
@@ -5314,8 +5340,10 @@ static void ReFixInitializePost(bool success) {
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
         ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
-        refix::csgo::ApplyOperationPatch(); // CS:GO only: later operation missions, before the game reads items_game
-        CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
+        if (g_config.realAppIdNum == 730 || g_config.realAppIdNum == 4465480 || UnrealSteamEmu::GetAppID() == 730 || UnrealSteamEmu::GetAppID() == 4465480) {
+            refix::csgo::ApplyOperationPatch(); // CS:GO only: later operation missions, before the game reads items_game
+            CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
+        }
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);

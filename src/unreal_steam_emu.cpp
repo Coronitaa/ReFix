@@ -4768,8 +4768,7 @@ namespace UnrealSteamEmu {
             LobbyCreated_t crResp = {};
             crResp.m_eResult = k_EResultOK;
             crResp.m_ulSteamIDLobby = lID;
-            uint64_t hCall = ++g_nextAPICall;
-            CompleteCallResult(hCall, LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp), false);
+            SteamAPICall_t hCall = PostCallResult(LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp), 0.0);
             PostCallback(LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp));
 
             LobbyEnter_t cbResp = {};
@@ -8706,7 +8705,9 @@ namespace UnrealSteamEmu {
         if (g_transportMode.load() == TransportMode::Canonical) {
             refix::lan::ILanCore::Get().SetAppScope("Steam_" + std::to_string(appId));
             refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
-            refix::gc::InitializeGCRelay();
+            if (appId == 730 || appId == 4465480) {
+                refix::gc::InitializeGCRelay();
+            }
         }
         ReFixLog("[UnrealSteam] Adopted AppID %u (was %u): LAN discovery scope updated", appId, previous);
     }
@@ -9175,7 +9176,9 @@ namespace UnrealSteamEmu {
                 (ep.ipv4 >> 24) & 0xFF, (ep.ipv4 >> 16) & 0xFF, (ep.ipv4 >> 8) & 0xFF, ep.ipv4 & 0xFF,
                 ep.port, core.Transport().GetDiscoveryPort());
             core.Identity().SetDisplayName(g_personaName);
-            refix::gc::InitializeGCRelay();
+            if (g_appID == 730 || g_appID == 4465480) {
+                refix::gc::InitializeGCRelay();
+            }
 
         // Bind local SteamID
         refix::lan::PeerId localPeer = core.Identity().GetLocalPeerId();

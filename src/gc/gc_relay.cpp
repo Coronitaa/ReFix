@@ -188,7 +188,8 @@ void HandleRelayPacket(const refix::lan::PeerId& sender, const uint8_t* data, si
 }
 
 void InitializeGCRelay() {
-    if (UnrealSteamEmu::GetAppID() != 730) return;
+    uint32_t appId = UnrealSteamEmu::GetAppID();
+    if (appId != 730 && appId != 4465480) return;
     std::lock_guard<std::mutex> lock(s_mutex);
     if (s_initialized) return;
     s_initialized = true;
@@ -207,7 +208,8 @@ void ShutdownGCRelay() {
 }
 
 void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
-    if (UnrealSteamEmu::GetAppID() != 730) return;
+    uint32_t appId = UnrealSteamEmu::GetAppID();
+    if (appId != 730 && appId != 4465480) return;
     uint64_t localSid = UnrealSteamEmu::GetLocalSteamID();
     if (clientSteamId == localSid) {
         ReFixLog("[GC] Host player SteamID %llu connected to local game server. Injecting local equipped cache...", localSid);
