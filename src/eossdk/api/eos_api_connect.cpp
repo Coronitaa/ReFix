@@ -410,7 +410,7 @@ EOS_DECLARE_FUNC(void) EOS_Connect_VerifyIdToken(EOS_HConnect Handle, const EOS_
         info.bIsAccountInfoPresent = hasAccount ? EOS_TRUE : EOS_FALSE;
         info.AccountIdType         = accountType;
         info.AccountId             = accountId.c_str();
-        info.Platform              = "other";
+        info.Platform              = "STEAM";
         info.DeviceType            = "PC";
         info.ClientId              = clientId.c_str();
         info.ProductId             = productId.c_str();

@@ -310,7 +310,11 @@ function Generate-UNAE-ReFixIni {
     $arbMode       = & $Pick "Network" "Mode"         $P.ArbitrationMode
     $defRegion     = & $Pick "Photon" "DefaultRegion" $regionCandidate
     $bypassVal     = if ($P.DLCMode -eq "none") { "false" } else { "true" }
-    $eosMode       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "emulated" } else { "passthrough" }
+    $hasEosOrig    = (Get-ChildItem -LiteralPath $TargetDir -Filter "EOSSDK_original.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+    $eosModeDefault = if ($hasEosOrig) { "passthrough" } elseif ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "emulated" } else { "passthrough" }
+    $eosMode       = & $Pick "EOS" "Mode" $eosModeDefault
+    $eosAuthDefault = if ($eosMode -eq "passthrough") { "true" } elseif ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
+    $eosAuth       = & $Pick "EOS" "DeviceIdAuth" $eosAuthDefault
     # ReFix decides the Photon backend: a detected Photon stack (PUN2/Realtime/Voice/Fusion) in a
     # no-third-party mode uses the local emulator (ReFixCloud over Steam P2P); otherwise real Photon.
     $photonDefault = if ($P.UsesPhoton -and ($P.OnlineMode -in @("valve","goldberg","offline","lan"))) { "ReFixCloud" } else { "OfficialPhoton" }
@@ -328,7 +332,6 @@ function Generate-UNAE-ReFixIni {
     if ($serverListOverride -ne "true") { $serverListOverride = if ($knowsReal) { "true" } else { "false" } }
     $serverListAppId = & $Pick "ServerBrowser" "ServerListAppId" ""
     if (-not $serverListAppId -or $serverListAppId -eq "480") { $serverListAppId = if ($realId -and $realId -ne "0") { $realId } else { "480" } }
-    $eosAuth       = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
     # Fast-failing cloud TCP (443/80) only helps when there is no internet backend to reach; online it would
     # block EOS sign-in, PlayFab and other official services.
     $fastCloudFailDefault = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "true" } else { "false" }

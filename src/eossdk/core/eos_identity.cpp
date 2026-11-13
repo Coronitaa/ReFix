@@ -178,9 +178,7 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
         }
     }
 
-    // 2. An explicit [User] SteamId. Deliberately NOT [Unreal.Steam] SteamId:
-    //    that key ships with a placeholder value, so honouring it would hand
-    //    every player on every machine the same account.
+    // 2. An explicit [User] SteamId or Steam API resolution.
     if (externalId.empty()) {
         std::string configured = Trim(cfg.GetString("User", "SteamId", ""));
         const bool numeric = !configured.empty() &&
@@ -190,6 +188,31 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
             source = "config";
             type = EAT::EOS_EAT_STEAM;
             m_externalValid = true;
+        } else {
+            HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+            if (!hSteam) hSteam = GetModuleHandleA("steam_api.dll");
+            if (hSteam) {
+                typedef uint64_t (*fn_GetSteamID)();
+                fn_GetSteamID pfn = (fn_GetSteamID)GetProcAddress(hSteam, "ReFix_GetLocalSteamID");
+                if (pfn) {
+                    uint64_t sid = pfn();
+                    if (sid != 0) {
+                        externalId = std::to_string(sid);
+                        source = "steam-api";
+                        type = EAT::EOS_EAT_STEAM;
+                        m_externalValid = true;
+                    }
+                }
+            }
+            if (externalId.empty()) {
+                uint64_t sid = SteamBackend::Get().LocalSteamId();
+                if (sid != 0) {
+                    externalId = std::to_string(sid);
+                    source = "steam-backend";
+                    type = EAT::EOS_EAT_STEAM;
+                    m_externalValid = true;
+                }
+            }
         }
     }
 
@@ -198,7 +221,11 @@ const UserRecord& Identity::ResolveLocalUser(int32_t credentialType, const char*
         // No external account system is involved: the player is identified by
         // the machine itself, exactly like an EOS DeviceId login.
         externalId = DerivedId("refix.device|" + HardwareFingerprint(), 8);
-        type = EAT::EOS_EAT_EPIC;
+        HMODULE hSteam = GetModuleHandleA("steam_api64.dll");
+        if (!hSteam) hSteam = GetModuleHandleA("steam_api.dll");
+        // For Steam-based titles, NEVER report EOS_EAT_EPIC (0), which causes cross-platform
+        // platform user factories to resolve "EGS" and crash with ArgumentOutOfRangeException.
+        type = (hSteam || SteamBackend::Get().LocalSteamId() != 0) ? EAT::EOS_EAT_STEAM : EAT::EOS_EAT_EPIC;
         m_externalValid = true;
         source = "device";
     }
