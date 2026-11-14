@@ -24,7 +24,7 @@ constexpr size_t   REFIX_MAX_INBOUND_QUEUE_SIZE     = 512; // Max inbound packet
 constexpr size_t   REFIX_MAX_OUT_OF_ORDER_INBOUND   = 512; // Max out-of-order buffered packets per peer
 constexpr size_t   REFIX_MAX_UNACKED_OUTBOUND       = 512; // Max outbound unacked ARQ packets per peer
 constexpr size_t   REFIX_MAX_OUTBOUND_QUEUE_SIZE    = REFIX_MAX_UNACKED_OUTBOUND; // Outbound ARQ queue capacity alias
-constexpr uint32_t REFIX_PEER_STATE_IDLE_TIMEOUT_SEC = 15; // Inactive peer state pruning threshold (seconds)
+constexpr uint32_t REFIX_PEER_STATE_IDLE_TIMEOUT_SEC = 60; // Inactive peer state pruning threshold (seconds - hardened against match loading stalls)
 
 // Message Types
 enum class MsgType : uint8_t {

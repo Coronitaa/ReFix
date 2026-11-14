@@ -39,7 +39,7 @@ $deployed = Join-Path $plugins "steam_api.dll"
 if (-not (Test-Path -LiteralPath $deployed) -or (Get-Item -LiteralPath $deployed).Length -ne $proxy32Size) {
     $failures += "ReFix x86 proxy not deployed to Game_Data\Plugins"
 }
-if (-not (Test-Path -LiteralPath (Join-Path $plugins "steam_api_o.dll"))) { $failures += "genuine x86 DLL not kept as steam_api_o.dll" }
+if (-not (Test-Path -LiteralPath (Join-Path $plugins "steam_api_original.dll")) -and -not (Test-Path -LiteralPath (Join-Path $plugins "steam_api_o.dll"))) { $failures += "genuine x86 DLL not kept as steam_api_original.dll" }
 foreach ($d in "x86", "x86_64") {
     $stray = Get-ChildItem -LiteralPath (Join-Path $plugins $d) -Filter "steam_api*" -File -ErrorAction SilentlyContinue
     if ($stray) { $failures += "Linux plugin folder $d received $($stray.Name -join ', ')" }

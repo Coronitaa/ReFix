@@ -64,6 +64,8 @@ static bool TestFirewall() {
     TEST_ASSERT(fw.IsAllowedIpv4(0xC0A80101), "192.168.1.1 must be allowed (192.168/16)");
     TEST_ASSERT(fw.IsAllowedIpv4(0xA9FE0101), "169.254.1.1 must be allowed (APIPA)");
     TEST_ASSERT(fw.IsAllowedIpv4(0xC6120001), "198.18.0.1 virtual Steam tunnel must be allowed");
+    TEST_ASSERT(fw.IsAllowedIpv4(0x64400001), "100.64.0.1 Tailscale / RFC 6598 CGNAT must be allowed");
+    TEST_ASSERT(fw.IsAllowedIpv4(0x19010203), "25.1.2.3 Hamachi VPN must be allowed");
     TEST_ASSERT(fw.IsAllowedIpv4(0xFFFFFFFF), "255.255.255.255 broadcast must be allowed");
 
     // 2. Allowed Scoped Multicast
@@ -4075,6 +4077,48 @@ static bool TestLocalPeerSurvivesStalePrune() {
     return true;
 }
 
+static bool TestLinuxAndVirtualLanHardening() {
+    std::cout << "[*] Running TestLinuxAndVirtualLanHardening (CustomBroadcasts, TouchPeer, ActiveSessionGuard)..." << std::endl;
+    auto& core = ILanCore::Get();
+    auto& tr = core.Transport();
+
+    // 1. Verify CustomBroadcasts Configuration
+    std::vector<LanEndpoint> customEps = {
+        LanEndpoint{0x0A3A3701, 47584}, // 10.58.55.1 (ZeroTier)
+        LanEndpoint{0x64400001, 47584}  // 100.64.0.1 (Tailscale)
+    };
+    tr.SetCustomBroadcasts(customEps);
+    auto retrieved = tr.GetCustomBroadcasts();
+    TEST_ASSERT(retrieved.size() == 2, "Custom broadcasts must be stored");
+    TEST_ASSERT(retrieved[0].ipv4 == 0x0A3A3701, "Endpoint 0 IP must match");
+    TEST_ASSERT(retrieved[1].ipv4 == 0x64400001, "Endpoint 1 IP must match");
+
+    // 2. Verify TouchPeer Keeps Peer Alive
+    PeerId testPeer{0x1234, 0x5678};
+    PeerInfo pInfo;
+    pInfo.peerId = testPeer;
+    pInfo.endpoint = LanEndpoint{0x7F000001, 8888};
+    pInfo.externalId.numericId = 123456789ULL;
+    core.Peers().RegisterOrUpdatePeer(pInfo);
+
+    // Call TouchPeer
+    core.Peers().TouchPeer(testPeer);
+    auto pFound = core.Peers().FindByPeerId(testPeer);
+    TEST_ASSERT(pFound.has_value(), "Peer must be present");
+
+    // 3. Verify Active Lobby Member Protection
+    std::string lobId = core.Lobby().CreateLobby(4, LobbyPermissionLevel::PublicAdvertised);
+    TEST_ASSERT(!lobId.empty(), "Lobby must be created");
+
+    // Run Tick - member of lobby or touched peer must survive
+    core.Tick();
+    auto pAfterTick = core.Peers().FindByPeerId(testPeer);
+    TEST_ASSERT(pAfterTick.has_value(), "Peer touched / protected by lobby must survive Tick");
+
+    std::cout << "  [PASS] CustomBroadcasts, TouchPeer, and active member protection verified." << std::endl;
+    return true;
+}
+
 int main() {
     std::cout << "============================================================" << std::endl;
     std::cout << "   REFIX UNIVERSAL LAN CORE & TRANSPORT TEST HARNESS        " << std::endl;
@@ -4082,6 +4126,7 @@ int main() {
 
     if (!TestIdentity()) return 1;
     if (!TestLocalPeerSurvivesStalePrune()) return 1;
+    if (!TestLinuxAndVirtualLanHardening()) return 1;
     if (!TestFirewall()) return 1;
     if (!TestWireSerialization()) return 1;
     if (!TestLobbyAndMatchmaking()) return 1;

@@ -97,6 +97,10 @@ echo ====================================================================
 :: Automatically synchronize freshly built binaries to bin/
 if exist bin\ (
     if not exist bin\lan mkdir bin\lan
+    copy /Y build\winmm.dll bin\winmm.dll >nul
+    copy /Y build\winmm.dll bin\lan\winmm.dll >nul
+    if exist bin\lan_offline copy /Y build\winmm.dll bin\lan_offline\winmm.dll >nul
+    if exist bin\online copy /Y build\winmm.dll bin\online\winmm.dll >nul
     copy /Y build\winhttp.dll bin\winhttp.dll >nul
     copy /Y build\winhttp.dll bin\lan\winhttp.dll >nul
     if exist bin\lan_offline copy /Y build\winhttp.dll bin\lan_offline\winhttp.dll >nul
@@ -106,6 +110,8 @@ if exist bin\ (
     if exist bin\lan_offline (
         copy /Y build\EOSSDK-Win64-Shipping.dll bin\lan_offline\EOSSDK-Win64-Shipping.dll >nul
         copy /Y build\RedboneEOS.dll bin\lan_offline\RedboneEOS.dll >nul
+        copy /Y build\steam_api64.dll bin\lan_offline\steam_api64.dll >nul
+        copy /Y build\refix_steamhost64.exe bin\lan_offline\refix_steamhost64.exe >nul
     )
     if exist bin\online (
         copy /Y build\EOSSDK-Win64-Shipping.dll bin\online\EOSSDK-Win64-Shipping.dll >nul

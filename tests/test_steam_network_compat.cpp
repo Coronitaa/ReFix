@@ -7,7 +7,7 @@
 #include "../src/steam_network_compat.h"
 
 // Stubs for linking with steam_network_compat.cpp
-HMODULE g_hOriginalDll = NULL;
+extern "C" HMODULE g_hOriginalDll = NULL;
 
 void ReFixLog(const char* fmt, ...) {
     (void)fmt;

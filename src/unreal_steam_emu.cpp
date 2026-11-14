@@ -759,8 +759,70 @@ namespace UnrealSteamEmu {
             ReFixLog("[ConfigDiag] Multi-instance listen port adjusted to %u for slot %d", g_listenPort, slot);
         }
 
-        GetPrivateProfileStringA("Unreal.Networking", "CustomBroadcasts", "", buf, sizeof(buf), iniPath.c_str());
+        GetPrivateProfileStringA("Network", "CustomBroadcasts", "", buf, sizeof(buf), iniPath.c_str());
+        if (!buf[0]) {
+            GetPrivateProfileStringA("Unreal.Networking", "CustomBroadcasts", "", buf, sizeof(buf), iniPath.c_str());
+        }
         g_customBroadcasts = buf;
+
+        if (g_customBroadcasts.empty()) {
+            std::vector<std::string> cbFiles = {
+                exeDir + "steam_settings\\custom_broadcasts.txt",
+                exeDir + "..\\steam_settings\\custom_broadcasts.txt",
+                exeDir + "..\\..\\steam_settings\\custom_broadcasts.txt"
+            };
+            for (const auto& cbf : cbFiles) {
+                FILE* f = fopen(cbf.c_str(), "r");
+                if (f) {
+                    char lineBuf[256];
+                    while (fgets(lineBuf, sizeof(lineBuf), f)) {
+                        std::string l(lineBuf);
+                        while (!l.empty() && (l.back() == '\r' || l.back() == '\n' || l.back() == ' ')) l.pop_back();
+                        if (!l.empty()) {
+                            if (!g_customBroadcasts.empty()) g_customBroadcasts += ",";
+                            g_customBroadcasts += l;
+                        }
+                    }
+                    fclose(f);
+                    break;
+                }
+            }
+        }
+
+        if (!g_customBroadcasts.empty()) {
+            std::vector<refix::lan::LanEndpoint> endpoints;
+            size_t start = 0;
+            while (start < g_customBroadcasts.size()) {
+                size_t end = g_customBroadcasts.find_first_of(",;\r\n", start);
+                if (end == std::string::npos) end = g_customBroadcasts.size();
+                std::string token = g_customBroadcasts.substr(start, end - start);
+                start = end + 1;
+
+                size_t first = token.find_first_not_of(" \t");
+                if (first == std::string::npos) continue;
+                size_t last = token.find_last_not_of(" \t");
+                token = token.substr(first, (last - first + 1));
+                if (token.empty()) continue;
+
+                refix::lan::LanEndpoint ep;
+                if (token.find(':') != std::string::npos) {
+                    ep = refix::lan::LanEndpoint::Parse(token);
+                } else {
+                    in_addr parsed{};
+                    if (inet_pton(AF_INET, token.c_str(), &parsed) == 1) {
+                        ep.ipv4 = ntohl(parsed.s_addr);
+                        ep.port = g_listenPort;
+                    }
+                }
+                if (ep.IsValid()) {
+                    endpoints.push_back(ep);
+                    refix::lan::LanFirewall::Get().AddAllowedIp(ep.ipv4);
+                }
+            }
+            if (!endpoints.empty()) {
+                refix::lan::ILanCore::Get().Transport().SetCustomBroadcasts(endpoints);
+            }
+        }
 
         char bufBypass[16];
         GetPrivateProfileStringA("Unreal.Steam", "BypassLicenseCheck", "true", bufBypass, sizeof(bufBypass), iniPath.c_str());
@@ -1526,10 +1588,21 @@ namespace UnrealSteamEmu {
 
         std::vector<std::string> destinations = { "255.255.255.255", "127.0.0.1" };
         if (!g_customBroadcasts.empty()) {
-            std::stringstream ss(g_customBroadcasts);
-            std::string ipStr;
-            while (std::getline(ss, ipStr, ',')) {
-                if (!ipStr.empty()) destinations.push_back(ipStr);
+            size_t start = 0;
+            while (start < g_customBroadcasts.size()) {
+                size_t end = g_customBroadcasts.find_first_of(",;\r\n", start);
+                if (end == std::string::npos) end = g_customBroadcasts.size();
+                std::string token = g_customBroadcasts.substr(start, end - start);
+                start = end + 1;
+                size_t first = token.find_first_not_of(" \t");
+                if (first == std::string::npos) continue;
+                size_t last = token.find_last_not_of(" \t");
+                token = token.substr(first, (last - first + 1));
+                if (!token.empty()) {
+                    size_t colon = token.find(':');
+                    if (colon != std::string::npos) token = token.substr(0, colon);
+                    destinations.push_back(token);
+                }
             }
         }
 

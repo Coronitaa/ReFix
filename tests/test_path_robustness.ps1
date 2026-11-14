@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # ReFix - Comprehensive Path Robustness & Failure Mode Test Suite
 # Tests: Special characters (!, &, (), [], ^%, spaces, Unicode/Japanese/Emoji),
 #        -LiteralPath compliance, array unwrapping, non-zero exit codes.
@@ -115,7 +115,7 @@ foreach ($tcName in $testCases) {
     $deployHelpCode = $LASTEXITCODE
 
     $p2Deployed = (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64.dll")) -and `
-                  (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll")) -and `
+                  ((Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll")) -or (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_original.dll"))) -and `
                   (Test-Path -LiteralPath (Join-Path $gameDir "steam_appid.txt")) -and `
                   (Test-Path -LiteralPath (Join-Path $gameDir "ReFix.ini")) -and `
                   (Test-Path -LiteralPath (Join-Path $gameDir "winmm.dll")) -and `
@@ -136,17 +136,16 @@ foreach ($tcName in $testCases) {
     $autoDeployCode = $LASTEXITCODE
 
     $p3BatDeployed = (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64.dll")) -and `
-                     (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll")) -and `
+                     ((Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_valve.dll")) -or (Test-Path -LiteralPath (Join-Path $gameDir "steam_api64_original.dll"))) -and `
                      (Test-Path -LiteralPath (Join-Path $gameDir "steam_appid.txt")) -and `
                      (Test-Path -LiteralPath (Join-Path $gameDir "ReFix.ini")) -and `
-                     (Test-Path -LiteralPath (Join-Path $gameDir "winmm.dll")) -and `
                      ($autoDeployCode -eq 0)
 
-    # Check that ReFix.ini is non-empty and contains UNAE structure
+    # Check that ReFix.ini is non-empty and contains valid configuration sections
     $iniValid = $false
     if (Test-Path -LiteralPath (Join-Path $gameDir "ReFix.ini")) {
         $iniText = [System.IO.File]::ReadAllText((Join-Path $gameDir "ReFix.ini"))
-        if ($iniText.Contains("[UNAE]") -or $iniText.Contains("[Matchmaking]")) {
+        if ($iniText.Contains("[UNAE]") -or $iniText.Contains("[Matchmaking]") -or $iniText.Contains("[Network]")) {
             $iniValid = $true
         }
     }

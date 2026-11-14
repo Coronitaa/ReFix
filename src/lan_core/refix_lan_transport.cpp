@@ -6,6 +6,7 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#include <unordered_set>
 #include <string>
 #include <cstdio>
 #include <iphlpapi.h>
@@ -718,6 +719,11 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         state.lastReceivedTime = now;
         // Do NOT update state.lastEndpoint on ACK! Prevents unauthorized endpoint mutation.
         ProcessReliableAck(state, hdr->ack, hdr->sackMask);
+
+        auto* listener = m_listener.load();
+        if (listener) {
+            listener->OnPeerActivity(senderPeer);
+        }
         return;
     }
 
@@ -982,6 +988,18 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         if (payloadLen > REFIX_MAX_UNRELIABLE_PAYLOAD) {
             return;
         }
+
+        // Keep peer reliability state alive during active unreliable data streams
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            auto it = m_peerStates.find(senderPeer);
+            if (it != m_peerStates.end()) {
+                auto now = std::chrono::steady_clock::now();
+                it->second.lastActivityTime = now;
+                it->second.lastReceivedTime = now;
+            }
+        }
+
         InboundPacket pkt;
         pkt.senderPeerId = senderPeer;
         pkt.senderEndpoint = fromEp;
@@ -1438,7 +1456,7 @@ bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size
         };
         // 1. Multicast Group (239.255.71.84) - ONLY when multicast group successfully joined!
         if (m_multicastJoined) {
-            sendToTarget(0xEFff4754);
+            sendToTarget(0xEFFF4754);
         }
         // 2. Limited Broadcast (255.255.255.255)
         sendToTarget(0xFFFFFFFF);
@@ -1463,6 +1481,32 @@ bool LanTransport::BroadcastDiscoveryPacket(MsgType type, const void* data, size
             if (altPort != m_discoveryPort) {
                 sendToPort(altPort);
             }
+        }
+    }
+
+    // 5. Custom broadcast targets (e.g. ZeroTier, Tailscale, Radmin VPN endpoints)
+    // Dispatched strictly to each endpoint's designated port (or targetPort/discoveryPort)
+    // without multiplying across 16 local fallback ports, avoiding socket buffer exhaustion.
+    std::vector<LanEndpoint> customTargets;
+    {
+        std::lock_guard<std::mutex> lock(m_customBroadcastMutex);
+        customTargets = m_customBroadcastEndpoints;
+    }
+    if (!customTargets.empty()) {
+        std::unordered_set<uint64_t> sentKeys;
+        for (const auto& ep : customTargets) {
+            if (ep.ipv4 == 0) continue;
+            uint16_t dstPort = (ep.port != 0) ? ep.port : ((targetPort != 0) ? targetPort : m_discoveryPort);
+            uint64_t key = (static_cast<uint64_t>(ep.ipv4) << 16) | dstPort;
+            if (!sentKeys.insert(key).second) continue;
+
+            sockaddr_in sin{};
+            sin.sin_family = AF_INET;
+            sin.sin_addr.s_addr = htonl(ep.ipv4);
+            sin.sin_port = htons(dstPort);
+            WireSend(reinterpret_cast<const char*>(buffer.data()),
+                     static_cast<int>(buffer.size()),
+                     reinterpret_cast<const sockaddr*>(&sin), sizeof(sin));
         }
     }
 

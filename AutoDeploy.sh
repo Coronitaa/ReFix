@@ -321,6 +321,26 @@ clean_online_winmm() {
     ok "Removed the ReFix Online winmm.dll from $EXE_DIR"
 }
 
+# ReFix Online Legacy (Option 3): Deploy winmm.dll proxy for early Steam Overlay / API injection
+deploy_online_winmm() {
+    [ "$MODE" = online ] || return 0
+    local src="$PRODUCT_BIN/winmm.dll"
+    [ -f "$src" ] || src="$BIN/online/winmm.dll"
+    [ -f "$src" ] || return 0
+
+    # Skip winmm for games with known integrity blacklists (e.g. Phasmophobia)
+    case "${GAME_NAME,,}" in *phasmophobia*) return 0 ;; esac
+
+    local d="$EXE_DIR"
+    local w="$d/winmm.dll"
+    if [ -f "$w" ] && [ ! -f "$d/winmm_o.dll" ] && ! is_refix "$w"; then
+        mv -f "$w" "$d/winmm_o.dll"
+        ok "Backed up original winmm.dll -> winmm_o.dll in $d"
+    fi
+    cp -f "$src" "$w"
+    ok "Deployed ReFix winmm.dll overlay loader proxy to $d"
+}
+
 uses_photon() {
     find "$GAME_DIR" -type f \( -iname 'Photon3Unity3D.dll' -o -iname 'PhotonRealtime.dll' -o -iname 'Fusion.Runtime.dll' \
         -o -iname 'PhotonUnityNetworking.dll' \) -not -path '*/ReFix/FusionShared/*' -print -quit 2>/dev/null | grep -q . && return 0
@@ -425,7 +445,13 @@ EOF
             ini_set "$ini" Overlay Enabled "$OV_ENABLED"
             ini_set "$ini" Overlay BlockSteamOverlay "$OV_BLOCK"
         fi
+        if [ "$PRODUCT_DIR" = lan_offline ]; then
+            ini_set "$ini" SteamLink Enabled 0
+        fi
         ok "Updated ReFix.ini in $EXE_DIR for ReFix $MODE"
+    fi
+    if [ "$PRODUCT_DIR" = lan_offline ]; then
+        ini_set "$ini" SteamLink Enabled 0
     fi
     # The game's server list (dedicated / community servers) under its real AppID: as Spacewar it shows none.
     if [ "$APP_ID" != 480 ] && [ "$APP_ID" != "$mask" ]; then
@@ -514,6 +540,7 @@ deploy_steam_x86
 deploy_eos
 deploy_eac
 clean_online_winmm
+deploy_online_winmm
 write_ini
 install_mods
 # ReFix Online + LAN: the Photon Fusion Shared server it starts next to the game (shipped with the Online product)
@@ -527,10 +554,13 @@ fi
 
 echo
 ok "ReFix $MODE is installed in $GAME_NAME."
+printf 'WINEDLLOVERRIDES="winmm,winhttp=n,b" %%command%%\n' > "$EXE_DIR/.refix_launch_options.txt"
 if [ "$MODE" = online ]; then
     echo "    Start the game from Steam (Proton). Steam must be running."
+    echo "    Proton Launch Options: WINEDLLOVERRIDES=\"winmm,winhttp=n,b\" %command%"
 else
     echo "    Start the game's .exe with Proton or Wine, or add it to Steam as a non-Steam game."
+    echo "    Proton Launch Options: WINEDLLOVERRIDES=\"winmm,winhttp=n,b\" %command%"
     echo "    Every PC and every instance gets its own identity; players on the same network find each other."
     echo "    Allow UDP 47584 and the game's ports in your firewall if players do not see each other."
 fi

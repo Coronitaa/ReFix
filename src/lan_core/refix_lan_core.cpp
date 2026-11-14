@@ -34,6 +34,8 @@ inline LanEndpoint Incoming(const LanEndpoint& sender, const PeerId& senderPeer,
 } // namespace refix::lan::lan_bridge
 
 #include <windows.h>
+#include <ws2tcpip.h>
+#include <unordered_set>
 #include <algorithm>
 #include <mutex>
 #include <set>
@@ -184,6 +186,14 @@ public:
         auto& p = m_peers[info.peerId];
         p = info;
         p.lastSeen = std::chrono::steady_clock::now();
+    }
+
+    void TouchPeer(const PeerId& peerId) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_peers.find(peerId);
+        if (it != m_peers.end()) {
+            it->second.lastSeen = std::chrono::steady_clock::now();
+        }
     }
 
     void BindExternalId(const PeerId& peerId, const ExternalId& extId) override {
@@ -1416,7 +1426,12 @@ public:
         m_channelHandlers[channel] = handler ? std::make_shared<ILanCore::ChannelHandler>(std::move(handler)) : nullptr;
     }
 
+    void OnPeerActivity(const PeerId& peerId) override {
+        m_peers.TouchPeer(peerId);
+    }
+
     void OnInboundData(const InboundPacket& packet) override {
+        m_peers.TouchPeer(packet.senderPeerId);
         std::shared_ptr<ILanCore::ChannelHandler> direct;
         {
             std::lock_guard<std::mutex> lock(m_channelMutex);
@@ -1497,6 +1512,90 @@ public:
         if (!m_initialized) {
             return false;
         }
+
+        // Configure custom broadcast destinations (VPN / ZeroTier / Tailscale)
+        char exePath[MAX_PATH] = {0};
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string exeDir(exePath);
+        size_t lastSlash = exeDir.find_last_of("\\/");
+        if (lastSlash != std::string::npos) exeDir = exeDir.substr(0, lastSlash + 1);
+
+        std::vector<std::string> iniCandidates = {
+            exeDir + "ReFix.ini",
+            exeDir + "..\\ReFix.ini",
+            exeDir + "..\\..\\ReFix.ini",
+            exeDir + "..\\..\\..\\ReFix.ini"
+        };
+        char cbBuf[1024] = {0};
+        for (const auto& cand : iniCandidates) {
+            if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                GetPrivateProfileStringA("Network", "CustomBroadcasts", "", cbBuf, sizeof(cbBuf), cand.c_str());
+                if (!cbBuf[0]) {
+                    GetPrivateProfileStringA("Unreal.Networking", "CustomBroadcasts", "", cbBuf, sizeof(cbBuf), cand.c_str());
+                }
+                if (cbBuf[0]) break;
+            }
+        }
+        std::string rawBroadcasts = cbBuf;
+        if (rawBroadcasts.empty()) {
+            std::vector<std::string> cbFiles = {
+                exeDir + "steam_settings\\custom_broadcasts.txt",
+                exeDir + "..\\steam_settings\\custom_broadcasts.txt",
+                exeDir + "..\\..\\steam_settings\\custom_broadcasts.txt"
+            };
+            for (const auto& cbf : cbFiles) {
+                FILE* f = fopen(cbf.c_str(), "r");
+                if (f) {
+                    char lineBuf[256];
+                    while (fgets(lineBuf, sizeof(lineBuf), f)) {
+                        std::string l(lineBuf);
+                        while (!l.empty() && (l.back() == '\r' || l.back() == '\n' || l.back() == ' ')) l.pop_back();
+                        if (!l.empty()) {
+                            if (!rawBroadcasts.empty()) rawBroadcasts += ",";
+                            rawBroadcasts += l;
+                        }
+                    }
+                    fclose(f);
+                    break;
+                }
+            }
+        }
+
+        if (!rawBroadcasts.empty()) {
+            std::vector<LanEndpoint> customEndpoints;
+            size_t start = 0;
+            while (start < rawBroadcasts.size()) {
+                size_t end = rawBroadcasts.find_first_of(",;\r\n", start);
+                if (end == std::string::npos) end = rawBroadcasts.size();
+                std::string token = rawBroadcasts.substr(start, end - start);
+                start = end + 1;
+
+                size_t first = token.find_first_not_of(" \t");
+                if (first == std::string::npos) continue;
+                size_t last = token.find_last_not_of(" \t");
+                token = token.substr(first, (last - first + 1));
+                if (token.empty()) continue;
+
+                LanEndpoint ep;
+                if (token.find(':') != std::string::npos) {
+                    ep = LanEndpoint::Parse(token);
+                } else {
+                    in_addr parsed{};
+                    if (inet_pton(AF_INET, token.c_str(), &parsed) == 1) {
+                        ep.ipv4 = ntohl(parsed.s_addr);
+                        ep.port = discoveryPort;
+                    }
+                }
+                if (ep.IsValid()) {
+                    customEndpoints.push_back(ep);
+                    LanFirewall::Get().AddAllowedIp(ep.ipv4);
+                }
+            }
+            if (!customEndpoints.empty()) {
+                m_transport.SetCustomBroadcasts(customEndpoints);
+            }
+        }
+
         m_lastAnnounce = std::chrono::steady_clock::now();
         m_discovery.AnnouncePresence();
         return m_initialized;
@@ -1527,8 +1626,26 @@ public:
             m_peers.BindExternalId(self->peerId, self->externalId);
         }
 
-        // Prune stale peers inactive > 12s and reset transport state
-        auto pruned = m_peers.PruneStalePeers(std::chrono::milliseconds(12000));
+        // Active Session & Lobby Guard: Protect active lobby and session members from pruning
+        std::unordered_set<PeerId> protectedPeers;
+        protectedPeers.insert(m_identity.GetLocalPeerId());
+        for (const auto& lob : m_lobby.GetAllKnownLobbies()) {
+            for (const auto& m : lob.members) {
+                protectedPeers.insert(m.peerId);
+            }
+        }
+        if (auto s = m_session.GetActiveSession()) {
+            protectedPeers.insert(s->hostPeerId);
+            for (const auto& [pid, _] : s->playerReadiness) {
+                protectedPeers.insert(pid);
+            }
+        }
+        for (const auto& pid : protectedPeers) {
+            m_peers.TouchPeer(pid);
+        }
+
+        // Prune stale peers inactive > 60s and reset transport state
+        auto pruned = m_peers.PruneStalePeers(std::chrono::milliseconds(60000));
         for (const auto& pid : pruned) {
             m_transport.ResetPeerState(pid);
         }
