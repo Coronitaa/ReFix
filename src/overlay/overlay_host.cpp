@@ -4,6 +4,7 @@
 #include "overlay_host.h"
 #include "overlay_gamepad.h"
 #include "overlay_theme.h"
+#include "../refix_wine.h"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -450,6 +451,10 @@ void SetStyles(Mode m) {
     LONG_PTR ex = BaseExStyle() | WS_EX_TOPMOST;
     if (m == Mode::Toast) {
         ex |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+    } else if (!ReFixIsWine()) {
+        // Wine maps WS_EX_TOOLWINDOW to an X11 utility window that gets no keyboard; Windows needs it to keep
+        // the overlay out of the taskbar and Alt+Tab.
+        ex |= WS_EX_TOOLWINDOW;
     }
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
 }
@@ -490,7 +495,10 @@ void ApplyMode(Mode m, const GameWindow& gw) {
         // window still has it: hiding first lets Windows activate the desktop, and then we may no longer
         // move the foreground.
         const bool giveBack = (from == Mode::Overlay || from == Mode::Dialog) && gw.hwnd;
-        if (from == Mode::Overlay || from == Mode::Dialog) {
+        // Wine / X11 only: the overlay is owned by the game and shares its input queue while open. On Windows
+        // AttachThreadInput ties us to a game thread that may stop pumping messages.
+        const bool wine = ReFixIsWine();
+        if (wine && (from == Mode::Overlay || from == Mode::Dialog)) {
             ResumeGameRawInput();
             if (gw.hwnd) {
                 DWORD gameThread = GetWindowThreadProcessId(gw.hwnd, NULL);
@@ -512,7 +520,7 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             ShowWindow(g_hwnd, SW_HIDE);
         } else {
             SetStyles(m);
-            if ((m == Mode::Overlay || m == Mode::Dialog) && gw.hwnd) {
+            if (wine && (m == Mode::Overlay || m == Mode::Dialog) && gw.hwnd) {
                 SetWindowLongPtrW(g_hwnd, GWLP_HWNDPARENT, (LONG_PTR)gw.hwnd);
                 ReleaseCapture();
                 SuspendGameRawInput();
@@ -547,11 +555,10 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             SetFocus(g_hwnd);
             ClipCursor(nullptr);
         }
-    } else if (m == Mode::Overlay || m == Mode::Dialog) {
+    } else if ((m == Mode::Overlay || m == Mode::Dialog) && (GetForegroundWindow() != g_hwnd || GetFocus() != g_hwnd)) {
+        // Only when we lost the focus: this runs every frame, and releasing the capture each time broke dragging.
         ReleaseCapture();
-        if (GetForegroundWindow() != g_hwnd) {
-            SetForegroundWindow(g_hwnd);
-        }
+        SetForegroundWindow(g_hwnd);
         SetActiveWindow(g_hwnd);
         SetFocus(g_hwnd);
         ClipCursor(nullptr);
@@ -662,7 +669,7 @@ bool InitThread() {
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
-    g_hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST, kClassName, L"ReFix LAN",
+    g_hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | (ReFixIsWine() ? 0 : WS_EX_TOOLWINDOW), kClassName, L"ReFix LAN",
                              WS_POPUP, 0, 0, std::max(64, GetSystemMetrics(SM_CXSCREEN)), std::max(64, GetSystemMetrics(SM_CYSCREEN)), nullptr, nullptr, wc.hInstance, nullptr);
     if (!g_hwnd || !CreateDeviceAndSurface((UINT)std::max(64, GetSystemMetrics(SM_CXSCREEN)), (UINT)std::max(64, GetSystemMetrics(SM_CYSCREEN)))) return false;
 

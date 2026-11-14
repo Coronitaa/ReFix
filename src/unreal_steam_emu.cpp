@@ -789,40 +789,8 @@ namespace UnrealSteamEmu {
             }
         }
 
-        if (!g_customBroadcasts.empty()) {
-            std::vector<refix::lan::LanEndpoint> endpoints;
-            size_t start = 0;
-            while (start < g_customBroadcasts.size()) {
-                size_t end = g_customBroadcasts.find_first_of(",;\r\n", start);
-                if (end == std::string::npos) end = g_customBroadcasts.size();
-                std::string token = g_customBroadcasts.substr(start, end - start);
-                start = end + 1;
-
-                size_t first = token.find_first_not_of(" \t");
-                if (first == std::string::npos) continue;
-                size_t last = token.find_last_not_of(" \t");
-                token = token.substr(first, (last - first + 1));
-                if (token.empty()) continue;
-
-                refix::lan::LanEndpoint ep;
-                if (token.find(':') != std::string::npos) {
-                    ep = refix::lan::LanEndpoint::Parse(token);
-                } else {
-                    in_addr parsed{};
-                    if (inet_pton(AF_INET, token.c_str(), &parsed) == 1) {
-                        ep.ipv4 = ntohl(parsed.s_addr);
-                        ep.port = g_listenPort;
-                    }
-                }
-                if (ep.IsValid()) {
-                    endpoints.push_back(ep);
-                    refix::lan::LanFirewall::Get().AddAllowedIp(ep.ipv4);
-                }
-            }
-            if (!endpoints.empty()) {
-                refix::lan::ILanCore::Get().Transport().SetCustomBroadcasts(endpoints);
-            }
-        }
+        // LanCore::Initialize hands these targets to the LAN transport on the discovery port; setting them here
+        // too (on the game port) overwrote that and sent discovery beacons where nobody listens.
 
         char bufBypass[16];
         GetPrivateProfileStringA("Unreal.Steam", "BypassLicenseCheck", "true", bufBypass, sizeof(bufBypass), iniPath.c_str());

@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include "../refix_wine.h"
 
 #include "steam_host_proto.h"
 
@@ -240,23 +241,8 @@ DWORD SteamPid() {
     return found;
 }
 
-static bool IsWine() {
-    static int s_isWine = -1;
-    if (s_isWine == -1) {
-        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        s_isWine = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr) ? 1 : 0;
-    }
-    return s_isWine == 1;
-}
-
-static bool HasProtonSteamEnv() {
-    char buf[64] = {0};
-    return (GetEnvironmentVariableA("STEAM_COMPAT_CLIENT_INSTALL_PATH", buf, sizeof(buf)) > 0 ||
-            GetEnvironmentVariableA("SteamEnv", buf, sizeof(buf)) > 0 ||
-            GetEnvironmentVariableA("SteamAppId", buf, sizeof(buf)) > 0 ||
-            GetEnvironmentVariableA("SteamGameId", buf, sizeof(buf)) > 0 ||
-            GetEnvironmentVariableA("STEAM_COMPAT_DATA_PATH", buf, sizeof(buf)) > 0);
-}
+static bool IsWine() { return ReFixIsWine(); }
+static bool HasProtonSteamEnv() { return ReFixHasProtonSteamEnv(); }
 
 bool SteamRunning() {
     if (SteamPid() != 0) return true;

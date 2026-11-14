@@ -204,12 +204,15 @@ uninstall() {
     restore_saves
     uninstall_mods
     while IFS= read -r d; do
+        # The game's own DLL wins over the stock Valve copy ReFix Online adds (same rule as Uninstall_ReFix.bat).
+        [ -f "$d/steam_api64_original.dll" ] && rm -f "$d/steam_api64_valve.dll" "$d/steam_api64_o.dll"
         restore_one "$d" steam_api64_original.dll steam_api64.dll
         restore_one "$d" steam_api64_valve.dll steam_api64.dll
         restore_one "$d" steam_api64_o.dll steam_api64.dll
         rm -f "$d/steam_api64_valve.dll"
     done < <({ dirs_with steam_api64_original.dll; dirs_with steam_api64_valve.dll; dirs_with steam_api64_o.dll; } | sort -u)
     while IFS= read -r d; do
+        [ -f "$d/steam_api_original.dll" ] && rm -f "$d/steam_api_valve.dll" "$d/steam_api_o.dll"
         restore_one "$d" steam_api_original.dll steam_api.dll
         restore_one "$d" steam_api_valve.dll steam_api.dll
         restore_one "$d" steam_api_o.dll steam_api.dll
@@ -221,7 +224,11 @@ uninstall() {
     done < <({ dirs_with EOSSDK_original.dll; dirs_with RedboneEOS.dll; } | sort -u)
     while IFS= read -r d; do restore_one "$d" winmm_o.dll winmm.dll; done < <(dirs_with winmm_o.dll)
     while IFS= read -r d; do restore_one "$d" winhttp_original.dll winhttp.dll; done < <(dirs_with winhttp_original.dll)
-    find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" -o -name "refix_steamlink64.dll" -o -name "refix_steamlink.dll" -o -name "refix_steamhost64.exe" -o -name "refix_steamhost.exe" -o -name "ReFixFusionShared.log" \) -delete 2>/dev/null || true
+    # ReFix loader proxies with no original behind them: the game would still load ReFix after uninstalling.
+    while IFS= read -r f; do
+        is_refix "$f" && rm -f "$f" && ok "Removed ReFix $(basename "$f") from $(dirname "$f")"
+    done < <(find "$GAME_DIR" -type f \( -iname winmm.dll -o -iname winhttp.dll \) 2>/dev/null)
+    find "$GAME_DIR" -type f \( -name "steam_appid.txt" -o -name "ReFix.ini" -o -name "ReFix.log" -o -name "local_save.txt" -o -name "refix_steamlink64.dll" -o -name "refix_steamlink.dll" -o -name "refix_steamhost64.exe" -o -name "refix_steamhost.exe" -o -name "ReFixFusionShared.log" -o -name ".refix_launch_options.txt" \) -delete 2>/dev/null || true
     # ReFix support tools (Photon Fusion Shared server): only the folder holding ReFix's own server, then its
     # ReFix parent if nothing else is left in it.
     while IFS= read -r f; do
@@ -548,7 +555,8 @@ install_mods
 if [ "$PRODUCT_DIR" = lan ] && [ -d "$BIN/online/ReFix" ] && uses_fusion; then
     cp -rf "$BIN/online/ReFix" "$EXE_DIR/" && ok "Deployed ReFix support tools (Fusion Shared server) to $EXE_DIR/ReFix"
 elif [ -f "$EXE_DIR/ReFix/FusionShared/ReFixFusionShared.exe" ]; then
-    rm -rf "$EXE_DIR/ReFix/FusionShared" && rmdir "$EXE_DIR/ReFix" 2>/dev/null
+    rm -rf "$EXE_DIR/ReFix/FusionShared"
+    rmdir "$EXE_DIR/ReFix" 2>/dev/null || true   # set -e: a non-empty ReFix folder must not abort the deploy
     ok "Removed the Fusion Shared server: this game does not use Photon Fusion"
 fi
 

@@ -35,7 +35,6 @@ inline LanEndpoint Incoming(const LanEndpoint& sender, const PeerId& senderPeer,
 
 #include <windows.h>
 #include <ws2tcpip.h>
-#include <unordered_set>
 #include <algorithm>
 #include <mutex>
 #include <set>
@@ -1626,24 +1625,8 @@ public:
             m_peers.BindExternalId(self->peerId, self->externalId);
         }
 
-        // Active Session & Lobby Guard: Protect active lobby and session members from pruning
-        std::unordered_set<PeerId> protectedPeers;
-        protectedPeers.insert(m_identity.GetLocalPeerId());
-        for (const auto& lob : m_lobby.GetAllKnownLobbies()) {
-            for (const auto& m : lob.members) {
-                protectedPeers.insert(m.peerId);
-            }
-        }
-        if (auto s = m_session.GetActiveSession()) {
-            protectedPeers.insert(s->hostPeerId);
-            for (const auto& [pid, _] : s->playerReadiness) {
-                protectedPeers.insert(pid);
-            }
-        }
-        for (const auto& pid : protectedPeers) {
-            m_peers.TouchPeer(pid);
-        }
-
+        // Live peers stay fresh through beacons and OnPeerActivity (data, ACKs). Lobby members are not touched
+        // here: a crashed player would otherwise never time out and stay in every lobby as a ghost.
         // Prune stale peers inactive > 60s and reset transport state
         auto pruned = m_peers.PruneStalePeers(std::chrono::milliseconds(60000));
         for (const auto& pid : pruned) {
