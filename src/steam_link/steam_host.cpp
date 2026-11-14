@@ -240,17 +240,45 @@ DWORD SteamPid() {
     return found;
 }
 
-bool SteamRunning() { return SteamPid() != 0; }
+static bool IsWine() {
+    static int s_isWine = -1;
+    if (s_isWine == -1) {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        s_isWine = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr) ? 1 : 0;
+    }
+    return s_isWine == 1;
+}
+
+static bool HasProtonSteamEnv() {
+    char buf[64] = {0};
+    return (GetEnvironmentVariableA("STEAM_COMPAT_CLIENT_INSTALL_PATH", buf, sizeof(buf)) > 0 ||
+            GetEnvironmentVariableA("SteamEnv", buf, sizeof(buf)) > 0 ||
+            GetEnvironmentVariableA("SteamAppId", buf, sizeof(buf)) > 0 ||
+            GetEnvironmentVariableA("SteamGameId", buf, sizeof(buf)) > 0 ||
+            GetEnvironmentVariableA("STEAM_COMPAT_DATA_PATH", buf, sizeof(buf)) > 0);
+}
+
+bool SteamRunning() {
+    if (SteamPid() != 0) return true;
+    if (IsWine() && HasProtonSteamEnv()) return true;
+    return false;
+}
 
 // SteamAPI_Init checks the registry pid too: point it back at the running client when a stray steam.exe left
 // it dead (the value Steam itself keeps there).
 bool SteamSignedIn() {
     const DWORD pid = SteamPid();
-    if (!pid) return false;
     const wchar_t* key = L"Software\\Valve\\Steam\\ActiveProcess";
-    if (RegDword(key, L"pid") != pid && !ProcessAlive(RegDword(key, L"pid")))
-        RegSetKeyValueW(HKEY_CURRENT_USER, key, L"pid", REG_DWORD, &pid, sizeof(pid));
-    return RegDword(key, L"ActiveUser") != 0;
+    if (pid != 0) {
+        if (RegDword(key, L"pid") != pid && !ProcessAlive(RegDword(key, L"pid")))
+            RegSetKeyValueW(HKEY_CURRENT_USER, key, L"pid", REG_DWORD, &pid, sizeof(pid));
+        return RegDword(key, L"ActiveUser") != 0;
+    }
+    if (IsWine()) {
+        if (RegDword(key, L"ActiveUser") != 0) return true;
+        if (HasProtonSteamEnv()) return true;
+    }
+    return false;
 }
 
 // Steam must outlive the game: started outside the game's job when Windows allows it.
@@ -298,6 +326,22 @@ void SendSteamToTray() { EnumWindows(TrayIfSteamMain, 0); }
 
 bool StartSteamAndWait() {
     if (SteamSignedIn()) return true;
+    if (IsWine()) {
+        // Fast-fail non-Steam Wine environments (Lutris, Heroic, Bottles)
+        // Never wait 30 seconds or attempt to run steam.exe -silent when native Steam is not running!
+        if (!HasProtonSteamEnv() && RegDword(L"Software\\Valve\\Steam\\ActiveProcess", L"ActiveUser") == 0) {
+            Report(kFailed, "Steam is not running on the host system");
+            return false;
+        }
+        for (DWORD waited = 0; waited < 5000; waited += 500) {
+            if (SteamSignedIn()) {
+                Report(kConnecting);
+                return Wait(1000);
+            }
+            if (!Wait(500)) return false;
+        }
+        return SteamSignedIn();
+    }
     const std::wstring exe = RegString(L"Software\\Valve\\Steam", L"SteamExe");
     if (exe.empty()) { Report(kFailed, "Steam is not installed"); return false; }
     if (!SteamRunning()) {

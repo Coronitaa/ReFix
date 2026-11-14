@@ -20,6 +20,15 @@ std::atomic<ReFixNetworkMode> NetworkModeManager::s_mode{ ReFixNetworkMode::Onli
 
 std::atomic<bool> NetworkModeManager::s_lanInternet{ true };
 
+static bool IsRunningUnderWine() {
+    static int s_isWine = -1;
+    if (s_isWine == -1) {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        s_isWine = (ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr) ? 1 : 0;
+    }
+    return s_isWine == 1;
+}
+
 bool NetworkModeManager::IsSteamClientRunning() {
     bool running = false;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -35,7 +44,34 @@ bool NetworkModeManager::IsSteamClientRunning() {
         }
         CloseHandle(snapshot);
     }
-    return running;
+    if (running) return true;
+
+    // Linux / Steam Play / Wine / Proton detection:
+    // On Linux, Steam runs natively outside Wine as an ELF binary (/usr/bin/steam).
+    // Inspect Proton / Steam environment variables and Wine registry for active client.
+    if (IsRunningUnderWine()) {
+        char envBuf[128] = {0};
+        if (GetEnvironmentVariableA("STEAM_COMPAT_CLIENT_INSTALL_PATH", envBuf, sizeof(envBuf)) > 0 ||
+            GetEnvironmentVariableA("SteamEnv", envBuf, sizeof(envBuf)) > 0 ||
+            GetEnvironmentVariableA("SteamAppId", envBuf, sizeof(envBuf)) > 0 ||
+            GetEnvironmentVariableA("SteamGameId", envBuf, sizeof(envBuf)) > 0 ||
+            GetEnvironmentVariableA("STEAM_COMPAT_DATA_PATH", envBuf, sizeof(envBuf)) > 0) {
+            return true;
+        }
+
+        HKEY hKey = NULL;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam\\ActiveProcess", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD activeUser = 0;
+            DWORD size = sizeof(activeUser);
+            if (RegQueryValueExW(hKey, L"ActiveUser", NULL, NULL, (LPBYTE)&activeUser, &size) == ERROR_SUCCESS && activeUser != 0) {
+                RegCloseKey(hKey);
+                return true;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+
+    return false;
 }
 
 void NetworkModeManager::LoadMode(const std::string& iniPath) {

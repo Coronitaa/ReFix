@@ -58,6 +58,7 @@ public:
     virtual ~IPeerRegistry() = default;
 
     virtual void RegisterOrUpdatePeer(const PeerInfo& info) = 0;
+    virtual void TouchPeer(const PeerId& peerId) = 0;
     virtual void BindExternalId(const PeerId& peerId, const ExternalId& extId) = 0;
     virtual std::optional<PeerInfo> FindByPeerId(const PeerId& peerId) const = 0;
     virtual std::optional<PeerId> FindByEndpoint(const LanEndpoint& endpoint) const = 0;

@@ -40,6 +40,7 @@ public:
     virtual void OnDiscoveryPacket(const LanEndpoint& sender, MsgType type, const uint8_t* data, size_t len) = 0;
     virtual void OnInboundData(const InboundPacket& packet) = 0;
     virtual void OnPeerTimeout(const PeerId& peerId, const LanEndpoint& endpoint) = 0;
+    virtual void OnPeerActivity(const PeerId& peerId) { (void)peerId; }
 };
 
 // Deterministic LAN network interface selection
@@ -88,6 +89,15 @@ public:
      */
     LanSendResult SendReliableDetailed(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
     bool SendReliable(const PeerId& targetPeer, const LanEndpoint& target, uint8_t channel, const void* data, size_t len);
+
+    void SetCustomBroadcasts(const std::vector<LanEndpoint>& endpoints) {
+        std::lock_guard<std::mutex> lock(m_customBroadcastMutex);
+        m_customBroadcastEndpoints = endpoints;
+    }
+    std::vector<LanEndpoint> GetCustomBroadcasts() const {
+        std::lock_guard<std::mutex> lock(m_customBroadcastMutex);
+        return m_customBroadcastEndpoints;
+    }
 
     // Queue Polling (if caller wants to drain synchronously)
     bool PollInbound(InboundPacket& outPacket);
@@ -226,6 +236,9 @@ private:
     int WireSend(const char* buf, int len, const sockaddr* to, int tolen);
     std::mutex m_tunnelMutex;
     std::vector<std::pair<LanEndpoint, std::vector<uint8_t>>> m_tunnelQueue;
+
+    mutable std::mutex m_customBroadcastMutex;
+    std::vector<LanEndpoint> m_customBroadcastEndpoints;
 
     mutable std::mutex m_inboundQueueMutex;
     std::deque<InboundPacket> m_inboundQueue;

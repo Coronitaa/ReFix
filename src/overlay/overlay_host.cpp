@@ -100,7 +100,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_MOUSEACTIVATE:
         if (g_mode == Mode::Toast) return MA_NOACTIVATE;
-        break;
+        return MA_ACTIVATE;
     case WM_CLOSE:
         if (g_client) g_client->OnCloseRequested();
         return 0;
@@ -448,7 +448,9 @@ void BecomePopup() {
 
 void SetStyles(Mode m) {
     LONG_PTR ex = BaseExStyle() | WS_EX_TOPMOST;
-    ex |= (m == Mode::Toast ? (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) : WS_EX_TOOLWINDOW);
+    if (m == Mode::Toast) {
+        ex |= (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+    }
     SetWindowLongPtrW(g_hwnd, GWL_EXSTYLE, ex);
 }
 
@@ -488,6 +490,14 @@ void ApplyMode(Mode m, const GameWindow& gw) {
         // window still has it: hiding first lets Windows activate the desktop, and then we may no longer
         // move the foreground.
         const bool giveBack = (from == Mode::Overlay || from == Mode::Dialog) && gw.hwnd;
+        if (from == Mode::Overlay || from == Mode::Dialog) {
+            ResumeGameRawInput();
+            if (gw.hwnd) {
+                DWORD gameThread = GetWindowThreadProcessId(gw.hwnd, NULL);
+                DWORD myThread = GetCurrentThreadId();
+                if (gameThread && gameThread != myThread) AttachThreadInput(gameThread, myThread, FALSE);
+            }
+        }
         if (g_childOf) {
             // Child of the game: the game never lost the activation, only the keyboard.
             if (IsWindow(g_childOf)) SetFocus(g_childOf);
@@ -502,6 +512,14 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             ShowWindow(g_hwnd, SW_HIDE);
         } else {
             SetStyles(m);
+            if ((m == Mode::Overlay || m == Mode::Dialog) && gw.hwnd) {
+                SetWindowLongPtrW(g_hwnd, GWLP_HWNDPARENT, (LONG_PTR)gw.hwnd);
+                ReleaseCapture();
+                SuspendGameRawInput();
+                DWORD gameThread = GetWindowThreadProcessId(gw.hwnd, NULL);
+                DWORD myThread = GetCurrentThreadId();
+                if (gameThread && gameThread != myThread) AttachThreadInput(gameThread, myThread, TRUE);
+            }
         }
         if (giveBack && !g_childOf && GetForegroundWindow() != gw.hwnd) SetForegroundWindow(gw.hwnd);
         g_client->OnModeChanged(from, m);
@@ -529,8 +547,13 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             SetFocus(g_hwnd);
             ClipCursor(nullptr);
         }
-    } else if ((m == Mode::Overlay || m == Mode::Dialog) && GetForegroundWindow() != g_hwnd) {
-        SetForegroundWindow(g_hwnd);
+    } else if (m == Mode::Overlay || m == Mode::Dialog) {
+        ReleaseCapture();
+        if (GetForegroundWindow() != g_hwnd) {
+            SetForegroundWindow(g_hwnd);
+        }
+        SetActiveWindow(g_hwnd);
+        SetFocus(g_hwnd);
         ClipCursor(nullptr);
     }
 }
@@ -639,7 +662,7 @@ bool InitThread() {
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
-    g_hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kClassName, L"ReFix LAN",
+    g_hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST, kClassName, L"ReFix LAN",
                              WS_POPUP, 0, 0, std::max(64, GetSystemMetrics(SM_CXSCREEN)), std::max(64, GetSystemMetrics(SM_CYSCREEN)), nullptr, nullptr, wc.hInstance, nullptr);
     if (!g_hwnd || !CreateDeviceAndSurface((UINT)std::max(64, GetSystemMetrics(SM_CXSCREEN)), (UINT)std::max(64, GetSystemMetrics(SM_CYSCREEN)))) return false;
 
@@ -663,6 +686,9 @@ void MaybeRescale(const GameWindow& gw) {
     ui::BuildFonts(want);
     ui::ApplyStyle(want);
     ImGui_ImplDX11_InvalidateDeviceObjects();
+    if (g_device && g_ctx) {
+        ImGui_ImplDX11_CreateDeviceObjects();
+    }
 }
 
 DWORD WINAPI HostThread(LPVOID) {
