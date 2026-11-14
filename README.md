@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.5.0-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.5.0)
+[![Release](https://img.shields.io/badge/version-v2.5.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.5.1)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -16,7 +16,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 ## Install
 
-1. Download `ReFix_v2.5.0.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
+1. Download `ReFix_v2.5.1.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
    - `[1] ReFix Online + LAN`, `[2] ReFix Offline LAN` or `[3] ReFix Online Legacy via Steam`
