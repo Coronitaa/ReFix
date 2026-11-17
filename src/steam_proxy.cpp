@@ -5880,6 +5880,9 @@ extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthSessionTick
     uint32_t handle = 1;
     if (g_pfn_GetAuthSessionTicket) {
         handle = g_pfn_GetAuthSessionTicket(self, pTicket, cbMaxTicket, pcbTicket);
+    } else {
+        // LAN: no real Steam behind us; the emulator fills the ticket and posts GetAuthSessionTicketResponse_t (163)
+        handle = UnrealSteamEmu::GetAuthSessionTicket(pTicket, cbMaxTicket, pcbTicket);
     }
     ReFixLog("SteamAPI_ISteamUser_GetAuthSessionTicket: handle=%u, cbTicket=%u", handle, (pcbTicket ? *pcbTicket : 0));
     g_lastAuthTicketHandle = handle;
@@ -5893,6 +5896,9 @@ extern "C" __declspec(dllexport) uint32_t SteamAPI_ISteamUser_GetAuthTicketForWe
     uint32_t handle = 1;
     if (g_pfn_GetAuthTicketForWebApi) {
         handle = g_pfn_GetAuthTicketForWebApi(self, pchIdentity);
+    } else {
+        // LAN: the emulator posts GetTicketForWebApiResponse_t (168) through the callback queue
+        handle = UnrealSteamEmu::GetAuthTicketForWebApi(pchIdentity);
     }
     ReFixLog("SteamAPI_ISteamUser_GetAuthTicketForWebApi ('%s'): handle=%u", pchIdentity ? pchIdentity : "", handle);
     if (handle != 0) {

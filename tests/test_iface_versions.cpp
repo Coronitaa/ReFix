@@ -64,6 +64,39 @@ int main(int argc, char** argv) {
     if (!(init && create && findUser && flatUser && flatId)) return 1;
     Check(init(), "SteamAPI_Init");
 
+    // Facepunch.Steamworks binds versioned flat accessors by name and dies with EntryPointNotFound if one is missing.
+    const char* kAccessors[] = { "SteamAPI_SteamUserStats_v013", "SteamAPI_SteamUserStats_v012", "SteamAPI_SteamUser_v023",
+                                 "SteamAPI_SteamFriends_v018", "SteamAPI_SteamUtils_v010", "SteamAPI_SteamApps_v008" };
+    for (const char* n : kAccessors) Check(GetProcAddress(h, n) != nullptr, n);
+
+    // GetAuthSessionTicket must post GetAuthSessionTicketResponse_t (163) through the ManualDispatch queue.
+    typedef HSteamPipe (*GetPipeFn)();
+    typedef void (*RunFrameFn)(HSteamPipe);
+    typedef bool (*GetNextFn)(HSteamPipe, CallbackMsg_t*);
+    typedef void (*FreeFn)(HSteamPipe);
+    typedef HAuthTicket (*AuthTicketFn)(void*, void*, int, uint32*, const SteamNetworkingIdentity*);
+    auto mdInit = (void (*)())GetProcAddress(h, "SteamAPI_ManualDispatch_Init");
+    auto getPipe = (GetPipeFn)GetProcAddress(h, "SteamAPI_GetHSteamPipe");
+    auto runFrame = (RunFrameFn)GetProcAddress(h, "SteamAPI_ManualDispatch_RunFrame");
+    auto getNext = (GetNextFn)GetProcAddress(h, "SteamAPI_ManualDispatch_GetNextCallback");
+    auto freeCb = (FreeFn)GetProcAddress(h, "SteamAPI_ManualDispatch_FreeLastCallback");
+    auto authTicket = (AuthTicketFn)GetProcAddress(h, "SteamAPI_ISteamUser_GetAuthSessionTicket");
+    Check(mdInit && getPipe && runFrame && getNext && freeCb && authTicket, "ManualDispatch/auth-ticket exports resolved");
+    if (mdInit && getPipe && runFrame && getNext && freeCb && authTicket) {
+        mdInit();
+        uint8 buf[1024]; uint32 len = 0;
+        HAuthTicket t = authTicket(((PtrFn)GetProcAddress(h, "SteamAPI_SteamUser_v023"))(), buf, sizeof(buf), &len, nullptr);
+        Check(t != 0 && len > 0, "GetAuthSessionTicket returns a ticket");
+        bool got163 = false;
+        HSteamPipe pipe0 = getPipe();
+        for (int i = 0; i < 5 && !got163; ++i) {
+            runFrame(pipe0);
+            CallbackMsg_t msg;
+            while (getNext(pipe0, &msg)) { if (msg.m_iCallback == 163) got163 = true; freeCb(pipe0); }
+        }
+        Check(got163, "GetAuthSessionTicketResponse_t (163) delivered via ManualDispatch");
+    }
+
     void* latestUser = flatUser();
     uint64 flatSteamId = flatId(latestUser);
     printf("  flat SteamID=%llu\n", (unsigned long long)flatSteamId);
