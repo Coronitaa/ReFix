@@ -1551,6 +1551,7 @@ static CRefixLobbyCreatedCallResult g_lobbyCreatedCallResult;
 static bool g_godotIsEngine = false;  // Set to true once config is loaded and EngineType=Godot
 static bool g_unrealIsEngine = false; // Set to true once config is loaded and EngineType=Unreal
 static bool g_enableWinsockHooks = true; // Set to false if [P2P] EnableWinsockHooks=false
+extern "C" void* SafeUnsupportedExportStub();
 // Mode check now happens via NetworkModeManager
 
 struct CRefixCallback {
@@ -4969,6 +4970,7 @@ static bool EnsureOriginal() {
     for (int i = 0; i < STEAM_FORWARD_COUNT; i++) {
         g_steamProcs[i] = GetProcAddress(g_hOriginalDll, g_forwardNames[i]);
         if (g_steamProcs[i]) resolvedCount++;
+        else g_steamProcs[i] = (FARPROC)SafeUnsupportedExportStub;  // an older Valve DLL lacks newer exports: never jmp to null
     }
     ReFixLog("steam_api64 forwarding table populated: %d/%d exports resolved", resolvedCount, STEAM_FORWARD_COUNT);
 
