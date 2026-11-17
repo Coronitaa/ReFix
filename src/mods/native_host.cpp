@@ -1,5 +1,7 @@
 #include "native_host.h"
 #include "mod_signature.h"
+#include "seh_guard.h"
+#include "../overlay/game_actions/mod_panels.h"
 
 #include <iostream>
 
@@ -55,12 +57,24 @@ bool NativeModInstance::Load(const void* host_api, std::string& out_error) {
     on_event_fn_ = reinterpret_cast<RefixModOnEventFn>(GetProcAddress(hModule_, "refix_mod_on_event"));
 
     if (init_fn_) {
-        int res = init_fn_(host_api);
+        int res = -1;
+        unsigned long code = 0;
+        if (!SehGuard([&] { res = init_fn_(host_api); }, &code)) {
+            Unload();
+            out_error = "refix_mod_init crashed (exception " + std::to_string(code) + ")";
+            return false;
+        }
         if (res != 0) {
             Unload();
             out_error = "refix_mod_init returned error code " + std::to_string(res);
             return false;
         }
+    }
+
+    // Overlay panels: only with the capability, and the manifest's target_games were already matched.
+    auto register_overlay = reinterpret_cast<refix::overlay::mods::RegisterFn>(GetProcAddress(hModule_, "refix_mod_register_overlay"));
+    if (register_overlay && manifest_.capabilities.count(Capability::OverlayPanel)) {
+        refix::overlay::mods::Registry::Get().RegisterModule(manifest_.id, register_overlay);
     }
 
     ReFixLog("[NativeHost] Successfully loaded official native mod: %s", manifest_.id.c_str());
@@ -70,8 +84,9 @@ bool NativeModInstance::Load(const void* host_api, std::string& out_error) {
 
 void NativeModInstance::Unload() {
     if (hModule_) {
+        refix::overlay::mods::Registry::Get().RemoveOwner(manifest_.id);  // no panel may point into the DLL
         if (shutdown_fn_) {
-            shutdown_fn_();
+            if (!SehGuard([&] { shutdown_fn_(); }, nullptr)) ReFixLog("[NativeHost] %s: shutdown crashed", manifest_.id.c_str());
             shutdown_fn_ = nullptr;
         }
         init_fn_ = nullptr;
@@ -82,8 +97,11 @@ void NativeModInstance::Unload() {
 }
 
 void NativeModInstance::DispatchEvent(int event_id, const void* event_data) {
-    if (on_event_fn_) {
-        on_event_fn_(event_id, event_data);
+    if (!on_event_fn_) return;
+    unsigned long code = 0;
+    if (!SehGuard([&] { on_event_fn_(event_id, event_data); }, &code)) {
+        ReFixLog("[NativeHost] %s: event %d crashed (exception 0x%08lX), events turned off", manifest_.id.c_str(), event_id, code);
+        on_event_fn_ = nullptr;  // fail closed
     }
 }
 

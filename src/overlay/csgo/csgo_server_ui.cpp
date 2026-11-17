@@ -11,7 +11,7 @@
 #include "../overlay_theme.h"
 #include "../overlay_i18n.h"
 #include "../overlay_app.h"
-#include "../overlay_ui_mods.h"
+#include "csgo_overlay.h"
 #include "../../steam_gc_emu.h"
 #include "../../gc/gc_relay.h"
 #include "../../gc/lan_rooms.h"
@@ -321,23 +321,22 @@ void HostNow() {
     ReFixGC::SetHostConfigJson(cfg.dump());
     ReFixGC::HostLanMatch();
     App::Get().ShowInfo(i18n::T("LAN server", "Servidor LAN"), std::string(i18n::T("Starting ", "Iniciando ")) + g_server.map);
-    App::Get().CloseMatchmakingHUD();
+    csgo_ui::CloseHud(csgo_ui::kServerHud);
 }
 
 } // namespace
 
-void SetHostMatchMode(const char* modeId) {
+void csgo_ui::SetServerMode(const char* modeId) {
     const int idx = FindModeIndex(modeId);
     if (idx >= 0) {
         ApplyModeDefaults(idx);
     }
 }
 
-void DrawMatchmakingToastWidget() {
-    if (!App::Get().IsMatchmakingHUDOpen()) return;
+void csgo_ui::DrawServerHud(float viewportW, float viewportH) {
     if (!g_server.mapsLoaded) LoadMaps();
 
-    ImVec2 vp = ImGui::GetIO().DisplaySize;
+    const ImVec2 vp(viewportW, viewportH);
     ImVec2 size((std::min)(ui::S(940), vp.x - ui::S(40)), (std::min)(ui::S(680), vp.y - ui::S(40)));
     ImGui::SetNextWindowPos(ImVec2((vp.x - size.x) * 0.5f, (vp.y - size.y) * 0.5f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(size, ImGuiCond_Always);
@@ -358,7 +357,7 @@ void DrawMatchmakingToastWidget() {
         float right = ImGui::GetWindowContentRegionMax().x;
         ImGui::SameLine(right - ui::S(30));
         if (ui::IconButton("srv_close", ui::icon::Close, i18n::T("Close", "Cerrar"), ui::color::Muted, true, ui::S(26)))
-            App::Get().CloseMatchmakingHUD();
+            csgo_ui::CloseHud(csgo_ui::kServerHud);
         ui::TextColored(ui::color::Faint, i18n::T("Host a match for the LAN or join one that is already running.",
                                                   "Hostea una partida para la LAN o únete a una que ya esté en marcha."));
         ImGui::Dummy(ImVec2(0, ui::S(8)));
@@ -391,7 +390,7 @@ void DrawMatchmakingToastWidget() {
                                         i18n::T("Nobody is hosting a match on the LAN.", "Nadie está hosteando una partida en la LAN."));
                 });
             });
-            App::Get().CloseMatchmakingHUD();
+            csgo_ui::CloseHud(csgo_ui::kServerHud);
         }
         ImGui::SameLine();
         if (ui::Clicked(ui::PrimaryButton(i18n::T("Host match", "Hostear partida"), ImVec2(btnW, ui::S(40))))) HostNow();

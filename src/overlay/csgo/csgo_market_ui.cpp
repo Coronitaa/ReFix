@@ -11,7 +11,7 @@
 #include "../overlay_theme.h"
 #include "../overlay_i18n.h"
 #include "../overlay_app.h"
-#include "../overlay_ui_mods.h"
+#include "csgo_overlay.h"
 #include "../../csgo_schema.h"
 #include "../../steam_gc_emu.h"
 #include "csgo_item_icons.h"
@@ -426,13 +426,12 @@ void DrawPrimeAndPasses(refix::csgo::SchemaManager& schema, float w, float h) {
 
 } // namespace
 
-void DrawMarketGiveModal() {
-    if (!App::Get().IsMarketHUDOpen()) return;
+void csgo_ui::DrawMarketHud(float viewportW, float viewportH) {
     auto& schema = refix::csgo::SchemaManager::Get();
     schema.Load();
     csgo_icons::BeginFrame();
 
-    ImVec2 vp = ImGui::GetIO().DisplaySize;
+    const ImVec2 vp(viewportW, viewportH);
     ImVec2 size((std::min)(ui::S(1220), vp.x - ui::S(40)), (std::min)(ui::S(760), vp.y - ui::S(40)));
     ImGui::SetNextWindowPos(ImVec2((vp.x - size.x) * 0.5f, (vp.y - size.y) * 0.5f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(size, ImGuiCond_Always);
@@ -464,7 +463,7 @@ void DrawMarketGiveModal() {
                         prime ? (std::string(ui::icon::Check) + " Prime").c_str() : i18n::T("No Prime", "Sin Prime"));
         ImGui::SameLine(right - ui::S(30));
         if (ui::IconButton("mkt_close", ui::icon::Close, i18n::T("Close", "Cerrar"), ui::color::Muted, true, ui::S(26)))
-            App::Get().CloseMarketHUD();
+            csgo_ui::CloseHud(csgo_ui::kMarketHud);
 
         ImGui::Dummy(ImVec2(0, ui::S(4)));
         ImGui::SetNextItemWidth(ui::S(420));

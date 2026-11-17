@@ -3998,32 +3998,15 @@ namespace UnrealSteamEmu {
 
         virtual void SetInGameVoiceSpeaking(CSteamID steamIDUser, bool bSpeaking) override {}
         virtual void ActivateGameOverlay(const char *pchDialog) override {
-            if (pchDialog && (_stricmp(pchDialog, "community") == 0 || _stricmp(pchDialog, "market") == 0)) {
-                ReFixOverlay::OpenMarketGiveMenu();
-            } else {
-                ReFixOverlay::ActivateOverlay(pchDialog);
-            }
+            ReFixOverlay::ActivateOverlay(pchDialog);  // game-specific dialogs go to that game's mod panels
         }
         virtual void ActivateGameOverlayToUser(const char *pchDialog, CSteamID steamID) override {
             ReFixOverlay::ActivateOverlayToUser(pchDialog, steamID.ConvertToUint64());
         }
         virtual void ActivateGameOverlayToWebPage(const char *pchURL, EActivateGameOverlayToWebPageMode eMode = k_EActivateGameOverlayToWebPageMode_Default) override {
             ReFixLog("[UnrealSteam] ActivateGameOverlayToWebPage('%s')", pchURL ? pchURL : "");
-            // The CS:GO play menu's "Host match" button passes its settings as refix://host/<url-encoded JSON>.
-            if (pchURL && strcmp(pchURL, "refix://server") == 0) {  // play menu "LAN server" button
-                ReFixOverlay::OpenLanServer();
-                return;
-            }
-            static const char kServerPrefix[] = "refix://server/";
-            if (pchURL && strncmp(pchURL, kServerPrefix, sizeof(kServerPrefix) - 1) == 0) {
-                ReFixOverlay::OpenLanServer(pchURL + sizeof(kServerPrefix) - 1);
-                return;
-            }
-            static const char kModePrefix[] = "refix://mode/";
-            if (pchURL && strncmp(pchURL, kModePrefix, sizeof(kModePrefix) - 1) == 0) {
-                ReFixOverlay::SetLanServerMode(pchURL + sizeof(kModePrefix) - 1);
-                return;
-            }
+            // The CS:GO play menu's "Host match" button passes its settings as refix://host/<url-encoded JSON>
+            // (GC host config). refix://server and refix://mode are the CS:GO overlay module's (overlay/csgo/).
             static const char kHostPrefix[] = "refix://host/";
             if (pchURL && strncmp(pchURL, kHostPrefix, sizeof(kHostPrefix) - 1) == 0) {
                 std::string json;
@@ -4039,13 +4022,6 @@ namespace UnrealSteamEmu {
                 ReFixGC::SetHostConfigJson(json);
                 ReFixGC::RequestHostOnNextStart();
                 return;
-            }
-            if (pchURL) {
-                if (strstr(pchURL, "market") || strstr(pchURL, "community") || strstr(pchURL, "give")) {
-                    ReFixOverlay::OpenMarketGiveMenu();
-                    return;
-                }
-
             }
             ReFixOverlay::ActivateWebPage(pchURL);
         }

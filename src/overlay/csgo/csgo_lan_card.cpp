@@ -1,5 +1,5 @@
 // The "CS:GO LAN" card of the overlay home: LAN rooms (gather before the match, follow the owner into it) and the
-// shortcuts to Market & Skins and the LAN server settings. Shown only in CS:GO.
+// shortcuts to Market & Skins and the LAN server settings. A cell of the mod grid, registered only in CS:GO.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,28 +10,15 @@
 #include "../overlay_theme.h"
 #include "../overlay_i18n.h"
 #include "../overlay_app.h"
-#include "../overlay_ui_mods.h"
+#include "csgo_overlay.h"
 #include "../../gc/lan_rooms.h"
 
 namespace refix::overlay {
 
 namespace {
 
-constexpr float kPad = 14.0f;   // unscaled, BeginCard scales it
 constexpr int kMaxListedRooms = 3;
 float g_measuredHeight = 0.0f;  // content height of the last frame: the card never clips its content
-
-bool IsCsgo() {
-    static int cached = -1;
-    if (cached < 0) {
-        wchar_t exe[MAX_PATH] = {};
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        std::wstring name = exe;
-        name = name.substr(name.find_last_of(L"\\/") + 1);
-        cached = _wcsicmp(name.c_str(), L"csgo.exe") == 0 ? 1 : 0;
-    }
-    return cached == 1;
-}
 
 void Initials(ImDrawList* dl, ImVec2 center, float radius, const std::string& name, ImU32 col) {
     dl->AddCircleFilled(center, radius, ui::Fade(col, 0.25f));
@@ -106,7 +93,7 @@ void DrawCurrentRoom(float w) {
         Caption(i18n::T("When you host a match, everyone in the room joins it.",
                         "Cuando hostees una partida, toda la sala entrará en ella."), ui::color::Muted);
         float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        if (ui::Clicked(ui::PrimaryButton(i18n::T("Host for the room", "Hostear para la sala"), ImVec2(half, ui::S(34))))) OpenHostMatchModal();
+        if (ui::Clicked(ui::PrimaryButton(i18n::T("Host for the room", "Hostear para la sala"), ImVec2(half, ui::S(34))))) csgo_ui::OpenHud(csgo_ui::kServerHud);
         ImGui::SameLine();
         if (ui::Clicked(ui::DangerButton(i18n::T("Close room", "Cerrar sala"), ImVec2(half, ui::S(34))))) refix::rooms::Leave();
     } else {
@@ -119,27 +106,19 @@ void DrawCurrentRoom(float w) {
 
 } // namespace
 
-float GetModsCardHeight(float width) {
-    if (!IsCsgo()) return 0.0f;
+namespace csgo_ui {
+
+float LanCardHeight(float width) {
     (void)width;
     // First frame: a sensible estimate; afterwards the measured content height.
-    return g_measuredHeight > 0.0f ? g_measuredHeight : ui::S(kPad) * 2 + ui::S(230);
+    return g_measuredHeight > 0.0f ? g_measuredHeight : ui::S(230);
 }
 
-void DrawModsCard(ImVec2 pos, float width, float height) {
-    if (!IsCsgo()) return;
-    const float wantedH = GetModsCardHeight(width);
-    if (height <= 0.0f) height = wantedH;
+// Content of the "CS:GO LAN" grid cell; the overlay draws the card and its title.
+void DrawLanCard(float width, float height) {
     const bool constrained = (g_measuredHeight > 0.0f && height + 1.0f < g_measuredHeight);
-    ui::BeginCard("##csgo_lan_card", pos, ImVec2(width, height), kPad);
-    float w = ImGui::GetContentRegionAvail().x;
-    float startY = ImGui::GetCursorPosY();
-
-    ImGui::PushFont(ui::F().strong);
-    ui::TextColored(ui::color::Accent, ui::icon::Game);
-    ImGui::SameLine();
-    ImGui::TextUnformatted("CS:GO LAN");
-    ImGui::PopFont();
+    const float w = width;
+    const float startY = ImGui::GetCursorPosY();
     Caption(i18n::T("Rooms, LAN matches and your inventory", "Salas, partidas LAN y tu inventario"), ui::color::Muted);
     ImGui::Dummy(ImVec2(0, ui::S(4)));
 
@@ -158,15 +137,18 @@ void DrawModsCard(ImVec2 pos, float width, float height) {
     ImGui::Dummy(ImVec2(0, ui::S(4)));
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0, ui::S(4)));
-    float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-    if (ui::Clicked(ui::PrimaryButton(i18n::T("Market & Skins", "Mercado & Skins"), ImVec2(half, ui::S(38))))) OpenMarketGiveMenu();
+    const float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    if (ui::Clicked(ui::PrimaryButton(i18n::T("Market & Skins", "Mercado & Skins"), ImVec2(half, ui::S(38))))) OpenHud(kMarketHud);
     ImGui::SameLine();
-    if (ui::Clicked(ui::SecondaryButton(i18n::T("LAN server", "Servidor LAN"), ImVec2(half, ui::S(38))))) OpenHostMatchModal();
+    if (ui::Clicked(ui::SecondaryButton(i18n::T("LAN server", "Servidor LAN"), ImVec2(half, ui::S(38))))) OpenHud(kServerHud);
 
-    if (!constrained) {
-        g_measuredHeight = ImGui::GetCursorPosY() - startY + ui::S(kPad) * 2 + ui::S(4);
-    }
-    ui::EndCard();
+    if (!constrained) g_measuredHeight = ImGui::GetCursorPosY() - startY + ui::S(4);
 }
+
+void RunOnOverlayThread(std::function<void()> fn) { App::Get().Post(std::move(fn)); }
+
+void CloseOverlayNow() { App::Get().CloseOverlay(); }
+
+} // namespace csgo_ui
 
 } // namespace refix::overlay

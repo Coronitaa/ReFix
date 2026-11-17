@@ -1,4 +1,5 @@
 #include "mod_host.h"
+#include "game_scope.h"
 #include "../include/refix_services.h"
 #include "../unreal_steam_emu.h"
 
@@ -8,6 +9,8 @@
 #include <iostream>
 
 namespace stdfs = std::filesystem;
+
+extern void ReFixLog(const char* fmt, ...);
 
 namespace refix::mods {
 
@@ -85,23 +88,13 @@ bool ModHost::LoadPackage(const std::string& rfmod_path, std::string& out_error)
     loaded.is_active = false;
     loaded.is_faulted = false;
 
-    // Validate target AppID compatibility (treating CS:GO classic 730 and standalone legacy 4465480 as equivalent).
-    if (!loaded.manifest.target_games.empty()) {
+    // A mod runs only in the games its signed manifest names (AppID and/or exe); anything else is rejected.
+    {
         const uint32_t curApp = UnrealSteamEmu::GetAppID();
-        if (curApp != 0 && curApp != 480) {
-            bool appMatch = false;
-            const bool curIsCsgo = (curApp == 730 || curApp == 4465480);
-            for (const auto& tg : loaded.manifest.target_games) {
-                const uint32_t targetId = tg.app_id;
-                if (targetId == 0 || targetId == curApp || (curIsCsgo && (targetId == 730 || targetId == 4465480))) {
-                    appMatch = true;
-                    break;
-                }
-            }
-            if (!appMatch) {
-                out_error = "Mod target_games does not match current AppID " + std::to_string(curApp);
-                return false;
-            }
+        const std::string curExe = CurrentExeName();
+        if (!MatchesGame(loaded.manifest.target_games, curApp, curExe)) {
+            out_error = "Mod target_games does not match this game (AppID " + std::to_string(curApp) + ", " + curExe + ")";
+            return false;
         }
     }
 
@@ -199,7 +192,7 @@ void ModHost::DiscoverAndLoad() {
         if (entry.is_regular_file() && entry.path().extension() == ".rfmod") {
             std::string err;
             if (!LoadPackage(entry.path().string(), err)) {
-                std::cerr << "[ModHost] Failed to load mod: " << entry.path().filename().string() << " (" << err << ")" << std::endl;
+                ReFixLog("[ModHost] Not loaded: %s (%s)", entry.path().filename().string().c_str(), err.c_str());
             }
         }
     }

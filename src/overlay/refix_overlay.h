@@ -45,16 +45,13 @@ void Start();
 void Shutdown();           // game exit: last profile sync upload
 bool IsEnabled();          // ISteamUtils::IsOverlayEnabled
 
+// Game-specific dialogs and URLs go first to the running game's mod panels (overlay/game_actions/mod_panels.h).
 void ActivateOverlay(const char* dialog);
 void ActivateOverlayToUser(const char* dialog, uint64_t steamId);
 void ActivateWebPage(const char* url);
 void ActivateStore(uint32_t appId);
-void OpenMarketGiveMenu();
-void OpenLanServer(const char* modeId = nullptr);
-void SetLanServerMode(const char* modeId);
 // Overlay toast from any thread, in the overlay language.
-void ShowNotice(const char* title, const char* bodyEs, const char* bodyEn);  // CS:GO "LAN server" window (play menu button)
-void OpenMatchmakerModal();
+void ShowNotice(const char* title, const char* bodyEs, const char* bodyEn);
 void PromptPurchase(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete = nullptr);
 void ActivateInviteDialog(uint64_t lobbyId, const char* connect);
 // ISteamFriends::InviteUserToGame / ISteamMatchmaking::InviteUserToLobby.

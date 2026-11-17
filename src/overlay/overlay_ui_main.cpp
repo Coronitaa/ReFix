@@ -153,7 +153,7 @@ void App::DrawOverlay(ImVec2 viewport) {
         const bool hasAchievements = !achievements_.empty();
         const float gap = ui::S(20);
         const float achMin = hasAchievements ? ui::S(kAchievementsCardMin) : 0.0f;
-        const float actH = GetModsCardHeight(leftW);  // 0 when the game has no card
+        const float actH = GetModGridHeight(leftW);  // 0 when no mod of this game has a panel
         const float commH = ui::S(56 + 2 * kTileHeight + 10 + 40);
         // Left column, top to bottom: community, the game's mod card, achievements. When both a mod card and
         // achievements are present on a shorter viewport, yield the static community links first so the mod card
@@ -166,7 +166,7 @@ void App::DrawOverlay(ImVec2 viewport) {
         const float roomH = top + height - leftY;
         if (actH > 0.0f && roomH >= ui::S(120)) {
             const float modsH = (std::min)(roomH, (std::min)(actH, (std::max)(ui::S(160), roomH - (achMin > 0 ? achMin + gap : 0.0f))));
-            DrawModsCard(ImVec2(m, leftY), leftW, modsH);
+            DrawModGrid(ImVec2(m, leftY), leftW, modsH);
             leftY += modsH + gap;
         }
         const float achH = top + height - leftY;

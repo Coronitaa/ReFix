@@ -2,7 +2,8 @@
 #define NOMINMAX
 #endif
 #include "refix_overlay.h"
-#include "overlay_ui_mods.h"
+#include "game_actions/mod_panels.h"
+#include "../mods/game_scope.h"
 #include "overlay_app.h"
 #include "overlay_i18n.h"
 #include "overlay_sound.h"
@@ -444,6 +445,8 @@ void Start() {
         std::lock_guard<std::mutex> lock(g_mu);
         active = g_active;
     }
+    // Mod panels of other games are never registered, so their dialogs, URLs and UI cannot open here.
+    refix::overlay::mods::Registry::Get().ActivateBuiltins(UnrealSteamEmu::GetAppID(), refix::mods::CurrentExeName());
     App::Get().Begin(UnrealSteamEmu::GetAppID(), active);
     ReFixLog("[Overlay] Started (%s)", active ? "profile" : "no profile");
 }
@@ -459,10 +462,7 @@ void ActivateOverlay(const char* dialog) {
         App::Get().Post([lobby] { App::Get().OpenOverlay(true, lobby); });
         return;
     }
-    if (_stricmp(d.c_str(), "Community") == 0 || _stricmp(d.c_str(), "Market") == 0) {
-        OpenMarketGiveMenu();
-        return;
-    }
+    if (refix::overlay::mods::Registry::Get().Route(REFIX_REQUEST_DIALOG, d.c_str())) return;
     App::Get().Post([] { App::Get().OpenOverlay(); });
 }
 
@@ -477,10 +477,7 @@ void ActivateOverlayToUser(const char* dialog, uint64_t steamId) {
 
 void ActivateWebPage(const char* url) {
     if (!IsEnabled() || !url) return;
-    if (strstr(url, "market") || strstr(url, "community") || strstr(url, "give")) {
-        OpenMarketGiveMenu();
-        return;
-    }
+    if (refix::overlay::mods::Registry::Get().Route(REFIX_REQUEST_WEBPAGE, url)) return;
 
     const std::wstring u = FromUtf8(url);
     App::Get().Post([u] { App::Get().OpenWeb(u); });
@@ -490,34 +487,6 @@ void ShowNotice(const char* title, const char* bodyEs, const char* bodyEn) {
     if (!IsEnabled()) return;
     std::string t = title ? title : "", es = bodyEs ? bodyEs : "", en = bodyEn ? bodyEn : "";
     App::Get().Post([t, es, en] { App::Get().ShowInfo(t, i18n::T(en.c_str(), es.c_str())); });
-}
-
-void OpenLanServer(const char* modeId) {
-    if (!IsEnabled()) return;
-    std::string mode = modeId ? modeId : "";
-    App::Get().Post([mode] { refix::overlay::OpenHostMatchModal(mode.empty() ? nullptr : mode.c_str()); });
-}
-
-void SetLanServerMode(const char* modeId) {
-    if (!IsEnabled() || !modeId || !*modeId) return;
-    std::string mode = modeId;
-    App::Get().Post([mode] { refix::overlay::SetHostMatchMode(mode.c_str()); });
-}
-
-void OpenMarketGiveMenu() {
-    if (!IsEnabled()) return;
-    App::Get().Post([] {
-        App::Get().OpenOverlay();
-        refix::overlay::OpenMarketGiveMenu();
-    });
-}
-
-void OpenMatchmakerModal() {
-    if (!IsEnabled()) return;
-    App::Get().Post([] {
-        App::Get().OpenOverlay();
-        refix::overlay::OpenHostMatchModal();
-    });
 }
 
 void ActivateStore(uint32_t appId) {

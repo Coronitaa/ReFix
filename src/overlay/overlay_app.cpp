@@ -133,7 +133,7 @@ host::Mode App::DesiredMode() {
     if (dialog_ != DialogKind::None) return host::Mode::Dialog;
     if (!started_) return host::Mode::Hidden;
     if (overlayOpen_) return host::Mode::Overlay;
-    if (hudMarketOpen_ || hudMatchmakingOpen_) return host::Mode::Overlay;
+    if (AnyModHudOpen()) return host::Mode::Overlay;
     const host::GameWindow gw = host::CurrentGame();
     if (!toasts_.empty() && gw.foreground) return host::Mode::Toast;
     return host::Mode::Hidden;
@@ -405,8 +405,7 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
     else if (overlayOpen_) DrawOverlay(viewport);
     else DrawToasts(viewport, true);
 
-    if (hudMarketOpen_) DrawMarketGiveModal();
-    if (hudMatchmakingOpen_) DrawMatchmakingToastWidget();
+    DrawModHuds(viewport);
     for (const auto& modal : refix::overlay::OverlayActionsRegistry::Get().GetModals()) {
         modal.renderFn(viewport.x, viewport.y);
     }

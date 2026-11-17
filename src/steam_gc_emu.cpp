@@ -26,11 +26,6 @@
 #include "gc/lan_rooms.h"
 #include "lan_core/refix_lan_core.h"
 
-namespace refix::overlay {
-    void ExecuteEngineClientCommand(const char* cmd);
-    void OpenMatchmakingToast();
-}
-
 namespace ReFixGC {
     void OnServerHelloHostConfig();
 }
