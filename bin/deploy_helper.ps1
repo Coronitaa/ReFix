@@ -2608,31 +2608,42 @@ function Install-BundledDirectXRuntime {
     # Cheap case-insensitive scan: import and delay-import tables hold the DLL name as plain ASCII, so a regex over the
     # file finds them (it also catches LoadLibrary("d3dx9_43.dll") strings, which need the same DLL).
     $rx = [regex]'(?i)\b(d3dx9_\d\d|d3dx10_\d\d|d3dx11_\d\d|d3dcompiler_(?:3\d|4[0-6])|xinput1_[1-3]|xaudio2_[0-7]|x3daudio1_[0-7]|xapofx1_[0-5])\.dll'
+    # dll -> folders of the binaries that reference it. Engines often load their DLLs with an altered search path
+    # (e.g. Source loads bin\shaderapidx9.dll so only bin\ and System32 are searched), so the runtime DLL must sit next
+    # to each referencing binary; next to the exe alone is not enough.
     $needed = @{}
+    $cabDirs = @($cabs | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique)  # the redist installer itself is not the game
     $bins = Get-ChildItem -LiteralPath $ExeFolder -Recurse -Depth 3 -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in '.exe', '.dll' -and $_.Length -lt 100MB -and $_.Name -notmatch '^(d3dx|d3dcompiler_|xinput1_|xaudio2_|x3daudio1_|xapofx1_)' }
+        Where-Object { $_.Extension -in '.exe', '.dll' -and $_.Length -lt 100MB -and $cabDirs -notcontains $_.DirectoryName -and
+                       $_.Name -notmatch '^(d3dx|d3dcompiler_|xinput1_|xaudio2_|x3daudio1_|xapofx1_)' }
     foreach ($b in $bins) {
         try { $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($b.FullName)) } catch { continue }
-        foreach ($m in $rx.Matches($text)) { $needed[$m.Groups[1].Value.ToLowerInvariant() + ".dll"] = $true }
+        foreach ($m in $rx.Matches($text)) {
+            $dll = $m.Groups[1].Value.ToLowerInvariant() + ".dll"
+            if (-not $needed.ContainsKey($dll)) { $needed[$dll] = @{} }
+            $needed[$dll][$b.DirectoryName] = $true
+        }
     }
-    $marker = Join-Path $ExeFolder ".refix_installed"
     foreach ($dll in ($needed.Keys | Sort-Object)) {
-        if (Test-Path -LiteralPath (Join-Path $ExeFolder $dll)) { continue }
         $base = $dll.Substring(0, $dll.Length - 4)
         # d3dx*/d3dcompiler cabs are named after the DLL; xinput/xaudio/x3daudio cabs hold several versions, so try each.
         $family = $base -replace '[\d_.]+$', ''
         $cands = @($cabs | Where-Object { $_.Name -like "*_${base}_$arch.cab" })
         if ($cands.Count -eq 0) { $cands = @($cabs | Where-Object { $_.Name -like "*_${family}_$arch.cab" }) }
-        foreach ($cab in $cands) {
-            & "$env:windir\System32\expand.exe" $cab.FullName "-F:$dll" $ExeFolder 2>&1 | Out-Null
-            if (Test-Path -LiteralPath (Join-Path $ExeFolder $dll)) {
-                if (-not ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker) -contains $dll)) { Add-Content -LiteralPath $marker -Value $dll }
-                Write-Host "  [OK] Extracted $dll ($arch) from $($cab.Name) next to the game exe (portable DirectX runtime)" -ForegroundColor Green
-                break
+        foreach ($dir in ($needed[$dll].Keys | Sort-Object)) {
+            if (Test-Path -LiteralPath (Join-Path $dir $dll)) { continue }
+            foreach ($cab in $cands) {
+                & "$env:windir\System32\expand.exe" $cab.FullName "-F:$dll" $dir 2>&1 | Out-Null
+                if (Test-Path -LiteralPath (Join-Path $dir $dll)) {
+                    $marker = Join-Path $dir ".refix_installed"
+                    if (-not ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker) -contains $dll)) { Add-Content -LiteralPath $marker -Value $dll }
+                    Write-Host "  [OK] Extracted $dll ($arch) from $($cab.Name) into $dir (portable DirectX runtime)" -ForegroundColor Green
+                    break
+                }
             }
-        }
-        if (-not (Test-Path -LiteralPath (Join-Path $ExeFolder $dll))) {
-            Write-Host "  [NOTICE] $dll is referenced by the game but no bundled $arch cab provides it" -ForegroundColor DarkGray
+            if (-not (Test-Path -LiteralPath (Join-Path $dir $dll))) {
+                Write-Host "  [NOTICE] $dll is referenced in $dir but no bundled $arch cab provides it" -ForegroundColor DarkGray
+            }
         }
     }
 }
