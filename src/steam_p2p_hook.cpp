@@ -1497,19 +1497,6 @@ void Install(void* hSteamOriginal) {
     if (hSteamOriginal) g_hSteamOriginal = hSteamOriginal;
     if (g_hooksInstalled) return;
 
-    // Check ReFix.ini [P2P] EnableWinsockHooks
-    char iniPath[MAX_PATH] = { 0 };
-    GetModuleFileNameA(NULL, iniPath, MAX_PATH);
-    std::string p(iniPath);
-    size_t pos = p.find_last_of("\\/");
-    std::string ini = (pos != std::string::npos ? p.substr(0, pos + 1) : ".\\") + "ReFix.ini";
-    char hookBuf[32] = { 0 };
-    GetPrivateProfileStringA("P2P", "EnableWinsockHooks", "true", hookBuf, sizeof(hookBuf), ini.c_str());
-    if (_stricmp(hookBuf, "false") == 0 || strcmp(hookBuf, "0") == 0 || _stricmp(hookBuf, "no") == 0) {
-        Log("Winsock P2P hooks disabled by configuration (EnableWinsockHooks=false)");
-        return;
-    }
-
     Log("Installing Winsock P2P hooks via MinHook...");
 
     // ALREADY_INITIALIZED: the overlay's save redirection may have started MinHook during SteamAPI_Init.

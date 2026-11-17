@@ -1714,7 +1714,6 @@ struct ReFixConfig {
     bool enableLog = true;
     bool enableConsole = false;
     bool enableServerBrowser = true;
-    bool enableWinsockHooks = true;
 };
 
 static ReFixConfig g_config;
@@ -1924,7 +1923,6 @@ static void LoadConfig() {
 
     // [P2P]
     g_enableWinsockHooks = ReadBool("P2P", "EnableWinsockHooks", true);
-    g_config.enableWinsockHooks = g_enableWinsockHooks;
 
     // [Debug]
     g_config.enableLog = ReadBool("Debug", "EnableLog", true);
@@ -5332,16 +5330,15 @@ static void ReFixInitializePost(bool success) {
     CapturePersonaName();
     TriggerSyntheticRelayCallback();
     
-    // Install Winsock hooks if enabled (exempt for Godot and when EnableWinsockHooks=false)
-    if (g_enableWinsockHooks && !g_godotIsEngine) {
+    // Winsock hooks (Internet-Zero egress protection, port virtualization) unless [P2P] EnableWinsockHooks=false
+    if (g_enableWinsockHooks) {
         SteamP2PHook::Install(g_hOriginalDll);
         ReFixLog("ReFixInitializePost: Winsock hooks active (mode=%d)", (int)ReFix::NetworkModeManager::GetMode());
         if (g_unrealIsEngine && !ReFix::NetworkModeManager::IsLanOnly() && !ReFix::NetworkModeManager::IsOffline()) {
             SteamP2PHook_ForceResolve();
         }
     } else {
-        ReFixLog("ReFixInitializePost: Winsock hooks disabled (enableWinsockHooks=%d, godot=%d)",
-                 g_enableWinsockHooks ? 1 : 0, g_godotIsEngine ? 1 : 0);
+        ReFixLog("ReFixInitializePost: Winsock hooks disabled by EnableWinsockHooks=false");
     }
 
     if (!ReFix::NetworkModeManager::IsOnline()) {
