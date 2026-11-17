@@ -133,6 +133,59 @@ def thunk(ret, flat, iface, method, params):
     return "\n".join(lines)
 
 
+def _rw(path, fn):
+    """Read-modify-write a text file keeping its line endings."""
+    raw = open(path, encoding="utf-8", newline="").read()
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    new = fn(raw.replace("\r\n", "\n")).replace("\n", eol)
+    if new != raw:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(new)
+
+
+def sync_exports(root, flat_names):
+    """Export every flat function of the dispatch table from steam_api*.dll.
+
+    A flat function is exported through the forward table: DEF line "X=X_proxy", a jmp stub
+    in steam_fwd*.asm and a g_forwardNames slot in steam_proxy.cpp whose g_steamProcs entry
+    LookupLanExport() resolves to the generated thunk.  Names already forwarded or exported
+    directly are left alone, so this is idempotent.
+    """
+    src = os.path.join(root, "src")
+    proxy = os.path.join(src, "steam_proxy.cpp")
+    text = open(proxy, encoding="utf-8").read().replace("\r\n", "\n")
+    m = re.search(r"(g_forwardNames\[STEAM_FORWARD_COUNT\] = \{)(.*?)(\n\};)", text, re.S)
+    forwarded = re.findall(r'"([^"]+)"', m.group(2))
+    exported = set()
+    for d in ("steam_api64.def", "steam_api_x86.def"):
+        for line in open(os.path.join(src, d), encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith((";", "LIBRARY", "EXPORTS")):
+                exported.add(line.split("=")[0].strip())
+    new = sorted(n for n in flat_names if n not in forwarded and n not in exported)
+    if not new:
+        print("exports already in sync")
+        return
+    base = len(forwarded)
+
+    def edit_cpp(t):
+        t = re.sub(r"(#define STEAM_FORWARD_COUNT )\d+", lambda mm: mm.group(1) + str(base + len(new)), t)
+        add = "".join(',\n    "%s"' % n for n in new)
+        return t.replace(m.group(0), m.group(1) + m.group(2) + add + m.group(3), 1)
+    _rw(proxy, edit_cpp)
+
+    tail = "\nPUBLIC SafeUnsupportedExportStub"
+    for asm, word, size in (("steam_fwd.asm", "QWORD", 8), ("steam_fwd_x86.asm", "DWORD", 4)):
+        stubs = "".join("%s_proxy PROC\n    jmp %s PTR [g_steamProcs + %d]\n%s_proxy ENDP\n" % (n, word, (base + i) * size, n)
+                        for i, n in enumerate(new))
+        _rw(os.path.join(src, asm), lambda t, stubs=stubs: t.replace(tail, stubs + tail, 1))
+
+    for d in ("steam_api64.def", "steam_api_x86.def"):
+        lines = "".join("    %s=%s_proxy\n" % (n, n) for n in new)
+        _rw(os.path.join(src, d), lambda t, lines=lines: t.replace("    SteamAPI_Init\n", lines + "    SteamAPI_Init\n", 1))
+    print("exported %d new flat functions: %s" % (len(new), ", ".join(new)))
+
+
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if "--root" in sys.argv:
@@ -268,6 +321,7 @@ def main():
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(out))
     print("wrote %s: %d thunks, %d skipped" % (path, len(table), len(skipped)))
+    sync_exports(root, table)
 
 
 if __name__ == "__main__":

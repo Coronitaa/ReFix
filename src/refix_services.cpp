@@ -14,6 +14,8 @@ namespace refix {
 static IRefixServices s_services;
 
 IRefixServices& GetRefixServices() {
+    // Only this function fills the table; the service constructors must not call back into it (a
+    // function-local static re-entered during its own construction deadlocks).
     if (!s_services.Log) {
         s_services.Log = &ReFixLog;
         s_services.gc = &gc::GcCore::Get();

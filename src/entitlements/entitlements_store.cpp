@@ -13,7 +13,6 @@ EntitlementsStore& EntitlementsStore::Get() {
 }
 
 EntitlementsStore::EntitlementsStore() {
-    refix::GetRefixServices().entitlements = this;
 }
 
 std::string EntitlementsStore::GetFilePath(uint64_t steam_id) const {

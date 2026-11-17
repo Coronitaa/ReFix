@@ -83,6 +83,14 @@ def main():
             all_critical_found = False
         print(f"    {status.ljust(15)} {sym}")
 
+    # Every flat function the dispatch table implements must be exported (Facepunch/Steamworks.NET bind by name).
+    import re
+    with open('src/generated/flat_dispatch.cpp', encoding='utf-8') as f:
+        flat = set(re.findall(r'\{\s*"(SteamAPI_\w+)"\s*,', f.read()))
+    unexported = flat - pe_names
+    print(f"[*] Flat dispatch functions: {len(flat)}, not exported by PE: {len(unexported)}")
+    missing |= unexported
+
     if missing:
         print(f"\n[FAIL] {len(missing)} exports missing from PE:")
         for m in sorted(missing):

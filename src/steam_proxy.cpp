@@ -54,7 +54,7 @@
 
 static bool EnsureOriginal();
 
-#define STEAM_FORWARD_COUNT 1141
+#define STEAM_FORWARD_COUNT 1184
 
 extern "C" {
     __declspec(dllexport) FARPROC g_steamProcs[STEAM_FORWARD_COUNT] = { 0 };
@@ -1201,7 +1201,50 @@ static const char* g_forwardNames[STEAM_FORWARD_COUNT] = {
     "SteamAPI_SteamUGC_v020",
     "SteamAPI_SteamUserStats_v013",
     "SteamAPI_SteamUser_v023",
-    "SteamAPI_SteamVideo_v007"
+    "SteamAPI_SteamVideo_v007",
+    "SteamAPI_ISteamRemotePlay_BEnableRemotePlayTogetherDirectInput",
+    "SteamAPI_ISteamRemotePlay_BSessionRemotePlayTogether",
+    "SteamAPI_ISteamRemotePlay_CreateMouseCursor",
+    "SteamAPI_ISteamRemotePlay_DisableRemotePlayTogetherDirectInput",
+    "SteamAPI_ISteamRemotePlay_GetInput",
+    "SteamAPI_ISteamRemotePlay_GetLargeSessionAvatar",
+    "SteamAPI_ISteamRemotePlay_GetMediumSessionAvatar",
+    "SteamAPI_ISteamRemotePlay_GetSessionGuestID",
+    "SteamAPI_ISteamRemotePlay_GetSmallSessionAvatar",
+    "SteamAPI_ISteamRemotePlay_SetMouseCursor",
+    "SteamAPI_ISteamRemotePlay_SetMousePosition",
+    "SteamAPI_ISteamRemotePlay_SetMouseVisibility",
+    "SteamAPI_ISteamRemotePlay_ShowRemotePlayTogetherUI",
+    "SteamAPI_ISteamUGC_SetItemsDisabledLocally",
+    "SteamAPI_ISteamUGC_SetSubscriptionsLoadOrder",
+    "SteamAPI_ISteamUser_GetAuthTicketForWebApi",
+    "SteamAPI_SteamApps_v009",
+    "SteamAPI_SteamFriends_v018",
+    "SteamAPI_SteamGameServerApps_v009",
+    "SteamAPI_SteamGameServerNetworkingMessages_v002",
+    "SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v009",
+    "SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v011",
+    "SteamAPI_SteamGameServerNetworkingSockets_v009",
+    "SteamAPI_SteamGameServerUGC_v015",
+    "SteamAPI_SteamGameServerUGC_v017",
+    "SteamAPI_SteamGameServerUGC_v018",
+    "SteamAPI_SteamGameServerUGC_v021",
+    "SteamAPI_SteamInput_v002",
+    "SteamAPI_SteamInput_v005",
+    "SteamAPI_SteamNetworkingMessages_v002",
+    "SteamAPI_SteamNetworkingSockets_SteamAPI_v009",
+    "SteamAPI_SteamNetworkingSockets_SteamAPI_v011",
+    "SteamAPI_SteamNetworkingSockets_v009",
+    "SteamAPI_SteamNetworkingUtils_SteamAPI_v003",
+    "SteamAPI_SteamRemotePlay_v003",
+    "SteamAPI_SteamRemotePlay_v004",
+    "SteamAPI_SteamTimeline_v001",
+    "SteamAPI_SteamUGC_v015",
+    "SteamAPI_SteamUGC_v017",
+    "SteamAPI_SteamUGC_v018",
+    "SteamAPI_SteamUGC_v021",
+    "SteamAPI_SteamUser_v022",
+    "SteamAPI_SteamVideo_v001"
 };
 
 extern "C" HMODULE g_hOriginalDll = nullptr;

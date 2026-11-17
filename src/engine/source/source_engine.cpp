@@ -12,7 +12,6 @@ SourceEngine& SourceEngine::Get() {
 }
 
 SourceEngine::SourceEngine() {
-    refix::GetRefixServices().engine = this;
 }
 
 void SourceEngine::EnqueueCommand(const char* command) {

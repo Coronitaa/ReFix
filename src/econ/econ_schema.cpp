@@ -10,7 +10,6 @@ EconSchema& EconSchema::Get() {
 }
 
 EconSchema::EconSchema() {
-    refix::GetRefixServices().econ = this;
 }
 
 void EconSchema::AddItemDef(const EconItemDefinition& item) {

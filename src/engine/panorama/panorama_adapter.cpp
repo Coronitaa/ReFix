@@ -9,7 +9,6 @@ PanoramaAdapter& PanoramaAdapter::Get() {
 }
 
 PanoramaAdapter::PanoramaAdapter() {
-    refix::GetRefixServices().panorama = this;
 }
 
 void PanoramaAdapter::RegisterScriptInjection(const char* target_script, const char* injected_code) {

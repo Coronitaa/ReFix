@@ -15,7 +15,6 @@ GcCore& GcCore::Get() {
 }
 
 GcCore::GcCore() {
-    refix::GetRefixServices().gc = this;
 }
 
 void GcCore::RegisterClientHandler(uint32_t msg_type, GcMessageHandlerFn fn) {

@@ -57,6 +57,7 @@ def main():
         if base_name in trailing_direct or base_name in ["CreateInterface", "SteamAPI_InitFlat", "ReFix_GetUnsupportedLanCallCount"]:
             trailing_filtered.append(line)
 
+    trailing_filtered_names = [l.split("=")[0].strip() for l in trailing_filtered]
     steam_forwarded_lines = [l for l in steam_def_lines if l not in trailing_filtered]
 
     print(f"[*] steam_api64.def custom ReFix exports: {len(custom_exports)}")
@@ -90,19 +91,20 @@ def main():
         else:
             errors.append(f"Index {i} ({cpp_name}): Missing from src/steam_fwd.asm")
 
-        # Check DEF
-        if i < len(steam_forwarded_lines):
-            def_line = steam_forwarded_lines[i]
-            expected_aliased = f"{cpp_name}={cpp_name}_proxy"
-            if def_line != expected_aliased and def_line != cpp_name:
-                errors.append(f"Index {i}: DEF line mismatch: expected '{expected_aliased}' or '{cpp_name}', got '{def_line}'")
-        else:
-            errors.append(f"Index {i} ({cpp_name}): Missing from src/steam_api64.def")
-
     if len(asm_entries) != len(cpp_names):
         errors.append(f"Count mismatch: g_forwardNames={len(cpp_names)} vs ASM={len(asm_entries)}")
-    if len(steam_forwarded_lines) != len(cpp_names):
-        errors.append(f"Count mismatch: g_forwardNames={len(cpp_names)} vs DEF={len(steam_forwarded_lines)}")
+    # DEF order is irrelevant (the stub offset comes from the ASM/g_forwardNames index), but every
+    # forwarded name must be exported exactly once and every export must be forwarded or direct.
+    def_names = [l.split("=")[0].strip() for l in steam_def_lines]
+    direct = set(trailing_filtered_names) | {"SteamGameServerInternal_CreateInterface"}
+    for name in cpp_names:
+        if name not in def_names:
+            errors.append(f"{name}: in g_forwardNames but not exported by src/steam_api64.def")
+    for name in def_names:
+        if name not in cpp_names and name not in direct:
+            errors.append(f"{name}: exported by src/steam_api64.def but missing from g_forwardNames")
+    if len(def_names) != len(set(def_names)):
+        errors.append("Duplicate names in src/steam_api64.def")
 
     if errors:
         print(f"\n[FAIL] Found {len(errors)} alignment errors:")
@@ -116,7 +118,7 @@ def main():
     print(f"All {len(cpp_names)} exports match perfectly across all 4 layers:")
     print("  1. g_forwardNames[i] in src/steam_proxy.cpp")
     print("  2. src/steam_fwd.asm [g_steamProcs + i*8]")
-    print("  3. src/steam_api64.def slot i")
+    print("  3. src/steam_api64.def export set")
     print("  4. g_steamProcs[i] runtime array slot")
     sys.exit(0)
 

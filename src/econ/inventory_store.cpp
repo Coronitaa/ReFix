@@ -9,7 +9,6 @@ InventoryStore& InventoryStore::Get() {
 }
 
 InventoryStore::InventoryStore() {
-    refix::GetRefixServices().inventory = this;
 }
 
 // The GC emulator loads on first use and saves on every change.

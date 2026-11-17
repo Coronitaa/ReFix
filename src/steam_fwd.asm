@@ -3433,6 +3433,135 @@ SteamAPI_SteamUser_v023_proxy ENDP
 SteamAPI_SteamVideo_v007_proxy PROC
     jmp QWORD PTR [g_steamProcs + 9120]
 SteamAPI_SteamVideo_v007_proxy ENDP
+SteamAPI_ISteamRemotePlay_BEnableRemotePlayTogetherDirectInput_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9128]
+SteamAPI_ISteamRemotePlay_BEnableRemotePlayTogetherDirectInput_proxy ENDP
+SteamAPI_ISteamRemotePlay_BSessionRemotePlayTogether_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9136]
+SteamAPI_ISteamRemotePlay_BSessionRemotePlayTogether_proxy ENDP
+SteamAPI_ISteamRemotePlay_CreateMouseCursor_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9144]
+SteamAPI_ISteamRemotePlay_CreateMouseCursor_proxy ENDP
+SteamAPI_ISteamRemotePlay_DisableRemotePlayTogetherDirectInput_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9152]
+SteamAPI_ISteamRemotePlay_DisableRemotePlayTogetherDirectInput_proxy ENDP
+SteamAPI_ISteamRemotePlay_GetInput_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9160]
+SteamAPI_ISteamRemotePlay_GetInput_proxy ENDP
+SteamAPI_ISteamRemotePlay_GetLargeSessionAvatar_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9168]
+SteamAPI_ISteamRemotePlay_GetLargeSessionAvatar_proxy ENDP
+SteamAPI_ISteamRemotePlay_GetMediumSessionAvatar_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9176]
+SteamAPI_ISteamRemotePlay_GetMediumSessionAvatar_proxy ENDP
+SteamAPI_ISteamRemotePlay_GetSessionGuestID_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9184]
+SteamAPI_ISteamRemotePlay_GetSessionGuestID_proxy ENDP
+SteamAPI_ISteamRemotePlay_GetSmallSessionAvatar_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9192]
+SteamAPI_ISteamRemotePlay_GetSmallSessionAvatar_proxy ENDP
+SteamAPI_ISteamRemotePlay_SetMouseCursor_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9200]
+SteamAPI_ISteamRemotePlay_SetMouseCursor_proxy ENDP
+SteamAPI_ISteamRemotePlay_SetMousePosition_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9208]
+SteamAPI_ISteamRemotePlay_SetMousePosition_proxy ENDP
+SteamAPI_ISteamRemotePlay_SetMouseVisibility_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9216]
+SteamAPI_ISteamRemotePlay_SetMouseVisibility_proxy ENDP
+SteamAPI_ISteamRemotePlay_ShowRemotePlayTogetherUI_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9224]
+SteamAPI_ISteamRemotePlay_ShowRemotePlayTogetherUI_proxy ENDP
+SteamAPI_ISteamUGC_SetItemsDisabledLocally_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9232]
+SteamAPI_ISteamUGC_SetItemsDisabledLocally_proxy ENDP
+SteamAPI_ISteamUGC_SetSubscriptionsLoadOrder_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9240]
+SteamAPI_ISteamUGC_SetSubscriptionsLoadOrder_proxy ENDP
+SteamAPI_ISteamUser_GetAuthTicketForWebApi_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9248]
+SteamAPI_ISteamUser_GetAuthTicketForWebApi_proxy ENDP
+SteamAPI_SteamApps_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9256]
+SteamAPI_SteamApps_v009_proxy ENDP
+SteamAPI_SteamFriends_v018_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9264]
+SteamAPI_SteamFriends_v018_proxy ENDP
+SteamAPI_SteamGameServerApps_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9272]
+SteamAPI_SteamGameServerApps_v009_proxy ENDP
+SteamAPI_SteamGameServerNetworkingMessages_v002_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9280]
+SteamAPI_SteamGameServerNetworkingMessages_v002_proxy ENDP
+SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9288]
+SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v009_proxy ENDP
+SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v011_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9296]
+SteamAPI_SteamGameServerNetworkingSockets_SteamAPI_v011_proxy ENDP
+SteamAPI_SteamGameServerNetworkingSockets_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9304]
+SteamAPI_SteamGameServerNetworkingSockets_v009_proxy ENDP
+SteamAPI_SteamGameServerUGC_v015_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9312]
+SteamAPI_SteamGameServerUGC_v015_proxy ENDP
+SteamAPI_SteamGameServerUGC_v017_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9320]
+SteamAPI_SteamGameServerUGC_v017_proxy ENDP
+SteamAPI_SteamGameServerUGC_v018_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9328]
+SteamAPI_SteamGameServerUGC_v018_proxy ENDP
+SteamAPI_SteamGameServerUGC_v021_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9336]
+SteamAPI_SteamGameServerUGC_v021_proxy ENDP
+SteamAPI_SteamInput_v002_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9344]
+SteamAPI_SteamInput_v002_proxy ENDP
+SteamAPI_SteamInput_v005_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9352]
+SteamAPI_SteamInput_v005_proxy ENDP
+SteamAPI_SteamNetworkingMessages_v002_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9360]
+SteamAPI_SteamNetworkingMessages_v002_proxy ENDP
+SteamAPI_SteamNetworkingSockets_SteamAPI_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9368]
+SteamAPI_SteamNetworkingSockets_SteamAPI_v009_proxy ENDP
+SteamAPI_SteamNetworkingSockets_SteamAPI_v011_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9376]
+SteamAPI_SteamNetworkingSockets_SteamAPI_v011_proxy ENDP
+SteamAPI_SteamNetworkingSockets_v009_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9384]
+SteamAPI_SteamNetworkingSockets_v009_proxy ENDP
+SteamAPI_SteamNetworkingUtils_SteamAPI_v003_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9392]
+SteamAPI_SteamNetworkingUtils_SteamAPI_v003_proxy ENDP
+SteamAPI_SteamRemotePlay_v003_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9400]
+SteamAPI_SteamRemotePlay_v003_proxy ENDP
+SteamAPI_SteamRemotePlay_v004_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9408]
+SteamAPI_SteamRemotePlay_v004_proxy ENDP
+SteamAPI_SteamTimeline_v001_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9416]
+SteamAPI_SteamTimeline_v001_proxy ENDP
+SteamAPI_SteamUGC_v015_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9424]
+SteamAPI_SteamUGC_v015_proxy ENDP
+SteamAPI_SteamUGC_v017_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9432]
+SteamAPI_SteamUGC_v017_proxy ENDP
+SteamAPI_SteamUGC_v018_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9440]
+SteamAPI_SteamUGC_v018_proxy ENDP
+SteamAPI_SteamUGC_v021_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9448]
+SteamAPI_SteamUGC_v021_proxy ENDP
+SteamAPI_SteamUser_v022_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9456]
+SteamAPI_SteamUser_v022_proxy ENDP
+SteamAPI_SteamVideo_v001_proxy PROC
+    jmp QWORD PTR [g_steamProcs + 9464]
+SteamAPI_SteamVideo_v001_proxy ENDP
 
 PUBLIC SafeUnsupportedExportStub
 SafeUnsupportedExportStub PROC

@@ -9,7 +9,6 @@ OverlayActionsRegistry& OverlayActionsRegistry::Get() {
 }
 
 OverlayActionsRegistry::OverlayActionsRegistry() {
-    refix::GetRefixServices().overlay = this;
 }
 
 void OverlayActionsRegistry::RegisterCard(const char* id, const char* title, const char* subtitle, OverlayRenderFn render_fn) {

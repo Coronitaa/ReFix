@@ -41,6 +41,7 @@ typedef void* (*PtrFn)();
 typedef uint64 (*GetIdFn)(void*);
 
 int main(int argc, char** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);  // a hang must still show the last step
     std::string src = argc > 1 ? argv[1] : ExeDir() + kDefaultSrc;
     std::string dir = ExeDir() + "iface_test_tmp";
     CreateDirectoryA(dir.c_str(), nullptr);
@@ -177,7 +178,7 @@ int main(int argc, char** argv) {
             // GC SDK handshake: proto ClientHello { version = 42 } -> ClientWelcome (4004) + ConnectionStatus (4009).
             const uint8_t hello[] = { 0xA6, 0x0F, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x08, 42 };
             Check(gc->SendMessage_(0x80000000u | 4006, hello, sizeof(hello)) == k_EGCResultOK, "GC ClientHello accepted");
-            uint8_t buf[256] = {};
+            uint8_t buf[8192] = {}; // the CS:GO ClientWelcome carries the whole SO cache (~3.5 KB)
             uint32 type = 0;
             Check(gc->IsMessageAvailable(&size) && size > 8, "GC reply available after ClientHello");
             Check(gc->RetrieveMessage(&type, buf, 4, &size) == k_EGCResultBufferTooSmall, "GC RetrieveMessage reports small buffer");
@@ -186,6 +187,8 @@ int main(int argc, char** argv) {
             Check(size > 10 && buf[8] == 0x08 && buf[9] == 42, "ClientWelcome echoes the hello version");
             Check(gc->RetrieveMessage(&type, buf, sizeof(buf), &size) == k_EGCResultOK && type == (0x80000000u | 4009),
                   "GC second reply is ConnectionStatus");
+            Check(gc->RetrieveMessage(&type, buf, sizeof(buf), &size) == k_EGCResultOK && type == (0x80000000u | 9110),
+                  "GC third reply is MatchmakingGC2ClientHello");
             Check(!gc->IsMessageAvailable(&size), "GC queue drained");
             void* serverGc = c17->GetISteamGenericInterface(2 /* game-server user */, pipe, "SteamGameCoordinator001");
             Check(serverGc != nullptr && serverGc != (void*)gc, "game-server pipe gets its own coordinator");
