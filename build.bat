@@ -188,6 +188,12 @@ if %ERRORLEVEL% neq 0 ( echo [!] Error building test_mini_json.exe & exit /b 1 )
 bin\test_mini_json.exe
 if %ERRORLEVEL% neq 0 ( echo [!] test_mini_json failed & exit /b 1 )
 
+echo [*] Building test_overlay_mods.exe (mod panels: game scoping, C ABI checks, fault isolation, grid)...
+cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\test_obj\ tests\test_overlay_mods.cpp src\overlay\game_actions\mod_panels.cpp src\overlay\game_actions\builtin_modules.cpp src\overlay\csgo\csgo_overlay_module.cpp src\mods\game_scope.cpp /Febin\test_overlay_mods.exe
+if %ERRORLEVEL% neq 0 ( echo [!] Error building test_overlay_mods.exe & exit /b 1 )
+bin\test_overlay_mods.exe
+if %ERRORLEVEL% neq 0 ( echo [!] test_overlay_mods failed & exit /b 1 )
+
 echo [*] Building test_steam_link_offline.exe (Steam online services stay inert while off)...
 cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\ tests\test_steam_link_offline.cpp src\steam_link\steam_link.cpp /Febin\test_steam_link_offline.exe advapi32.lib shell32.lib
 if %ERRORLEVEL% neq 0 ( echo [!] Error building test_steam_link_offline.exe & exit /b 1 )

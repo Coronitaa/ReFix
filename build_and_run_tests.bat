@@ -29,6 +29,14 @@ build\tests\test_steam_network_compat.exe
 if %ERRORLEVEL% neq 0 ( echo [!] Steam networking compatibility tests failed & exit /b 1 )
 
 echo ====================================================================
+echo [*] Overlay mod panels (game scoping, C ABI checks, fault isolation, grid)
+echo ====================================================================
+cl /nologo /EHsc /std:c++17 /utf-8 tests\test_overlay_mods.cpp src\overlay\game_actions\mod_panels.cpp src\overlay\game_actions\builtin_modules.cpp src\overlay\csgo\csgo_overlay_module.cpp src\mods\game_scope.cpp /Fobuild\tests\ /Febuild\tests\test_overlay_mods.exe
+if %ERRORLEVEL% neq 0 ( echo [!] Failed building test_overlay_mods & exit /b 1 )
+build\tests\test_overlay_mods.exe
+if %ERRORLEVEL% neq 0 ( echo [!] Overlay mod panel tests failed & exit /b 1 )
+
+echo ====================================================================
 echo [*] AutoDeploy path robustness and deployment pipeline tests
 echo ====================================================================
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tests\test_path_robustness.ps1"
