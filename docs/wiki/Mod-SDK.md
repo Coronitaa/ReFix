@@ -35,6 +35,7 @@ DevMode = false         ; true: load unsigned or untrusted packages (development
 It then opens every `*.rfmod` in `<game exe folder>\refix_mods\`, and for each package:
 
 1. Reads `refixmod.json` and validates it (schema, id, capabilities, file paths).
+   A package whose `target_games` do not name the running game stops here (logged as "Not loaded").
 2. Checks the Ed25519 signature and the SHA-256 of every file listed in the manifest.
 3. Decides the trust level (see [section 3](#3-capabilities-and-trust)) and whether the mod may run
    without asking the player.
@@ -102,7 +103,7 @@ The manifest of the CS:GO mod:
 | `execution_tier` | no | `native` or `sandboxed` (default). |
 | `phase` | no | Phase the mod is scheduled in (`Boot`, `PreRefix`, `PostRefix`, `EngineReady`). |
 | `priority` | no | Order inside a phase. |
-| `target_games` | no | Games the mod is for (`app_id`, `exe_name`, `engine`). Informational in 2.2.0: the loader does not filter on it. The [catalog](#8-publishing-the-mod-catalog-and-autodeploy) decides which game gets the mod. |
+| `target_games` | yes | Games the mod is for (`app_id`, `exe_name`, `engine`). The loader rejects the package in any other game: each entry needs an `app_id` or an `exe_name`, and with both, both must match (the exe alone decides while the AppID is unknown). CS:GO 730 and 4465480 count as one game. |
 | `dependencies` | no | `{ "before": [], "after": [], "requires": [], "conflicts": [] }`, each a list of mod ids. |
 | `capabilities` | no | What the mod may do (next section). |
 | `resource_limits` | no | Sandbox limits: `max_memory_mb` (16), `watchdog_timeout_ms` (15), `max_hooks` (16), `storage_quota_kb` (1024). Defaults in brackets. |
@@ -120,7 +121,7 @@ A mod declares what it needs; anything else is refused. Valid values:
 | `config` | Reading its own settings. | |
 | `storage` | A private key/value store, limited by `storage_quota_kb`. | |
 | `events` | Receiving lifecycle and game events. | |
-| `overlay.panel` | Adding panels and cards to the ReFix overlay. | |
+| `overlay.panel` | Adding panels to the ReFix overlay through the C ABI ([Mod-SDK-Overlay](Mod-SDK-Overlay.md)). | |
 | `patch.declarative` | Byte patches checked against the expected original bytes. | |
 | `hooks.game` | Function hooks in the game's own modules (never system DLLs). | |
 | `memory.write` | Writing game memory directly. | high |
@@ -329,7 +330,7 @@ The CS:GO 1.37 support is split in two:
 | Game Coordinator | `src/steam_gc_emu.cpp` | Answers CS:GO's GC: welcome and SO cache, inventory, cases, stickers, music kits, service medals, matchmaking on the LAN, operation passes and missions. |
 | Item schema | `src/csgo_schema.cpp` | Reads `items_game.txt` and the language files: names, rarities, loot lists, sticker/graffiti/music kits, mission cards and quest goals. |
 | Operation missions | `src/csgo_operation_patch.cpp`, `tools/gen_csgo_operation_patch.py` | Adds the Shattered Web weeks that the 2019 build ships locked to `items_game.txt` and the language files, keeping `.refix_orig` backups. |
-| Overlay | `src/overlay/csgo/` | The CS:GO LAN card, Market & Skins and the LAN server dialog. |
+| Overlay | `src/overlay/csgo/` | The CS:GO LAN card, Market & Skins and the LAN server dialog: a builtin overlay module (`csgo_overlay_module.cpp`) that registers through the same C ABI as a mod, only when the game is CS:GO (`src/overlay/game_actions/builtin_modules.cpp`). |
 | Rooms and relay | `src/gc/lan_rooms.cpp`, `src/gc/gc_relay.cpp` | LAN rooms, finding open matches, carrying each player's inventory and quest points to the host. |
 
 Moving these parts into the mod, one GC message at a time, is the way forward: register the message in

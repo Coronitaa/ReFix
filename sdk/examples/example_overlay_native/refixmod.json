@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "com.example.hello_overlay",
+  "name": "Hello overlay panel",
+  "version": "1.0.0",
+  "author": "You",
+  "entrypoint": "example_overlay.dll",
+  "execution_tier": "native",
+  "phase": "EngineReady",
+  "priority": 0,
+  "target_games": [
+    { "app_id": 3241660, "exe_name": "REPO.exe", "engine": "unity" }
+  ],
+  "capabilities": ["log", "overlay.panel"]
+}
