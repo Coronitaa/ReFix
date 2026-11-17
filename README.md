@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.5.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.5.1)
+[![Release](https://img.shields.io/badge/version-v2.5.2-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.5.2)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -16,7 +16,7 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 ## Install
 
-1. Download `ReFix_v2.5.1.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
+1. Download `ReFix_v2.5.2.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
    - `[1] ReFix Online + LAN`, `[2] ReFix Offline LAN` or `[3] ReFix Online Legacy via Steam`
@@ -29,6 +29,8 @@ Everyone who plays together needs the same ReFix version and the same mode.
 To undo everything, run `Uninstall_ReFix.bat` on Windows (or `bash Uninstall_ReFix.sh` on Linux). It restores the game's original DLLs and gives the game this PC's own saves back. ReFix LAN profiles stay in `%APPDATA%\ReFix`.
 
 To update ReFix in a game, run the new `AutoDeploy` on it again.
+
+A deployed game folder is portable: AutoDeploy also extracts the old DirectX DLLs the game needs (d3dx9, xinput...) from the redistributable the game ships, so a copy of the folder starts on a PC that never installed them.
 
 ## ReFix Online Legacy
 
@@ -118,7 +120,9 @@ For ReFix Online Legacy, launch the game from Steam with Proton so the Steam cli
 
 Some games get a ReFix mod made for them (the first one is CS:GO 1.37: working inventory, cases, stickers, Operation Shattered Web missions, LAN server browser and rooms). AutoDeploy checks [`refix_mods/catalog.tsv`](refix_mods/catalog.tsv) and, when the game has a mod, installs it into the game's `refix_mods` folder: from the release zip, or downloaded from this repository and checked against its SHA-256. The uninstaller removes it and puts back any game file the mod changed.
 
-Writing a mod: see the [Mod SDK](docs/wiki/Mod-SDK.md).
+A mod only loads in the games listed in its `target_games`, so one game's mod never shows up in another.
+
+Writing a mod: see the [Mod SDK](docs/wiki/Mod-SDK.md) and, for overlay panels, [Mod-SDK-Overlay](docs/wiki/Mod-SDK-Overlay.md).
 
 ## DLC unlocker
 
@@ -161,6 +165,9 @@ ServerListAppId =                ; the real AppID (AutoDeploy fills both)
 DiscoveryPort = 47584      ; LAN discovery
 CustomBroadcasts =         ; extra broadcast IPs for VPNs, comma-separated
 InternetAccess = allow     ; Online + LAN: block keeps the game on the local network
+
+[P2P]
+EnableWinsockHooks = true  ; false if a game freezes when joining a lobby (games on Steam networking sockets)
 
 [Debug]
 EnableLog = false          ; set to true to get a ReFix.log for a bug report
