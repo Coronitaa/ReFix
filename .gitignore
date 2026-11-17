@@ -74,7 +74,18 @@ bin/steam_api64.dll
 bin/refix_net_test.exe
 bin/refix_csgo.dll
 
-# OAuth client IDs (docs/cloud-sync-setup.md)
+# OAuth client IDs (docs/wiki/cloud-sync-setup.md)
 src/overlay/cloud_keys.local.h
 # Google OAuth client downloads (secret: never commit)
 client_secret_*.json
+
+# Scratch and local junk
+*.dmp
+*.ilk
+*.rsp
+*.stackdump
+*.orig
+*.rej
+*.swp
+*~
+.claude/worktrees/

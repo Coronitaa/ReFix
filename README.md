@@ -76,7 +76,7 @@ Settings > **Syncing** keeps each profile's saves, achievements, stats, items an
 - The round button next to your profile shows the state: a green tick when synced, orange changes waiting, red failed, grey nowhere to sync. Click it to sync now.
 - At game start ReFix takes a newer file from another PC. What it replaces is kept in `%APPDATA%\ReFix\SyncBackups` (last 3). If the destination could not be read at start, ReFix never uploads over a newer copy from another PC.
 - Steam profiles sync on their own; local profiles only with "Sync local profiles too".
-- Privacy policy: <https://coronitaa.github.io/privacy.html>. Building ReFix yourself: the cloud services need client IDs, see [docs/cloud-sync-setup.md](docs/cloud-sync-setup.md).
+- Privacy policy: <https://coronitaa.github.io/privacy.html>. Building ReFix yourself: the cloud services need client IDs, see [docs/wiki/cloud-sync-setup.md](docs/wiki/cloud-sync-setup.md).
 
 ### Overlay
 
@@ -181,7 +181,6 @@ DLC_Unlocker.bat                 SmokeAPI installer
 bin/online, bin/lan              the two products
 bin/*.ps1                        detection, deploy, DLC and firewall helpers
 src/                             C++ sources (Steam and EOS proxies, LAN core, overlay, Photon emulator)
-tests/                           test suites
 ```
 
 ## Credits

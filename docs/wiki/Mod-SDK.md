@@ -275,8 +275,8 @@ bin\refixmod.exe verify refix_mods\refix.csgo.lan_overhaul.rfmod
 4. Set `EnableLog = true` under `[Debug]` and start the game. `ReFix.log` (next to `ReFix.ini`) shows
    `[ModHost]` lines for every package: loaded, waiting for approval, or why it was refused.
 
-The `test_mod_*` programs that `build.bat` produces check manifest parsing, packages, signatures, the
-trust store, the scheduler and the sandbox; run them after changing the loader.
+The `test_mod_*` programs (manifest parsing, packages, signatures, trust store, scheduler, sandbox)
+live on the `dev/tests` branch; run them after changing the loader.
 
 ## 8. Publishing: the mod catalog and AutoDeploy
 

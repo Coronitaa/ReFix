@@ -78,11 +78,6 @@ echo [*] Building refix_steamhost64.exe (Steam online services helper)...
 cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\ src\steam_link\steam_host.cpp /Febuild\refix_steamhost64.exe /link /SUBSYSTEM:WINDOWS
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling refix_steamhost64.exe & exit /b 1 )
 
-if not exist build\test_obj mkdir build\test_obj
-echo [*] Building steam_api64_test.dll proxy (test variant with test hooks)...
-cl /nologo /O2 /Zi /FS /EHsc /std:c++17 /utf-8 /Zc:preprocessor /DREFIX_BUILD_TESTS=1 /DREFIX_LAN_EDITION=1 /DREFIX_STEAM_LINK=1 /LD /Fobuild\test_obj\ /Ithird_party /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Isrc\mods /Isrc\mods\crypto /Isrc\mods\miniz /Isrc\mods\wasm3 src\steam_proxy.cpp src\steam_link\steam_link.cpp src\refix_module_dedupe.cpp src\refix_multi_instance.cpp src\refix_crash_log.cpp src\steam_sockets_flat.cpp !UNREAL_SRC! !OVERLAY_SRC! !MODS_SRC! !IL2CPP_SRC! src\photon\pn_proto18.cpp src\photon\pn_enet.cpp src\photon\pn_server.cpp src\photon\pn_fusion.cpp src\photon\pn_shared.cpp src\photon\pn_crypto.cpp src\photon\pn_dns.cpp src\photon\pn_p2p.cpp src\photon\pn_lan_backend.cpp src\steam_p2p_hook.cpp src\upnp_firewall.cpp src\network\network_mode.cpp src\providers\provider_factory.cpp src\steam_network_compat.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c build\steam_fwd.obj /Febuild\steam_api64_test.dll /Fdbuild\steam_api64_test.pdb user32.lib kernel32.lib ws2_32.lib iphlpapi.lib ole32.lib oleaut32.lib advapi32.lib !OVERLAY_LIBS! /link /DEF:src\steam_api64.def /DEBUG /MAP:build\steam_api64_test.map !OVERLAY_DELAYLOAD!
-if %ERRORLEVEL% neq 0 ( echo [!] Error compiling steam_api64_test.dll & exit /b 1 )
-
 echo.
 echo ====================================================================
 echo [OK] All ReFix DLL proxies successfully built in build\
@@ -91,7 +86,6 @@ echo   - build\winhttp.dll (Anti-Cheat / EAC Proxy)
 echo   - build\EOSSDK-Win64-Shipping.dll
 echo   - build\RedboneEOS.dll
 echo   - build\steam_api64.dll (Production - Clean EAT)
-echo   - build\steam_api64_test.dll (Testing - Instrumented EAT)
 echo ====================================================================
 
 :: Automatically synchronize freshly built binaries to bin/
@@ -118,7 +112,6 @@ if exist bin\ (
     copy /Y build\steam_api64.dll bin\lan\steam_api64.dll >nul
     copy /Y build\refix_steamhost64.exe bin\lan\refix_steamhost64.exe >nul
     copy /Y build\steam_api64.dll bin\steam_api64.dll >nul
-    copy /Y build\steam_api64_test.dll bin\steam_api64_test.dll >nul
     echo [OK] Synchronized ReFix LAN binaries to bin\lan\ ^(ReFix Online: run build_online.bat^)
 )
 
@@ -127,120 +120,7 @@ echo [*] Building ReFix LAN x86 (32-bit games)...
 cmd /c ""%~dp0build_x86_lan.bat" <nul"
 if %ERRORLEVEL% neq 0 ( echo [!] Error building ReFix LAN x86 & exit /b 1 )
 
-echo [*] Building refix_net_test.exe (Phase 3.6 loopback tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ src\network\refix_net_test.cpp /Febin\refix_net_test.exe
-if %ERRORLEVEL% neq 0 ( echo [!] Error building refix_net_test.exe & exit /b 1 )
-echo [OK] refix_net_test.exe built and placed in bin\
-
-echo [*] Building test_refix_lan_core.exe (Universal LAN Core and Transport tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_refix_lan_core.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp /Febin\test_refix_lan_core.exe ws2_32.lib advapi32.lib iphlpapi.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_refix_lan_core.exe & exit /b 1 )
-echo [OK] test_refix_lan_core.exe built and placed in bin\
-
-echo [*] Building test_steam_lancore_adapter.exe (Steamworks to LanCore Adapter tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_steam_lancore_adapter.cpp /Febin\test_steam_lancore_adapter.exe user32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_steam_lancore_adapter.exe & exit /b 1 )
-echo [OK] test_steam_lancore_adapter.exe built and placed in bin\
-
-echo [*] Building test_transport_ownership.exe (H-01 Transport Ownership regression tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_transport_ownership.cpp /Febin\test_transport_ownership.exe ws2_32.lib user32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_transport_ownership.exe & exit /b 1 )
-echo [OK] test_transport_ownership.exe built and placed in bin\
-
-echo [*] Building test_steam_sockets_lancore.exe (ISteamNetworkingSockets LanCore tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_steam_sockets_lancore.cpp /Febin\test_steam_sockets_lancore.exe ws2_32.lib user32.lib advapi32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_steam_sockets_lancore.exe & exit /b 1 )
-echo [OK] test_steam_sockets_lancore.exe built and placed in bin\
-
-echo [*] Building test_lan_concurrency_contract.exe (Dedicated Concurrency Contract and Mesh tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Isrc\eossdk /Fobuild\ tests\test_lan_concurrency_contract.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp src\lan_core\refix_lan_core.cpp src\eossdk\core\lobby_model.cpp /Febin\test_lan_concurrency_contract.exe ws2_32.lib advapi32.lib iphlpapi.lib user32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_lan_concurrency_contract.exe & exit /b 1 )
-echo [OK] test_lan_concurrency_contract.exe built and placed in bin\
-
-echo [*] Building test_multi_instance.exe (singleton mutex release tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Fobuild\ tests\test_multi_instance.cpp /Febin\test_multi_instance.exe user32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_multi_instance.exe & exit /b 1 )
-echo [OK] test_multi_instance.exe built and placed in bin\
-
-echo [*] Building test_module_dedupe.exe (one-emulator-per-process regression tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ tests\test_module_dedupe.cpp /Febin\test_module_dedupe.exe
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_module_dedupe.exe & exit /b 1 )
-echo [OK] test_module_dedupe.exe built and placed in bin\
-
-echo [*] Building test_iface_versions.exe (versioned interface adapter tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_iface_versions.cpp /Febin\test_iface_versions.exe user32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_iface_versions.exe & exit /b 1 )
-echo [OK] test_iface_versions.exe built and placed in bin\
-
-echo [*] Building test_identity_probe.exe (IdentityMode auto/fixed probe)...
-cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ tests\test_identity_probe.cpp /Febin\test_identity_probe.exe
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_identity_probe.exe & exit /b 1 )
-echo [OK] test_identity_probe.exe built and placed in bin\
-
-
-echo [*] Building test_gamepad.exe (controller reports and overlay toggle)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\ tests\test_gamepad.cpp src\overlay\overlay_gamepad.cpp /Febin\test_gamepad.exe hid.lib setupapi.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_gamepad.exe & exit /b 1 )
-echo [OK] test_gamepad.exe built and placed in bin\
-echo [*] Building test_mini_json.exe (achievement schema reader)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\ tests\test_mini_json.cpp /Febin\test_mini_json.exe
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_mini_json.exe & exit /b 1 )
-bin\test_mini_json.exe
-if %ERRORLEVEL% neq 0 ( echo [!] test_mini_json failed & exit /b 1 )
-
-echo [*] Building test_overlay_mods.exe (mod panels: game scoping, C ABI checks, fault isolation, grid)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\test_obj\ tests\test_overlay_mods.cpp src\overlay\game_actions\mod_panels.cpp src\overlay\game_actions\builtin_modules.cpp src\overlay\csgo\csgo_overlay_module.cpp src\mods\game_scope.cpp /Febin\test_overlay_mods.exe
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_overlay_mods.exe & exit /b 1 )
-bin\test_overlay_mods.exe
-if %ERRORLEVEL% neq 0 ( echo [!] test_overlay_mods failed & exit /b 1 )
-
-echo [*] Building test_steam_link_offline.exe (Steam online services stay inert while off)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Fobuild\ tests\test_steam_link_offline.cpp src\steam_link\steam_link.cpp /Febin\test_steam_link_offline.exe advapi32.lib shell32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_steam_link_offline.exe & exit /b 1 )
-bin\test_steam_link_offline.exe
-if %ERRORLEVEL% neq 0 ( echo [!] test_steam_link_offline failed & exit /b 1 )
-
-echo [*] Building test_lan_bridge_rewrite.exe (Steam bridge discovery rewrite)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Isrc /Isrc\lan_core /Isrc\include /Isrc\include\steam /Fobuild\ tests\test_lan_bridge_rewrite.cpp src\lan_core\refix_lan_firewall.cpp src\lan_core\refix_lan_transport.cpp /Febin\test_lan_bridge_rewrite.exe ws2_32.lib advapi32.lib iphlpapi.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_lan_bridge_rewrite.exe & exit /b 1 )
-bin\test_lan_bridge_rewrite.exe
-if %ERRORLEVEL% neq 0 ( echo [!] test_lan_bridge_rewrite failed & exit /b 1 )
-
-echo [*] Building test_profile_sync_package.exe (profile sync package format)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Isrc /Isrc\mods /Isrc\mods\miniz /Fobuild\test_obj\ tests\test_profile_sync_package.cpp src\overlay\profile_sync_package.cpp src\mods\miniz\miniz.c src\mods\crypto\monocypher.c /Febin\test_profile_sync_package.exe advapi32.lib bcrypt.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_profile_sync_package.exe & exit /b 1 )
-bin\test_profile_sync_package.exe
-if %ERRORLEVEL% neq 0 ( echo [!] test_profile_sync_package failed & exit /b 1 )
-
-echo [*] Building test_cloud_account.exe (cloud sign-in: PKCE, callback, DPAPI store)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Isrc /Fobuild\test_obj\ tests\test_cloud_account.cpp /Febin\test_cloud_account.exe advapi32.lib shell32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_cloud_account.exe & exit /b 1 )
-bin\test_cloud_account.exe
-if %ERRORLEVEL% neq 0 ( echo [!] test_cloud_account failed & exit /b 1 )
-
-echo [*] Building test_lan_profiles.exe (LAN profiles per-game isolation and savedata tester)...
-cl /nologo /O2 /EHsc /std:c++17 /utf-8 /Isrc /Fobuild\ tests\test_lan_profiles.cpp src\overlay\profile_store.cpp src\overlay\overlay_i18n.cpp /Febin\test_lan_profiles.exe ole32.lib shell32.lib advapi32.lib user32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_lan_profiles.exe & exit /b 1 )
-echo [OK] test_lan_profiles.exe built and placed in bin\
-
-echo [*] Building test_nvidia_reflex_block.exe (NVIDIA Reflex Overlay suppression tester)...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc /Fobuild\ tests\test_nvidia_reflex_block.cpp src\overlay\nvidia_reflex_block.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c /Febin\test_nvidia_reflex_block.exe user32.lib advapi32.lib
-if %ERRORLEVEL% neq 0 ( echo [!] Error building test_nvidia_reflex_block.exe & exit /b 1 )
-
 echo [*] Building refixmod.exe (ReFix Mods CLI tool)...
 cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\mods\crypto /Isrc\mods\miniz /Fobuild\ tools\refixmod\main.cpp src\mods\mod_package.cpp src\mods\mod_manifest.cpp src\mods\mod_signature.cpp src\mods\crypto\monocypher.c src\mods\crypto\monocypher-ed25519.c src\mods\miniz\miniz.c Advapi32.lib /Febin\refixmod.exe
 if %ERRORLEVEL% neq 0 ( echo [!] Error building refixmod.exe & exit /b 1 )
 echo [OK] refixmod.exe built and placed in bin\
-
-echo [*] Building ReFix Mods test suite...
-cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\mods\crypto /Fobuild\ tests\test_mod_manifest.cpp src\mods\mod_manifest.cpp /Febin\test_mod_manifest.exe
-cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\mods\crypto /Fobuild\ tests\test_mod_signature.cpp src\mods\mod_signature.cpp src\mods\crypto\monocypher.c src\mods\crypto\monocypher-ed25519.c Advapi32.lib /Febin\test_mod_signature.exe
-cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\mods\crypto /Isrc\mods\miniz /Fobuild\ tests\test_mod_package.cpp src\mods\mod_package.cpp src\mods\mod_manifest.cpp src\mods\mod_signature.cpp src\mods\crypto\monocypher.c src\mods\crypto\monocypher-ed25519.c src\mods\miniz\miniz.c Advapi32.lib /Febin\test_mod_package.exe
-cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\mods\crypto /Fobuild\ tests\test_mod_trust_store.cpp src\mods\mod_trust_store.cpp src\mods\mod_signature.cpp src\mods\crypto\monocypher.c src\mods\crypto\monocypher-ed25519.c Advapi32.lib Crypt32.lib Shell32.lib /Febin\test_mod_trust_store.exe
-cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Fobuild\ tests\test_mod_scheduler.cpp src\mods\mod_scheduler.cpp /Febin\test_mod_scheduler.exe
-cl /nologo /O2 /EHsc /std:c++17 /Zc:preprocessor /Isrc\mods /Isrc\mods\wasm3 /Fobuild\ tests\test_sandbox_wasm.cpp src\mods\sandbox_wasm.cpp src\mods\wasm3\*.c /Febin\test_sandbox_wasm.exe
-cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\minhook /Fobuild\ tests\test_patch_engine.cpp src\mods\patch_engine.cpp src\minhook\buffer.c src\minhook\hook.c src\minhook\trampoline.c src\minhook\hde\hde64.c /Febin\test_patch_engine.exe
-cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\mods\crypto /Fobuild\ tests\test_privacy_gate.cpp src\mods\privacy_gate.cpp src\mods\mod_signature.cpp src\mods\crypto\monocypher.c src\mods\crypto\monocypher-ed25519.c Advapi32.lib /Febin\test_privacy_gate.exe
-cl /nologo /O2 /EHsc /std:c++17 /Fobuild\ tests\test_refixmod_cli.cpp /Febin\test_refixmod_cli.exe
-echo [OK] All ReFix Mods unit tests built in bin\
-echo [OK] test_nvidia_reflex_block.exe built and placed in bin\

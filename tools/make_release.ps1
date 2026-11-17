@@ -49,7 +49,7 @@ Get-ChildItem -LiteralPath (Join-Path $repo "refix_mods") -File | Where-Object {
 # Deploy scripts and the small helpers they call
 Get-ChildItem -LiteralPath $bin -File | Where-Object {
     $_.Extension -in ".ps1", ".py" -or
-    $_.Name -in "Install_ReFix_Steam_Shortcut.bat", "ReFix.ini", "ReFixSync.dll", "steam_api64_valve.dll"
+    $_.Name -in "Install_ReFix_Steam_Shortcut.bat", "ReFix.ini", "ReFixSync.dll"
 } | ForEach-Object { Copy-Into ("bin\" + $_.Name) }
 
 # Product folders: ReFix LAN, ReFix Online, the legacy x86 fallback and the deploy tools

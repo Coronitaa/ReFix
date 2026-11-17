@@ -1,4 +1,4 @@
-// OAuth client IDs of ReFix's own Google and Microsoft apps (docs/cloud-sync-setup.md says how to get them).
+// OAuth client IDs of ReFix's own Google and Microsoft apps (docs/wiki/cloud-sync-setup.md says how to get them).
 // They name the app, they do not open any account: every player still signs in and consents in the browser.
 // Kept out of git in cloud_keys.local.h (copy cloud_keys.local.h.example); a build without it hides the buttons.
 #pragma once
