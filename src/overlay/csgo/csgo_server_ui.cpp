@@ -127,7 +127,11 @@ void AddWarGames(const std::string& gameDir, const ModeOption& skirmishMode) {
         const std::string token(sk.GetString("loc_name"));
         m.en = Localized(token, true, m.id);
         m.es = Localized(token, false, m.en);
-        if (!m.id.empty()) g_modes.push_back(m);
+        // Some builds also list a regular mode here (Arms Race, Demolition): the mode button already hosts it.
+        const bool repeatsMode = std::any_of(g_modes.begin(), g_modes.end(), [&](const ModeOption& o) {
+            return !o.skirmish && (o.en == m.en || o.id == m.id);
+        });
+        if (!m.id.empty() && !repeatsMode) g_modes.push_back(m);
     }
 }
 

@@ -84,6 +84,9 @@ static void HookModuleGameTypes(const char* moduleName) {
 
     void** vtable = *reinterpret_cast<void***>(gameTypes);
     if (!vtable) return;
+    // Already hooked: the slot now holds our code, which no longer references "skirmish".
+    const GameTypesHookSlot& hooked = s_gameTypesHooks[SlotIdx];
+    if (hooked.vtableEntry && hooked.hookFn && *hooked.vtableEntry == hooked.hookFn) return;
     const int slot = FindGetMaxPlayersSlot(hMod, vtable);
     if (slot < 0) {
         static std::atomic<bool> warned{ false };

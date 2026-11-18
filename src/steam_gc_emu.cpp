@@ -2446,6 +2446,8 @@ void InstallFallbackGameTypesHook(const char* modName) {
     if (!gt) return;
     void** vt = *reinterpret_cast<void***>(gt);
     if (!vt) return;
+    const FallbackGameTypesSlot& hooked = s_fallbackHooks[SlotIdx];
+    if (hooked.vtableEntry && hooked.hookFn && *hooked.vtableEntry == hooked.hookFn) return;  // already ours
     const int slot = refix::csgo::FindGetMaxPlayersSlot(hMod, vt);
     if (slot < 0) return;  // unknown layout: never guess a vtable slot
     void** entry = &vt[slot];
