@@ -368,7 +368,10 @@ bool LoadValve(const std::wstring& dir) {
         const std::wstring path = dir + L"\\" + name;
         if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
         g_api.dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!g_api.dll) continue;
+        if (!g_api.dll) {
+            Log("Valve Steam API DLL load failed (error %lu)", GetLastError());
+            continue;
+        }
         const bool ok = Resolve(g_api.Init, "SteamAPI_Init") && Resolve(g_api.Shutdown, "SteamAPI_Shutdown") &&
             Resolve(g_api.RunCallbacks, "SteamAPI_RunCallbacks") &&
             Resolve(g_api.RegisterCallback, "SteamAPI_RegisterCallback") &&
@@ -395,6 +398,7 @@ bool LoadValve(const std::wstring& dir) {
             Resolve(g_api.ImageSize, "SteamAPI_ISteamUtils_GetImageSize") &&
             Resolve(g_api.ImageRgba, "SteamAPI_ISteamUtils_GetImageRGBA");
         if (ok) {
+            Log("Valve Steam API DLL loaded");
             ResolveAny(g_api.NetUtils, { "SteamAPI_SteamNetworkingUtils_SteamAPI_v004", "SteamAPI_SteamNetworkingUtils_SteamAPI_v003" });
             Resolve(g_api.InitRelay, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
             Resolve(g_api.RelayStatus, "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus");
@@ -402,6 +406,7 @@ bool LoadValve(const std::wstring& dir) {
             return true;
         }
         FreeLibrary(g_api.dll);
+        Log("Valve Steam API DLL is missing required exports");
         g_api = Api{};
     }
     Report(kFailed, "Steam API library not found (refix_steamlink DLL)");
@@ -428,6 +433,7 @@ bool InitAsSpacewar() {
 bool InitWhenReady() {
     for (DWORD waited = 0;; waited += kInitRetryMs) {
         if (SteamSignedIn() && InitAsSpacewar()) return true;
+        if (!waited) Log("Steam API initialization failed; retrying (Wine=%d, Proton environment=%d)", IsWine(), HasProtonSteamEnv());
         if (waited >= kSteamStartTimeoutMs) {
             Report(kFailed, "SteamAPI_Init failed (is Steam signed in?)");
             return false;
@@ -575,6 +581,7 @@ int Run(int argc, wchar_t** argv) {
     g_game.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     g_game.sin_port = htons(gamePort);
     Post(Writer(kHello).Raw(token.data(), token.size()));
+    Log("Steam helper started (Wine=%d, Proton environment=%d)", IsWine(), HasProtonSteamEnv());
 
     if (!StartSteamAndWait() || !LoadValve(dir) || !InitWhenReady()) {
         while (Wait(500)) {}   // stay until the game reads the failure and lets us go
