@@ -1358,6 +1358,9 @@ public:
         PutVarintField(resp, 1, accountId);
         std::vector<uint8_t> globalStats;
         PutVarintField(globalStats, 14, (uint32_t)::time(nullptr)); // rtime32_cur: the GC clock
+        // Non-zero so pre-Panorama clients request the store price sheet (2500); with 0 they never create the
+        // store panel and the main menu store tiles crash (CS:GO March 2018).
+        PutVarintField(globalStats, 10, 1); // pricesheet_version
         PutBytesField(resp, 3, globalStats);
         PutVarintField(resp, 6, 0);       // vac_banned = 0 (clean!)
         PutBytesField(resp, 7, ranking);
