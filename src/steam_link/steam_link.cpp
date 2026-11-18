@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include "../refix_wine.h"
 
 #include <atomic>
 #include <cstring>
@@ -306,7 +307,7 @@ constexpr const wchar_t* kHostExe = L"refix_steamhost64.exe";
 constexpr const wchar_t* kHostExe = L"refix_steamhost.exe";
 #endif
 
-// The helper inherits none of the game's Steam* variables (it sets Spacewar itself).
+// Preserve Proton's Steam connection environment; the helper sets its own app identity.
 HANDLE StartHost(uint16_t port, const std::string& token) {
     const std::wstring dir = ModuleDir();
     std::wstring exe = dir + kHostExe;
@@ -318,7 +319,11 @@ HANDLE StartHost(uint16_t port, const std::string& token) {
     std::wstring env;
     if (wchar_t* block = GetEnvironmentStringsW()) {
         for (const wchar_t* v = block; *v; v += wcslen(v) + 1) {
-            if (_wcsnicmp(v, L"Steam", 5) == 0 || _wcsnicmp(v, L"_SteamInjection", 15) == 0 ||
+            if ((!ReFixIsWine() && _wcsnicmp(v, L"Steam", 5) == 0) ||
+                (ReFixIsWine() && (_wcsnicmp(v, L"SteamAppId=", 11) == 0 ||
+                                  _wcsnicmp(v, L"SteamGameId=", 12) == 0 ||
+                                  _wcsnicmp(v, L"SteamOverlayGameId=", 19) == 0)) ||
+                _wcsnicmp(v, L"_SteamInjection", 15) == 0 ||
                 _wcsnicmp(v, L"ENABLE_STEAM_OVERLAY", 20) == 0) continue;
             env.append(v);
             env.push_back(L'\0');
@@ -517,6 +522,7 @@ bool SendRaw(uint64_t steamId, uint16_t srcPort, uint16_t dstPort, uint8_t flags
 } // namespace
 
 bool SteamInstalled() {
+    if (ReFixIsWine() && ReFixHasProtonSteamEnv()) return true;
     const std::wstring exe = RegString(L"Software\\Valve\\Steam", L"SteamExe");
     return !exe.empty() && GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
