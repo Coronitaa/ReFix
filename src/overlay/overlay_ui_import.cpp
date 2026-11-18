@@ -8,6 +8,10 @@
 #include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "refix_overlay.h"
+#include "../refix_wine.h"
+#if REFIX_STEAM_LINK
+#include "../steam_link/steam_link.h"
+#endif
 
 #include <shobjidl.h>
 #include <algorithm>
@@ -107,6 +111,14 @@ void App::ImportImage() {
 void App::ImportFromSteam() {
     editor_.error.clear();
     editor_.info.clear();
+#if REFIX_STEAM_LINK
+    if (ReFixIsWine() && steamlink::GetState() == steamlink::State::Off) {
+        steamlink::Enable();
+        editor_.info = T("Connecting to Steam. Try importing again once connected.",
+                         "Conectando a Steam. Intenta importar de nuevo cuando se conecte.");
+        return;
+    }
+#endif
     std::wstring err;
     const std::optional<SteamSession> s = profiles::ReadSteamSession(err);
     if (!s) {

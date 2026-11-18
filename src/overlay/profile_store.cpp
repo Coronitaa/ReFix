@@ -5,6 +5,10 @@
 #include "profile_store.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
+#include "../refix_wine.h"
+#if REFIX_STEAM_LINK
+#include "../steam_link/steam_link.h"
+#endif
 
 #include <shlobj.h>
 #include <algorithm>
@@ -139,6 +143,20 @@ bool IsValidId(const std::wstring& id) {
 }
 
 std::wstring SteamPath() {
+    if (ReFixIsWine()) {
+        const DWORD n = GetEnvironmentVariableW(L"STEAM_COMPAT_CLIENT_INSTALL_PATH", nullptr, 0);
+        if (n > 1) {
+            std::wstring path(n, L'\0');
+            const DWORD len = GetEnvironmentVariableW(L"STEAM_COMPAT_CLIENT_INSTALL_PATH", &path[0], n);
+            if (len && len < n) {
+                path.resize(len);
+                if (path[0] == L'/') {
+                    std::replace(path.begin(), path.end(), L'/', L'\\');
+                    return L"Z:" + path;
+                }
+            }
+        }
+    }
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", 0, KEY_READ, &key) != ERROR_SUCCESS) return {};
     wchar_t buf[MAX_PATH] = {};
@@ -590,6 +608,31 @@ std::vector<SteamSession> ReadSteamAccounts() {
 }
 
 std::optional<SteamSession> ReadSteamSession(std::wstring& error) {
+#if REFIX_STEAM_LINK
+    if (ReFixIsWine() && steamlink::GetState() != steamlink::State::Off) {
+        const auto state = steamlink::GetState();
+        if (state == steamlink::State::Starting) {
+            error = i18n::TW(L"Connecting to Steam. Try importing again once connected.",
+                             L"Conectando a Steam. Intenta importar de nuevo cuando se conecte.");
+            return std::nullopt;
+        }
+        if (state != steamlink::State::Online || !steamlink::LocalSteamId()) {
+            error = i18n::TW(L"Could not connect to Steam. Check the Steam connection in the overlay.",
+                             L"No se pudo conectar a Steam. Comprueba la conexión en la interfaz.");
+            return std::nullopt;
+        }
+        SteamSession session;
+        session.steamId = steamlink::LocalSteamId();
+        const std::wstring path = SteamPath();
+        if (!path.empty()) {
+            session.name = PersonaFromLoginUsers(path, session.steamId);
+            const std::wstring avatar = path + L"\\config\\avatarcache\\" + std::to_wstring(session.steamId) + L".png";
+            if (GetFileAttributesW(avatar.c_str()) != INVALID_FILE_ATTRIBUTES) session.avatarPath = avatar;
+        }
+        if (session.name.empty()) session.name = L"Steam " + std::to_wstring(session.steamId);
+        return session;
+    }
+#endif
     DWORD pid = 0, accountId = 0;
     if (!ReadActiveProcess(pid, accountId) || !IsProcessAlive(pid)) {
         error = i18n::TW(L"Steam is not running. Open it and sign in to import your account.",
