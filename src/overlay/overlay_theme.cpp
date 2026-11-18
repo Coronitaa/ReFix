@@ -3,6 +3,7 @@
 #endif
 #include "overlay_theme.h"
 #include "overlay_sound.h"
+#include "refix_icons_font.h"
 #include "../imgui/imgui_internal.h"
 
 #include <windows.h>
@@ -77,6 +78,15 @@ const ImWchar* IconRanges() {
     return ranges;
 }
 
+// Segoe icons from Windows\Fonts, or the embedded copy when the prefix has none (Wine/Proton showed "?").
+ImFont* AddIconFont(const std::string& path, float px, ImFontConfig& cfg) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (!path.empty()) return io.Fonts->AddFontFromFileTTF(path.c_str(), px, &cfg, IconRanges());
+    cfg.FontDataOwnedByAtlas = false;  // static data, the atlas must not free it
+    return io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(kReFixIconsTtf), (int)sizeof(kReFixIconsTtf),
+                                          px, &cfg, IconRanges());
+}
+
 ImFont* AddFont(const std::string& text, const std::string& icons, float px, float iconPx) {
     ImGuiIO& io = ImGui::GetIO();
     ImFontConfig cfg;
@@ -87,14 +97,12 @@ ImFont* AddFont(const std::string& text, const std::string& icons, float px, flo
     ImFont* f = !text.empty() ? io.Fonts->AddFontFromFileTTF(text.c_str(), cfg.SizePixels, &cfg, TextRanges()) : nullptr;
     // Preserve the requested size and hierarchy even in a minimal Wine prefix.
     if (!f) f = io.Fonts->AddFontDefault(&cfg);
-    if (!icons.empty()) {
-        ImFontConfig ic;
-        ic.MergeMode = true;
-        ic.PixelSnapH = true;
-        ic.GlyphOffset = ImVec2(0, iconPx * 0.12f);
-        ic.GlyphMinAdvanceX = iconPx;
-        io.Fonts->AddFontFromFileTTF(icons.c_str(), iconPx, &ic, IconRanges());
-    }
+    ImFontConfig ic;
+    ic.MergeMode = true;
+    ic.PixelSnapH = true;
+    ic.GlyphOffset = ImVec2(0, iconPx * 0.12f);
+    ic.GlyphMinAdvanceX = iconPx;
+    AddIconFont(icons, iconPx, ic);
     return f;
 }
 
@@ -142,6 +150,29 @@ bool StyledButton(const char* label, ImVec2 size, bool enabled, ImU32 fill, ImU3
 
 } // namespace
 
+std::string SystemIconFontPath() {
+    for (const char* file : { "SegoeIcons.ttf", "segmdl2.ttf" }) {
+        const std::string path = FontPath(file);
+        if (Exists(path)) return path;
+    }
+    return {};
+}
+
+const wchar_t* GdiIconFamily(bool* isMdl2) {
+    if (isMdl2) *isMdl2 = false;
+    if (Exists(FontPath("SegoeIcons.ttf"))) return L"Segoe Fluent Icons";
+    if (Exists(FontPath("segmdl2.ttf"))) {
+        if (isMdl2) *isMdl2 = true;
+        return L"Segoe MDL2 Assets";
+    }
+    static const bool registered = [] {
+        DWORD count = 0;
+        return AddFontMemResourceEx(const_cast<unsigned char*>(kReFixIconsTtf), (DWORD)sizeof(kReFixIconsTtf),
+                                    nullptr, &count) != nullptr;
+    }();
+    return registered ? REFIX_ICONS_FAMILY : L"Segoe Fluent Icons";
+}
+
 Fonts& F() { return g_fonts; }
 float S(float px) { return std::round(px * g_fonts.scale); }
 int StockCount() { return (int)(sizeof(kStock) / sizeof(kStock[0])); }
@@ -153,18 +184,16 @@ void BuildFonts(float scale) {
     g_fonts.scale = scale;
     const std::string regular = TextFontPath(false);
     const std::string semibold = TextFontPath(true);
-    std::string icons = FontPath("SegoeIcons.ttf");
-    if (!Exists(icons)) icons = FontPath("segmdl2.ttf");
-    if (!Exists(icons)) icons.clear();
+    const std::string icons = SystemIconFontPath();
     g_fonts.body = AddFont(regular, icons, 16.0f * scale, 16.0f * scale);
     g_fonts.caption = AddFont(regular, icons, 15.0f * scale, 14.5f * scale);
     g_fonts.strong = AddFont(semibold, icons, 16.0f * scale, 16.0f * scale);
     g_fonts.heading = AddFont(semibold, icons, 20.0f * scale, 19.0f * scale);
     g_fonts.title = AddFont(semibold, icons, 28.0f * scale, 26.0f * scale);
-    if (!icons.empty()) {
+    {
         ImFontConfig cfg;
         cfg.PixelSnapH = true;
-        g_fonts.glyph = io.Fonts->AddFontFromFileTTF(icons.c_str(), 44.0f * scale, &cfg, IconRanges());
+        g_fonts.glyph = AddIconFont(icons, 44.0f * scale, cfg);
     }
     if (!g_fonts.glyph) g_fonts.glyph = g_fonts.title;
     io.FontDefault = g_fonts.body;
