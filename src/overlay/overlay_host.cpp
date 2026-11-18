@@ -491,6 +491,11 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     if (m != g_mode) {
         const Mode from = g_mode;
         g_mode = m;
+        // RIDEV_NOLEGACY belongs to the process, including this popup's thread.
+        // Leaving the game's registration active can suppress WM_KEYDOWN/WM_CHAR
+        // in Wine even though the overlay has foreground activation.
+        if (m == Mode::Overlay || m == Mode::Dialog) SuspendGameRawInput();
+        else ResumeGameRawInput();
         // Give the focus back to the game (restoring it if it minimised when we took the focus) while our
         // window still has it: hiding first lets Windows activate the desktop, and then we may no longer
         // move the foreground.
@@ -555,8 +560,9 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             SetFocus(g_hwnd);
             ClipCursor(nullptr);
         }
-    } else if ((m == Mode::Overlay || m == Mode::Dialog) && (GetForegroundWindow() != g_hwnd || GetFocus() != g_hwnd)) {
-        // Only when we lost the focus: this runs every frame, and releasing the capture each time broke dragging.
+    } else if ((m == Mode::Overlay || m == Mode::Dialog) &&
+               (GetForegroundWindow() != g_hwnd || (GetFocus() != g_hwnd && !IsChild(g_hwnd, GetFocus())))) {
+        // Restore focus only when it is lost, preserving browser child focus and dragging.
         ReleaseCapture();
         SetForegroundWindow(g_hwnd);
         SetActiveWindow(g_hwnd);
@@ -662,6 +668,15 @@ bool RecreateDevice() {
 }
 
 bool InitThread() {
+    // Keep window coordinates and render targets in physical pixels. Set only
+    // this thread's awareness: changing the game's process DPI mode is unsafe.
+    using SetThreadDpiContext = HANDLE (WINAPI*)(HANDLE);
+    const auto setDpiContext = reinterpret_cast<SetThreadDpiContext>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext"));
+    if (setDpiContext) {
+        if (!setDpiContext(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)))) // per-monitor v2
+            setDpiContext(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-3))); // per-monitor v1
+    }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
@@ -735,8 +750,10 @@ DWORD WINAPI HostThread(LPVOID) {
         const HWND fg = GetForegroundWindow();
         const bool away = !g_childOf && m != Mode::Hidden && gw.hwnd && fg && !IsOurProcessWindow(fg);
         if (away) {
+            ResumeGameRawInput();
             if (IsWindowVisible(g_hwnd)) ShowWindow(g_hwnd, SW_HIDE);
         } else {
+            if (m == Mode::Overlay || m == Mode::Dialog) SuspendGameRawInput();
             if (m != Mode::Hidden && m != g_mode) MaybeRescale(gw);
             ApplyMode(m, gw);
         }

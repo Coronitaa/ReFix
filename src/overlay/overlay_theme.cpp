@@ -48,6 +48,17 @@ std::string FontPath(const char* file) {
 
 bool Exists(const std::string& p) { return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
+std::string TextFontPath(bool bold) {
+    // Wine prefixes normally have Tahoma/Arial, but not Microsoft's Segoe UI.
+    const char* regular[] = { "segoeui.ttf", "tahoma.ttf", "arial.ttf", "verdana.ttf" };
+    const char* strong[] = { "seguisb.ttf", "segoeuib.ttf", "tahomabd.ttf", "arialbd.ttf", "verdanab.ttf" };
+    if (bold) {
+        for (const char* name : strong) if (Exists(FontPath(name))) return FontPath(name);
+    }
+    for (const char* name : regular) if (Exists(FontPath(name))) return FontPath(name);
+    return {};
+}
+
 const ImWchar* TextRanges() {
     static const ImWchar ranges[] = {
         0x0020, 0x00FF, // Basic Latin + Latin-1 (á é í ó ú ñ ¿ ¡)
@@ -69,10 +80,13 @@ const ImWchar* IconRanges() {
 ImFont* AddFont(const std::string& text, const std::string& icons, float px, float iconPx) {
     ImGuiIO& io = ImGui::GetIO();
     ImFontConfig cfg;
-    cfg.OversampleH = 2;
-    cfg.PixelSnapH = true;
-    ImFont* f = Exists(text) ? io.Fonts->AddFontFromFileTTF(text.c_str(), px, &cfg, TextRanges())
-                             : io.Fonts->AddFontDefault();
+    cfg.SizePixels = std::round(px);
+    cfg.OversampleH = 3;
+    cfg.OversampleV = 2;
+    cfg.PixelSnapH = false;
+    ImFont* f = !text.empty() ? io.Fonts->AddFontFromFileTTF(text.c_str(), cfg.SizePixels, &cfg, TextRanges()) : nullptr;
+    // Preserve the requested size and hierarchy even in a minimal Wine prefix.
+    if (!f) f = io.Fonts->AddFontDefault(&cfg);
     if (!icons.empty()) {
         ImFontConfig ic;
         ic.MergeMode = true;
@@ -135,9 +149,10 @@ int StockCount() { return (int)(sizeof(kStock) / sizeof(kStock[0])); }
 void BuildFonts(float scale) {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
+    g_fonts = Fonts{};
     g_fonts.scale = scale;
-    const std::string regular = FontPath("segoeui.ttf");
-    const std::string semibold = Exists(FontPath("seguisb.ttf")) ? FontPath("seguisb.ttf") : FontPath("segoeuib.ttf");
+    const std::string regular = TextFontPath(false);
+    const std::string semibold = TextFontPath(true);
     std::string icons = FontPath("SegoeIcons.ttf");
     if (!Exists(icons)) icons = FontPath("segmdl2.ttf");
     if (!Exists(icons)) icons.clear();
