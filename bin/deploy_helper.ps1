@@ -117,10 +117,21 @@ function Get-Or-Generate-Identity {
     $finalName = ""
     $autoGenerateSteamId = $true
 
-    # Check if ReFix.ini exists and already has persistent identity configured
-    if (Test-Path -LiteralPath $ConfigPath) {
-        $iniLines = Get-Content -LiteralPath $ConfigPath -ErrorAction SilentlyContinue
+    # Identity source: the game's ReFix.ini, or on a first deploy the ReFix.ini of the package AutoDeploy runs from
+    # (bin\ReFix.ini), so IdentityMode = fixed + SteamId set once there applies to every new folder (issue #30).
+    $identitySource = $ConfigPath
+    if (-not (Test-Path -LiteralPath $identitySource) -and $BinDir) {
+        $packageIni = Join-Path $BinDir "ReFix.ini"
+        if (Test-Path -LiteralPath $packageIni) { $identitySource = $packageIni }
+    }
+    if (Test-Path -LiteralPath $identitySource) {
+        $iniLines = Get-Content -LiteralPath $identitySource -ErrorAction SilentlyContinue
+        $identityMode = ""
         foreach ($line in $iniLines) {
+            # IdentityMode is the documented switch; AutoGenerateSteamId is kept for older ReFix.ini files.
+            if ($line -match "^\s*IdentityMode\s*=\s*(auto|fixed)\s*(;.*)?$") {
+                $identityMode = $Matches[1].ToLowerInvariant()
+            }
             if ($line -match "^\s*AutoGenerateSteamId\s*=\s*(false|0)\s*$") {
                 $autoGenerateSteamId = $false
             }
@@ -137,6 +148,8 @@ function Get-Or-Generate-Identity {
                 }
             }
         }
+        if ($identityMode -eq "fixed") { $autoGenerateSteamId = $false }
+        elseif ($identityMode -eq "auto") { $autoGenerateSteamId = $true }
     }
 
     # If an explicit SteamID was provided during deployment, prioritize it
