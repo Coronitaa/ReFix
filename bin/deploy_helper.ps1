@@ -1154,6 +1154,12 @@ switch ($OnlineMode) {
                         $hostSrc32 = Join-Path $ProductBinDir "x86\refix_steamhost.exe"
                         if (Test-Path -LiteralPath $hostSrc32) {
                             Copy-Item -LiteralPath $hostSrc32 -Destination (Join-Path $dir32 "refix_steamhost.exe") -Force -ErrorAction SilentlyContinue
+                            # Steam online services need a current Valve steam_api.dll (flat networking API); the
+                            # game's own copy can be years older (CS:GO 2018 ships SDK 1.40, which lacks it).
+                            $linkSrc32 = Join-Path $BinDir "valve\steam_api.dll"
+                            if (Test-Path -LiteralPath $linkSrc32) {
+                                Copy-Item -LiteralPath $linkSrc32 -Destination (Join-Path $dir32 "refix_steamlink.dll") -Force -ErrorAction SilentlyContinue
+                            }
                         }
                     } elseif (Test-Path -LiteralPath $goldbergDll32) {
                         Copy-Item -LiteralPath $goldbergDll32 -Destination $steamPath32 -Force -ErrorAction Stop
