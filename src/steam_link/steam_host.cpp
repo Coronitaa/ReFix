@@ -45,6 +45,7 @@ constexpr ULONGLONG kDiagMs = 5000;
 constexpr int kFriendFlagImmediate = 4;
 constexpr DWORD kSteamStartTimeoutMs = 180000;
 constexpr DWORD kInitRetryMs = 2000;
+constexpr DWORD kActiveUserGraceMs = 4000;  // Steam running this long without ActiveUser: try SteamAPI_Init anyway
 constexpr ULONGLONG kFriendRefreshMs = 3000;
 constexpr size_t kFriendBytes = 60000;             // one datagram
 
@@ -336,12 +337,21 @@ bool StartSteamAndWait() {
         g_startedSteam = true;
     }
     // Never another steam.exe while one runs: it would only rewrite ActiveProcess (see SteamPid).
+    DWORD runningFor = 0;
     for (DWORD waited = 0; waited < kSteamStartTimeoutMs; waited += 500) {
         if (SteamSignedIn()) {
             Report(kConnecting);
             return Wait(2000);   // steamclient needs a moment after login before it accepts API clients
         }
-        if (SteamRunning()) Report(kSigningIn);
+        if (SteamRunning()) {
+            Report(kSigningIn);
+            // Current Steam clients can leave ActiveProcess\ActiveUser at 0 while signed in: after a few seconds
+            // let SteamAPI_Init decide (InitWhenReady keeps retrying it until Steam accepts or the timeout).
+            if ((runningFor += 500) >= kActiveUserGraceMs) {
+                Report(kConnecting);
+                return true;
+            }
+        }
         if (!Wait(500)) return false;
     }
     Report(kFailed, "Steam did not sign in in time");
@@ -427,7 +437,7 @@ bool InitAsSpacewar() {
 // Steam that has just signed in may still refuse API clients for a moment: retry until it accepts us.
 bool InitWhenReady() {
     for (DWORD waited = 0;; waited += kInitRetryMs) {
-        if (SteamSignedIn() && InitAsSpacewar()) return true;
+        if ((SteamSignedIn() || SteamRunning()) && InitAsSpacewar()) return true;
         if (waited >= kSteamStartTimeoutMs) {
             Report(kFailed, "SteamAPI_Init failed (is Steam signed in?)");
             return false;

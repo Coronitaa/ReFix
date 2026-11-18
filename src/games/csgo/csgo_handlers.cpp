@@ -273,6 +273,9 @@ void ApplyLanHostConfig(const char* jsonStr) {
         "op08_headshots_server.cfg",
         "op08_hunter_gatherers_server.cfg",
         "op08_heavy_assault_suit_server.cfg",
+        // The engine runs it after the mode's and the War Game's configs (game_type 5 runs no gamemode cfg),
+        // so the host settings win over what the map load re-applies.
+        "listenserver.cfg",
     };
     for (const char* name : kServerModeCfgs) {
         EnsureServerCfgHook(cfgDir + name);
@@ -319,6 +322,9 @@ void ShutdownCSGOHandlers() {
 void RegisterCSGOHandlers(refix::IRefixServices* services) {
     s_services = services;
     EnsureGameTypesHooksInstalled();
+    // listenserver.cfg and the mode configs exec this file on every listen server: it only holds settings once
+    // the player hosts from ReFix in this session, never an earlier session's.
+    { std::ofstream(GetCsgoCfgDir() + "refix_lan_host.cfg", std::ios::binary | std::ios::trunc); }
 
     if (services && services->Log) {
         services->Log("[CSGO Mod] LAN Host Enforcer & GC bridge active");

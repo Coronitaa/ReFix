@@ -5404,7 +5404,10 @@ static void ReFixInitializePost(bool success) {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
     }
 
-    if (!ReFix::NetworkModeManager::IsOnline()) ReFix_MultiInstanceOnSteamInit();
+    if (!ReFix::NetworkModeManager::IsOnline()) {
+        ReFix_MultiInstanceOnSteamInit();
+        ReFix_MultiInstanceAvoidExclusiveFullscreen(UnrealSteamEmu::GetInstanceSlot());
+    }
     InstallVTableHooks();
 }
 

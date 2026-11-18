@@ -2606,6 +2606,9 @@ void ApplyHostConfigToEngineAndFiles(const std::string& jsonStr) {
         "op08_headshots_server.cfg",
         "op08_hunter_gatherers_server.cfg",
         "op08_heavy_assault_suit_server.cfg",
+        // The engine runs it after the mode's and the War Game's configs (game_type 5 runs no gamemode cfg),
+        // so the host settings win over what the map load re-applies.
+        "listenserver.cfg",
     };
     static const char* kHookLine = "exec refix_lan_host.cfg";
     for (const char* name : kServerModeCfgs) {

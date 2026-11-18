@@ -200,3 +200,30 @@ void ReFix_MultiInstanceOnSteamInit() {
     if (t) CloseHandle(t);
     else FreeLibrary(self);
 }
+
+void ReFix_MultiInstanceAvoidExclusiveFullscreen(int instanceSlot) {
+    if (instanceSlot <= 0) return;
+    HMODULE tier0 = GetModuleHandleA("tier0.dll");
+    using CommandLineFn = void* (__cdecl*)();
+    auto getCmdLine = tier0 ? reinterpret_cast<CommandLineFn>(GetProcAddress(tier0, "CommandLine")) : nullptr;
+    void* cmdLine = getCmdLine ? getCmdLine() : nullptr;
+    void** vtable = cmdLine ? *reinterpret_cast<void***>(cmdLine) : nullptr;
+    if (!vtable || !vtable[2] || !vtable[6]) return;
+    // ICommandLine: [2] GetCmdLine, [6] AppendParm(parm, values).
+    using GetCmdLineFn = const char*(__thiscall*)(void*);
+    using AppendParmFn = void(__thiscall*)(void*, const char*, const char*);
+    const char* line = reinterpret_cast<GetCmdLineFn>(vtable[2])(cmdLine);
+    if (!line) return;
+    std::string lower(line);
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    auto has = [&](const char* p) {
+        const size_t at = lower.find(p);
+        const size_t end = at == std::string::npos ? at : at + strlen(p);
+        return at != std::string::npos && (end == lower.size() || lower[end] == ' ' || lower[end] == '"');
+    };
+    if (has("-fullscreen") || has("-full") || has("-windowed") || has("-window") || has("-sw")) return;
+    reinterpret_cast<AppendParmFn>(vtable[6])(cmdLine, "-windowed", nullptr);
+    reinterpret_cast<AppendParmFn>(vtable[6])(cmdLine, "-noborder", nullptr);
+    ReFixLog("[MultiInstance] Instance %d: started in a borderless window (exclusive fullscreen would black out the others)",
+             instanceSlot + 1);
+}
