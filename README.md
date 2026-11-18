@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.5.3-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.5.3)
+[![Release](https://img.shields.io/badge/version-v2.5.4-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.5.4)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
@@ -8,7 +8,7 @@ ReFix gets multiplayer working in PC games that normally need Steam or Epic onli
 
 One download contains three products. You pick one per game:
 
-- **ReFix Online + LAN** plays on your local network (or a VPN like Radmin, Hamachi or ZeroTier) with no Steam client at all. If Steam is installed, one switch in the overlay also lets you play with your Steam friends over the Internet.
+- **ReFix Mixed** (LAN + Online) plays on your local network (or a VPN like Radmin, Hamachi or ZeroTier) with no Steam client at all. If Steam is installed, one switch in the overlay also lets you play with your Steam friends over the Internet.
 - **ReFix Offline LAN** is the LAN version of the previous release (2.3.2), for local network play only.
 - **ReFix Online Legacy** is the online version of the previous release (2.3.2): the whole game runs through your Steam client as Spacewar.
 
@@ -16,10 +16,10 @@ ReFix also ships a DLC unlocker based on SmokeAPI.
 
 ## Install
 
-1. Download `ReFix_v2.5.3.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
+1. Download `ReFix_v2.5.4.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
 2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
 3. Pick the game folder, confirm the game's `.exe`, then choose:
-   - `[1] ReFix Online + LAN`, `[2] ReFix Offline LAN` or `[3] ReFix Online Legacy via Steam`
+   - `[1] ReFix Mixed - LAN + Online`, `[2] ReFix Offline LAN` or `[3] ReFix Online Legacy via Steam`
    - which overlay the game shows (LAN products only): ReFix's, Steam's, or none
    - which DLCs to unlock: all, none, or a list you pick from the Steam Store
 4. Start the game.
@@ -42,7 +42,7 @@ A deployed game folder is portable: AutoDeploy also extracts the old DirectX DLL
 - Photon games (PUN 2, Realtime, Voice, Fusion) run against a local Photon emulator, and their traffic goes over Steam P2P. No Photon servers or AppIDs are needed.
 - Epic Online Services games get a DeviceID login through the bundled EOS proxy.
 
-## ReFix Online + LAN
+## ReFix Mixed (LAN + Online)
 
 - No Steam client needed. ReFix LAN replaces the game's Steam and EOS libraries with a local emulator.
 - Players on the same network find each other through the game's own lobbies and server lists. Some older Source games (CS:GO) still join by IP: `connect <host IP>:27015` in the console.
@@ -108,7 +108,7 @@ Press **Shift+Tab**, or the Xbox / PS button of a controller.
 
 ```bash
 bash AutoDeploy.sh                                        # asks for everything
-bash AutoDeploy.sh "/path/to/game" lan                    # ReFix Online + LAN
+bash AutoDeploy.sh "/path/to/game" lan                    # ReFix Mixed (LAN + Online)
 bash AutoDeploy.sh "/path/to/game" offline                # ReFix Offline LAN (2.3.2)
 bash AutoDeploy.sh "/path/to/game" online 480 none        # game folder, mode, AppID, overlay
 bash Uninstall_ReFix.sh "/path/to/game"                    # or bash AutoDeploy.sh --uninstall
@@ -155,7 +155,7 @@ IsolateSaves = true        ; each profile keeps its own saves
 [Steam]
 RealAppId =                ; the game's real AppID
 DLCs = all                 ; all | none | comma-separated AppIDs
-OnlineServices = auto      ; Online + LAN: auto | on | off (the overlay's Steam button wins)
+OnlineServices = auto      ; Mixed: auto | on | off (the overlay's Steam button wins)
 
 [ServerBrowser]
 OverrideServerListAppId = true   ; Online Legacy: search the game's servers under its real AppID
@@ -164,7 +164,7 @@ ServerListAppId =                ; the real AppID (AutoDeploy fills both)
 [Network]
 DiscoveryPort = 47584      ; LAN discovery
 CustomBroadcasts =         ; extra broadcast IPs for VPNs, comma-separated
-InternetAccess = allow     ; Online + LAN: block keeps the game on the local network
+InternetAccess = allow     ; Mixed: block keeps the game on the local network
 
 [P2P]
 EnableWinsockHooks = true  ; false if a game freezes when joining a lobby (games on Steam networking sockets)
