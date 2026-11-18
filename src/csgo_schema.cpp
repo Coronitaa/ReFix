@@ -710,6 +710,27 @@ std::string SchemaManager::ResolveTokenEn(const std::string& token) const {
     return it != m_tokensEn.end() ? it->second : ResolveToken(token);
 }
 
+void SchemaManager::LoadGameKnownIds(const std::string& gamePath) {
+    m_gameDefs.clear();
+    m_gamePaintKits.clear();
+    if (gamePath.empty()) return;
+    KeyValueRead kv(gamePath.c_str());
+    const KeyValue* root = kv.Good() ? kv.Root().GetSubkey("items_game") : nullptr;
+    if (!root) return;
+    if (const KeyValue* items = root->GetSubkey("items"))
+        for (const KeyValue& it : items->Subkeys())
+            if (uint32_t def = FromString<uint32_t>(it.Name())) m_gameDefs.insert(def);
+    if (const KeyValue* kits = root->GetSubkey("paint_kits"))
+        for (const KeyValue& k : kits->Subkeys())
+            if (uint32_t id = FromString<uint32_t>(k.Name())) m_gamePaintKits.insert(id);
+    ReFixLog("[GC] CSGOSchema: this build defines %zu items and %zu paint kits", m_gameDefs.size(), m_gamePaintKits.size());
+}
+
+bool SchemaManager::IsKnownToGame(uint32_t defIndex, uint32_t paintKit) const {
+    if (m_gameDefs.empty()) return true;  // schema not read: filter nothing
+    return m_gameDefs.count(defIndex) && (paintKit == 0 || m_gamePaintKits.count(paintKit));
+}
+
 bool SchemaManager::Load() {
     if (m_loaded) return true;
 
@@ -970,6 +991,15 @@ bool SchemaManager::Load() {
     };
     addKits(m_impl->m_stickerKits);
     addKits(m_impl->m_musicKits);
+
+    // The items above include items_extra.txt, which the running build may not have: an older client shows
+    // those without an icon. Keep only what this build's own items_game.txt defines.
+    LoadGameKnownIds(gamePath);
+    m_marketItems.erase(std::remove_if(m_marketItems.begin(), m_marketItems.end(),
+                                       [&](const MarketItem& mi) { return !IsKnownToGame(mi.defIndex, mi.paintKit); }),
+                        m_marketItems.end());
+    catCounts.clear();
+    for (const MarketItem& mi : m_marketItems) catCounts[mi.category]++;
 
     // 3. Build CategoryInfo list
     m_categories.clear();

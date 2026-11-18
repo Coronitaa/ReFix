@@ -22,6 +22,7 @@
 #include "overlay/refix_overlay.h"
 #include "csgo_item_defs.h"
 #include "csgo_schema.h"
+#include "csgo_gametypes_slot.h"
 #include "source_main_thread_queue.h"
 #include "gc/lan_rooms.h"
 #include "lan_core/refix_lan_core.h"
@@ -1358,6 +1359,9 @@ public:
         PutVarintField(resp, 1, accountId);
         std::vector<uint8_t> globalStats;
         PutVarintField(globalStats, 14, (uint32_t)::time(nullptr)); // rtime32_cur: the GC clock
+        // Non-zero so pre-Panorama clients request the store price sheet (2500); with 0 they never create the
+        // store panel and the main menu store tiles crash (CS:GO March 2018).
+        PutVarintField(globalStats, 10, 1); // pricesheet_version
         PutBytesField(resp, 3, globalStats);
         PutVarintField(resp, 6, 0);       // vac_banned = 0 (clean!)
         PutBytesField(resp, 7, ranking);
@@ -2441,8 +2445,12 @@ void InstallFallbackGameTypesHook(const char* modName) {
     void* gt = createIf("VENGINE_GAMETYPES_VERSION002", nullptr);
     if (!gt) return;
     void** vt = *reinterpret_cast<void***>(gt);
-    if (!vt || !vt[31]) return;
-    void** entry = &vt[31];
+    if (!vt) return;
+    const FallbackGameTypesSlot& hooked = s_fallbackHooks[SlotIdx];
+    if (hooked.vtableEntry && hooked.hookFn && *hooked.vtableEntry == hooked.hookFn) return;  // already ours
+    const int slot = refix::csgo::FindGetMaxPlayersSlot(hMod, vt);
+    if (slot < 0) return;  // unknown layout: never guess a vtable slot
+    void** entry = &vt[slot];
     if (s_fallbackHooks[SlotIdx].hookFn && *entry == s_fallbackHooks[SlotIdx].hookFn) return;
     const bool twoArgs = IsFallbackTwoArgGetMaxPlayers(*entry);
     void* targetHook = twoArgs
@@ -2598,6 +2606,9 @@ void ApplyHostConfigToEngineAndFiles(const std::string& jsonStr) {
         "op08_headshots_server.cfg",
         "op08_hunter_gatherers_server.cfg",
         "op08_heavy_assault_suit_server.cfg",
+        // The engine runs it after the mode's and the War Game's configs (game_type 5 runs no gamemode cfg),
+        // so the host settings win over what the map load re-applies.
+        "listenserver.cfg",
     };
     static const char* kHookLine = "exec refix_lan_host.cfg";
     for (const char* name : kServerModeCfgs) {
@@ -2664,6 +2675,11 @@ void HostLanMatch() {
     int gameType = 0, gameMode = 1;
     for (const Mode& m : kModes)
         if (modeName == m.name) { gameType = m.type; gameMode = m.mode; break; }
+    // The overlay reads game_type/game_mode from this build's gamemodes.txt; the names above are for older callers.
+    if (j.contains("game_type") && j["game_type"].is_number_integer() && j.contains("game_mode") && j["game_mode"].is_number_integer()) {
+        gameType = std::clamp(j["game_type"].get<int>(), 0, 16);
+        gameMode = std::clamp(j["game_mode"].get<int>(), 0, 16);
+    }
 
     std::string map = str("map", "de_dust2");
     if (map.empty() || map.find_first_of(";\"\n ") != std::string::npos) map = "de_dust2"; // never inject commands
@@ -2776,12 +2792,34 @@ void SendToClient(uint32_t msg, const std::vector<uint8_t>& body) {
     }
 }
 
+// What the running build can show: items and coupons its own items_game.txt defines. The inventory is shared by
+// every CS:GO version, and an older client draws newer items without an icon. Nothing is removed from the file.
+static std::vector<EconItem> ClientVisibleItems() {
+    auto& schema = refix::csgo::SchemaManager::Get();
+    schema.Load();
+    auto items = CSGOInventoryManager::Get().GetItems();
+    items.erase(std::remove_if(items.begin(), items.end(),
+                               [&](const EconItem& it) { return !schema.IsKnownToGame(it.defIndex, it.paintKit); }),
+                items.end());
+    return items;
+}
+
+static std::vector<EconCoupon> ClientVisibleCoupons() {
+    auto& schema = refix::csgo::SchemaManager::Get();
+    schema.Load();
+    auto coupons = CSGOInventoryManager::Get().GetCoupons();
+    coupons.erase(std::remove_if(coupons.begin(), coupons.end(),
+                                 [&](const EconCoupon& c) { return !schema.IsKnownToGame(c.defidx, 0); }),
+                  coupons.end());
+    return coupons;
+}
+
 std::vector<uint8_t> BuildEquippedCacheSubscribed(uint64_t steamId) {
     std::vector<uint8_t> owner;
     PutVarintField(owner, 1, kSOTypeSteamId);
     PutVarintField(owner, 2, steamId);
 
-    auto items = CSGOInventoryManager::Get().GetItems();
+    auto items = ClientVisibleItems();
     uint32_t accountId = (uint32_t)(steamId & 0xFFFFFFFF);
 
     std::vector<uint8_t> itemType;
@@ -2819,8 +2857,8 @@ std::vector<uint8_t> BuildClientWelcome(uint32_t version, uint64_t steamId) {
     PutVarintField(owner, 2, steamId);
 
     // Get profile-isolated inventory items and coupons
-    auto items = CSGOInventoryManager::Get().GetItems();
-    auto coupons = CSGOInventoryManager::Get().GetCoupons();
+    auto items = ClientVisibleItems();
+    auto coupons = ClientVisibleCoupons();
     uint32_t accountId = (uint32_t)(steamId & 0xFFFFFFFF);
 
     // SubscribedType for CSOEconItem (type_id = 1)
@@ -2907,8 +2945,8 @@ std::vector<uint8_t> BuildCacheSubscribed(uint64_t steamId) {
     PutVarintField(owner, 1, kSOTypeSteamId);
     PutVarintField(owner, 2, steamId);
 
-    auto items = CSGOInventoryManager::Get().GetItems();
-    auto coupons = CSGOInventoryManager::Get().GetCoupons();
+    auto items = ClientVisibleItems();
+    auto coupons = ClientVisibleCoupons();
     uint32_t accountId = (uint32_t)(steamId & 0xFFFFFFFF);
 
     std::vector<uint8_t> itemType;

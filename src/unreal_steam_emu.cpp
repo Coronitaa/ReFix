@@ -6769,6 +6769,36 @@ namespace UnrealSteamEmu {
         virtual ISteamNetworkingFakeUDPPort *CreateFakeUDPPort(int idxFakeServerPort) override { return nullptr; }
     };
     static CSteamNetworkingSocketsEmu g_steamNetworkingSocketsInstance;
+    // Valve-internal interface the game's own steamnetworkingsockets.dll asks for (CS:GO 2018 asks 001 and 002).
+    // Its name contains "SteamNetworkingSockets", so it used to get the ISteamNetworkingSockets object and crash.
+    // Two classes because x86 thiscall is callee-cleanup: GetNetworkConfigJSON gained an argument in 003.
+    class CSteamNetworkingSocketsSerialized002Emu : public ISteamNetworkingSocketsSerialized002 {
+    public:
+        void SendP2PRendezvous(CSteamID, uint32, const void*, uint32) override {}
+        void SendP2PConnectionFailure(CSteamID, uint32, uint32, const char*) override {}
+        SteamAPICall_t GetCertAsync() override { return k_uAPICallInvalid; }
+        int GetNetworkConfigJSON(void*, uint32) override { return 0; }
+        void CacheRelayTicket(const void*, uint32) override {}
+        uint32 GetCachedRelayTicketCount() override { return 0; }
+        int GetCachedRelayTicket(uint32, void*, uint32) override { return 0; }
+        void PostConnectionStateMsg(const void*, uint32) override {}
+    };
+    static CSteamNetworkingSocketsSerialized002Emu g_steamNetworkingSocketsSerialized002Instance;
+    class CSteamNetworkingSocketsSerialized005Emu : public ISteamNetworkingSocketsSerialized005 {
+    public:
+        void SendP2PRendezvous(CSteamID, uint32, const void*, uint32) override {}
+        void SendP2PConnectionFailure(CSteamID, uint32, uint32, const char*) override {}
+        SteamAPICall_t GetCertAsync() override { return k_uAPICallInvalid; }
+        int GetNetworkConfigJSON(void*, uint32, const char*) override { return 0; }
+        void CacheRelayTicket(const void*, uint32) override {}
+        uint32 GetCachedRelayTicketCount() override { return 0; }
+        int GetCachedRelayTicket(uint32, void*, uint32) override { return 0; }
+        void PostConnectionStateMsg(const void*, uint32) override {}
+        bool GetSTUNServer(int, char*, unsigned int) override { return false; }
+        bool BAllowDirectConnectToPeer(SteamNetworkingIdentity const&) override { return false; }
+        int BeginAsyncRequestFakeIP(int) override { return 0; }
+    };
+    static CSteamNetworkingSocketsSerialized005Emu g_steamNetworkingSocketsSerialized005Instance;
     // --- ISteamNetworkingUtils ---
     class CSteamNetworkingUtilsEmu : public ISteamNetworkingUtils {
     public:
@@ -8596,6 +8626,12 @@ namespace UnrealSteamEmu {
             return &g_steamMatchmakingInstance;
         if (strstr(pchVersion, "STEAMAPPS") || strstr(pchVersion, "SteamApps"))
             return &g_steamAppsInstance;
+        // 001's layout is unknown; CS:GO 2018's steamnetworkingsockets.dll accepts NULL and then asks for 002.
+        if (strstr(pchVersion, "SteamNetworkingSocketsSerialized001")) return nullptr;
+        if (strstr(pchVersion, "SteamNetworkingSocketsSerialized002"))
+            return &g_steamNetworkingSocketsSerialized002Instance;
+        if (strstr(pchVersion, "SteamNetworkingSocketsSerialized"))
+            return &g_steamNetworkingSocketsSerialized005Instance;
         if (strstr(pchVersion, "SteamNetworkingSockets") || strstr(pchVersion, "STEAMNETWORKINGSOCKETS"))
             return &g_steamNetworkingSocketsInstance;
         if (strstr(pchVersion, "SteamNetworkingUtils") || strstr(pchVersion, "STEAMNETWORKINGUTILS"))

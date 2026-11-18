@@ -45,6 +45,7 @@ constexpr ULONGLONG kDiagMs = 5000;
 constexpr int kFriendFlagImmediate = 4;
 constexpr DWORD kSteamStartTimeoutMs = 180000;
 constexpr DWORD kInitRetryMs = 2000;
+constexpr DWORD kActiveUserGraceMs = 4000;  // Steam running this long without ActiveUser: try SteamAPI_Init anyway
 constexpr ULONGLONG kFriendRefreshMs = 3000;
 constexpr size_t kFriendBytes = 60000;             // one datagram
 
@@ -336,12 +337,21 @@ bool StartSteamAndWait() {
         g_startedSteam = true;
     }
     // Never another steam.exe while one runs: it would only rewrite ActiveProcess (see SteamPid).
+    DWORD runningFor = 0;
     for (DWORD waited = 0; waited < kSteamStartTimeoutMs; waited += 500) {
         if (SteamSignedIn()) {
             Report(kConnecting);
             return Wait(2000);   // steamclient needs a moment after login before it accepts API clients
         }
-        if (SteamRunning()) Report(kSigningIn);
+        if (SteamRunning()) {
+            Report(kSigningIn);
+            // Current Steam clients can leave ActiveProcess\ActiveUser at 0 while signed in: after a few seconds
+            // let SteamAPI_Init decide (InitWhenReady keeps retrying it until Steam accepts or the timeout).
+            if ((runningFor += 500) >= kActiveUserGraceMs) {
+                Report(kConnecting);
+                return true;
+            }
+        }
         if (!Wait(500)) return false;
     }
     Report(kFailed, "Steam did not sign in in time");
@@ -368,7 +378,10 @@ bool LoadValve(const std::wstring& dir) {
         const std::wstring path = dir + L"\\" + name;
         if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
         g_api.dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!g_api.dll) continue;
+        if (!g_api.dll) {
+            Log("Valve Steam API DLL load failed (error %lu)", GetLastError());
+            continue;
+        }
         const bool ok = Resolve(g_api.Init, "SteamAPI_Init") && Resolve(g_api.Shutdown, "SteamAPI_Shutdown") &&
             Resolve(g_api.RunCallbacks, "SteamAPI_RunCallbacks") &&
             Resolve(g_api.RegisterCallback, "SteamAPI_RegisterCallback") &&
@@ -395,6 +408,7 @@ bool LoadValve(const std::wstring& dir) {
             Resolve(g_api.ImageSize, "SteamAPI_ISteamUtils_GetImageSize") &&
             Resolve(g_api.ImageRgba, "SteamAPI_ISteamUtils_GetImageRGBA");
         if (ok) {
+            Log("Valve Steam API DLL loaded");
             ResolveAny(g_api.NetUtils, { "SteamAPI_SteamNetworkingUtils_SteamAPI_v004", "SteamAPI_SteamNetworkingUtils_SteamAPI_v003" });
             Resolve(g_api.InitRelay, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess");
             Resolve(g_api.RelayStatus, "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus");
@@ -402,6 +416,7 @@ bool LoadValve(const std::wstring& dir) {
             return true;
         }
         FreeLibrary(g_api.dll);
+        Log("Valve Steam API DLL is missing required exports");
         g_api = Api{};
     }
     Report(kFailed, "Steam API library not found (refix_steamlink DLL)");
@@ -427,7 +442,8 @@ bool InitAsSpacewar() {
 // Steam that has just signed in may still refuse API clients for a moment: retry until it accepts us.
 bool InitWhenReady() {
     for (DWORD waited = 0;; waited += kInitRetryMs) {
-        if (SteamSignedIn() && InitAsSpacewar()) return true;
+        if ((SteamSignedIn() || SteamRunning()) && InitAsSpacewar()) return true;
+        if (!waited) Log("Steam API initialization failed; retrying (Wine=%d, Proton environment=%d)", IsWine(), HasProtonSteamEnv());
         if (waited >= kSteamStartTimeoutMs) {
             Report(kFailed, "SteamAPI_Init failed (is Steam signed in?)");
             return false;
@@ -575,6 +591,7 @@ int Run(int argc, wchar_t** argv) {
     g_game.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     g_game.sin_port = htons(gamePort);
     Post(Writer(kHello).Raw(token.data(), token.size()));
+    Log("Steam helper started (Wine=%d, Proton environment=%d)", IsWine(), HasProtonSteamEnv());
 
     if (!StartSteamAndWait() || !LoadValve(dir) || !InitWhenReady()) {
         while (Wait(500)) {}   // stay until the game reads the failure and lets us go

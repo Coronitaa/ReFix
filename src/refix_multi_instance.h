@@ -16,3 +16,9 @@ void ReFix_MultiInstanceOnSteamInit();
 // Scans this process's handles once and closes Mutant handles whose name ends in a known singleton
 // name. Returns the number of handles closed. Exposed for tests.
 int ReFix_MultiInstanceReleaseNow();
+
+// Source engine games: a second (third...) instance in exclusive fullscreen takes the screen and leaves the
+// first one black. From instance slot 1 on, adds -windowed -noborder to the game's command line (tier0
+// CommandLine) unless the player asked for -fullscreen or a window mode already. Call before the engine sets
+// its video mode (SteamAPI_Init time). No-op outside Source or for the first instance.
+void ReFix_MultiInstanceAvoidExclusiveFullscreen(int instanceSlot);

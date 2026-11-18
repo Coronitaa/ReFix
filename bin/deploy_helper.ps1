@@ -21,7 +21,8 @@ param(
     [string]$AppIdVoice = "",
     [string]$ArbitrationMode = "auto",
     [string]$DefaultRegion = "sa",
-    [string]$OverlayMode = ""
+    [string]$OverlayMode = "",
+    [string]$PortableRuntime = ""
 )
 
 # Fallback to environment variables if parameters were omitted or empty
@@ -43,6 +44,7 @@ if (-not $CustomBroadcasts -and $env:REFIX_CUSTOM_BROADCASTS) { $CustomBroadcast
 if (-not $PhotonAppId -and $env:REFIX_PHOTON_APPID) { $PhotonAppId = $env:REFIX_PHOTON_APPID }
 if (-not $PhotonRegion -and $env:REFIX_PHOTON_REGION) { $PhotonRegion = $env:REFIX_PHOTON_REGION }
 if (-not $OverlayMode -and $env:REFIX_OVERLAY_MODE) { $OverlayMode = $env:REFIX_OVERLAY_MODE }
+if (-not $PortableRuntime -and $env:REFIX_PORTABLE_RUNTIME) { $PortableRuntime = $env:REFIX_PORTABLE_RUNTIME }
 
 # Free-to-play games (Brawlhalla) are in every Steam library and their own backend checks a Steam ticket for the
 # real AppID, so ReFix Online keeps the real AppID instead of masking it as 480. Offline lookup keeps 480.
@@ -117,10 +119,21 @@ function Get-Or-Generate-Identity {
     $finalName = ""
     $autoGenerateSteamId = $true
 
-    # Check if ReFix.ini exists and already has persistent identity configured
-    if (Test-Path -LiteralPath $ConfigPath) {
-        $iniLines = Get-Content -LiteralPath $ConfigPath -ErrorAction SilentlyContinue
+    # Identity source: the game's ReFix.ini, or on a first deploy the ReFix.ini of the package AutoDeploy runs from
+    # (bin\ReFix.ini), so IdentityMode = fixed + SteamId set once there applies to every new folder (issue #30).
+    $identitySource = $ConfigPath
+    if (-not (Test-Path -LiteralPath $identitySource) -and $BinDir) {
+        $packageIni = Join-Path $BinDir "ReFix.ini"
+        if (Test-Path -LiteralPath $packageIni) { $identitySource = $packageIni }
+    }
+    if (Test-Path -LiteralPath $identitySource) {
+        $iniLines = Get-Content -LiteralPath $identitySource -ErrorAction SilentlyContinue
+        $identityMode = ""
         foreach ($line in $iniLines) {
+            # IdentityMode is the documented switch; AutoGenerateSteamId is kept for older ReFix.ini files.
+            if ($line -match "^\s*IdentityMode\s*=\s*(auto|fixed)\s*(;.*)?$") {
+                $identityMode = $Matches[1].ToLowerInvariant()
+            }
             if ($line -match "^\s*AutoGenerateSteamId\s*=\s*(false|0)\s*$") {
                 $autoGenerateSteamId = $false
             }
@@ -137,6 +150,8 @@ function Get-Or-Generate-Identity {
                 }
             }
         }
+        if ($identityMode -eq "fixed") { $autoGenerateSteamId = $false }
+        elseif ($identityMode -eq "auto") { $autoGenerateSteamId = $true }
     }
 
     # If an explicit SteamID was provided during deployment, prioritize it
@@ -1154,6 +1169,12 @@ switch ($OnlineMode) {
                         $hostSrc32 = Join-Path $ProductBinDir "x86\refix_steamhost.exe"
                         if (Test-Path -LiteralPath $hostSrc32) {
                             Copy-Item -LiteralPath $hostSrc32 -Destination (Join-Path $dir32 "refix_steamhost.exe") -Force -ErrorAction SilentlyContinue
+                            # Steam online services need a current Valve steam_api.dll (flat networking API); the
+                            # game's own copy can be years older (CS:GO 2018 ships SDK 1.40, which lacks it).
+                            $linkSrc32 = Join-Path $BinDir "valve\steam_api.dll"
+                            if (Test-Path -LiteralPath $linkSrc32) {
+                                Copy-Item -LiteralPath $linkSrc32 -Destination (Join-Path $dir32 "refix_steamlink.dll") -Force -ErrorAction SilentlyContinue
+                            }
                         }
                     } elseif (Test-Path -LiteralPath $goldbergDll32) {
                         Copy-Item -LiteralPath $goldbergDll32 -Destination $steamPath32 -Force -ErrorAction Stop
@@ -2544,6 +2565,13 @@ function Verify-ReFixDeployment {
 # downloaded from the repository, and must match the catalog's SHA-256.
 # ============================================================
 function Install-GameMods {
+    # REFIX_GAME_MODS (set by BlueStar's install presets): unset = the first catalog row that matches the game,
+    # "none" = no mods, otherwise a comma-separated list of mod ids; each listed mod is installed if it matches.
+    $only = $null
+    if ($env:REFIX_GAME_MODS) {
+        if ($env:REFIX_GAME_MODS.Trim() -ieq "none") { Write-Host "  [*] Game mods disabled (REFIX_GAME_MODS=none)" -ForegroundColor DarkGray; return }
+        $only = @($env:REFIX_GAME_MODS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
     $modsUrl = if ($env:REFIX_MODS_URL) { $env:REFIX_MODS_URL } else { "https://raw.githubusercontent.com/Coronitaa/ReFix/main/refix_mods" }
     $localMods = Join-Path (Split-Path -Parent $BinDir) "refix_mods"
     $catalogPath = Join-Path $localMods "catalog.tsv"
@@ -2560,6 +2588,7 @@ function Install-GameMods {
         $c = $line -split "`t"
         if ($c.Count -lt 7) { continue }
         $id, $product, $exe, $matchFile, $matchText, $file, $sum = $c[0..6]
+        if ($only -and $only -notcontains $id) { continue }
         if ($product -ne "any" -and $product -ne $productName) { continue }
         $exeItem = Get-ChildItem -LiteralPath $TargetDir -Filter $exe -Recurse -Depth 2 -File -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $exeItem) { continue }
@@ -2588,7 +2617,7 @@ function Install-GameMods {
         $marker = Join-Path $dest ".refix_installed"
         if (-not ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker) -contains $file)) { Add-Content -LiteralPath $marker -Value $file }
         Write-Host "  [OK] Installed the $id mod in $dest" -ForegroundColor Green
-        return
+        if (-not $only) { return }
     }
 }
 
@@ -2648,8 +2677,13 @@ function Install-BundledDirectXRuntime {
     }
 }
 
-try { Install-BundledDirectXRuntime -GameDir $TargetDir -ExeFolder $ExeDir -IsX86 ([bool]$isX86Game) }
-catch { Write-Host "  [WARN] Could not extract the bundled DirectX runtime: $_" -ForegroundColor Yellow }
+# Opt-out only: AutoDeploy asks (default yes); BlueStar passes the choice through REFIX_PORTABLE_RUNTIME.
+if ("$PortableRuntime".Trim() -match '^(?i:n|no|false|0|off)$') {
+    Write-Host "  [INFO] Portable runtime libraries skipped (PortableRuntime=$PortableRuntime)" -ForegroundColor DarkGray
+} else {
+    try { Install-BundledDirectXRuntime -GameDir $TargetDir -ExeFolder $ExeDir -IsX86 ([bool]$isX86Game) }
+    catch { Write-Host "  [WARN] Could not extract the bundled DirectX runtime: $_" -ForegroundColor Yellow }
+}
 
 Install-GameMods
 

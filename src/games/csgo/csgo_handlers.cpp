@@ -2,6 +2,7 @@
 #include "csgo_proto.h"
 #include "../../csgo_schema.h"
 #include "../../csgo_item_defs.h"
+#include "../../csgo_gametypes_slot.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -82,8 +83,18 @@ static void HookModuleGameTypes(const char* moduleName) {
     if (!gameTypes) return;
 
     void** vtable = *reinterpret_cast<void***>(gameTypes);
-    if (!vtable || !vtable[31]) return;
-    void** entry = &vtable[31]; // IGameTypes::GetMaxPlayersForTypeAndMode
+    if (!vtable) return;
+    // Already hooked: the slot now holds our code, which no longer references "skirmish".
+    const GameTypesHookSlot& hooked = s_gameTypesHooks[SlotIdx];
+    if (hooked.vtableEntry && hooked.hookFn && *hooked.vtableEntry == hooked.hookFn) return;
+    const int slot = FindGetMaxPlayersSlot(hMod, vtable);
+    if (slot < 0) {
+        static std::atomic<bool> warned{ false };
+        if (!warned.exchange(true) && s_services && s_services->Log)
+            s_services->Log("[CSGO Mod] GetMaxPlayersForTypeAndMode not found in %s: max players not overridden", moduleName);
+        return;
+    }
+    void** entry = &vtable[slot]; // IGameTypes::GetMaxPlayersForTypeAndMode
     if (s_gameTypesHooks[SlotIdx].hookFn && *entry == s_gameTypesHooks[SlotIdx].hookFn) {
         return;
     }
@@ -101,8 +112,8 @@ static void HookModuleGameTypes(const char* moduleName) {
         *entry = targetHook;
         VirtualProtect(entry, sizeof(void*), oldProt, &oldProt);
         if (s_services && s_services->Log) {
-            s_services->Log("[CSGO Mod] Hooked IGameTypes::GetMaxPlayersForTypeAndMode (%d args) in %s",
-                            twoArgs ? 2 : 3, moduleName);
+            s_services->Log("[CSGO Mod] Hooked IGameTypes::GetMaxPlayersForTypeAndMode (slot %d, %d args) in %s",
+                            slot, twoArgs ? 2 : 3, moduleName);
         }
     }
 }
@@ -262,6 +273,9 @@ void ApplyLanHostConfig(const char* jsonStr) {
         "op08_headshots_server.cfg",
         "op08_hunter_gatherers_server.cfg",
         "op08_heavy_assault_suit_server.cfg",
+        // The engine runs it after the mode's and the War Game's configs (game_type 5 runs no gamemode cfg),
+        // so the host settings win over what the map load re-applies.
+        "listenserver.cfg",
     };
     for (const char* name : kServerModeCfgs) {
         EnsureServerCfgHook(cfgDir + name);
@@ -308,6 +322,9 @@ void ShutdownCSGOHandlers() {
 void RegisterCSGOHandlers(refix::IRefixServices* services) {
     s_services = services;
     EnsureGameTypesHooksInstalled();
+    // listenserver.cfg and the mode configs exec this file on every listen server: it only holds settings once
+    // the player hosts from ReFix in this session, never an earlier session's.
+    { std::ofstream(GetCsgoCfgDir() + "refix_lan_host.cfg", std::ios::binary | std::ios::trunc); }
 
     if (services && services->Log) {
         services->Log("[CSGO Mod] LAN Host Enforcer & GC bridge active");
