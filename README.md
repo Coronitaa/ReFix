@@ -4,54 +4,124 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
-ReFix gets multiplayer working in PC games that normally need Steam or Epic online services. It replaces the game's `steam_api64.dll` (and the EOS DLLs when the game has them) with its own, and backs up the originals so you can undo it.
+ReFix is a C++ Steamworks and EOS proxy for Unity, Unreal, and native PC games. It lets you play multiplayer games on a local network or with Steam friends, manages separate player profiles with their own saves and achievements, loads custom mods, and includes a SmokeAPI-based DLC unlocker.
 
-One download contains three products. You pick one per game:
+---
 
-- **ReFix Mixed** (LAN + Online) plays on your local network (or a VPN like Radmin, Hamachi or ZeroTier) with no Steam client at all. If Steam is installed, one switch in the overlay also lets you play with your Steam friends over the Internet.
-- **ReFix Offline LAN** is the LAN version of the previous release (2.3.2), for local network play only.
-- **ReFix Online Legacy** is the online version of the previous release (2.3.2): the whole game runs through your Steam client as Spacewar.
+## Modes
 
-ReFix also ships a DLC unlocker based on SmokeAPI.
+ReFix runs in three different modes depending on how you want to connect and whether you want to use Steam. You can pick your mode during installation with `AutoDeploy` or change it later in the config.
+
+### 1. ReFix LAN Offline
+Runs 100% offline over your local network. Steam does not need to be installed or running.
+* **Networking:** Matchmaking and multiplayer traffic go purely through your local network (LAN). Does not require an internet connection.
+* **Play over the internet:** To play with people outside your house, connect everyone to the same virtual LAN using **RadminVPN, Hamachi, ZeroTier**, or any similar VPN tool.
+* **Features:** Includes the in-game **ReFix Overlay** (`Shift+Tab`), local profile management, achievement tracking with unlock notifications, and full support for **ReFix Mods**.
+
+### 2. ReFix Mixed (LAN + Online)
+Combines everything in `ReFix LAN Offline` with optional Steam P2P networking.
+* **Networking:** You can switch between pure local LAN (or virtual LAN like RadminVPN/ZeroTier) and Steam's P2P network via **Spacewar (AppID 480)**.
+* **Steam Friends & Local Profiles:** When online mode is active through the overlay's Steam toggle, you can mix your local ReFix profiles with your Steam friends list. You can see which friends are playing, invite them directly to your lobby, or join their games.
+* **Features:** Uses the **ReFix Overlay** (with an option to load the Steam overlay alongside it), supports achievements, profile cloud syncing, and **ReFix Mods**.
+
+### 3. ReFix Online Legacy
+The classic mode, closest to standard *OnlineFix*.
+* **Networking:** Completely dependent on the Steam client and requires an active internet connection. All multiplayer traffic routes through Steam's P2P network using **Spacewar (AppID 480)**.
+* **Overlay:** Uses only the native **Steam Overlay**. The ReFix Overlay, local profile switcher, and ReFix mod loader are not active in this mode.
+* **Updates:** Kept for backwards compatibility with older setups. It does not receive frequent updates.
+
+---
+
+## Comparison
+
+| Feature | ReFix LAN Offline | ReFix Mixed | ReFix Online Legacy |
+| :--- | :--- | :--- | :--- |
+| **Requires Steam** | No | Optional (Required for Online P2P) | Yes |
+| **Requires Internet** | No | Only for Steam P2P | Yes |
+| **Network Type** | Pure LAN / Virtual LAN (Radmin, ZeroTier, Hamachi) | LAN + Steam P2P (Spacewar) | Steam P2P (Spacewar) |
+| **Overlay** | ReFix Overlay | ReFix Overlay (+ optional Steam Overlay) | Steam Overlay only |
+| **Achievements & Profiles** | Yes (ReFix local profiles) | Yes (Local + Steam profile mixing) | Steam default |
+| **ReFix Mods Support** | Yes | Yes | No |
+| **Maintenance** | Active | Active | Legacy (Rare updates) |
+
+---
 
 ## Install
 
-1. Download `ReFix_v2.5.5.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases/latest) and extract it anywhere.
-2. Run `AutoDeploy.bat` on Windows, or `bash AutoDeploy.sh` on Linux.
-3. Pick the game folder, confirm the game's `.exe`, then choose:
-   - `[1] ReFix Mixed - LAN + Online`, `[2] ReFix Offline LAN` or `[3] ReFix Online Legacy via Steam`
-   - which overlay the game shows (LAN products only): ReFix's, Steam's, or none
-   - which DLCs to unlock: all, none, or a list you pick from the Steam Store
-4. Start the game.
+1. Download the latest `ReFix_Release.zip` from [Releases](https://github.com/Coronitaa/ReFix/releases) and extract it anywhere.
+2. Run `AutoDeploy.bat` on Windows (or `AutoDeploy.sh` on Linux).
+3. Select the game folder and follow the prompts:
+   * Choose your mode: **ReFix LAN Offline**, **ReFix Mixed**, or **ReFix Online Legacy**.
+   * Choose which overlay to display: ReFix's, Steam's, or none.
+   * Choose which DLCs to unlock: all, none, or a specific list fetched from the Steam Store.
+4. Start the game. Everyone playing together must use the same game version and the same ReFix version.
 
-Everyone who plays together needs the same ReFix version and the same mode.
+### Linux (Proton / Wine)
+`AutoDeploy.sh` installs ReFix into Windows games running under Proton or Wine:
+```bash
+bash AutoDeploy.sh
+```
+Make sure your launcher (Steam, Heroic, Lutris, Faugus) adds the DLL override for the proxy DLL deployed into the game directory (e.g., `WINEDLLOVERRIDES="winmm=n,b"` or `version=n,b`). If it fails on your distro, open an issue with the terminal output.
 
-To undo everything, run `Uninstall_ReFix.bat` on Windows (or `bash Uninstall_ReFix.sh` on Linux). It restores the game's original DLLs and gives the game this PC's own saves back. ReFix LAN profiles stay in `%APPDATA%\ReFix`.
+---
 
-To update ReFix in a game, run the new `AutoDeploy` on it again.
+## In-Game Overlay & Profiles
 
-A deployed game folder is portable: AutoDeploy also extracts the old DirectX DLLs the game needs (d3dx9, xinput...) from the redistributable the game ships, so a copy of the folder starts on a PC that never installed them.
+Press `Shift+Tab` in-game to open the **ReFix Overlay** (available in `LAN Offline` and `Mixed` modes).
+* **Players & Invites:** See players on your LAN or connected via Steam, and send or accept game invites.
+* **Profiles:** Create and switch between multiple profiles on the same PC. Each profile keeps its own SteamID, save files, stats, inventory items, and achievements.
+* **Cloud Sync (Optional):** Local profiles stay on your PC unless you turn on Google Drive sync in `Settings -> Syncing`. ReFix only uses the isolated `drive.appdata` folder in your Google account to back up your saves and profile data.
+* **Dual Overlay:** ReFix blocks the default Steam overlay by default to avoid input conflicts. Set `BlockSteamOverlay = false` under `[Overlay]` in the config if you want both loaded.
 
-## ReFix Online Legacy
+---
 
-- Needs the Steam client running. The game runs as Spacewar (AppID 480), so you get Steam lobbies, invites, P2P and Valve's relay.
-- Free-to-play games keep their real AppID (AutoDeploy asks the Steam store), so their own servers accept the Steam login.
-- If Steam has no install folder for the real AppID, the game gets its own folder instead of an empty path.
-- The real AppID goes into the lobby data, so you only see players of the same game.
-- The game's server browser searches its real AppID (AutoDeploy sets `[ServerBrowser] OverrideServerListAppId`), so public dedicated and community servers show up. Servers that check a ticket for the real game may still refuse the Spacewar login.
-- Photon games (PUN 2, Realtime, Voice, Fusion) run against a local Photon emulator, and their traffic goes over Steam P2P. No Photon servers or AppIDs are needed.
-- Epic Online Services games get a DeviceID login through the bundled EOS proxy.
+## ReFix Mods & Mod SDK
 
-## ReFix Mixed (LAN + Online)
+ReFix includes a built-in mod loader and a C++ header-only **Mod SDK** that works across `ReFix LAN Offline` and `ReFix Mixed`. Mods load directly through ReFix without patching game binaries on disk, and can hook into the ReFix Overlay, read/write game memory, draw custom ImGui windows, and send custom network packets between players in the same lobby.
 
-- No Steam client needed. ReFix LAN replaces the game's Steam and EOS libraries with a local emulator.
-- Players on the same network find each other through the game's own lobbies and server lists. Some older Source games (CS:GO) still join by IP: `connect <host IP>:27015` in the console.
-- Each PC gets its own SteamID automatically, so a patched game folder can be copied to another PC as is.
-- Several copies of the same game can run on one PC, each as a different player.
-- 32-bit and 64-bit games, including older Steamworks SDKs (Dark Souls III and other games from around 2016).
-- Photon games work over LAN, public room lists included. Unreal Engine lobbies show up in the server list.
-- The game can still reach its own Internet services (news, analytics, web APIs). Steam and Photon stay emulated. `InternetAccess = block` in `ReFix.ini` keeps it on the local network only.
-- Photon Fusion games in Shared mode get ReFix's own Fusion server next to the game (`ReFix\FusionShared`).
+* **Official Mods Gallery:** Browse and download ready-to-use mods from the [Official ReFix Mods Gallery](https://github.com/Coronitaa/ReFix/wiki/Official-Mods-Gallery) (or install them directly via [BlueStar](https://github.com/Coronitaa/BlueStar)).
+* **Writing a Mod (SDK & Wiki):** The SDK sits in the `sdk/` folder (`refix_mod_sdk.h`). It exposes a clean C ABI for lifecycle callbacks (`OnModLoad`, `OnFrame`, `OnOverlayDraw`, `OnPacketReceived`), overlay UI registration, and P2P messaging.
+* **Documentation:** Read the [Mod Development Wiki](https://github.com/Coronitaa/ReFix/wiki) for setup guides, API references, and example mod templates.
+
+To install a `.dll` mod manually, drop it into the `refix_mods/` folder inside your game directory. You can enable, disable, or configure loaded mods from the **Mods** tab inside the ReFix Overlay.
+
+---
+
+## DLC Unlocker
+
+ReFix ships with a standalone DLC unlocker based on SmokeAPI.
+* During `AutoDeploy`, you can unlock all DLCs automatically or pick specific ones from the Steam Store.
+* You can also run `DLC_Unlocker.bat` separately if you only want to unlock DLCs on a legitimate Steam install without touching multiplayer files.
+
+---
+
+## Known Limits
+
+* **Official Dedicated Servers:** ReFix cannot connect to official studio servers. Ranked matchmaking, server-side inventories, and global leaderboards stay offline.
+* **Kernel Anti-Cheat:** Games protected by EasyAntiCheat (EAC), BattlEye, or Vanguard must be launched with their anti-cheat disabled or bypassed for local/P2P play.
+* **FromSoftware Games:** Titles like *Dark Souls III*, *Elden Ring*, *Sekiro*, and *Armored Core VI* start in their offline mode unless paired with a dedicated Seamless Co-op mod.
+
+---
+
+## Building from Source
+
+Requirements:
+* Windows 10 or 11
+* Visual Studio 2022 (Desktop development with C++ workload, MSVC v143, Windows 10/11 SDK)
+* CMake 3.24+
+
+```bash
+git clone --recursive [https://github.com/Coronitaa/ReFix.git](https://github.com/Coronitaa/ReFix.git)
+cd ReFix
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+---
+
+## License
+
+You can copy, modify, and share ReFix for non-commercial use, as long as you give credit and keep the same license. See [LICENSE](LICENSE) for full details.
 
 **ReFix Offline LAN** (AutoDeploy option [2]) is the LAN build of 2.3.2, unchanged: the same local network play, without the Steam online services, profile sync and the rest of what is new in 2.4.0.
 
