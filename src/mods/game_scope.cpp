@@ -7,15 +7,11 @@ namespace refix::mods {
 
 namespace {
 
-bool IsCsgo(uint32_t appId) { return appId == 730 || appId == 4465480; }
-
-bool SameGame(uint32_t a, uint32_t b) { return a == b || (IsCsgo(a) && IsCsgo(b)); }
-
 bool TargetMatches(const TargetGame& t, uint32_t appId, const std::string& exeName) {
     if (t.app_id == 0 && t.exe_name.empty()) return false;  // a wildcard target would load the mod everywhere
     if (!t.exe_name.empty() && _stricmp(t.exe_name.c_str(), exeName.c_str()) != 0) return false;
     if (t.app_id == 0) return true;
-    if (IsKnownAppId(appId)) return SameGame(t.app_id, appId);
+    if (IsKnownAppId(appId)) return t.app_id == appId;
     return !t.exe_name.empty();  // unknown AppID: only the exe can vouch for the game
 }
 

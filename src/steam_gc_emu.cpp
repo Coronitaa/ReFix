@@ -22,7 +22,6 @@
 #include "overlay/refix_overlay.h"
 #include "csgo_item_defs.h"
 #include "csgo_schema.h"
-#include "csgo_gametypes_slot.h"
 #include "source_main_thread_queue.h"
 #include "gc/lan_rooms.h"
 #include "lan_core/refix_lan_core.h"
@@ -2387,249 +2386,21 @@ static std::string s_hostConfigJson;
 static std::mutex s_hostConfigMutex;
 static std::atomic<bool> s_hostRequested{ false };
 static std::atomic<bool> s_hostConfigActive{ false };
-static std::atomic<int> s_fallbackOverrideSlots{ 0 };
-static std::mutex s_fallbackHookMutex;
-
 namespace {
 
-using GetMaxPlayers2Fn = int(__thiscall*)(void* thisPtr, int gameType, int gameMode);
-using GetMaxPlayers3Fn = int(__thiscall*)(void* thisPtr, int gameType, int gameMode, int skirmishId);
-struct FallbackGameTypesSlot {
-    void** vtableEntry = nullptr;
-    void* original = nullptr;
-    void* hookFn = nullptr;
-};
-static FallbackGameTypesSlot s_fallbackHooks[3] = {};
-
-template <int SlotIdx>
-int __fastcall Fallback_GetMaxPlayersForTypeAndMode2(void* thisPtr, void* /*edx*/, int gameType, int gameMode) {
-    const int slots = s_fallbackOverrideSlots.load();
-    if (slots >= 2 && slots <= 64) return slots;
-    if (auto orig = reinterpret_cast<GetMaxPlayers2Fn>(s_fallbackHooks[SlotIdx].original)) {
-        return orig(thisPtr, gameType, gameMode);
-    }
-    return 10;
-}
-
-template <int SlotIdx>
-int __fastcall Fallback_GetMaxPlayersForTypeAndMode3(void* thisPtr, void* /*edx*/, int gameType, int gameMode, int skirmishId) {
-    const int slots = s_fallbackOverrideSlots.load();
-    if (slots >= 2 && slots <= 64) return slots;
-    if (auto orig = reinterpret_cast<GetMaxPlayers3Fn>(s_fallbackHooks[SlotIdx].original)) {
-        return orig(thisPtr, gameType, gameMode, skirmishId);
-    }
-    return 10;
-}
-
-bool IsFallbackTwoArgGetMaxPlayers(const void* fnAddr) {
-    if (!fnAddr) return false;
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(fnAddr);
-    bool sawRet8 = false;
-    for (int i = 0; i < 240; ++i) {
-        if (p[i] == 0xCC && p[i + 1] == 0xCC) break;
-        if (p[i] == 0xC2 && p[i + 2] == 0x00) {
-            if (p[i + 1] == 0x0C) return false;
-            if (p[i + 1] == 0x08) sawRet8 = true;
-        }
-    }
-    return sawRet8;
-}
-
-template <int SlotIdx>
-void InstallFallbackGameTypesHook(const char* modName) {
-    HMODULE hMod = GetModuleHandleA(modName);
-    if (!hMod) return;
-    using CreateInterfaceFn = void* (__cdecl*)(const char* name, int* rc);
-    auto createIf = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hMod, "CreateInterface"));
-    if (!createIf) return;
-    void* gt = createIf("VENGINE_GAMETYPES_VERSION002", nullptr);
-    if (!gt) return;
-    void** vt = *reinterpret_cast<void***>(gt);
-    if (!vt) return;
-    const FallbackGameTypesSlot& hooked = s_fallbackHooks[SlotIdx];
-    if (hooked.vtableEntry && hooked.hookFn && *hooked.vtableEntry == hooked.hookFn) return;  // already ours
-    const int slot = refix::csgo::FindGetMaxPlayersSlot(hMod, vt);
-    if (slot < 0) return;  // unknown layout: never guess a vtable slot
-    void** entry = &vt[slot];
-    if (s_fallbackHooks[SlotIdx].hookFn && *entry == s_fallbackHooks[SlotIdx].hookFn) return;
-    const bool twoArgs = IsFallbackTwoArgGetMaxPlayers(*entry);
-    void* targetHook = twoArgs
-        ? reinterpret_cast<void*>(&Fallback_GetMaxPlayersForTypeAndMode2<SlotIdx>)
-        : reinterpret_cast<void*>(&Fallback_GetMaxPlayersForTypeAndMode3<SlotIdx>);
-    if (*entry == targetHook) return;
-    DWORD oldProt = 0;
-    if (VirtualProtect(entry, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
-        s_fallbackHooks[SlotIdx].vtableEntry = entry;
-        s_fallbackHooks[SlotIdx].original = *entry;
-        s_fallbackHooks[SlotIdx].hookFn = targetHook;
-        *entry = targetHook;
-        VirtualProtect(entry, sizeof(void*), oldProt, &oldProt);
-    }
-}
-
+// The game's own mod (refix_csgo.dll) applies the host settings: max players, refix_lan_host.cfg and the configs that
+// exec it. ReFix keeps no copy of that logic.
 void ApplyHostConfigToEngineAndFiles(const std::string& jsonStr) {
     if (jsonStr.empty()) return;
-
-    // 1. If the CS:GO native mod (refix_csgo.dll) is loaded, notify its LAN Host Enforcer directly.
     HMODULE hCsgoMod = GetModuleHandleA("refix_csgo.dll");
-    if (hCsgoMod) {
-        using ModApplyFn = void(__cdecl*)(const char*);
-        if (auto fn = reinterpret_cast<ModApplyFn>(GetProcAddress(hCsgoMod, "ReFixCSGOMod_ApplyHostConfig"))) {
-            fn(jsonStr.c_str());
-            s_hostConfigActive.store(true);
-            return;
-        }
+    using ModApplyFn = void(__cdecl*)(const char*);
+    auto fn = hCsgoMod ? reinterpret_cast<ModApplyFn>(GetProcAddress(hCsgoMod, "ReFixCSGOMod_ApplyHostConfig")) : nullptr;
+    if (!fn) {
+        ReFixLog("[GC] Host settings not applied: the CS:GO mod (refix_csgo.dll) is not loaded");
+        return;
     }
-
-    // 2. Built-in fallback enforcement when refix_csgo.dll is not loaded yet.
-    nlohmann::json j = nlohmann::json::parse(jsonStr, nullptr, false);
-    if (!j.is_object()) return;
-    auto num = [&](const char* key, double def) {
-        double v = j.contains(key) && j[key].is_number() ? j[key].get<double>() : def;
-        return (std::max)(-1.0e6, (std::min)(1.0e6, v));
-    };
-    auto str = [&](const char* key, const char* def) {
-        return j.contains(key) && j[key].is_string() ? j[key].get<std::string>() : std::string(def);
-    };
-
-    const int slots = std::clamp((int)num("maxplayers", 10), 2, 64);
-    const int maxRounds = std::clamp((int)num("maxrounds", 30), 1, 100);
-    const double roundTime = std::clamp(num("roundtime", 1.92), 0.5, 60.0);
-    const int warmupTime = std::clamp((int)num("warmuptime", 60), 0, 3600);
-    const int startMoney = std::clamp((int)num("startmoney", 800), 0, 65535);
-    const int maxMoney = std::clamp((int)num("maxmoney", 16000), 0, 65535);
-    const int friendlyFire = (int)num("friendlyfire", 1) ? 1 : 0;
-    const int bots = std::clamp((int)num("bot_quota", 9), 0, 63);
-    const int botDifficulty = std::clamp((int)num("bot_difficulty", 2), 0, 3);
-    const int cheats = (int)num("sv_cheats", 0) ? 1 : 0;
-    const int overtime = (int)num("overtime", 0) ? 1 : 0;
-    std::string password = str("password", "");
-    password.erase(std::remove_if(password.begin(), password.end(), [](char c) { return c == '"' || c == ';' || c == '\n' || c == '\r'; }),
-                   password.end());
-
-    s_fallbackOverrideSlots.store(slots);
+    fn(jsonStr.c_str());
     s_hostConfigActive.store(true);
-
-    if (HMODULE hTier0 = GetModuleHandleA("tier0.dll")) {
-        using CommandLineFn = void* (__cdecl*)();
-        if (auto getCmdLine = reinterpret_cast<CommandLineFn>(GetProcAddress(hTier0, "CommandLine"))) {
-            if (void* cmdLine = getCmdLine()) {
-                void** vt = *reinterpret_cast<void***>(cmdLine);
-                if (vt && vt[6]) {
-                    using AppendParmFn = void(__thiscall*)(void*, const char*, const char*);
-                    char sBuf[16];
-                    snprintf(sBuf, sizeof(sBuf), "%d", slots);
-                    reinterpret_cast<AppendParmFn>(vt[6])(cmdLine, "-maxplayers_override", sBuf);
-                }
-            }
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(s_fallbackHookMutex);
-        InstallFallbackGameTypesHook<0>("server.dll");
-        InstallFallbackGameTypesHook<1>("matchmaking.dll");
-        InstallFallbackGameTypesHook<2>("client.dll");
-    }
-
-    char exe[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    std::string cfgDir = exe;
-    const size_t slash = cfgDir.find_last_of("\\/");
-    cfgDir = (slash == std::string::npos ? "" : cfgDir.substr(0, slash + 1)) + "csgo\\cfg\\";
-    CreateDirectoryA(cfgDir.c_str(), nullptr);
-
-    std::ostringstream cfg;
-    cfg << "// Generated by ReFix LAN Host\r\n"
-        << "sv_lan 1\r\n"
-        << "sv_visiblemaxplayers " << slots << "\r\n"
-        << "mp_maxrounds " << maxRounds << "\r\n"
-        << "mp_roundtime " << roundTime << "\r\n"
-        << "mp_roundtime_defuse " << roundTime << "\r\n"
-        << "mp_roundtime_hostage " << roundTime << "\r\n"
-        << "mp_startmoney " << startMoney << "\r\n"
-        << "mp_maxmoney " << maxMoney << "\r\n"
-        << "mp_friendlyfire " << friendlyFire << "\r\n"
-        << "mp_overtime_enable " << overtime << "\r\n"
-        << "sv_cheats " << cheats << "\r\n"
-        << "sv_password \"" << password << "\"\r\n"
-        << "mp_limitteams 0\r\n"
-        << "mp_autoteambalance 0\r\n"
-        << "mp_humanteam any\r\n"
-        << "bot_difficulty " << botDifficulty << "\r\n"
-        << "bot_chatter normal\r\n"
-        << "bot_join_after_player 1\r\n";
-    if (warmupTime <= 0) {
-        cfg << "mp_do_warmup_period 0\r\n"
-            << "mp_do_warmup_offine 0\r\n"
-            << "mp_warmuptime 0\r\n"
-            << "mp_warmuptime_all_players_connected 0\r\n"
-            << "mp_warmup_end\r\n";
-    } else {
-        cfg << "mp_do_warmup_period 1\r\n"
-            << "mp_do_warmup_offine 1\r\n"
-            << "mp_warmuptime " << warmupTime << "\r\n"
-            << "mp_warmuptime_all_players_connected " << warmupTime << "\r\n"
-            << "mp_warmup_pausetimer 0\r\n";
-    }
-    if (bots <= 0) {
-        cfg << "bot_quota 0\r\n"
-            << "bot_kick\r\n";
-    } else {
-        cfg << "bot_quota_mode normal\r\n"
-            << "bot_quota " << bots << "\r\n";
-    }
-
-    {
-        std::ofstream out(cfgDir + "refix_lan_host.cfg", std::ios::binary | std::ios::trunc);
-        if (out) {
-            const std::string text = cfg.str();
-            out.write(text.data(), (std::streamsize)text.size());
-        }
-    }
-
-    static const char* const kServerModeCfgs[] = {
-        "gamemode_competitive_server.cfg",
-        "gamemode_casual_server.cfg",
-        "gamemode_competitive2v2_server.cfg",
-        "gamemode_weapons_expert_server.cfg",
-        "gamemode_deathmatch_server.cfg",
-        "gamemode_armsrace_server.cfg",
-        "gamemode_demolition_server.cfg",
-        "gamemode_flyingscoutsman_server.cfg",
-        "gamemode_cooperative_server.cfg",
-        "gamemode_coopmission_server.cfg",
-        "gamemode_survival_server.cfg",
-        "op08_flying_scoutsman_server.cfg",
-        "op08_stab_stab_zap_server.cfg",
-        "op08_trigger_discipline_server.cfg",
-        "op08_headshots_server.cfg",
-        "op08_hunter_gatherers_server.cfg",
-        "op08_heavy_assault_suit_server.cfg",
-        // The engine runs it after the mode's and the War Game's configs (game_type 5 runs no gamemode cfg),
-        // so the host settings win over what the map load re-applies.
-        "listenserver.cfg",
-    };
-    static const char* kHookLine = "exec refix_lan_host.cfg";
-    for (const char* name : kServerModeCfgs) {
-        const std::string path = cfgDir + name;
-        std::string existing;
-        {
-            std::ifstream in(path, std::ios::binary);
-            if (in) {
-                std::ostringstream ss;
-                ss << in.rdbuf();
-                existing = ss.str();
-            }
-        }
-        if (existing.find(kHookLine) == std::string::npos) {
-            std::ofstream out(path, std::ios::binary | std::ios::app);
-            if (out) {
-                if (!existing.empty() && existing.back() != '\n') out << "\r\n";
-                out << kHookLine << "\r\n";
-            }
-        }
-    }
 }
 
 } // namespace
@@ -2643,12 +2414,8 @@ void OnServerHelloHostConfig() {
     if (!s_hostConfigActive.load()) return;
     if (HMODULE hCsgoMod = GetModuleHandleA("refix_csgo.dll")) {
         using ModHelloFn = void(__cdecl*)();
-        if (auto fn = reinterpret_cast<ModHelloFn>(GetProcAddress(hCsgoMod, "ReFixCSGOMod_OnServerHello"))) {
-            fn();
-            return;
-        }
+        if (auto fn = reinterpret_cast<ModHelloFn>(GetProcAddress(hCsgoMod, "ReFixCSGOMod_OnServerHello"))) fn();
     }
-    refix::source::MainThreadQueue::ExecuteClientCmd("exec refix_lan_host.cfg");
 }
 
 // Starts a listen server with the settings last stored by SetHostConfigJson (play menu or overlay).

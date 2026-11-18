@@ -7,6 +7,7 @@
 #include "profile_store.h"
 #include "refix_overlay.h"
 #include "../unreal_steam_emu.h"
+#include "../mods/mod_host.h"
 
 #include <windows.h>
 #include <winhttp.h>
@@ -224,25 +225,44 @@ void ParseUtf16VdfTokens(const std::wstring& path,
     }
 }
 
-bool LoadCsgoLocalSchema(std::vector<Def>& defs) {
-    const std::wstring base = ExeDir();
-    const std::wstring enPath = base + L"csgo\\resource\\csgo_english.txt";
+// Source engine: the game folder is named after the exe (hl2.exe aside), e.g. csgo.exe -> csgo\.
+std::wstring SourceGameDir() {
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring name = exe;
+    name = name.substr(name.find_last_of(L"\\/") + 1);
+    const size_t dot = name.find_last_of(L'.');
+    return dot == std::wstring::npos ? name : name.substr(0, dot);
+}
+
+// Local icon folders of a Source game's achievements (Panorama build, then Scaleform build).
+std::vector<std::wstring> SourceAchievementIconDirs() {
+    const std::wstring game = ExeDir() + SourceGameDir() + L"\\";
+    return { game + L"materials\\panorama\\images\\icons\\achievements\\", game + L"resource\\flash\\images\\achievements\\" };
+}
+
+// Achievements read from a Source game's own files (<game>\resource\<game>_<language>.txt: <API>_NAME/_DESC tokens,
+// icons in its achievement folders). Only when the game's mod asks for it ("source.local_achievements"); API names
+// the mod marks hidden are skipped.
+bool LoadSourceLocalSchema(std::vector<Def>& defs) {
+    if (!refix::mods::GameFeatureRequested("source.local_achievements")) return false;
+    const std::wstring game = SourceGameDir();
+    const std::wstring resource = ExeDir() + game + L"\\resource\\" + game;
+    const std::wstring enPath = resource + L"_english.txt";
     if (GetFileAttributesW(enPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
     std::map<std::string, std::string> enTokens, esTokens;
     std::vector<std::string> order;
     ParseUtf16VdfTokens(enPath, enTokens, &order);
-    ParseUtf16VdfTokens(base + L"csgo\\resource\\csgo_spanish.txt", esTokens, nullptr);
+    ParseUtf16VdfTokens(resource + L"_spanish.txt", esTokens, nullptr);
 
-    const std::wstring panoIcons = base + L"csgo\\materials\\panorama\\images\\icons\\achievements\\";
-    const std::wstring flashIcons = base + L"csgo\\resource\\flash\\images\\achievements\\";
+    const std::vector<std::wstring> iconDirs = SourceAchievementIconDirs();
 
     defs.clear();
     std::set<std::string> seen;
     for (const std::string& api : order) {
         if (!seen.insert(api).second) continue;
-        // Cut beta achievements not in CS:GO's 167 achievement list.
-        if (api == "BOMB_DEFUSE_NEEDED_KIT" || api == "BREAK_PROPS" || api == "GUN_GAME_SELECT_SUICIDE_WITH_KNIFE") continue;
+        if (refix::mods::IsHiddenAchievement(api)) continue;
 
         auto itName = enTokens.find(api + "_NAME");
         auto itDesc = enTokens.find(api + "_DESC");
@@ -252,10 +272,9 @@ bool LoadCsgoLocalSchema(std::vector<Def>& defs) {
         for (char& c : lower) c = (char)tolower((unsigned char)c);
         const std::string iconFile = lower + ".jpg";
         const std::wstring wIcon = FromUtf8(iconFile);
-        if (GetFileAttributesW((panoIcons + wIcon).c_str()) == INVALID_FILE_ATTRIBUTES &&
-            GetFileAttributesW((flashIcons + wIcon).c_str()) == INVALID_FILE_ATTRIBUTES) {
-            continue;
-        }
+        bool hasIcon = false;
+        for (const std::wstring& dir : iconDirs) hasIcon = hasIcon || GetFileAttributesW((dir + wIcon).c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (!hasIcon) continue;
 
         Def d;
         d.api = api;
@@ -444,9 +463,9 @@ void Ensure(bool waitForSchema) {
             const std::wstring folder = g_appId ? ReFixOverlay::StatsFolder(g_appId) : std::wstring();
             if (!folder.empty()) g_stateFile = folder + L"\\stats.ini";
             LoadStateLocked();
-            // Merge CS:GO stats across classic (730) and standalone legacy (4465480) AppIDs if present.
-            if (g_appId == 730 || g_appId == 4465480) {
-                const uint32_t altAppId = (g_appId == 730) ? 4465480u : 730u;
+            // Builds of the same game under other AppIDs (the mod lists them) share progress.
+            for (const uint32_t altAppId : refix::mods::GameAppIds()) {
+                if (altAppId == g_appId) continue;
                 const std::wstring altFolder = ReFixOverlay::StatsFolder(altAppId);
                 if (!altFolder.empty()) {
                     const std::wstring savedFile = g_stateFile;
@@ -456,11 +475,11 @@ void Ensure(bool waitForSchema) {
                 }
             }
             g_schemaEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            std::vector<Def> csgoDefs;
-            if (LoadCsgoLocalSchema(csgoDefs)) {
-                InstallSchema(std::move(csgoDefs));
+            std::vector<Def> localDefs;
+            if (LoadSourceLocalSchema(localDefs)) {
+                InstallSchema(std::move(localDefs));
                 SetEvent(g_schemaEvent);
-                ReFixLog("[Achievements] Loaded %zu local CS:GO achievements", g_defs.size());
+                ReFixLog("[Achievements] Loaded %zu achievements from the game's own files", g_defs.size());
             } else if (g_appId != 0 && g_appId != 480) {
                 g_cacheDir = profiles::RootDir() + L"\\Achievements\\" + std::to_wstring(g_appId);
                 std::vector<Def> defs;
@@ -752,12 +771,12 @@ bool SchemaReady() {
 
 std::wstring IconFile(const std::string& icon) {
     if (!SafeIconName(icon)) return {};
-    const std::wstring base = ExeDir();
     const std::wstring wIcon = FromUtf8(icon);
-    const std::wstring panoPath = base + L"csgo\\materials\\panorama\\images\\icons\\achievements\\" + wIcon;
-    if (GetFileAttributesW(panoPath.c_str()) != INVALID_FILE_ATTRIBUTES) return panoPath;
-    const std::wstring flashPath = base + L"csgo\\resource\\flash\\images\\achievements\\" + wIcon;
-    if (GetFileAttributesW(flashPath.c_str()) != INVALID_FILE_ATTRIBUTES) return flashPath;
+    if (refix::mods::GameFeatureRequested("source.local_achievements")) {
+        for (const std::wstring& dir : SourceAchievementIconDirs()) {
+            if (GetFileAttributesW((dir + wIcon).c_str()) != INVALID_FILE_ATTRIBUTES) return dir + wIcon;
+        }
+    }
 
     std::wstring dir;
     {

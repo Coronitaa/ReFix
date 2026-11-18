@@ -236,6 +236,27 @@ bool ParseManifest(const std::string& json_text, ModManifest& out, std::string& 
         parse_str_list("conflicts", out.dependencies.conflicts);
     }
 
+    // features, own_save_roots (optional)
+    out.features.clear();
+    if (root.obj_val.count("features") && root.obj_val["features"].type == JsonType::Array) {
+        for (const auto& item : root.obj_val["features"].arr_val) {
+            if (item.type == JsonType::String && !item.str_val.empty()) out.features.insert(item.str_val);
+        }
+    }
+    out.own_save_roots.clear();
+    if (root.obj_val.count("own_save_roots") && root.obj_val["own_save_roots"].type == JsonType::Array) {
+        for (const auto& item : root.obj_val["own_save_roots"].arr_val) {
+            if (item.type == JsonType::String && !item.str_val.empty()) out.own_save_roots.push_back(item.str_val);
+        }
+    }
+
+    out.hidden_achievements.clear();
+    if (root.obj_val.count("hidden_achievements") && root.obj_val["hidden_achievements"].type == JsonType::Array) {
+        for (const auto& item : root.obj_val["hidden_achievements"].arr_val) {
+            if (item.type == JsonType::String && !item.str_val.empty()) out.hidden_achievements.insert(item.str_val);
+        }
+    }
+
     // capabilities
     out.capabilities.clear();
     if (root.obj_val.count("capabilities") && root.obj_val["capabilities"].type == JsonType::Array) {
@@ -347,6 +368,17 @@ std::string ToCanonicalJson(const ModManifest& m) {
     ss << "\"entrypoint\":" << EscapeJsonString(m.entrypoint) << ",";
     ss << "\"execution_tier\":" << (m.execution_tier == ExecutionTier::Native ? "\"native\"" : "\"sandboxed\"") << ",";
 
+    if (!m.features.empty()) {
+        ss << "\"features\":[";
+        first = true;
+        for (const auto& f : m.features) {
+            if (!first) ss << ",";
+            first = false;
+            ss << EscapeJsonString(f);
+        }
+        ss << "],";
+    }
+
     // files sorted
     ss << "\"files\":{";
     first = true;
@@ -357,8 +389,26 @@ std::string ToCanonicalJson(const ModManifest& m) {
     }
     ss << "},";
 
+    if (!m.hidden_achievements.empty()) {
+        ss << "\"hidden_achievements\":[";
+        first = true;
+        for (const auto& a : m.hidden_achievements) {
+            if (!first) ss << ",";
+            first = false;
+            ss << EscapeJsonString(a);
+        }
+        ss << "],";
+    }
     ss << "\"id\":" << EscapeJsonString(m.id) << ",";
     ss << "\"name\":" << EscapeJsonString(m.name) << ",";
+    if (!m.own_save_roots.empty()) {
+        ss << "\"own_save_roots\":[";
+        for (size_t i = 0; i < m.own_save_roots.size(); ++i) {
+            if (i > 0) ss << ",";
+            ss << EscapeJsonString(m.own_save_roots[i]);
+        }
+        ss << "],";
+    }
     ss << "\"phase\":" << EscapeJsonString(m.phase) << ",";
     ss << "\"priority\":" << m.priority << ",";
 

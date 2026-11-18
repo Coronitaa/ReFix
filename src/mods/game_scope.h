@@ -12,7 +12,8 @@ namespace refix::mods {
 bool IsKnownAppId(uint32_t appId);
 
 // True when one target matches the running game. A target needs an app_id or an exe_name; with both, both
-// must match (the exe alone decides while the AppID is unknown). CS:GO 730 and 4465480 count as one game.
+// must match (the exe alone decides while the AppID is unknown). Builds of one game under different AppIDs are
+// listed as separate targets.
 // An empty target list matches nothing: a mod has to say which game it is for.
 bool MatchesGame(const std::vector<TargetGame>& targets, uint32_t appId, const std::string& exeName);
 

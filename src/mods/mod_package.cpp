@@ -344,7 +344,11 @@ bool ModPackage::VerifyAndExtract(const std::string& rfmod_path,
         }
 
         std::string full_dest = dest_dir + "/" + rel_path;
-        bool write_ok = WriteDiskFile(full_dest, reinterpret_cast<const uint8_t*>(p), uncomp_size);
+        // Another instance of the game may have this exact file loaded: an identical copy needs no write.
+        std::vector<uint8_t> existing;
+        bool write_ok = (ReadDiskFile(full_dest, existing) && existing.size() == uncomp_size &&
+                         memcmp(existing.data(), p, uncomp_size) == 0) ||
+                        WriteDiskFile(full_dest, reinterpret_cast<const uint8_t*>(p), uncomp_size);
         mz_free(p);
 
         if (!write_ok) {

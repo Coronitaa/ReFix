@@ -1,6 +1,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include "../mods/mod_host.h"
 #include "save_swap.h"
 #include "overlay_text.h"
 #include "refix_overlay.h"
@@ -647,6 +648,8 @@ static bool IsExcludedRoot(const std::wstring& folder) {
         // Engines y launchers
         L"unity", L"unrealengine", L"steam", L"valve", L"epic", L"epic games",
         L"epicgameslauncher", L"eos", L"discord",
+        // Data folders of other games (their own mod claims them back with own_save_roots)
+        L"counter-strike global offensive",
         // Rutas propias de ReFix
         L"refix", L"cef", L"squirreltemp", nullptr
     };
@@ -742,14 +745,7 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
                 std::wstring sub = s.substr(bf.base.size() + 1);
                 size_t slash = sub.find(L'\\');
                 std::wstring firstPart = (slash == std::wstring::npos) ? sub : sub.substr(0, slash);
-                if (firstPart.empty() || IsExcludedRoot(firstPart)) continue;
-
-                if (UnrealSteamEmu::GetAppID() != 730) {
-                    if (_wcsicmp(firstPart.c_str(), L"Counter-Strike Global Offensive") == 0 ||
-                        s.find(L"Counter-Strike Global Offensive") != std::wstring::npos) {
-                        continue;
-                    }
-                }
+                if (firstPart.empty() || (IsExcludedRoot(firstPart) && !refix::mods::IsOwnSaveRoot(firstPart))) continue;
 
                 // Candidate save path: wait for profile gate if active
                 if (g_gateActive.load()) {

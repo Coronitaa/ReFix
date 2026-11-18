@@ -66,6 +66,7 @@
 
 #include "unreal_steam_emu.h"
 #include "gc/gc_relay.h"
+#include "mods/mod_host.h"
 #include "unreal_detect.h"
 #include "network/fault_injector.h"
 #include "network/message_tracker.h"
@@ -3549,7 +3550,7 @@ namespace UnrealSteamEmu {
             }
 
             ReFixLog("[UnrealSteam] BeginAuthSession: Accepted session for SteamID %llu", sid);
-            if (UnrealSteamEmu::GetAppID() == 730) {
+            if (refix::mods::GameFeatureRequested("csgo.gc")) {
                 refix::gc::OnGameServerClientAuth(sid, 1);
             }
             return k_EBeginAuthSessionResultOK;
@@ -7699,7 +7700,7 @@ namespace UnrealSteamEmu {
             }
 
             ReFixLog("[UnrealSteam] SendUserConnectAndAuthenticate: Approved client %llu", sid);
-            if (UnrealSteamEmu::GetAppID() == 730) {
+            if (refix::mods::GameFeatureRequested("csgo.gc")) {
                 refix::gc::OnGameServerClientAuth(sid, 1);
             }
             return true;
@@ -8758,7 +8759,7 @@ namespace UnrealSteamEmu {
         if (g_transportMode.load() == TransportMode::Canonical) {
             refix::lan::ILanCore::Get().SetAppScope("Steam_" + std::to_string(appId));
             refix::lan::ILanCore::Get().Discovery().AnnouncePresence();
-            if (appId == 730 || appId == 4465480) {
+            if (refix::mods::GameFeatureRequested("csgo.gc")) {
                 refix::gc::InitializeGCRelay();
             }
         }
@@ -9229,7 +9230,7 @@ namespace UnrealSteamEmu {
                 (ep.ipv4 >> 24) & 0xFF, (ep.ipv4 >> 16) & 0xFF, (ep.ipv4 >> 8) & 0xFF, ep.ipv4 & 0xFF,
                 ep.port, core.Transport().GetDiscoveryPort());
             core.Identity().SetDisplayName(g_personaName);
-            if (g_appID == 730 || g_appID == 4465480) {
+            if (refix::mods::GameFeatureRequested("csgo.gc")) {
                 refix::gc::InitializeGCRelay();
             }
 

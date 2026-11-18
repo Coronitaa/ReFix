@@ -84,6 +84,13 @@ struct ModManifest {
     std::set<std::string> capabilities;
     ResourceLimits resource_limits;
     std::map<std::string, std::string> files; // relative_path -> sha256_hex
+    // ReFix built-in features this mod turns on for its game (e.g. "csgo.gc"). The game-specific switches live in
+    // the mod's signed manifest, not as AppID checks in ReFix.
+    std::set<std::string> features;
+    // Documents folders that hold this game's own data. ReFix's save scan skips them for every other game.
+    std::vector<std::string> own_save_roots;
+    // Achievement API names the game's files still carry but the game never awards (cut or beta ones).
+    std::set<std::string> hidden_achievements;
 };
 
 } // namespace refix::mods

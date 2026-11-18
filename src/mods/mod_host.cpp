@@ -5,7 +5,9 @@
 
 #include <windows.h>
 #include <shlobj.h>
+#include <algorithm>
 #include <filesystem>
+#include <mutex>
 #include <iostream>
 
 namespace stdfs = std::filesystem;
@@ -138,6 +140,10 @@ bool ModHost::LoadPackage(const std::string& rfmod_path, std::string& out_error)
 
     // If approved, extract to safe temp cache
     stdfs::path extract_dir = stdfs::temp_directory_path() / "refix" / "mods" / loaded.manifest.id;
+    {
+        auto entry = loaded.manifest.files.find(loaded.manifest.entrypoint);
+        if (entry != loaded.manifest.files.end() && entry->second.size() >= 12) extract_dir /= entry->second.substr(0, 12);
+    }
     loaded.extracted_path = extract_dir.string();
 
     std::string extract_err;
@@ -275,6 +281,54 @@ void ModHost::Shutdown() {
     scheduler_.Clear();
     is_initialized_ = false;
     std::cout << "[ModHost] Shutdown complete." << std::endl;
+}
+
+// ---- What the running game's mods declare ---------------------------------------------------------------------
+
+namespace {
+std::wstring Widen(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
+    return w;
+}
+} // namespace
+
+bool GameFeatureRequested(const char* feature) {
+    if (!feature) return false;
+    for (const auto& kv : ModHost::GetInstance().GetLoadedMods()) {
+        if (kv.second.is_approved && kv.second.manifest.features.count(feature)) return true;
+    }
+    return false;
+}
+
+std::vector<uint32_t> GameAppIds() {
+    std::vector<uint32_t> ids;
+    for (const auto& kv : ModHost::GetInstance().GetLoadedMods()) {
+        if (!kv.second.is_approved) continue;
+        for (const TargetGame& t : kv.second.manifest.target_games) {
+            if (t.app_id && std::find(ids.begin(), ids.end(), t.app_id) == ids.end()) ids.push_back(t.app_id);
+        }
+    }
+    return ids;
+}
+
+bool IsHiddenAchievement(const std::string& api) {
+    for (const auto& kv : ModHost::GetInstance().GetLoadedMods()) {
+        if (kv.second.is_approved && kv.second.manifest.hidden_achievements.count(api)) return true;
+    }
+    return false;
+}
+
+bool IsOwnSaveRoot(const std::wstring& folder) {
+    for (const auto& kv : ModHost::GetInstance().GetLoadedMods()) {
+        if (!kv.second.is_approved) continue;
+        for (const std::string& root : kv.second.manifest.own_save_roots) {
+            if (_wcsicmp(Widen(root).c_str(), folder.c_str()) == 0) return true;
+        }
+    }
+    return false;
 }
 
 } // namespace refix::mods
