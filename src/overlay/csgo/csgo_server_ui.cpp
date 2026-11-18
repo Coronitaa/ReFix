@@ -5,6 +5,8 @@
 #endif
 #include <windows.h>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
@@ -15,52 +17,172 @@
 #include "../../steam_gc_emu.h"
 #include "../../gc/gc_relay.h"
 #include "../../gc/lan_rooms.h"
+#include "../../csgo_schema.h"
+#include "../../keyvalue.h"
 
 namespace refix::overlay {
 
 namespace {
 
-// Every mode of gamemodes.txt that runs on a listen server. War Games are game_type 5 plus the skirmish id of
-// items_game "skirmish_modes"; the server applies that mode's own config. mapPrefix: maps the mode needs.
+// Game modes come from the installed build: gamemodes.txt (types, modes, player limits; gamemodes_server.txt on top),
+// each mode's own gamemode_*.cfg for the defaults, and items_game.txt "skirmish_modes" for War Games. A 2018 build
+// has no Danger Zone, a newer one does, and the limits follow whatever that build ships.
 struct ModeOption {
-    const char* id;
-    const char* en;
-    const char* es;
-    int defaultSlots;
-    int defaultRounds;
-    float defaultRoundTime;
-    int defaultWarmupTime;
-    int defaultStartMoney;
-    int defaultMaxMoney;
-    bool defaultFriendlyFire;
-    bool defaultOvertime;
-    int defaultBots;
-    int defaultBotDifficulty;
-    int skirmish;
-    const char* mapPrefix;
+    std::string id;     // gamemodes.txt mode name ("competitive"), or the War Game's name ("flyingscoutsman")
+    std::string en, es;
+    int gameType = 0;
+    int gameMode = 0;
+    int skirmish = 0;   // War Games: skirmish id (game_type 5)
+    int maxPlayers = 10;
+    int defaultRounds = 30;
+    float defaultRoundTime = 1.92f;
+    int defaultWarmupTime = 60;
+    int defaultStartMoney = 800;
+    int defaultMaxMoney = 16000;
+    bool defaultFriendlyFire = false;  // mp_friendlyfire defaults to 0
+    bool defaultOvertime = false;
+    int defaultBots = 9;
+    int defaultBotDifficulty = 2;
+    const char* mapPrefix = nullptr;  // maps the mode needs
 };
-const ModeOption kModes[] = {
-    { "competitive",        "Competitive",        "Competitivo",            10, 30,  1.92f, 60,  800, 16000, true,  false,  9, 2, 0, nullptr },
-    { "casual",             "Casual",             "Casual",                 20, 15,  3.00f, 90, 1000, 10000, false, false,  9, 1, 0, nullptr },
-    { "scrimcomp2v2",       "Wingman",            "Compañero",               4, 16,  1.50f, 60,  800,  8000, true,  false,  3, 2, 0, nullptr },
-    { "scrimcomp5v5",       "Weapons Expert",     "Experto en armas",       10, 20,  1.92f, 60,  800, 16000, true,  false,  9, 2, 0, nullptr },
-    { "deathmatch",         "Deathmatch",         "Deathmatch",             16,  1, 10.00f, 20,    0,     0, false, false, 10, 2, 0, nullptr },
-    { "gungameprogressive", "Arms Race",          "Carrera armamentística", 10, 10, 30.00f, 30,    0,     0, false, false,  9, 1, 0, nullptr },
-    { "gungametrbomb",      "Demolition",         "Demolición",             10, 20,  1.50f, 30,    0,     0, false, false,  9, 2, 0, nullptr },
-    { "survival",           "Danger Zone",        "Zona de peligro",        18,  1, 15.00f, 60,  500, 10000, true,  false,  0, 2, 0, "dz_"   },
-    { "cooperative",        "Guardian",           "Guardián",                2, 15,  2.00f, 30,  800, 10000, true,  false,  5, 3, 0, nullptr },
-    { "coopmission",        "Co-op Strike",       "Ataque cooperativo",      2, 15, 45.00f, 30,    0,     0, true,  false, 10, 1, 0, "coop_" },
-    { "skirmish",           "Flying Scoutsman",   "Explorador volador",     16, 15,  3.00f, 30,    0,     0, false, false,  9, 1, 3, nullptr },
-    { "skirmish",           "Stab Stab Zap",      "Apuñala, apuñala, zap",  16, 15,  3.00f, 30,    0,     0, false, false,  9, 1, 1, nullptr },
-    { "skirmish",           "Trigger Discipline", "Disciplina de gatillo",  16, 15,  3.00f, 30, 1000, 10000, false, false,  9, 1, 4, nullptr },
-    { "skirmish",           "Headshots",          "Disparos en la cabeza",  16,  1, 10.00f, 20,    0,     0, false, false, 10, 2, 6, nullptr },
-    { "skirmish",           "Hunter-Gatherers",   "Cazadores-recolectores", 16,  1, 10.00f, 20,    0,     0, false, false, 10, 2, 7, nullptr },
-    { "skirmish",           "Heavy Assault Suit", "Traje de asalto pesado", 16, 15,  3.00f, 30, 1000, 16000, false, false,  9, 1, 8, nullptr },
-};
+std::vector<ModeOption> g_modes;
+bool g_modesLoaded = false;
+
+std::string GameDir() {
+    char exe[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string dir = exe;
+    return dir.substr(0, dir.find_last_of("\\/") + 1) + "csgo\\";
+}
+
+std::string LowerAscii(std::string s) {
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+// Reads the ConVars a mode config sets ("name value // comment"); later files override earlier ones.
+void ReadCfg(const std::string& path, ModeOption& m) {
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        line = line.substr(0, line.find("//"));
+        std::istringstream ss(line);
+        std::string name, value;
+        if (!(ss >> name >> value)) continue;
+        if (value.size() >= 2 && value.front() == '"') value = value.substr(1, value.size() - 2);
+        name = LowerAscii(name);
+        const double v = atof(value.c_str());
+        if (name == "mp_maxrounds") m.defaultRounds = std::clamp((int)v, 1, 100);
+        else if (name == "mp_roundtime") m.defaultRoundTime = std::clamp((float)v, 0.5f, 60.0f);
+        else if (name == "mp_warmuptime") m.defaultWarmupTime = std::clamp((int)v, 0, 3600);
+        else if (name == "mp_startmoney") m.defaultStartMoney = std::clamp((int)v, 0, 65535);
+        else if (name == "mp_maxmoney") m.defaultMaxMoney = std::clamp((int)v, 0, 65535);
+        else if (name == "mp_friendlyfire") m.defaultFriendlyFire = v != 0;
+        else if (name == "mp_overtime_enable") m.defaultOvertime = v != 0;
+        else if (name == "bot_quota") m.defaultBots = std::clamp((int)v, 0, 63);
+        else if (name == "bot_difficulty") m.defaultBotDifficulty = std::clamp((int)v, 0, 3);
+    }
+}
+
+// The KeyValues reader keeps one of the mode's two "exec" entries; both files follow from either name.
+void ReadModeCfgs(const std::string& cfgDir, std::string exec, ModeOption& m) {
+    exec = LowerAscii(exec);
+    const size_t server = exec.find("_server.cfg");
+    std::string base = server != std::string::npos ? exec.substr(0, server) : exec.substr(0, exec.rfind(".cfg"));
+    if (base.empty()) return;
+    ReadCfg(cfgDir + base + ".cfg", m);
+    ReadCfg(cfgDir + base + "_server.cfg", m);
+}
+
+std::string Localized(const std::string& token, bool english, const std::string& fallback) {
+    auto& schema = refix::csgo::SchemaManager::Get();
+    if (token.empty() || !schema.IsLoaded()) return fallback;  // the GC thread loads it; never race its loading
+    std::string text = english ? schema.ResolveTokenEn(token) : schema.ResolveToken(token);
+    return text.empty() ? fallback : text;
+}
+
+// War Games of this build: items_game.txt skirmish_modes { "<id>" { name, loc_name, gamemode, server_exec } }.
+void AddWarGames(const std::string& gameDir, const ModeOption& skirmishMode) {
+    KeyValueRead kv((gameDir + "scripts\\items\\items_game.txt").c_str());
+    const KeyValue* root = kv.Good() ? kv.Root().GetSubkey("items_game") : nullptr;
+    const KeyValue* list = root ? root->GetSubkey("skirmish_modes") : nullptr;
+    if (!list) return;
+    for (const KeyValue& sk : list->Subkeys()) {
+        const int id = FromString<int>(sk.Name());
+        if (id <= 0) continue;
+        ModeOption m = skirmishMode;
+        // Defaults of the mode it is built on, then its own server config.
+        for (const ModeOption& base : g_modes)
+            if (base.id == sk.GetString("gamemode")) m = base;
+        m.id = std::string(sk.GetString("name"));
+        m.gameType = skirmishMode.gameType;
+        m.gameMode = skirmishMode.gameMode;
+        m.maxPlayers = skirmishMode.maxPlayers;
+        m.skirmish = id;
+        m.mapPrefix = nullptr;
+        std::istringstream exec{ std::string(sk.GetString("server_exec")) };
+        std::string word, cfg;
+        while (exec >> word) cfg = word;  // "execwithwhitelist op08_flying_scoutsman.cfg"
+        if (!cfg.empty()) ReadCfg(gameDir + "cfg\\" + cfg, m);
+        const std::string token(sk.GetString("loc_name"));
+        m.en = Localized(token, true, m.id);
+        m.es = Localized(token, false, m.en);
+        if (!m.id.empty()) g_modes.push_back(m);
+    }
+}
+
+bool g_namesLocalized = false;
+
+void LoadModes() {
+    g_modesLoaded = true;
+    g_namesLocalized = refix::csgo::SchemaManager::Get().IsLoaded();
+    g_modes.clear();
+    const std::string gameDir = GameDir();
+    KeyValueRead kv((gameDir + "gamemodes.txt").c_str());
+    if (kv.Good()) kv.MergeToFromFile((gameDir + "gamemodes_server.txt").c_str());  // optional server overrides
+    const KeyValue* root = kv.Good() ? kv.Root().GetSubkey("GameModes.txt") : nullptr;
+    const KeyValue* types = root ? root->GetSubkey("gameTypes") : nullptr;
+    ModeOption skirmishMode;
+    bool hasSkirmish = false;
+    for (const KeyValue& type : types ? types->Subkeys() : std::vector<KeyValue>{}) {
+        if (type.GetNumber<int>("singleplayeronly", 0)) continue;  // Training
+        const std::string typeName = LowerAscii(std::string(type.Name()));
+        if (typeName == "custom") continue;                        // no rules of its own
+        const KeyValue* modes = type.GetSubkey("gameModes");
+        for (const KeyValue& mode : modes ? modes->Subkeys() : std::vector<KeyValue>{}) {
+            ModeOption m;
+            m.id = LowerAscii(std::string(mode.Name()));
+            m.gameType = type.GetNumber<int>("value", 0);
+            m.gameMode = mode.GetNumber<int>("value", 0);
+            m.maxPlayers = std::clamp(mode.GetNumber<int>("maxplayers", 10), 2, 64);
+            if (const KeyValue* exec = mode.GetSubkey("exec"))
+                for (const KeyValue& e : exec->Subkeys()) ReadModeCfgs(gameDir + "cfg\\", std::string(e.String()), m);
+            if (m.id == "survival") m.mapPrefix = "dz_";
+            if (m.id == "coopmission") m.mapPrefix = "coop_";
+            const std::string token(mode.GetString("nameID"));
+            m.en = Localized(token, true, m.id);
+            m.es = Localized(token, false, m.en);
+            if (typeName == "skirmish") { skirmishMode = m; hasSkirmish = true; continue; }  // listed per War Game
+            g_modes.push_back(m);
+        }
+    }
+    if (hasSkirmish) AddWarGames(gameDir, skirmishMode);
+    if (g_modes.empty()) {  // no readable gamemodes.txt: the classic modes every build has
+        ModeOption comp;
+        comp.id = "competitive"; comp.en = "Competitive"; comp.es = "Competitivo"; comp.gameMode = 1;
+        ModeOption casual;
+        casual.id = "casual"; casual.en = casual.es = "Casual"; casual.maxPlayers = 20; casual.defaultRounds = 15;
+        g_modes = { comp, casual };
+    }
+}
+
+const std::vector<ModeOption>& Modes() {
+    if (!g_modesLoaded || (!g_namesLocalized && refix::csgo::SchemaManager::Get().IsLoaded())) LoadModes();
+    return g_modes;
+}
 
 // Maps only one mode can run (Danger Zone, Co-op Strike).
 bool IsModeOnlyMap(const std::string& m) { return m.rfind("dz_", 0) == 0 || m.rfind("coop_", 0) == 0; }
-constexpr int kModeCount = (int)(sizeof(kModes) / sizeof(kModes[0]));
 
 struct ServerState {
     bool mapsLoaded = false;
@@ -68,6 +190,7 @@ struct ServerState {
     char mapFilter[64] = "";
     std::string map = "de_dust2";
     int mode = 0;
+    bool modeChosen = false;  // false until a mode's defaults were applied
     int slots = 10;
     int maxRounds = 30;
     float roundTime = 1.92f;
@@ -174,52 +297,50 @@ void Segmented(const char* id, int& value, const char* const* labels, int count,
 }
 
 void ApplyModeDefaults(int i) {
-    if (i < 0 || i >= kModeCount) return;
+    const auto& modes = Modes();
+    if (i < 0 || i >= (int)modes.size()) return;
     if (!g_server.mapsLoaded) LoadMaps();
+    const ModeOption& m = modes[i];
     g_server.mode = i;
-    g_server.slots = kModes[i].defaultSlots;
-    g_server.maxRounds = kModes[i].defaultRounds;
-    g_server.roundTime = kModes[i].defaultRoundTime;
-    g_server.warmupTime = kModes[i].defaultWarmupTime;
-    g_server.startMoney = kModes[i].defaultStartMoney;
-    g_server.maxMoney = kModes[i].defaultMaxMoney;
-    g_server.friendlyFire = kModes[i].defaultFriendlyFire;
-    g_server.overtime = kModes[i].defaultOvertime;
-    g_server.bots = kModes[i].defaultBots;
-    g_server.botDifficulty = kModes[i].defaultBotDifficulty;
+    g_server.modeChosen = true;
+    g_server.slots = m.maxPlayers;
+    g_server.maxRounds = m.defaultRounds;
+    g_server.roundTime = m.defaultRoundTime;
+    g_server.warmupTime = m.defaultWarmupTime;
+    g_server.startMoney = m.defaultStartMoney;
+    g_server.maxMoney = m.defaultMaxMoney;
+    g_server.friendlyFire = m.defaultFriendlyFire;
+    g_server.overtime = m.defaultOvertime;
+    g_server.bots = (std::min)(m.defaultBots, (std::max)(0, m.maxPlayers - 1));
+    g_server.botDifficulty = m.defaultBotDifficulty;
     g_server.cheats = false;
     // Danger Zone and Co-op Strike only run on their own maps, and those maps only in that mode.
-    auto fits = [&](const std::string& m) {
-        return kModes[i].mapPrefix ? m.rfind(kModes[i].mapPrefix, 0) == 0 : !IsModeOnlyMap(m);
+    auto fits = [&](const std::string& map) {
+        return m.mapPrefix ? map.rfind(m.mapPrefix, 0) == 0 : !IsModeOnlyMap(map);
     };
     if (!fits(g_server.map)) {
-        for (const std::string& m : g_server.maps)
-            if (fits(m)) { g_server.map = m; break; }
+        for (const std::string& map : g_server.maps)
+            if (fits(map)) { g_server.map = map; break; }
     }
 }
 
+// Play-menu names and aliases -> this build's mode list ("wingman", "skirmish_3", "flyingscoutsman"...).
 int FindModeIndex(const char* modeId) {
     if (!modeId || !*modeId) return -1;
-    std::string m = modeId;
-    for (char& c : m) c = (char)tolower((unsigned char)c);
-    if (m == "competitive" || m == "comp") return 0;
-    if (m == "casual") return 1;
-    if (m == "scrimcomp2v2" || m == "wingman" || m == "competitive2v2") return 2;
-    if (m == "scrimcomp5v5" || m == "weaponsexpert") return 3;
-    if (m == "deathmatch" || m == "dm") return 4;
-    if (m == "gungameprogressive" || m == "armsrace" || m == "mg_skirmish_armsrace") return 5;
-    if (m == "gungametrbomb" || m == "demolition" || m == "mg_skirmish_demolition") return 6;
-    if (m == "survival" || m == "dangerzone") return 7;
-    if (m == "cooperative" || m == "guardian") return 8;
-    if (m == "coopmission") return 9;
-    if (m == "flyingscoutsman" || m == "mg_skirmish_flyingscoutsman" || m == "skirmish" || m == "skirmish_3") return 10;
-    if (m == "stabstabzap" || m == "skirmish_1") return 11;
-    if (m == "triggerdiscipline" || m == "skirmish_4") return 12;
-    if (m == "headshots" || m == "skirmish_6") return 13;
-    if (m == "huntergatherers" || m == "skirmish_7") return 14;
-    if (m == "heavyassaultsuit" || m == "skirmish_8") return 15;
-    for (int i = 0; i < kModeCount; ++i) {
-        if (m == kModes[i].id) return i;
+    std::string m = LowerAscii(modeId);
+    static const std::pair<const char*, const char*> kAliases[] = {
+        { "comp", "competitive" }, { "wingman", "scrimcomp2v2" }, { "competitive2v2", "scrimcomp2v2" },
+        { "weaponsexpert", "scrimcomp5v5" }, { "dm", "deathmatch" }, { "armsrace", "gungameprogressive" },
+        { "mg_skirmish_armsrace", "gungameprogressive" }, { "demolition", "gungametrbomb" },
+        { "mg_skirmish_demolition", "gungametrbomb" }, { "dangerzone", "survival" }, { "guardian", "cooperative" },
+        { "skirmish", "flyingscoutsman" }, { "mg_skirmish_flyingscoutsman", "flyingscoutsman" },
+    };
+    for (const auto& a : kAliases)
+        if (m == a.first) m = a.second;
+    const auto& modes = Modes();
+    const int skirmishId = m.rfind("skirmish_", 0) == 0 ? atoi(m.c_str() + 9) : 0;
+    for (int i = 0; i < (int)modes.size(); ++i) {
+        if (skirmishId ? modes[i].skirmish == skirmishId : modes[i].id == m) return i;
     }
     return -1;
 }
@@ -229,14 +350,15 @@ void DrawSettings(float w, float h) {
     float fw = w - ui::S(12);
     ui::SectionLabel(i18n::T("Game mode", "Modo de juego"));
     float modeW = (fw - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
-    for (int i = 0, col = 0; i < kModeCount; ++i, ++col) {
-        if (kModes[i].skirmish && !kModes[i - 1].skirmish) {
+    const auto& modes = Modes();
+    for (int i = 0, col = 0; i < (int)modes.size(); ++i, ++col) {
+        if (modes[i].skirmish && (i == 0 || !modes[i - 1].skirmish)) {
             Label(i18n::T("WAR GAMES", "JUEGOS DE GUERRA"));
             col = 0;
         }
         if (col % 3) ImGui::SameLine();
         ImGui::PushID(i);
-        const char* label = i18n::T(kModes[i].en, kModes[i].es);
+        const char* label = i18n::T(modes[i].en.c_str(), modes[i].es.c_str());
         bool clicked = g_server.mode == i ? ui::PrimaryButton(label, ImVec2(modeW, ui::S(32)))
                                           : ui::SecondaryButton(label, ImVec2(modeW, ui::S(32)));
         ImGui::PopID();
@@ -251,7 +373,10 @@ void DrawSettings(float w, float h) {
     ImGui::BeginGroup();
     Label(i18n::T("PLAYERS", "JUGADORES"));
     ImGui::SetNextItemWidth(half);
-    if (ImGui::SliderInt("##slots", &g_server.slots, 2, 64)) {
+    // This build's own limit for the mode (gamemodes.txt maxplayers).
+    const int maxSlots = g_server.mode < (int)modes.size() ? modes[g_server.mode].maxPlayers : 64;
+    g_server.slots = std::clamp(g_server.slots, 2, maxSlots);
+    if (ImGui::SliderInt("##slots", &g_server.slots, 2, maxSlots)) {
         if (g_server.bots > g_server.slots - 1) g_server.bots = (std::max)(0, g_server.slots - 1);
     }
     ImGui::EndGroup();
@@ -309,8 +434,10 @@ void DrawSettings(float w, float h) {
 }
 
 void HostNow() {
+    if (g_server.mode >= (int)Modes().size()) return;
     nlohmann::json cfg = {
-        { "map", g_server.map }, { "mode", kModes[g_server.mode].id }, { "skirmish", kModes[g_server.mode].skirmish },
+        { "map", g_server.map }, { "mode", Modes()[g_server.mode].id }, { "skirmish", Modes()[g_server.mode].skirmish },
+        { "game_type", Modes()[g_server.mode].gameType }, { "game_mode", Modes()[g_server.mode].gameMode },
         { "maxplayers", g_server.slots },
         { "maxrounds", g_server.maxRounds }, { "roundtime", g_server.roundTime },
         { "warmuptime", g_server.warmupTime }, { "startmoney", g_server.startMoney },
@@ -335,6 +462,10 @@ void csgo_ui::SetServerMode(const char* modeId) {
 
 void csgo_ui::DrawServerHud(float viewportW, float viewportH) {
     if (!g_server.mapsLoaded) LoadMaps();
+    if (!g_server.modeChosen) {
+        const int competitive = FindModeIndex("competitive");
+        ApplyModeDefaults(competitive >= 0 ? competitive : 0);
+    }
 
     const ImVec2 vp(viewportW, viewportH);
     ImVec2 size((std::min)(ui::S(940), vp.x - ui::S(40)), (std::min)(ui::S(680), vp.y - ui::S(40)));

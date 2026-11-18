@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 
 namespace refix::csgo {
@@ -95,6 +96,9 @@ public:
     std::string GetPaintKitDisplayName(uint32_t paintKit) const;
     std::string ResolveToken(const std::string& token) const;
     std::string ResolveTokenEn(const std::string& token) const;  // English only
+    // True when the running build's own items_game.txt defines the item (and paint kit, if any); an older
+    // client shows anything else without an icon.
+    bool IsKnownToGame(uint32_t defIndex, uint32_t paintKit) const;
 
 private:
     SchemaManager();
@@ -116,6 +120,9 @@ private:
     std::unordered_map<std::string, std::string> m_tokensEn;
     std::unordered_map<uint32_t, uint32_t> m_missionCards;  // season -> mission card count
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> m_questGoals;  // quest id -> (points, stars)
+    std::unordered_set<uint32_t> m_gameDefs;       // items of the build's own items_game.txt
+    std::unordered_set<uint32_t> m_gamePaintKits;
+    void LoadGameKnownIds(const std::string& gamePath);
 };
 
 } // namespace refix::csgo
