@@ -37,6 +37,7 @@
 #include "refix_module_dedupe.h"
 #include "refix_multi_instance.h"
 #include "refix_crash_log.h"
+#include "refix_portable_com.h"
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
 #include "overlay/refix_overlay.h"
@@ -5354,6 +5355,7 @@ extern "C" void SteamP2PHook_ForceResolve();
 
 static void ReFixInitializePre() {
     ApplySteamEnv();
+    ReFix_InstallPortableXAudio2();  // before the engine starts its sound system
     if (!ReFix::NetworkModeManager::IsOnline()) {
         InitializeLanForwardTable();
         auto provider = ReFix::ProviderFactory::GetSteamProvider();
