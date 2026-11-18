@@ -21,7 +21,8 @@ param(
     [string]$AppIdVoice = "",
     [string]$ArbitrationMode = "auto",
     [string]$DefaultRegion = "sa",
-    [string]$OverlayMode = ""
+    [string]$OverlayMode = "",
+    [string]$PortableRuntime = ""
 )
 
 # Fallback to environment variables if parameters were omitted or empty
@@ -43,6 +44,7 @@ if (-not $CustomBroadcasts -and $env:REFIX_CUSTOM_BROADCASTS) { $CustomBroadcast
 if (-not $PhotonAppId -and $env:REFIX_PHOTON_APPID) { $PhotonAppId = $env:REFIX_PHOTON_APPID }
 if (-not $PhotonRegion -and $env:REFIX_PHOTON_REGION) { $PhotonRegion = $env:REFIX_PHOTON_REGION }
 if (-not $OverlayMode -and $env:REFIX_OVERLAY_MODE) { $OverlayMode = $env:REFIX_OVERLAY_MODE }
+if (-not $PortableRuntime -and $env:REFIX_PORTABLE_RUNTIME) { $PortableRuntime = $env:REFIX_PORTABLE_RUNTIME }
 
 # Free-to-play games (Brawlhalla) are in every Steam library and their own backend checks a Steam ticket for the
 # real AppID, so ReFix Online keeps the real AppID instead of masking it as 480. Offline lookup keeps 480.
@@ -2667,8 +2669,13 @@ function Install-BundledDirectXRuntime {
     }
 }
 
-try { Install-BundledDirectXRuntime -GameDir $TargetDir -ExeFolder $ExeDir -IsX86 ([bool]$isX86Game) }
-catch { Write-Host "  [WARN] Could not extract the bundled DirectX runtime: $_" -ForegroundColor Yellow }
+# Opt-out only: AutoDeploy asks (default yes); BlueStar passes the choice through REFIX_PORTABLE_RUNTIME.
+if ("$PortableRuntime".Trim() -match '^(?i:n|no|false|0|off)$') {
+    Write-Host "  [INFO] Portable runtime libraries skipped (PortableRuntime=$PortableRuntime)" -ForegroundColor DarkGray
+} else {
+    try { Install-BundledDirectXRuntime -GameDir $TargetDir -ExeFolder $ExeDir -IsX86 ([bool]$isX86Game) }
+    catch { Write-Host "  [WARN] Could not extract the bundled DirectX runtime: $_" -ForegroundColor Yellow }
+}
 
 Install-GameMods
 

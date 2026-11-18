@@ -404,6 +404,24 @@ if not "%REFIX_NON_INTERACTIVE%"=="1" set /p "FW_CHOICE=Apply Firewall rules? [Y
 if /i not "%FW_CHOICE%"=="N" set "FIREWALL_AUTO_APPLY=true"
 :AFTER_FIREWALL_PROMPT
 
+:: Portable runtime libraries. Labels, not a parenthesized block (same reason as the firewall prompt).
+echo:
+echo ====================================================================
+echo                  Portable Runtime Libraries
+echo ====================================================================
+echo:
+echo  Copy the DirectX runtime DLLs the game needs (d3dx9, XAudio2, XInput...)
+echo  from its own redist folder next to its binaries, so it runs on PCs
+echo  without the DirectX June 2010 runtime. Nothing is installed system-wide.
+echo:
+set "PORTABLE_CHOICE=Y"
+:: Unattended deploys: REFIX_PORTABLE_RUNTIME=Y/N (default Y)
+if not "%REFIX_PORTABLE_RUNTIME%"=="" set "PORTABLE_CHOICE=%REFIX_PORTABLE_RUNTIME%"
+if not "%REFIX_NON_INTERACTIVE%"=="1" set /p "PORTABLE_CHOICE=Include portable runtime libraries? [Y/N] (Default: Y): "
+set "PORTABLE_RUNTIME=true"
+if /i "%PORTABLE_CHOICE%"=="N" set "PORTABLE_RUNTIME=false"
+if /i "%PORTABLE_CHOICE%"=="NO" set "PORTABLE_RUNTIME=false"
+
 echo:
 echo ====================================================================
 echo Starting ReFix Deployment... (%PRODUCT_LABEL%)
@@ -433,7 +451,7 @@ if not exist "%BIN_DIR%\deploy_helper.ps1" (
 )
 
 echo [1/3] Running ReFix deployment and topology engine...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%BIN_DIR%\deploy_helper.ps1" -TargetDir "%TARGET_DIR%" -BinDir "%BIN_DIR%" -ExeDir "%EXE_DIR%" -EngineType "%ENGINE_TYPE%" -OnlineMode "%HELPER_MODE%" -GameName "%GAME_NAME%" -UserName "%CUSTOM_USERNAME%" -RealAppId "%REAL_APPID%" -MaskAppId "%MASK_APPID%" -Language "english" -DLCs "%DLCS%" -DLCMode "%DLC_MODE%" -ListenPort "%LAN_PORT%" -CustomBroadcasts "%CUSTOM_BROADCASTS%" -PhotonAppId "%PHOTON_APPID%" -PhotonRegion "%PHOTON_REGION%" -OverlayMode "%OVERLAY_MODE%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%BIN_DIR%\deploy_helper.ps1" -TargetDir "%TARGET_DIR%" -BinDir "%BIN_DIR%" -ExeDir "%EXE_DIR%" -EngineType "%ENGINE_TYPE%" -OnlineMode "%HELPER_MODE%" -GameName "%GAME_NAME%" -UserName "%CUSTOM_USERNAME%" -RealAppId "%REAL_APPID%" -MaskAppId "%MASK_APPID%" -Language "english" -DLCs "%DLCS%" -DLCMode "%DLC_MODE%" -ListenPort "%LAN_PORT%" -CustomBroadcasts "%CUSTOM_BROADCASTS%" -PhotonAppId "%PHOTON_APPID%" -PhotonRegion "%PHOTON_REGION%" -OverlayMode "%OVERLAY_MODE%" -PortableRuntime "%PORTABLE_RUNTIME%"
 if errorlevel 1 (
     echo:
     echo [ERROR] Deployment engine reported failure! Aborting.
