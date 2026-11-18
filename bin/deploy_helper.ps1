@@ -2565,6 +2565,13 @@ function Verify-ReFixDeployment {
 # downloaded from the repository, and must match the catalog's SHA-256.
 # ============================================================
 function Install-GameMods {
+    # REFIX_GAME_MODS (set by BlueStar's install presets): unset = the first catalog row that matches the game,
+    # "none" = no mods, otherwise a comma-separated list of mod ids; each listed mod is installed if it matches.
+    $only = $null
+    if ($env:REFIX_GAME_MODS) {
+        if ($env:REFIX_GAME_MODS.Trim() -ieq "none") { Write-Host "  [*] Game mods disabled (REFIX_GAME_MODS=none)" -ForegroundColor DarkGray; return }
+        $only = @($env:REFIX_GAME_MODS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
     $modsUrl = if ($env:REFIX_MODS_URL) { $env:REFIX_MODS_URL } else { "https://raw.githubusercontent.com/Coronitaa/ReFix/main/refix_mods" }
     $localMods = Join-Path (Split-Path -Parent $BinDir) "refix_mods"
     $catalogPath = Join-Path $localMods "catalog.tsv"
@@ -2581,6 +2588,7 @@ function Install-GameMods {
         $c = $line -split "`t"
         if ($c.Count -lt 7) { continue }
         $id, $product, $exe, $matchFile, $matchText, $file, $sum = $c[0..6]
+        if ($only -and $only -notcontains $id) { continue }
         if ($product -ne "any" -and $product -ne $productName) { continue }
         $exeItem = Get-ChildItem -LiteralPath $TargetDir -Filter $exe -Recurse -Depth 2 -File -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $exeItem) { continue }
@@ -2609,7 +2617,7 @@ function Install-GameMods {
         $marker = Join-Path $dest ".refix_installed"
         if (-not ((Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker) -contains $file)) { Add-Content -LiteralPath $marker -Value $file }
         Write-Host "  [OK] Installed the $id mod in $dest" -ForegroundColor Green
-        return
+        if (-not $only) { return }
     }
 }
 
