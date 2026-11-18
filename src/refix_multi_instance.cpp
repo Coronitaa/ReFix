@@ -1,4 +1,5 @@
 #include "refix_multi_instance.h"
+#include "engine/source/source_cmdline.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -203,16 +204,7 @@ void ReFix_MultiInstanceOnSteamInit() {
 
 void ReFix_MultiInstanceAvoidExclusiveFullscreen(int instanceSlot) {
     if (instanceSlot <= 0) return;
-    HMODULE tier0 = GetModuleHandleA("tier0.dll");
-    using CommandLineFn = void* (__cdecl*)();
-    auto getCmdLine = tier0 ? reinterpret_cast<CommandLineFn>(GetProcAddress(tier0, "CommandLine")) : nullptr;
-    void* cmdLine = getCmdLine ? getCmdLine() : nullptr;
-    void** vtable = cmdLine ? *reinterpret_cast<void***>(cmdLine) : nullptr;
-    if (!vtable || !vtable[2] || !vtable[6]) return;
-    // ICommandLine: [2] GetCmdLine, [6] AppendParm(parm, values).
-    using GetCmdLineFn = const char*(__thiscall*)(void*);
-    using AppendParmFn = void(__thiscall*)(void*, const char*, const char*);
-    const char* line = reinterpret_cast<GetCmdLineFn>(vtable[2])(cmdLine);
+    const char* line = refix::source::GetGameCommandLine();
     if (!line) return;
     std::string lower(line);
     for (char& c : lower) c = (char)tolower((unsigned char)c);
@@ -222,8 +214,8 @@ void ReFix_MultiInstanceAvoidExclusiveFullscreen(int instanceSlot) {
         return at != std::string::npos && (end == lower.size() || lower[end] == ' ' || lower[end] == '"');
     };
     if (has("-fullscreen") || has("-full") || has("-windowed") || has("-window") || has("-sw")) return;
-    reinterpret_cast<AppendParmFn>(vtable[6])(cmdLine, "-windowed", nullptr);
-    reinterpret_cast<AppendParmFn>(vtable[6])(cmdLine, "-noborder", nullptr);
+    refix::source::AppendGameParm("-windowed", nullptr);
+    refix::source::AppendGameParm("-noborder", nullptr);
     ReFixLog("[MultiInstance] Instance %d: started in a borderless window (exclusive fullscreen would black out the others)",
              instanceSlot + 1);
 }

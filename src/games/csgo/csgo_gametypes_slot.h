@@ -1,5 +1,5 @@
 // IGameTypes::GetMaxPlayersForTypeAndMode moves between CS:GO builds (vtable slot 30 in March 2018, 31 in 2019+).
-// Shared by ReFix's fallback hook (steam_gc_emu.cpp) and the CS:GO mod (games/csgo/csgo_handlers.cpp).
+// Used by the CS:GO mod (csgo_handlers.cpp).
 #pragma once
 #include <windows.h>
 #include <algorithm>

@@ -34,6 +34,17 @@ struct LoadedMod {
     std::unique_ptr<NativeModInstance> native_instance;
 };
 
+// What the running game's approved mods declare (signed manifest). Approved means the signature and trust
+// checks passed; the mod's own code may still have failed to start (e.g. a second instance), the declarations hold.
+bool GameFeatureRequested(const char* feature);
+// Every AppID the running game's mods target: builds of one game that share data (e.g. stats).
+std::vector<uint32_t> GameAppIds();
+// Achievement API names the running game's mods mark as never awarded.
+bool IsHiddenAchievement(const std::string& api);
+// True when the running game's mod declares `folder` (a Documents subfolder) as the game's own data folder, so the
+// save scan keeps it even if it is on the generic list of folders that are never a save.
+bool IsOwnSaveRoot(const std::wstring& folder);
+
 class ModHost {
 public:
     static ModHost& GetInstance();

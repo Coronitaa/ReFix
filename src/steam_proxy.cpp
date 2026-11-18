@@ -5395,8 +5395,11 @@ static void ReFixInitializePost(bool success) {
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
         ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
-        if (g_config.realAppIdNum == 730 || g_config.realAppIdNum == 4465480 || UnrealSteamEmu::GetAppID() == 730 || UnrealSteamEmu::GetAppID() == 4465480) {
-            refix::csgo::ApplyOperationPatch(); // CS:GO only: later operation missions, before the game reads items_game
+        // Game-specific built-ins run only when the game's own mod asks for them (signed manifest "features").
+        if (refix::mods::GameFeatureRequested("csgo.operation_patch")) {
+            refix::csgo::ApplyOperationPatch(); // later operation missions, before the game reads items_game
+        }
+        if (refix::mods::GameFeatureRequested("csgo.play_menu")) {
             CreateThread(NULL, 0, Source_PanoramaHookThread, NULL, 0, NULL);
         }
 #endif

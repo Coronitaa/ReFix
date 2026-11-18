@@ -1,5 +1,6 @@
 #include "mod_panels.h"
 #include "../../mods/game_scope.h"
+#include "../../mods/mod_host.h"
 #include "../../mods/seh_guard.h"
 
 #include <windows.h>
@@ -121,8 +122,9 @@ void Registry::ActivateBuiltins(uint32_t appId, const std::string& exeName) {
         builtinsDone_ = true;
     }
     for (const BuiltinModule& m : BuiltinModules()) {
-        if (!refix::mods::MatchesGame(m.targets, appId, exeName)) {
-            ReFixLog("[OverlayMods] %s: not for this game (AppID %u, %s), not registered", m.id, appId, exeName.c_str());
+        if (!refix::mods::GameFeatureRequested(m.feature)) {
+            ReFixLog("[OverlayMods] %s: no mod of this game asks for %s (AppID %u, %s), not registered", m.id, m.feature,
+                     appId, exeName.c_str());
             continue;
         }
         RegisterModule(m.id, m.registerFn);

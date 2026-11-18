@@ -36,6 +36,8 @@ struct VpkIndex {
     uint32_t dataOffset = 0;
     std::unordered_map<std::string, VpkEntry> files;      // lowercase "path/name.ext"
     std::unordered_map<std::string, std::string> paints;  // pattern name -> vtf path
+    // Glove finishes are materials (customcharacter .vmt: palette colours + pattern), not paint textures.
+    std::unordered_map<std::string, std::string> glovePaints;  // pattern name -> vmt path
 };
 
 std::string Lower(std::string s) {
@@ -92,6 +94,7 @@ void LoadIndex(VpkIndex& idx) {
             std::string lpath = Lower(path);
             bool econPng = ext == "png" && (lpath.rfind("resource/flash/econ", 0) == 0 || lpath.rfind("panorama/images/econ", 0) == 0);
             bool paintVtf = ext == "vtf" && lpath.find("customization/paints") != std::string::npos;
+            bool gloveVmt = ext == "vmt" && lpath.find("customization/paints_gloves") != std::string::npos;
             while (readStr(name) && !name.empty()) {
                 if (p + 18 > end) return;
                 uint16_t preload, archive, term;
@@ -103,7 +106,7 @@ void LoadIndex(VpkIndex& idx) {
                 memcpy(&term, data.data() + p + 16, 2);
                 p += 18;
                 if (term != 0xFFFF || p + preload > end) return;
-                if (econPng || paintVtf) {
+                if (econPng || paintVtf || gloveVmt) {
                     std::string key = lpath + "/" + Lower(name) + "." + ext;
                     VpkEntry& e = idx.files[key];
                     e.archive = archive;
@@ -111,6 +114,7 @@ void LoadIndex(VpkIndex& idx) {
                     e.length = length;
                     e.preload.assign(data.begin() + p, data.begin() + p + preload);
                     if (paintVtf) idx.paints.emplace(Lower(name), key);
+                    if (gloveVmt) idx.glovePaints.emplace(Lower(name), key);
                 }
                 p += preload;
             }
@@ -381,10 +385,44 @@ ImTextureID PaintSwatch(const std::string& pattern) {
     return it == idx.paints.end() ? 0 : Load(it->second, true);
 }
 
+std::string GloveFallbackPath(const refix::csgo::MarketItem& item);
+
 ImTextureID ItemImage(const refix::csgo::MarketItem& item) {
     std::string rendered = RenderedPath(item);
     if (!rendered.empty()) return Load(rendered, false);
-    return BaseImage(item.imageInventory);
+    if (ImTextureID t = BaseImage(item.imageInventory)) return t;
+    const std::string glove = GloveFallbackPath(item);
+    return glove.empty() ? 0 : Load(glove, false);
+}
+
+// Colours of a glove finish: its material's $palettecolor1..8 ("[ r g b ]", 0-255). Empty when the build has none.
+const std::vector<ImU32>& GlovePalette(const std::string& pattern) {
+    static std::unordered_map<std::string, std::vector<ImU32>> cache;  // render thread only
+    auto cached = cache.find(pattern);
+    if (cached != cache.end()) return cached->second;
+    std::vector<ImU32>& colors = cache[pattern];
+    auto it = Index().glovePaints.find(Lower(pattern));
+    std::vector<uint8_t> bytes;
+    if (it == Index().glovePaints.end() || !ReadGameFile(it->second, bytes)) return colors;
+    const std::string text(bytes.begin(), bytes.end());
+    for (int i = 1; i <= 8; ++i) {
+        const std::string key = "$palettecolor" + std::to_string(i) + "\"";
+        size_t at = Lower(text).find(key);
+        if (at == std::string::npos) continue;
+        at = text.find('[', at);
+        float r = 0, g = 0, b = 0;
+        if (at != std::string::npos && sscanf(text.c_str() + at + 1, "%f %f %f", &r, &g, &b) == 3) {
+            auto c = [](float v) { return (int)std::clamp(v, 0.0f, 255.0f); };
+            colors.push_back(IM_COL32(c(r), c(g), c(b), 255));
+        }
+    }
+    return colors;
+}
+
+// The generic glove picture this build ships when a glove has no picture of its own.
+std::string GloveFallbackPath(const refix::csgo::MarketItem& item) {
+    if (item.category != "Guantes") return {};
+    return BasePath("econ/weapons/base_weapons/ct_gloves");
 }
 
 void DrawItemArt(ImDrawList* dl, const refix::csgo::MarketItem& item, ImVec2 min, ImVec2 max, float rounding) {
@@ -401,9 +439,20 @@ void DrawItemArt(ImDrawList* dl, const refix::csgo::MarketItem& item, ImVec2 min
                 dl->AddImageRounded(sw, min, max, ImVec2(0.1f, 0.1f), ImVec2(0.9f, 0.9f), IM_COL32(255, 255, 255, 150), rounding);
                 ui::GradientRect(dl, min, max, IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 150), rounding);
             }
+        } else if (const std::vector<ImU32>& palette = GlovePalette(item.pattern); !palette.empty()) {
+            // Glove finish: its palette as vertical bands, darkened at the bottom like the paint swatches.
+            const float w = (max.x - min.x) / (float)palette.size();
+            for (size_t i = 0; i < palette.size(); ++i) {
+                const ImVec2 a(min.x + w * (float)i, min.y), b(i + 1 == palette.size() ? max.x : min.x + w * (float)(i + 1), max.y);
+                const ImDrawFlags corners = i == 0 ? ImDrawFlags_RoundCornersLeft
+                                          : (i + 1 == palette.size() ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersNone);
+                dl->AddRectFilled(a, b, (palette[i] & 0x00FFFFFF) | IM_COL32(0, 0, 0, 150), rounding, corners);
+            }
+            ui::GradientRect(dl, min, max, IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 150), rounding);
         }
     }
     std::string base = BasePath(item.imageInventory);
+    if (base.empty()) base = GloveFallbackPath(item);
     if (!base.empty())
         if (ImTextureID t = Load(base, false)) FitImage(dl, t, SizeOf(base), min, max);
 }

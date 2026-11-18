@@ -16,10 +16,11 @@ namespace refix::overlay::mods {
 
 using RegisterFn = int (*)(const RefixOverlayHost* host);
 
-// A module compiled into ReFix itself (e.g. the CS:GO UI). Same ABI and same game rule as a mod DLL.
+// A module compiled into ReFix itself (e.g. the CS:GO UI). Same ABI as a mod DLL; it registers only when the
+// running game's mod asks for it in its signed manifest ("features"), so ReFix holds no list of games.
 struct BuiltinModule {
     const char* id;
-    std::vector<refix::mods::TargetGame> targets;
+    const char* feature;
     RegisterFn registerFn;
 };
 const std::vector<BuiltinModule>& BuiltinModules();  // builtin_modules.cpp

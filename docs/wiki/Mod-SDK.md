@@ -103,11 +103,14 @@ The manifest of the CS:GO mod:
 | `execution_tier` | no | `native` or `sandboxed` (default). |
 | `phase` | no | Phase the mod is scheduled in (`Boot`, `PreRefix`, `PostRefix`, `EngineReady`). |
 | `priority` | no | Order inside a phase. |
-| `target_games` | yes | Games the mod is for (`app_id`, `exe_name`, `engine`). The loader rejects the package in any other game: each entry needs an `app_id` or an `exe_name`, and with both, both must match (the exe alone decides while the AppID is unknown). CS:GO 730 and 4465480 count as one game. |
+| `target_games` | yes | Games the mod is for (`app_id`, `exe_name`, `engine`). The loader rejects the package in any other game: each entry needs an `app_id` or an `exe_name`, and with both, both must match (the exe alone decides while the AppID is unknown). List every AppID a game has shipped under (CS:GO: 730 and 4465480): ReFix also treats them as one game for shared data such as achievement progress. |
 | `dependencies` | no | `{ "before": [], "after": [], "requires": [], "conflicts": [] }`, each a list of mod ids. |
 | `capabilities` | no | What the mod may do (next section). |
 | `resource_limits` | no | Sandbox limits: `max_memory_mb` (16), `watchdog_timeout_ms` (15), `max_hooks` (16), `storage_quota_kb` (1024). Defaults in brackets. |
 | `files` | written by `pack` | SHA-256 of every file in the package. Do not write it by hand. |
+| `features` | no | ReFix built-in features this mod turns on for its game. ReFix has no list of games: game-specific built-ins run only when the game's mod names them. CS:GO: `csgo.gc` (game coordinator, inventory, LAN relay), `csgo.operation_patch`, `csgo.play_menu` (Panorama play menu), `csgo.overlay` (LAN card, Market & Skins, LAN server), and the generic `source.local_achievements` (achievements from `<game>\resource\<game>_<language>.txt` and the game's icon folders). |
+| `own_save_roots` | no | Documents subfolders that hold this game's own data. ReFix's save scan never takes them for another game, and keeps them for this one. |
+| `hidden_achievements` | no | Achievement API names the game's files carry but the game never awards; `source.local_achievements` skips them. |
 
 ## 3. Capabilities and trust
 

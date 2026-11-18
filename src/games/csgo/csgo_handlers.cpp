@@ -2,7 +2,8 @@
 #include "csgo_proto.h"
 #include "../../csgo_schema.h"
 #include "../../csgo_item_defs.h"
-#include "../../csgo_gametypes_slot.h"
+#include "csgo_gametypes_slot.h"
+#include "../../engine/source/source_cmdline.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -126,20 +127,9 @@ static void EnsureGameTypesHooksInstalled() {
 }
 
 static void SetTier0MaxPlayersOverride(int slots) {
-    HMODULE hTier0 = GetModuleHandleA("tier0.dll");
-    if (!hTier0) return;
-    using CommandLineFn = void* (__cdecl*)();
-    auto getCmdLine = reinterpret_cast<CommandLineFn>(GetProcAddress(hTier0, "CommandLine"));
-    if (!getCmdLine) return;
-    void* cmdLine = getCmdLine();
-    if (!cmdLine) return;
-    void** vtable = *reinterpret_cast<void***>(cmdLine);
-    if (!vtable || !vtable[6]) return;
-    // ICommandLine::AppendParm(const char* pszParm, const char* pszValues) is at vtable index 6.
-    using AppendParmFn = void(__thiscall*)(void* thisPtr, const char* parm, const char* val);
     char buf[16];
     snprintf(buf, sizeof(buf), "%d", slots);
-    reinterpret_cast<AppendParmFn>(vtable[6])(cmdLine, "-maxplayers_override", buf);
+    refix::source::AppendGameParm("-maxplayers_override", buf);
 }
 
 static std::string GetCsgoCfgDir() {
