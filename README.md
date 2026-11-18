@@ -79,7 +79,7 @@ Press `Shift+Tab` in-game to open the **ReFix Overlay** (available in `LAN Offli
 
 ReFix includes a built-in mod loader and a C++ header-only **Mod SDK** that works across `ReFix LAN Offline` and `ReFix Mixed`. Mods load directly through ReFix without patching game binaries on disk, and can hook into the ReFix Overlay, read/write game memory, draw custom ImGui windows, and send custom network packets between players in the same lobby.
 
-* **Official Mods Gallery:** Browse and download ready-to-use mods from the [Official ReFix Mods Gallery](https://github.com/Coronitaa/ReFix/wiki/Official-Mods-Gallery) (or install them directly via [BlueStar](https://github.com/Coronitaa/BlueStar)).
+* **Official Mods Gallery:** Browse and download ready-to-use mods from the [Official ReFix Mods Gallery](https://github.com/Coronitaa/ReFix/tree/main/refix_mods) (or install them directly via [BlueStar](https://github.com/Coronitaa/BlueStar)).
 * **Writing a Mod (SDK & Wiki):** The SDK sits in the `sdk/` folder (`refix_mod_sdk.h`). It exposes a clean C ABI for lifecycle callbacks (`OnModLoad`, `OnFrame`, `OnOverlayDraw`, `OnPacketReceived`), overlay UI registration, and P2P messaging.
 * **Documentation:** Read the [Mod Development Wiki](https://github.com/Coronitaa/ReFix/wiki) for setup guides, API references, and example mod templates.
 
