@@ -13,6 +13,7 @@
 #include "steam_overlay_block.h"
 #include "nvidia_reflex_block.h"
 #include "overlay_settings.h"
+#include "overlay_theme.h"
 #include "avatar_image.h"
 #include "presence_net.h"
 #include "profile_sync.h"
@@ -585,18 +586,12 @@ static void GenerateStockAvatar(int stockIdx, int width, int height, std::vector
             int fontSize = (int)std::round(width * 0.52f);
             if (fontSize < 10) fontSize = 10;
 
+            // CreateFontW never fails for a missing family (GDI substitutes one), so pick by installed file.
             bool isMdl2 = false;
+            const wchar_t* family = refix::overlay::ui::GdiIconFamily(&isMdl2);
             HFONT hFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                      ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                      L"Segoe Fluent Icons");
-            if (!hFont) {
-                hFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                    ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                    L"Segoe MDL2 Assets");
-                isMdl2 = true;
-            }
+                                      ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, family);
 
             HGDIOBJ oldFont = hFont ? SelectObject(hdc, hFont) : nullptr;
             memset(bits, 0, (size_t)width * height * 4);

@@ -7,7 +7,8 @@
 
 namespace refix::overlay::ui {
 
-// Segoe Fluent Icons (Windows 11) / Segoe MDL2 Assets (Windows 10) code points.
+// Segoe Fluent Icons (Windows 11) / Segoe MDL2 Assets (Windows 10) code points. Wine/Proton have neither font:
+// there ReFix uses its embedded copy (refix_icons_font.h, tools/gen_icon_font.py) with the same code points.
 namespace icon {
 constexpr const char* Close = "\xEE\x9C\x91";        // E711
 constexpr const char* Back = "\xEE\x9C\xAB";         // E72B
@@ -49,6 +50,12 @@ constexpr const char* Speed = "\xEE\xB1\x8A";        // EC4A speed high
 constexpr const char* Cloud = "\xEE\x9D\x93";        // E753
 constexpr const char* Usb = "\xEE\xA2\x8E";          // E88E
 } // namespace icon
+
+// The Segoe icon font in Windows\Fonts (Fluent Icons, else MDL2 Assets); empty when neither is installed.
+std::string SystemIconFontPath();
+// GDI family name for drawing icons: the installed Segoe font, else ReFix's embedded icons registered for this
+// process. *isMdl2 tells callers about MDL2's glyph differences.
+const wchar_t* GdiIconFamily(bool* isMdl2);
 
 namespace color {
 constexpr ImU32 Backdrop = IM_COL32(6, 9, 14, 235);
