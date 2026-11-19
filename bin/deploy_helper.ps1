@@ -2189,6 +2189,59 @@ FixedRegion=$effectiveRegion
             exit 1
         }
     }
+} elseif ($EngineType -eq "Source") {
+    Write-Host "[4/6] Processing Source Engine deployment (mode: $OnlineMode)..." -ForegroundColor Cyan
+    
+    $reFixIni = Join-Path $ExeDir "ReFix.ini"
+    $targetAppId = "480"
+    if (Test-Path -LiteralPath $reFixIni) {
+        $iniLines = Get-Content -LiteralPath $reFixIni -ErrorAction SilentlyContinue
+        foreach ($line in $iniLines) {
+            if ($OnlineMode -eq "valve") {
+                if ($line -match "^\s*MaskAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
+            } else {
+                if ($line -match "^\s*RealAppId\s*=\s*(.+)") { $targetAppId = $Matches[1].Trim() }
+            }
+        }
+    }
+    if (-not $targetAppId -or $targetAppId -eq "0") { $targetAppId = "480" }
+
+    # Place steam_appid.txt in game root ($ExeDir) and bin\ directory
+    try {
+        $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"
+        [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
+        Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in Source root $ExeDir" -ForegroundColor Green
+        
+        $binDir = Join-Path $TargetDir "bin"
+        if (Test-Path -LiteralPath $binDir) {
+            $binAppIdPath = Join-Path $binDir "steam_appid.txt"
+            [System.IO.File]::WriteAllText($binAppIdPath, "$targetAppId`r`n")
+            $binIniPath = Join-Path $binDir "ReFix.ini"
+            if ((Test-Path -LiteralPath $reFixIni) -and (-not (Test-Path -LiteralPath $binIniPath))) {
+                Copy-Item -LiteralPath $reFixIni -Destination $binIniPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Write-Host "  [ERROR] Failed to write Source steam_appid.txt: $_" -ForegroundColor Red
+        exit 1
+    }
+} elseif ($EngineType -eq "Mono" -or $EngineType -eq "DotNet") {
+    Write-Host "[4/6] Processing Mono/.NET deployment (mode: $OnlineMode)..." -ForegroundColor Cyan
+    $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"
+    $targetAppId = if ($OnlineMode -eq "valve") { $MaskAppId } else { $finalRealAppId }
+    if (-not $targetAppId -or $targetAppId -eq "0") { $targetAppId = "480" }
+    try {
+        [System.IO.File]::WriteAllText($exeAppIdPath, "$targetAppId`r`n")
+        Write-Host "  [OK] Placed steam_appid.txt ($targetAppId) in $ExeDir" -ForegroundColor Green
+
+        $rootAppIdPath = Join-Path $TargetDir "steam_appid.txt"
+        if ($rootAppIdPath -ne $exeAppIdPath) {
+            [System.IO.File]::WriteAllText($rootAppIdPath, "$targetAppId`r`n")
+        }
+    } catch {
+        Write-Host "  [ERROR] Failed to write steam_appid.txt: $_" -ForegroundColor Red
+        exit 1
+    }
 } else {
     Write-Host "[4/6] Processing Native/Custom deployment (mode: $OnlineMode)..." -ForegroundColor Cyan
     $exeAppIdPath = Join-Path $ExeDir "steam_appid.txt"

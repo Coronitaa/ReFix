@@ -2147,7 +2147,7 @@ namespace UnrealSteamEmu {
             }
         }
 
-        bool isReliable = (nSendFlags & k_nSteamNetworkingSend_Reliable) != 0;
+        bool isReliable = ((nSendFlags & k_nSteamNetworkingSend_Reliable) != 0) || ((nSendFlags & 2) != 0);
         if (isReliable) {
             std::vector<uint8_t> packetBuf(sizeof(RfxsSinglePayloadHeader) + cbData);
             RfxsSinglePayloadHeader* hdr = (RfxsSinglePayloadHeader*)packetBuf.data();
@@ -2450,7 +2450,7 @@ namespace UnrealSteamEmu {
                 msg->m_usecTimeReceived = (SteamNetworkingMicroseconds)std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
                 msg->m_nMessageNumber = hdr->messageNumber;
-                msg->m_nFlags = (hdr->nSendFlags & k_nSteamNetworkingSend_Reliable) ? k_nSteamNetworkingSend_Reliable : 0;
+                msg->m_nFlags = ((hdr->nSendFlags & k_nSteamNetworkingSend_Reliable) != 0 || (hdr->nSendFlags & 2) != 0) ? k_nSteamNetworkingSend_Reliable : 0;
                 msg->m_idxLane = 0;
                 msg->m_nChannel = 0;
 
@@ -6467,16 +6467,8 @@ namespace UnrealSteamEmu {
 
         // 12. SendMessageToConnection
         virtual EResult SendMessageToConnection(HSteamNetConnection hConn, const void *pData, uint32 cbData, int nSendFlags, int64 *pOutMessageNumber) override {
-            if (!pData || cbData == 0) return k_EResultInvalidParam;
+            if (!pData && cbData > 0) return k_EResultInvalidParam;
             
-            // Validate flags: allowlist is 0x1D
-            if ((nSendFlags & ~0x1D) != 0) {
-                return k_EResultInvalidParam;
-            }
-            // Mutual exclusion: Reliable and NoDelay cannot be combined
-            if ((nSendFlags & k_nSteamNetworkingSend_Reliable) && (nSendFlags & k_nSteamNetworkingSend_NoDelay)) {
-                return k_EResultInvalidParam;
-            }
             // Maximum message payload size
             if (cbData > 262107) {
                 return k_EResultInvalidParam;
@@ -6494,7 +6486,7 @@ namespace UnrealSteamEmu {
                 if (it == g_connections.end()) return k_EResultInvalidParam;
 
                 if (it->second.state == k_ESteamNetworkingConnectionState_Connecting) {
-                    if (nSendFlags & k_nSteamNetworkingSend_NoDelay) {
+                    if ((nSendFlags & k_nSteamNetworkingSend_NoDelay) && !(nSendFlags & k_nSteamNetworkingSend_Reliable) && !(nSendFlags & 2)) {
                         return k_EResultIgnored;
                     }
                     if (it->second.connectingQueue.size() >= 128 ||
@@ -6505,7 +6497,9 @@ namespace UnrealSteamEmu {
                     ConnectingQueuedMsg qm;
                     qm.messageNumber = msgNumber;
                     qm.flags = nSendFlags;
-                    qm.data.assign((const uint8_t*)pData, (const uint8_t*)pData + cbData);
+                    if (cbData > 0 && pData) {
+                        qm.data.assign((const uint8_t*)pData, (const uint8_t*)pData + cbData);
+                    }
                     it->second.connectingQueue.push_back(std::move(qm));
                     it->second.connectingQueueBytes += cbData;
                     if (pOutMessageNumber) *pOutMessageNumber = msgNumber;
@@ -6525,7 +6519,7 @@ namespace UnrealSteamEmu {
 
             if (pOutMessageNumber) *pOutMessageNumber = msgNumber;
 
-            bool isReliable = (nSendFlags & k_nSteamNetworkingSend_Reliable) != 0;
+            bool isReliable = ((nSendFlags & k_nSteamNetworkingSend_Reliable) != 0) || ((nSendFlags & 2) != 0);
             if (isReliable) {
                 std::vector<uint8_t> packetBuf(sizeof(RfxsSinglePayloadHeader) + cbData);
                 RfxsSinglePayloadHeader* hdr = (RfxsSinglePayloadHeader*)packetBuf.data();
@@ -6538,7 +6532,9 @@ namespace UnrealSteamEmu {
                 hdr->nSendFlags = (uint32_t)nSendFlags;
                 hdr->payloadLen = cbData;
                 hdr->virtualPort = 0;
-                memcpy(packetBuf.data() + sizeof(RfxsSinglePayloadHeader), pData, cbData);
+                if (cbData > 0 && pData) {
+                    memcpy(packetBuf.data() + sizeof(RfxsSinglePayloadHeader), pData, cbData);
+                }
 
                 bool sent = SendRfxsPacket(remoteID, packetBuf.data(), packetBuf.size(), true /* reliable */);
                 return sent ? k_EResultOK : k_EResultIgnored;
@@ -6556,7 +6552,9 @@ namespace UnrealSteamEmu {
                     hdr->nSendFlags = (uint32_t)nSendFlags;
                     hdr->payloadLen = cbData;
                     hdr->virtualPort = 0;
-                    memcpy(packetBuf.data() + sizeof(RfxsSinglePayloadHeader), pData, cbData);
+                    if (cbData > 0 && pData) {
+                        memcpy(packetBuf.data() + sizeof(RfxsSinglePayloadHeader), pData, cbData);
+                    }
 
                     bool sent = SendRfxsPacket(remoteID, packetBuf.data(), packetBuf.size(), false /* unreliable */);
                     return sent ? k_EResultOK : k_EResultIgnored;
@@ -6582,7 +6580,9 @@ namespace UnrealSteamEmu {
                         fhdr->fragmentCount = fragCount;
                         fhdr->fragmentOffset = offset;
                         fhdr->fragmentPayloadLen = fragLen;
-                        memcpy(fragBuf.data() + sizeof(RfxsUnreliableFragmentHeader), pSrc + offset, fragLen);
+                        if (fragLen > 0 && pSrc) {
+                            memcpy(fragBuf.data() + sizeof(RfxsUnreliableFragmentHeader), pSrc + offset, fragLen);
+                        }
 
                         SendRfxsPacket(remoteID, fragBuf.data(), fragBuf.size(), false /* unreliable */);
                     }
@@ -7052,7 +7052,7 @@ namespace UnrealSteamEmu {
             if (targetSteamID != 0) {
                 auto target = ResolvePeerTargetFromSteamId(targetSteamID);
                 if (target.found && target.endpoint.IsValid()) {
-                    bool reliable = (nSendFlags & k_nSteamNetworkingSend_Reliable) != 0;
+                    bool reliable = ((nSendFlags & k_nSteamNetworkingSend_Reliable) != 0) || ((nSendFlags & 2) != 0);
                     bool ok = false;
                     if (reliable) {
                         ok = refix::lan::ILanCore::Get().Transport().SendReliable(target.peerId, target.endpoint, (uint8_t)nRemoteChannel, pubData, cubData);

@@ -23,7 +23,7 @@ $ignorePatterns = @(
     "*vcredist*", "*dxsetup*", "*dotnet*", "*prereq*", "*F10.exe*",
     "*.unpacked.exe*", "*.steamstub.exe*", "*.original.exe*", "*redist*",
     "*EasyAntiCheat*", "*eac_server*", "*BEService*", "*BattlEye*", "*cefprocess*",
-    "*CefSharp*", "*QtWebEngineProcess*",
+    "*CefSharp*", "*QtWebEngineProcess*", "*createdump*",
     # ReFix's own helpers (Steam host, Fusion Shared server, mods tool) are never the game
     "*refix_steamhost*", "*ReFixFusionShared*", "*refixmod*"
 )
@@ -59,6 +59,28 @@ $pck = Get-ChildItem -LiteralPath $target -Filter "*.pck" -Recurse -File -ErrorA
 $godotDll = Get-ChildItem -LiteralPath $target -Filter "libgodot*.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($pck -or $godotDll) {
     $engineType = "Godot"
+}
+
+# Source Engine detection (Source 1 / Source 2)
+$sourceEngine = (Test-Path -LiteralPath (Join-Path $target "bin\engine.dll")) -or `
+                (Test-Path -LiteralPath (Join-Path $target "bin\client.dll")) -or `
+                (Test-Path -LiteralPath (Join-Path $target "bin\tier0.dll")) -or `
+                (Get-ChildItem -LiteralPath $target -Filter "gameinfo.txt" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1) -or `
+                (Get-ChildItem -LiteralPath $target -Filter "gameinfo.gi" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+if ($sourceEngine) {
+    $engineType = "Source"
+}
+
+# Mono / .NET detection (e.g. Barotrauma, Terraria, Stardew Valley)
+if ($engineType -eq "Native") {
+    $monoOrDotNet = (Get-ChildItem -LiteralPath $target -Filter "MonoPosixHelper.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1) -or `
+                    (Get-ChildItem -LiteralPath $target -Filter "mono-2.0*.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1) -or `
+                    (Get-ChildItem -LiteralPath $target -Filter "hostfxr.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1) -or `
+                    (Get-ChildItem -LiteralPath $target -Filter "coreclr.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1) -or `
+                    (Get-ChildItem -LiteralPath $target -Filter "*.runtimeconfig.json" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($monoOrDotNet) {
+        $engineType = "Mono"
+    }
 }
 
 # 2. Find all steam_api64.dll or steam_api.dll locations
@@ -237,18 +259,39 @@ if (($eacDirs.Count -gt 0) -or ($eacFiles.Count -gt 0) -or ($eacSetup.Count -gt 
 }
 
 # 5. Architecture detection (x86 vs x64)
-# A game is flagged as x86 when it ships steam_api.dll (32-bit) without steam_api64.dll,
-# or when Unity Plugins\x86 subfolder is present.
+# First inspect chosen executable PE header directly (0x014c = x86, 0x8664 = x64)
 $isX86 = $false
-$steamApi32s = Get-ChildItem -LiteralPath $target -Filter "steam_api.dll" -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -eq "steam_api.dll" }
-$steamApi64s = Get-ChildItem -LiteralPath $target -Filter "steam_api64.dll" -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notlike "*valve*" -and $_.Name -notlike "*_o.dll*" }
-$pluginsX86Dirs = Get-ChildItem -LiteralPath $target -Directory -Filter "x86" -Recurse -ErrorAction SilentlyContinue |
-    Where-Object { $_.Parent.Name -eq "Plugins" }
+$peDetected = $false
+if ($chosenExe -and (Test-Path -LiteralPath $chosenExe.FullName)) {
+    try {
+        $peBytes = [System.IO.File]::ReadAllBytes($chosenExe.FullName)
+        if ($peBytes.Length -ge 0x40) {
+            $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
+            if ($peOffset + 6 -le $peBytes.Length) {
+                $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
+                if ($mach -eq 0x014c) {
+                    $isX86 = $true
+                    $peDetected = $true
+                } elseif ($mach -eq 0x8664) {
+                    $isX86 = $false
+                    $peDetected = $true
+                }
+            }
+        }
+    } catch {}
+}
 
-if ($steamApi32s.Count -gt 0 -and $steamApi64s.Count -eq 0) { $isX86 = $true }
-if ($pluginsX86Dirs.Count -gt 0)                              { $isX86 = $true }
+if (-not $peDetected) {
+    $steamApi32s = Get-ChildItem -LiteralPath $target -Filter "steam_api.dll" -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "steam_api.dll" }
+    $steamApi64s = Get-ChildItem -LiteralPath $target -Filter "steam_api64.dll" -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike "*valve*" -and $_.Name -notlike "*_o.dll*" }
+    $pluginsX86Dirs = Get-ChildItem -LiteralPath $target -Directory -Filter "x86" -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Parent.Name -eq "Plugins" }
+
+    if ($steamApi32s.Count -gt 0 -and $steamApi64s.Count -eq 0) { $isX86 = $true }
+    if ($pluginsX86Dirs.Count -gt 0)                              { $isX86 = $true }
+}
 
 # Build candidate exe list for interactive picker (up to top 5)
 $candidateList = @()

@@ -172,7 +172,7 @@ goto AFTER_EXE_CHOICE
 :AFTER_EXE_CHOICE
 echo:
 set "USER_ENGINE_CHOICE="
-if not "%REFIX_NON_INTERACTIVE%"=="1" set /p "USER_ENGINE_CHOICE=Confirm Engine [Unity/Godot/Unreal/Native] (Default: %ENGINE_TYPE%): "
+if not "%REFIX_NON_INTERACTIVE%"=="1" set /p "USER_ENGINE_CHOICE=Confirm Engine [Unity/Godot/Unreal/Source/Mono/Native] (Default: %ENGINE_TYPE%): "
 if not "%USER_ENGINE_CHOICE%"=="" set "ENGINE_TYPE=%USER_ENGINE_CHOICE%"
 
 :: Read existing settings from ReFix.ini if it already exists in target
