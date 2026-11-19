@@ -186,6 +186,7 @@ void App::DrawOverlay(ImVec2 viewport) {
     DrawDeleteConfirm();
     DrawSteamConfirm();
     DrawEditorModal();
+    DrawSyncConflictModal();
     DrawPurchaseModal(viewport);
     if (!inviteOnly_) DrawWebModal(viewport);
     if (!inviteOnly_) DrawAchievementsModal(viewport);

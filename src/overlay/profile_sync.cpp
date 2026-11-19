@@ -9,6 +9,8 @@
 #endif
 #include "profile_sync.h"
 #include "cloud_account.h"
+#include "overlay_app.h"
+#include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "save_swap.h"
 
@@ -42,6 +44,13 @@ std::atomic<bool> g_started{ false };
 std::atomic<bool> g_seenRemote{ false };   // this session read the destination (or knows nothing newer is there)
 HANDLE g_wake = nullptr;
 uint8_t g_lastPending[32] = {};  // state seen by the previous check (uploads wait until it holds still)
+
+std::mutex g_conflictMu;
+ConflictInfo g_conflict;
+Profile g_conflictProfile;
+FileList g_conflictCloudFiles;
+uint8_t g_conflictRemoteHash[32] = {};
+uint8_t g_conflictLocalHash[32] = {};
 
 std::wstring Ini() { return profiles::RootDir() + L"\\profiles.ini"; }
 std::wstring StateIni() { return profiles::RootDir() + L"\\sync.ini"; }
@@ -279,8 +288,24 @@ void Pull(const Profile& p) {
         SetState(remoteHex == localHex ? State::Synced : State::Pending);
         return;
     }
-    // New over there. Here unchanged since the last sync (or never had anything): take it. Both changed:
-    // the package wins too, since it was uploaded after this PC's last sync; this PC's copy is backed up.
+    // Both local and remote have diverged with un-synced data: prompt user to resolve conflict
+    if (!local.empty() && !last.empty() && last != localHex) {
+        std::lock_guard<std::mutex> lock(g_conflictMu);
+        g_conflict.active = true;
+        g_conflict.profileId = p.id;
+        g_conflict.profileName = p.name;
+        g_conflict.steamId = p.steamId;
+        g_conflict.localFiles = local.size();
+        g_conflict.cloudFiles = files.size();
+        g_conflictProfile = p;
+        g_conflictCloudFiles = std::move(files);
+        memcpy(g_conflictRemoteHash, remoteHash, 32);
+        memcpy(g_conflictLocalHash, localHash, 32);
+        SetState(State::Pending, "Sync conflict detected");
+        ReFixLog("[Sync] Conflict detected for %s: local=%zu files, cloud=%zu files", ToUtf8(p.name).c_str(), local.size(), g_conflictCloudFiles.size());
+        return;
+    }
+    // Unchanged locally or local had nothing: take remote
     Backup(p, local, localHash);
     if (!Apply(p, files)) { SetState(State::Failed, "Could not write the downloaded saves"); return; }
     uint8_t now[32];
@@ -505,6 +530,216 @@ void Shutdown() {
     for (DWORD waited = 0; waited < kShutdownWaitMs; waited += 100) {
         Sleep(100);
         if (!g_busy && Get().state != State::Pending) break;
+    }
+}
+
+bool HasConflict() {
+    std::lock_guard<std::mutex> lock(g_conflictMu);
+    return g_conflict.active;
+}
+
+ConflictInfo GetConflict() {
+    std::lock_guard<std::mutex> lock(g_conflictMu);
+    return g_conflict;
+}
+
+void ResolveConflictUseCloud() {
+    Profile p;
+    FileList files;
+    uint8_t remoteHash[32];
+    {
+        std::lock_guard<std::mutex> lock(g_conflictMu);
+        if (!g_conflict.active) return;
+        p = g_conflictProfile;
+        files = std::move(g_conflictCloudFiles);
+        memcpy(remoteHash, g_conflictRemoteHash, 32);
+        g_conflict.active = false;
+    }
+    const std::vector<Entry> local = Collect(p);
+    uint8_t localHash[32];
+    StateHash(local, localHash);
+    Backup(p, local, localHash);
+    if (Apply(p, files)) {
+        SetLastHash(p, remoteHash);
+        SetState(State::Synced);
+        ReFixLog("[Sync] Conflict resolved using cloud data for profile %s", ToUtf8(p.id).c_str());
+        App::Get().RestartWithProfile(p.id);
+    } else {
+        SetState(State::Failed, "Could not write the downloaded saves");
+    }
+}
+
+void ResolveConflictUseLocal() {
+    Profile p;
+    {
+        std::lock_guard<std::mutex> lock(g_conflictMu);
+        if (!g_conflict.active) return;
+        p = g_conflictProfile;
+        g_conflictCloudFiles.clear();
+        g_conflict.active = false;
+    }
+    Push(p, true);
+    ReFixLog("[Sync] Conflict resolved using local data for profile %s", ToUtf8(p.id).c_str());
+}
+
+void ResolveConflictKeepBoth() {
+    Profile p;
+    FileList files;
+    uint8_t remoteHash[32];
+    {
+        std::lock_guard<std::mutex> lock(g_conflictMu);
+        if (!g_conflict.active) return;
+        p = g_conflictProfile;
+        files = std::move(g_conflictCloudFiles);
+        memcpy(remoteHash, g_conflictRemoteHash, 32);
+        g_conflict.active = false;
+    }
+    std::vector<Profile> all = profiles::LoadAll();
+    const std::wstring suffix = i18n::Spanish() ? L" (Nube)" : L" (Cloud)";
+    Profile newP = profiles::MakeNew(p.name + suffix, all);
+    newP.originGame = p.originGame;
+    newP.games = p.games;
+    newP.customAvatar = p.customAvatar;
+    if (profiles::Save(newP)) {
+        if (p.customAvatar) {
+            CopyFileW(profiles::AvatarPath(p.id).c_str(), profiles::AvatarPath(newP.id).c_str(), FALSE);
+        }
+        Apply(newP, files);
+        SetLastHash(newP, remoteHash);
+        ReFixLog("[Sync] Conflict resolved keeping both: created profile %s (%s)", ToUtf8(newP.id).c_str(), ToUtf8(newP.name).c_str());
+        App::Get().Post([] { App::Get().ReloadProfiles(); });
+    }
+}
+
+void SyncAllProfilesFromCloud() {
+    auto target = Target();
+    if (!target || !target->Ready()) return;
+
+    const std::vector<std::wstring> files = target->ListFiles();
+    if (files.empty()) return;
+
+    std::vector<Profile> allProfiles = profiles::LoadAll();
+    const std::wstring curGame = profiles::GameKey();
+    const std::wstring curGameName = profiles::DefaultGameName();
+    const std::wstring stateIni = StateIni();
+
+    bool anyAdded = false;
+    bool activeUpdated = false;
+    std::wstring activeIdToRestart;
+
+    for (const std::wstring& file : files) {
+        if (GetPrivateProfileIntW(L"Deleted", file.c_str(), 0, stateIni.c_str()) != 0) continue;
+
+        uint64_t fileSteamId = 0;
+        std::wstring fileLocalId;
+        if (file.rfind(L"steam_", 0) == 0 && file.size() > 11) {
+            fileSteamId = _wcstoui64(file.substr(6, file.size() - 11).c_str(), nullptr, 10);
+        } else if (file.rfind(L"local_", 0) == 0 && file.size() > 11) {
+            fileLocalId = file.substr(6, file.size() - 11);
+        }
+
+        if (fileSteamId != 0 && GetPrivateProfileIntW(L"Deleted", (L"steam_" + std::to_wstring(fileSteamId)).c_str(), 0, stateIni.c_str()) != 0) {
+            continue;
+        }
+        if (!fileLocalId.empty() && GetPrivateProfileIntW(L"Deleted", fileLocalId.c_str(), 0, stateIni.c_str()) != 0) {
+            continue;
+        }
+
+        Profile* match = nullptr;
+        for (auto& p : allProfiles) {
+            if (fileSteamId != 0 && p.steamId == fileSteamId) {
+                match = &p;
+                break;
+            }
+            if (!fileLocalId.empty() && _wcsicmp(p.id.c_str(), fileLocalId.c_str()) == 0) {
+                match = &p;
+                break;
+            }
+        }
+
+        std::vector<uint8_t> pkg;
+        if (!target->Read(file, pkg)) continue;
+
+        FileList pkgFiles;
+        uint64_t pkgSteamId = 0;
+        uint8_t remoteHash[32] = {};
+        if (!Unpack(pkg, pkgFiles, &pkgSteamId, remoteHash)) continue;
+
+        if (match) {
+            bool changed = profiles::AddGame(*match, curGame, curGameName, false);
+            if (changed) profiles::Save(*match);
+
+            const std::vector<Entry> localEntries = Collect(*match);
+            uint8_t localHash[32];
+            StateHash(localEntries, localHash);
+            const std::string last = LastHash(*match);
+            const std::string localHex = ToUtf8(Hex(localHash, 32));
+            const std::string remoteHex = ToUtf8(Hex(remoteHash, 32));
+
+            if (remoteHex == localHex || remoteHex == last) {
+                continue;
+            }
+
+            if (!localEntries.empty() && !last.empty() && last != localHex) {
+                std::lock_guard<std::mutex> lock(g_conflictMu);
+                if (!g_conflict.active) {
+                    g_conflict.active = true;
+                    g_conflict.profileId = match->id;
+                    g_conflict.profileName = match->name;
+                    g_conflict.steamId = match->steamId;
+                    g_conflict.localFiles = localEntries.size();
+                    g_conflict.cloudFiles = pkgFiles.size();
+                    g_conflictProfile = *match;
+                    g_conflictCloudFiles = std::move(pkgFiles);
+                    memcpy(g_conflictRemoteHash, remoteHash, 32);
+                    memcpy(g_conflictLocalHash, localHash, 32);
+                    SetState(State::Pending, "Sync conflict detected");
+                    ReFixLog("[Sync] Cloud sync conflict for existing profile %s", ToUtf8(match->name).c_str());
+                }
+            } else {
+                Backup(*match, localEntries, localHash);
+                if (Apply(*match, pkgFiles)) {
+                    SetLastHash(*match, remoteHash);
+                    ReFixLog("[Sync] Installed newer cloud saves for %s (%zu files)", ToUtf8(match->name).c_str(), pkgFiles.size());
+                    if (g_profile && g_profile->id == match->id) {
+                        activeUpdated = true;
+                        activeIdToRestart = match->id;
+                    }
+                }
+            }
+        } else {
+            std::wstring profName = file;
+            bool customAv = false;
+            for (const auto& [n, data] : pkgFiles) {
+                if (n == "Meta/name.txt" && !data.empty()) {
+                    profName = FromUtf8(std::string(data.begin(), data.end()));
+                }
+                if (n == "Profile/avatar.png") customAv = true;
+            }
+
+            Profile newP = profiles::MakeNew(profName, allProfiles);
+            if (fileSteamId != 0) newP.steamId = fileSteamId;
+            else if (pkgSteamId != 0) newP.steamId = pkgSteamId;
+            newP.originGame = curGame;
+            newP.customAvatar = customAv;
+            profiles::AddGame(newP, curGame, curGameName, false);
+
+            if (profiles::Save(newP)) {
+                Apply(newP, pkgFiles);
+                SetLastHash(newP, remoteHash);
+                allProfiles.push_back(newP);
+                anyAdded = true;
+                ReFixLog("[Sync] Downloaded and installed new profile %s (%s) from cloud", ToUtf8(newP.id).c_str(), ToUtf8(newP.name).c_str());
+            }
+        }
+    }
+
+    if (anyAdded) {
+        App::Get().Post([] { App::Get().ReloadProfiles(); });
+    }
+
+    if (activeUpdated && !activeIdToRestart.empty()) {
+        App::Get().RestartWithProfile(activeIdToRestart);
     }
 }
 

@@ -379,6 +379,15 @@ bool Save(const Profile& p) {
 
 bool Remove(const std::wstring& id) {
     if (!IsValidId(id) || IsInUseAnywhere(id)) return false;
+    if (auto p = Load(id)) {
+        const std::wstring syncIni = RootDir() + L"\\sync.ini";
+        WritePrivateProfileStringW(L"Deleted", id.c_str(), L"1", syncIni.c_str());
+        WritePrivateProfileStringW(L"Deleted", (L"local_" + id + L".rfxp").c_str(), L"1", syncIni.c_str());
+        if (p->steamId != 0) {
+            WritePrivateProfileStringW(L"Deleted", (L"steam_" + std::to_wstring(p->steamId)).c_str(), L"1", syncIni.c_str());
+            WritePrivateProfileStringW(L"Deleted", (L"steam_" + std::to_wstring(p->steamId) + L".rfxp").c_str(), L"1", syncIni.c_str());
+        }
+    }
     // The definition goes first: a half-deleted folder never shows up as a profile again.
     if (!DeleteFileW(IniPath(id).c_str())) return false;
     DeleteTree(ProfileDir(id));

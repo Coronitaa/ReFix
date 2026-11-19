@@ -100,6 +100,20 @@ public:
         }
         return MoveFileExW(temp.c_str(), final.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
     }
+    std::vector<std::wstring> ListFiles() override {
+        std::vector<std::wstring> out;
+        if (!Ready()) return out;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((folder_ + L"\\*.rfxp").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return out;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                out.push_back(fd.cFileName);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        return out;
+    }
 
 private:
     std::wstring folder_;

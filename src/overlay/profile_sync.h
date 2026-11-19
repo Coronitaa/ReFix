@@ -42,8 +42,25 @@ public:
     virtual bool Read(const std::wstring& file, std::vector<uint8_t>& out) = 0;   // false when missing
     virtual bool Write(const std::wstring& file, const std::vector<uint8_t>& data) = 0;
     virtual bool Failed() const { return false; }   // the last Read could not reach it (not the same as missing)
+    virtual std::vector<std::wstring> ListFiles() { return {}; }
 };
 std::unique_ptr<ISyncTarget> MakeFolderTarget(const std::wstring& folder);
+
+struct ConflictInfo {
+    bool active = false;
+    std::wstring profileId;
+    std::wstring profileName;
+    uint64_t steamId = 0;
+    size_t localFiles = 0;
+    size_t cloudFiles = 0;
+};
+
+bool HasConflict();
+ConflictInfo GetConflict();
+void ResolveConflictUseCloud();
+void ResolveConflictUseLocal();
+void ResolveConflictKeepBoth();
+void SyncAllProfilesFromCloud();
 
 struct CloudFolder {
     std::wstring label;           // "OneDrive", "Google Drive", "Dropbox"

@@ -479,6 +479,23 @@ public:
                (put.status == 200 || put.status == 201);
     }
 
+    std::vector<std::wstring> ListFiles() override {
+        std::vector<std::wstring> out;
+        const std::string q = "trashed=false";
+        Resp r;
+        if (!Call(L"GET", L"https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name)&q=" +
+                              FromUtf8(UrlEncode(q)), L"", {}, r) || r.status != 200) return out;
+        const json::Value v = json::Parse(r.body);
+        const json::Value& files = v["files"];
+        for (const auto& item : files.items) {
+            std::string name = item.Str("name");
+            if (name.size() > 5 && name.substr(name.size() - 5) == ".rfxp") {
+                out.push_back(FromUtf8(name));
+            }
+        }
+        return out;
+    }
+
 private:
     static bool Call(const wchar_t* method, const std::wstring& url, const std::wstring& headers, const std::string& body, Resp& r) {
         std::string token;
@@ -539,6 +556,21 @@ public:
         return true;
     }
 
+    std::vector<std::wstring> ListFiles() override {
+        std::vector<std::wstring> out;
+        Resp r;
+        if (!Call(L"GET", L"https://graph.microsoft.com/v1.0/me/drive/special/approot/children?$select=name", L"", {}, r) || r.status != 200) return out;
+        const json::Value v = json::Parse(r.body);
+        const json::Value& val = v["value"];
+        for (const auto& item : val.items) {
+            std::string name = item.Str("name");
+            if (name.size() > 5 && name.substr(name.size() - 5) == ".rfxp") {
+                out.push_back(FromUtf8(name));
+            }
+        }
+        return out;
+    }
+
 private:
     static std::wstring Item(const std::wstring& file) {
         return L"https://graph.microsoft.com/v1.0/me/drive/special/approot:/" + FromUtf8(UrlEncode(ToUtf8(file))) + L":";
@@ -588,7 +620,10 @@ void SignInAsync(Provider p) {
         const bool ok = Connect(p, err);
         Account a;
         if (ok && FetchAccount(p, a)) StoreAccount(p, a);
-        if (ok) sync::SetFolder(Choice(p));
+        if (ok) {
+            sync::SetFolder(Choice(p));
+            sync::SyncAllProfilesFromCloud();
+        }
         {
             std::lock_guard<std::mutex> lock(g_mu);
             g_error = ok ? Msg{} : err;

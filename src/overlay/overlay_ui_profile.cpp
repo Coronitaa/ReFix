@@ -8,6 +8,7 @@
 #include "avatar_image.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
+#include "profile_sync.h"
 #include "refix_overlay.h"
 #include "save_swap.h"
 
@@ -273,6 +274,76 @@ void App::DrawSwitchConfirm() {
         ImGui::CloseCurrentPopup();
         pendingSwitch_.clear();
     }
+    ImGui::EndPopup();
+}
+
+void App::DrawSyncConflictModal() {
+    if (!sync::HasConflict()) return;
+    if (!BeginCenteredModal("##syncconflict", 520)) return;
+
+    const sync::ConflictInfo info = sync::GetConflict();
+
+    ImGui::PushFont(ui::F().heading);
+    ui::TextColored(ui::color::Accent, ui::icon::Cloud);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(T("Cloud Sync Conflict", "Conflicto de sincronización en la nube"));
+    ImGui::PopFont();
+
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+    ImGui::PushFont(ui::F().body);
+    ImGui::PushTextWrapPos(0.0f);
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             T("Different saved data was found in Google Drive / Cloud for profile '%s'.\nWhich version do you want to keep?",
+               "Se encontraron datos guardados diferentes en Google Drive / Nube para el perfil '%s'.\n¿Qué versión prefieres conservar?"),
+             ToUtf8(info.profileName).c_str());
+    ui::TextColored(ui::color::Text, buf);
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+
+    ImGui::Dummy(ImVec2(0, ui::S(14)));
+
+    const float availW = ImGui::GetContentRegionAvail().x;
+    const float gap = ui::S(8);
+    const float btnW = (availW - gap * 2.0f) / 3.0f;
+    const ImVec2 bs(btnW, ui::S(40));
+
+    // Option 1: Cloud data (Nube)
+    if (ui::PrimaryButton(T("Cloud data", "Datos nube"), bs)) {
+        ImGui::CloseCurrentPopup();
+        sync::ResolveConflictUseCloud();
+    }
+    ui::Tooltip(T("Download and install cloud saves, then restart the game.",
+                  "Descarga e instala las partidas de la nube y reinicia el juego."));
+
+    // Option 2: Local data (Locales)
+    ImGui::SameLine(0, gap);
+    if (ui::SecondaryButton(T("Local data", "Datos locales"), bs)) {
+        ImGui::CloseCurrentPopup();
+        sync::ResolveConflictUseLocal();
+    }
+    ui::Tooltip(T("Keep your local saves on this PC and upload them to the cloud.",
+                  "Conserva tus partidas locales en este PC y súbelas a la nube."));
+
+    // Option 3: Keep both (Conservar ambos)
+    ImGui::SameLine(0, gap);
+    if (ui::SecondaryButton(T("Keep both", "Conservar ambos"), bs)) {
+        ImGui::CloseCurrentPopup();
+        sync::ResolveConflictKeepBoth();
+    }
+    ui::Tooltip(T("Keep local saves and add the cloud version as a differentiated profile.",
+                  "Conserva las locales y añade la versión de la nube como un perfil diferenciado."));
+
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+    ImGui::PushFont(ui::F().caption);
+    ImGui::PushTextWrapPos(0.0f);
+    ui::TextColored(ui::color::Muted,
+                    T("Tip: 'Keep both' creates an extra profile named '(Cloud)' with the downloaded saves so you don't lose anything.",
+                      "Consejo: 'Conservar ambos' crea un perfil adicional '(Nube)' con las partidas descargadas para no perder nada."));
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+
     ImGui::EndPopup();
 }
 

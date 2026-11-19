@@ -126,6 +126,7 @@ public:
     void DeferProfile(const std::wstring& id);
     void AcceptInvite(const net::Invite& inv);
     bool DeleteProfile(const std::wstring& id);   // false when it is in use somewhere
+    void ReloadProfiles();
     void ShowInfo(const std::string& title, const std::string& body);
     bool IsOverlayOpen() const { return overlayOpen_; }
 
@@ -227,6 +228,7 @@ private:
     void DrawProfileMenu();
     void DrawSwitchConfirm();
     void DrawDeleteConfirm();
+    void DrawSyncConflictModal();
     void DrawLanguageSwitch(ImVec2 rightEdgeCenter);
     void DrawEditorModal();
     void DrawWebModal(ImVec2 viewport);
@@ -239,7 +241,6 @@ private:
     void ImportFromSteam();
     void ImportProfile(const std::wstring& id);   // a profile of another game, into this one
     void DrawImportPopup();
-    void ReloadProfiles();
 
     std::mutex postMu_;
     std::vector<std::function<void()>> posts_;
