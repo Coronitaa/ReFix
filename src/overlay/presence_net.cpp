@@ -12,7 +12,6 @@
 #include <cstring>
 #include <map>
 #include <mutex>
-#include <set>
 
 #include "../steam_p2p_hook.h"
 #include "../lan_core/refix_lan_core.h"
@@ -107,9 +106,11 @@ std::map<uint64_t, RemotePlayer> g_players;
 std::map<uint64_t, Download> g_downloads;
 std::vector<PendingInvite> g_outbox;
 std::vector<Invite> g_inbox;
-std::set<std::pair<uint64_t, uint32_t>> g_seenInvites;
+// Remember retries briefly, rather than retaining every invite for the whole game session.
+std::map<std::pair<uint64_t, uint32_t>, ULONGLONG> g_seenInvites;
 std::vector<uint32_t> g_broadcasts;
-uint32_t g_nextInviteId = 1;
+// A new sender process must not reuse IDs starting at 1 while peers are still running.
+uint32_t g_nextInviteId = (uint32_t)(GetTickCount64() ^ GetCurrentProcessId());
 
 void SendTo(SOCKET s, uint32_t ip, uint16_t port, const std::vector<uint8_t>& data) {
     sockaddr_in to{};
@@ -327,7 +328,11 @@ void OnInvite(Reader& r, uint32_t fromIp) {
         }
 #endif
         if (!forMe) return;
-        if (g_seenInvites.insert({ inv.from, inv.id }).second) g_inbox.push_back(inv);
+        const ULONGLONG now = GetTickCount64();
+        for (auto it = g_seenInvites.begin(); it != g_seenInvites.end();) {
+            it = now - it->second > 30000 ? g_seenInvites.erase(it) : std::next(it);
+        }
+        if (g_seenInvites.emplace(std::make_pair(inv.from, inv.id), now).second) g_inbox.push_back(inv);
     }
     Writer ack(Msg::InviteAck);
     ack.U32(inv.id);
@@ -341,7 +346,7 @@ void OnInviteAck(Reader& r) {
     if (!r.Ok()) return;
     std::lock_guard<std::mutex> lock(g_mu);
     g_outbox.erase(std::remove_if(g_outbox.begin(), g_outbox.end(),
-                                  [&](const PendingInvite& p) { return p.invite.id == id; }),
+                                  [&](const PendingInvite& p) { return p.invite.id == id && p.to == from; }),
                    g_outbox.end());
 }
 
