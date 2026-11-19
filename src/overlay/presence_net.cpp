@@ -165,6 +165,29 @@ void RefreshBroadcasts() {
                 if (std::find(out.begin(), out.end(), bcast) == out.end()) out.push_back(bcast);
             }
         }
+        if (std::find(out.begin(), out.end(), 0xFFFFFFFFu) == out.end()) out.push_back(0xFFFFFFFFu);
+    }
+    char iniPath[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, iniPath, MAX_PATH);
+    char* lastSlash = strrchr(iniPath, '\\');
+    if (lastSlash) *(lastSlash + 1) = '\0';
+    strcat_s(iniPath, "ReFix.ini");
+    char customBuf[512] = {};
+    GetPrivateProfileStringA("Network", "CustomBroadcasts", "", customBuf, sizeof(customBuf), iniPath);
+    if (!customBuf[0]) {
+        GetPrivateProfileStringA("Unreal.Networking", "CustomBroadcasts", "", customBuf, sizeof(customBuf), iniPath);
+    }
+    if (customBuf[0]) {
+        char* ctx = nullptr;
+        char* token = strtok_s(customBuf, ",; ", &ctx);
+        while (token) {
+            unsigned long ip = inet_addr(token);
+            if (ip != INADDR_NONE && ip != 0) {
+                uint32_t nip = ntohl(ip);
+                if (std::find(out.begin(), out.end(), nip) == out.end()) out.push_back(nip);
+            }
+            token = strtok_s(nullptr, ",; ", &ctx);
+        }
     }
     std::lock_guard<std::mutex> lock(g_mu);
     g_broadcasts = std::move(out);
@@ -254,6 +277,15 @@ void OnPresence(Reader& r, uint32_t fromIp, const uint8_t* rawBuf, size_t rawLen
         playerKey += p.port;
         p.steamId = playerKey;
     }
+#if REFIX_STEAM_LINK
+    auto it = g_players.find(playerKey);
+    if (it != g_players.end()) {
+        if (!steamlink::IsVirtual(it->second.ip) && steamlink::IsVirtual(p.ip)) {
+            p.ip = it->second.ip;
+            p.port = it->second.port;
+        }
+    }
+#endif
     g_players[playerKey] = std::move(p);
 }
 
@@ -428,10 +460,8 @@ void Housekeeping(ULONGLONG now, ULONGLONG& lastAnnounce, ULONGLONG& lastAdapter
     }
     for (uint32_t ip : targets) {
         SendTo(g_bcast, ip, kPresencePort, presence);
-        if (ip == 0x7F000001u || ip == 0xFFFFFFFFu) {
-            for (uint16_t alt = 47691; alt <= 47698; ++alt) {
-                SendTo(g_bcast, ip, alt, presence);
-            }
+        for (uint16_t alt = 47691; alt <= 47698; ++alt) {
+            SendTo(g_bcast, ip, alt, presence);
         }
     }
 #if REFIX_STEAM_LINK
@@ -532,6 +562,14 @@ void SetLocal(const Presence& p) {
     if (changed) g_localDirty = true;
 }
 
+void SetLocalAppId(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (g_local.appId != appId) {
+        g_local.appId = appId;
+        g_localDirty = true;
+    }
+}
+
 void SetLocalAvatar(uint32_t key, std::vector<uint8_t> jpeg) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_avatarKey = key;
@@ -553,18 +591,33 @@ std::vector<RemotePlayer> Players() {
         if (steamlink::IsBridgePort(p.endpoint.port)) continue;
         if (steamlink::IsVirtual(p.endpoint.ipv4)) continue;
 #endif
-        if (g_players.count(sid) == 0) {
-            RemotePlayer rp;
-            rp.steamId = sid;
-            rp.name = p.displayName;
-            rp.game = !g_local.game.empty() ? g_local.game : "LAN Game";
-            rp.appId = g_local.appId != 0 ? g_local.appId : 480;
-            rp.joinable = true;
-            rp.ip = p.endpoint.ipv4;
-            rp.port = p.endpoint.port != 0 ? p.endpoint.port : 47585;
-            rp.lastSeen = GetTickCount64();
-            out.push_back(rp);
+        auto it = g_players.find(sid);
+        if (it != g_players.end()) {
+#if REFIX_STEAM_LINK
+            if (steamlink::IsVirtual(it->second.ip) && p.endpoint.ipv4 != 0 && !steamlink::IsVirtual(p.endpoint.ipv4)) {
+                it->second.ip = p.endpoint.ipv4;
+                if (p.endpoint.port != 0) it->second.port = p.endpoint.port;
+                for (auto& row : out) {
+                    if (row.steamId == sid) {
+                        row.ip = p.endpoint.ipv4;
+                        if (p.endpoint.port != 0) row.port = p.endpoint.port;
+                        break;
+                    }
+                }
+            }
+#endif
+            continue;
         }
+        RemotePlayer rp;
+        rp.steamId = sid;
+        rp.name = p.displayName;
+        rp.game = !g_local.game.empty() ? g_local.game : "LAN Game";
+        rp.appId = g_local.appId != 0 ? g_local.appId : 480;
+        rp.joinable = true;
+        rp.ip = p.endpoint.ipv4;
+        rp.port = p.endpoint.port != 0 ? p.endpoint.port : 47585;
+        rp.lastSeen = GetTickCount64();
+        out.push_back(rp);
     }
     return out;
 }

@@ -25,6 +25,9 @@ void SendQuestProgress(uint64_t steamId, const std::vector<uint8_t>& playerQuest
 // when nobody hosts one.
 void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFound);
 
+// Returns the reachable IP:port for a peer's advertised server, rewriting WSL/virtual or tunnel IPs.
+std::string ResolveReachableServerAddress(uint64_t peerSteamId, const std::string& advertisedAddr);
+
 // "a.b.c.d:port" with a private/loopback IPv4 address. Peer-supplied server addresses go into a console
 // "connect" command, so anything else (e.g. "1.2.3.4; quit") is rejected.
 bool IsValidLanServerAddress(const std::string& address);

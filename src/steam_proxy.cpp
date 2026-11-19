@@ -40,6 +40,7 @@
 #include "refix_portable_com.h"
 #if REFIX_LAN_EDITION
 #include "photon/pn_p2p.h"
+#include "refix_steam_flat.h"
 #include "overlay/refix_overlay.h"
 #include "overlay/save_swap.h"
 #if REFIX_LAN_EDITION
@@ -2221,9 +2222,14 @@ static void EnsureSteamAppIdFile(const char* appIdStr) {
 static void ApplySteamEnv() {
     LoadConfig();
     EnsureSteamAppIdFile(nullptr);
+    uint32_t adopted = UnrealSteamEmu::GetAppID();
+    std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
+    if (adopted != 0 && adopted != 480) {
+        targetApp = std::to_string(adopted);
+    }
+    if (targetApp.empty() || targetApp == "0") targetApp = "480";
+
     if (ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
-        std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
-        if (targetApp.empty() || targetApp == "0") targetApp = "480";
         SetEnvironmentVariableA("SteamAppId", targetApp.c_str());
         SetEnvironmentVariableA("SteamGameId", targetApp.c_str());
         SetEnvironmentVariableA("SteamOverlayGameId", targetApp.c_str());
@@ -2231,8 +2237,6 @@ static void ApplySteamEnv() {
         EnsureSteamAppIdFile(targetApp.c_str());
         ReFixLog("ApplySteamEnv (Goldberg LAN): AppId=%s", targetApp.c_str());
     } else {
-        std::string targetApp = (!g_config.realAppId.empty() && g_config.realAppId != "0") ? g_config.realAppId : g_config.maskAppId;
-        if (targetApp.empty() || targetApp == "0") targetApp = "480";
         SetEnvironmentVariableA("SteamAppId", targetApp.c_str());
         SetEnvironmentVariableA("SteamGameId", targetApp.c_str());
         SetEnvironmentVariableA("SteamOverlayGameId", targetApp.c_str());
@@ -5771,6 +5775,7 @@ extern "C" __declspec(dllexport) void SteamAPI_RunCallbacks() {
     }
     refix::source::MainThreadQueue::Drain();
     refix::rooms::Tick();
+    ReFixSteamFlat::ServiceMainThread();
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     if (provider) {
         provider->RunCallbacks();
@@ -5804,6 +5809,7 @@ extern "C" __declspec(dllexport) void SteamAPI_ManualDispatch_RunFrame(uint32_t 
     } else {
         UnrealSteamEmu::ManualDispatch_RunFrame(hSteamPipe);
     }
+    ReFixSteamFlat::ServiceMainThread();
     DispatchPendingAuthCallbacks();
 #if REFIX_LAN_EDITION
     ReFixIL2CPP::Update();
@@ -5848,6 +5854,8 @@ extern "C" __declspec(dllexport) bool SteamAPI_ManualDispatch_GetNextCallback(ui
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 333 (GameLobbyJoinRequested_t)");
                 } else if (msg->m_iCallback == 504) {
                     ReFixLog("ManualDispatch_GetNextCallback: Callback 504 (LobbyEnter_t)");
+                } else if (msg->m_iCallback == 1251) {
+                    ReFixSteamFlat::OnSessionRequestCallback(msg->m_pubParam, msg->m_cubParam);
                 }
             }
             return true;

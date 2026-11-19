@@ -1,13 +1,16 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include "steam_link.h"
-#include "steam_host_proto.h"
-
 #include <winsock2.h>
 #include <windows.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include "steam_link.h"
+#include "steam_host_proto.h"
+#include "../mods/mod_host.h"
 #include "../refix_wine.h"
 
 #include <atomic>
@@ -119,7 +122,11 @@ void PublishPresence() {
         std::lock_guard<std::mutex> lock(g_mu);
         name = g_gameName.substr(0, 120);   // rich presence values are short
     }
-    ToHost(proto::Writer(proto::kPresence).Put<uint32_t>(g_appId.load()).Str(name));
+    auto w = proto::Writer(proto::kPresence).Put<uint32_t>(g_appId.load()).Str(name);
+    for (uint32_t alt : refix::mods::GameAppIds()) {
+        if (alt != g_appId.load()) w.Put<uint32_t>(alt);
+    }
+    ToHost(w);
 }
 
 void ReadFriends(proto::Reader& r) {
@@ -527,7 +534,10 @@ bool SteamInstalled() {
     return !exe.empty() && GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-void SetLocalGame(uint32_t appId) { g_appId = appId; }
+void SetLocalGame(uint32_t appId) {
+    g_appId = appId;
+    if (g_state == State::Online) PublishPresence();
+}
 
 void SetLocalGameName(const std::string& utf8Name) {
     {

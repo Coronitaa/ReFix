@@ -4,6 +4,7 @@
 #if REFIX_STEAM_LINK
 #include "../steam_link/steam_link.h"
 #endif
+#include "../mods/mod_host.h"
 
 namespace refix::lan::lan_bridge {
 // Lobby member lists cross the Steam online services bridge (steam_link.h). Written by a PC with Steam on: a
@@ -1059,10 +1060,25 @@ public:
         return ReachableFrom(sender, advertised);
     }
 
+    static bool IsCompatibleScope(const std::string& rxScope, const std::string& localScope) {
+        if (rxScope == localScope) return true;
+        if (rxScope.rfind("Steam_", 0) == 0 && localScope.rfind("Steam_", 0) == 0) {
+            uint32_t rxApp = (uint32_t)atoi(rxScope.c_str() + 6);
+            uint32_t locApp = (uint32_t)atoi(localScope.c_str() + 6);
+            if (rxApp && locApp) {
+                const auto& modApps = refix::mods::GameAppIds();
+                bool hasRx = std::find(modApps.begin(), modApps.end(), rxApp) != modApps.end();
+                bool hasLoc = std::find(modApps.begin(), modApps.end(), locApp) != modApps.end();
+                if (hasRx && hasLoc) return true;
+            }
+        }
+        return false;
+    }
+
     void OnDiscoveryPacket(const LanEndpoint& sender, MsgType type, const uint8_t* data, size_t len) override {
         ByteReader r(data, len);
         std::string scope = r.ReadString();
-        if (scope != Scope()) { LanTrace("disc scope mismatch rx='%s' local='%s' type=%u", scope.c_str(), Scope().c_str(), (unsigned)type); return; }
+        if (!IsCompatibleScope(scope, Scope())) { LanTrace("disc scope mismatch rx='%s' local='%s' type=%u", scope.c_str(), Scope().c_str(), (unsigned)type); return; }
 
         PeerId pid = r.ReadPeerId();
         if (pid == m_identity.GetLocalPeerId()) return;
@@ -1071,6 +1087,7 @@ public:
             std::string name = r.ReadString();
             LanEndpoint ep = ViaTunnel(sender, r.ReadEndpoint());
             if (!ep.IsValid()) ep = sender;
+            if (sender.ipv4 == 0x7F000001 || (m_transport.GetLocalDataEndpoint().ipv4 != 0 && sender.ipv4 == m_transport.GetLocalDataEndpoint().ipv4)) ep.ipv4 = 0x7F000001;
 
             uint64_t extSteamId = 0;
             if (r.Remaining() >= 8) {

@@ -44,6 +44,7 @@ struct Invite {
 
 bool Start();
 void SetLocal(const Presence& p);
+void SetLocalAppId(uint32_t appId);
 void SetLocalAvatar(uint32_t key, std::vector<uint8_t> jpeg);
 std::vector<RemotePlayer> Players();                      // live players, own instance excluded
 bool SendInvite(uint64_t to, uint64_t lobbyId, const std::string& connect);

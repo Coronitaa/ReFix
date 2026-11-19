@@ -101,6 +101,7 @@ public:
     // Blocks the calling (game) thread on the profile window. Returns the chosen profile, or none for guest.
     std::optional<Profile> RunDialog(DialogKind kind);
     void Begin(uint32_t appId, std::optional<Profile> active);   // after SteamAPI init
+    void SetAppId(uint32_t appId);
     bool Started() const { return started_; }
 
     // ---- host::Client ----

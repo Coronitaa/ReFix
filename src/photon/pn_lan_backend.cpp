@@ -54,9 +54,20 @@ uint64_t SteamIdOf(const refix::lan::PeerId& peer) {
         g_steamToPeer[info->externalId.numericId] = peer;
         return info->externalId.numericId;
     }
-    std::lock_guard<std::mutex> lock(g_idCacheMutex);
-    auto it = g_peerToSteam.find(peer);
-    return it != g_peerToSteam.end() ? it->second : 0;
+    {
+        std::lock_guard<std::mutex> lock(g_idCacheMutex);
+        auto it = g_peerToSteam.find(peer);
+        if (it != g_peerToSteam.end()) return it->second;
+    }
+    for (const auto& p : refix::lan::ILanCore::Get().Peers().GetAllPeers()) {
+        if (p.peerId == peer && p.externalId.numericId != 0) {
+            std::lock_guard<std::mutex> lock(g_idCacheMutex);
+            g_peerToSteam[peer] = p.externalId.numericId;
+            g_steamToPeer[p.externalId.numericId] = peer;
+            return p.externalId.numericId;
+        }
+    }
+    return 0;
 }
 
 void Queue(int channel, const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
@@ -142,6 +153,17 @@ bool SendMessage(uint64_t steamID, const void* data, uint32_t size, int channel,
         std::lock_guard<std::mutex> lock(g_idCacheMutex);
         auto it = g_steamToPeer.find(steamID);
         if (it != g_steamToPeer.end()) peerId = it->second;
+    }
+    if (!peerId) {
+        for (const auto& p : core.Peers().GetAllPeers()) {
+            if (p.externalId.numericId == steamID) {
+                peerId = p.peerId;
+                std::lock_guard<std::mutex> lock(g_idCacheMutex);
+                g_peerToSteam[p.peerId] = steamID;
+                g_steamToPeer[steamID] = p.peerId;
+                break;
+            }
+        }
     }
     if (!peerId) return false;
     auto peer = core.Peers().FindByPeerId(*peerId);

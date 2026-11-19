@@ -44,7 +44,10 @@ uint32_t DiscoverLocalIpv4() {
     std::vector<uint8_t> buffer(outBufLen);
     PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
 
-    ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+#ifndef GAA_FLAG_INCLUDE_GATEWAYS
+#define GAA_FLAG_INCLUDE_GATEWAYS 0x0080
+#endif
+    ULONG flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS;
     DWORD ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &outBufLen);
     if (ret == ERROR_BUFFER_OVERFLOW) {
         buffer.resize(outBufLen);
@@ -84,8 +87,10 @@ uint32_t DiscoverLocalIpv4() {
 
             bool isVirtual = false;
             const char* vKeywords[] = {
-                "virtual", "vbox", "vmware", "hyper-v", "wsl", "docker",
-                "tap", "tun", "tailscale", "zerotier", "wireguard", "vpn", "host-only"
+                "virtual", "vbox", "vmware", "hyper-v", "hyperv", "wsl", "docker",
+                "tap", "tun", "tailscale", "zerotier", "wireguard", "vpn", "host-only",
+                "vethernet", "veth", "switch", "conmutador", "npcap", "pcap", "bridge",
+                "multiplexor", "pseudo", "loopback", "vmnet"
             };
             for (const char* kw : vKeywords) {
                 if (nameLower.find(kw) != std::string::npos || descLower.find(kw) != std::string::npos) {
@@ -103,26 +108,40 @@ uint32_t DiscoverLocalIpv4() {
 
                 if ((ip & 0xFF000000) == 0x7F000000) continue; // Loopback
 
-                bool isRfc1918 = ((ip & 0xFF000000) == 0x0A000000) ||   // 10.0.0.0/8
-                                 ((ip & 0xFFF00000) == 0xAC100000) ||   // 172.16.0.0/12
-                                 ((ip & 0xFFFF0000) == 0xC0A80000);     // 192.168.0.0/16
+                bool isRfc1918_10 = ((ip & 0xFF000000) == 0x0A000000);   // 10.0.0.0/8
+                bool isRfc1918_172 = ((ip & 0xFFF00000) == 0xAC100000);  // 172.16.0.0/12
+                bool isRfc1918_192 = ((ip & 0xFFFF0000) == 0xC0A80000);  // 192.168.0.0/16
                 bool isApipa = ((ip & 0xFFFF0000) == 0xA9FE0000);       // 169.254.0.0/16
                 bool isVBoxDefault = ((ip & 0xFFFFFF00) == 0xC0A83800); // 192.168.56.0/24
 
                 int score = 0;
                 if (curr->IfType == IF_TYPE_ETHERNET_CSMACD && !isVirtual) {
-                    score += 100;
+                    score += hasGateway ? 120 : 60;
                 } else if (curr->IfType == IF_TYPE_IEEE80211 && !isVirtual) {
-                    score += 90;
+                    score += hasGateway ? 110 : 50;
                 } else if (!isVirtual) {
-                    score += 50;
+                    score += hasGateway ? 70 : 30;
                 } else {
                     score -= 100;
                 }
 
-                if (hasGateway) score += 40;
-                if (isRfc1918) score += 30;
-                if (isApipa) score -= 50;
+                if (hasGateway) {
+                    score += 50;
+                } else {
+                    score -= 40;
+                }
+
+                if (isRfc1918_192 || isRfc1918_10) {
+                    score += 30;
+                } else if (isRfc1918_172) {
+                    if (hasGateway && !isVirtual) {
+                        score += 20;
+                    } else {
+                        score -= 80;
+                    }
+                }
+
+                if (isApipa) score -= 100;
                 if (isVBoxDefault) score -= 150;
 
                 candidates.push_back({ip, score});

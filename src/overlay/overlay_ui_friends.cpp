@@ -12,6 +12,7 @@
 #include "overlay_sound.h"
 #include "profile_sync.h"
 #include "../steam_link/steam_link.h"
+#include "../mods/mod_host.h"
 
 #include <algorithm>
 #include <cmath>
@@ -58,9 +59,18 @@ const char* StateLabel(State s) {
     }
 }
 
+static inline bool IsSameGameAppId(uint32_t a, uint32_t b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    const auto& ids = refix::mods::GameAppIds();
+    bool hasA = std::find(ids.begin(), ids.end(), a) != ids.end();
+    bool hasB = std::find(ids.begin(), ids.end(), b) != ids.end();
+    return hasA && hasB;
+}
+
 // --- friends ------------------------------------------------------------------------------------------------
 int Rank(const steamlink::Friend& f, uint32_t appId) {
-    if (f.refix) return f.appId == appId ? 0 : 1;
+    if (f.refix) return IsSameGameAppId(f.appId, appId) ? 0 : 1;
     if (f.playing) return 2;
     return f.personaState ? 3 : 4;
 }
@@ -75,7 +85,7 @@ ImU32 PersonaColor(const steamlink::Friend& f) {
 // The same words Steam uses, plus which game a ReFix friend plays.
 std::string PersonaLabel(const steamlink::Friend& f, uint32_t appId) {
     if (f.refix) {
-        if (f.appId == appId) return T("Playing this game with ReFix", "Jugando a este juego con ReFix");
+        if (IsSameGameAppId(f.appId, appId)) return T("Playing this game with ReFix", "Jugando a este juego con ReFix");
         std::string game = f.gameName.empty() ? apps::Name(f.appId) : f.gameName;
         if (game.empty()) game = T("another game", "otro juego");
         return std::string(T("Playing ", "Jugando a ")) + game + T(" with ReFix", " con ReFix");

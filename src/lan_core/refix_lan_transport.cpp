@@ -34,7 +34,10 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
     std::vector<uint8_t> buffer(outBufLen);
     PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
 
-    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+#ifndef GAA_FLAG_INCLUDE_GATEWAYS
+#define GAA_FLAG_INCLUDE_GATEWAYS 0x0080
+#endif
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS;
     DWORD ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &outBufLen);
     if (ret == ERROR_BUFFER_OVERFLOW) {
         buffer.resize(outBufLen);
@@ -80,8 +83,10 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
 
             bool isVirtual = false;
             const char* vKeywords[] = {
-                "virtual", "vbox", "vmware", "hyper-v", "wsl", "docker",
-                "tap", "tun", "tailscale", "zerotier", "wireguard", "vpn", "host-only"
+                "virtual", "vbox", "vmware", "hyper-v", "hyperv", "wsl", "docker",
+                "tap", "tun", "tailscale", "zerotier", "wireguard", "vpn", "host-only",
+                "vethernet", "veth", "switch", "conmutador", "npcap", "pcap", "bridge",
+                "multiplexor", "pseudo", "loopback", "vmnet"
             };
             for (const char* kw : vKeywords) {
                 if (nameLower.find(kw) != std::string::npos || descLower.find(kw) != std::string::npos) {
@@ -99,9 +104,9 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
 
                 if ((ip & 0xFF000000) == 0x7F000000) continue; // Loopback
 
-                bool isRfc1918 = ((ip & 0xFF000000) == 0x0A000000) ||   // 10.0.0.0/8
-                                 ((ip & 0xFFF00000) == 0xAC100000) ||   // 172.16.0.0/12
-                                 ((ip & 0xFFFF0000) == 0xC0A80000);     // 192.168.0.0/16
+                bool isRfc1918_10 = ((ip & 0xFF000000) == 0x0A000000);   // 10.0.0.0/8
+                bool isRfc1918_172 = ((ip & 0xFFF00000) == 0xAC100000);  // 172.16.0.0/12
+                bool isRfc1918_192 = ((ip & 0xFFFF0000) == 0xC0A80000);  // 192.168.0.0/16
                 bool isApipa = ((ip & 0xFFFF0000) == 0xA9FE0000);       // 169.254.0.0/16
                 bool isVBoxDefault = ((ip & 0xFFFFFF00) == 0xC0A83800); // 192.168.56.0/24
 
@@ -109,13 +114,13 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
                 std::string reason;
 
                 if (curr->IfType == IF_TYPE_ETHERNET_CSMACD && !isVirtual) {
-                    score += 100;
+                    score += hasGateway ? 120 : 60;
                     reason = "Physical Ethernet";
                 } else if (curr->IfType == IF_TYPE_IEEE80211 && !isVirtual) {
-                    score += 90;
+                    score += hasGateway ? 110 : 50;
                     reason = "Physical Wi-Fi";
                 } else if (!isVirtual) {
-                    score += 50;
+                    score += hasGateway ? 70 : 30;
                     reason = "Physical Adapter";
                 } else {
                     score -= 100;
@@ -123,14 +128,26 @@ uint32_t ResolveLocalIpv4(std::string* outReason) {
                 }
 
                 if (hasGateway) {
-                    score += 40;
+                    score += 50;
                     reason += " (Gateway Present)";
+                } else {
+                    score -= 40;
+                    reason += " (No Gateway)";
                 }
-                if (isRfc1918) {
+
+                if (isRfc1918_192 || isRfc1918_10) {
                     score += 30;
+                } else if (isRfc1918_172) {
+                    if (hasGateway && !isVirtual) {
+                        score += 20;
+                    } else {
+                        score -= 80;
+                        reason += " (172.16-31 Internal Subnet without Gateway)";
+                    }
                 }
+
                 if (isApipa) {
-                    score -= 50;
+                    score -= 100;
                     reason += " (APIPA Link-Local)";
                 }
                 if (isVBoxDefault) {
@@ -687,7 +704,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
         auto& state = it->second;
 
         // P0 Validation 1: Verify source endpoint against registered session endpoint
-        if (state.lastEndpoint.IsValid() && fromEp != state.lastEndpoint) {
+        if (state.lastEndpoint.IsValid() && !IsSameOrEquivalentEndpoint(fromEp, state.lastEndpoint)) {
             return; // Reject spoofed ACK from unauthorized endpoint without mutating state
         }
 
@@ -792,7 +809,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             // unless the migration has been explicitly authorized or the previous session has timed out.
             bool isMigrationAuthorized = (m_endpointValidator && m_endpointValidator(senderPeer, fromEp)) ||
                                          (state.authorizedMigrationEndpoint.IsValid() && fromEp == state.authorizedMigrationEndpoint);
-            if (state.lastEndpoint.IsValid() && fromEp != state.lastEndpoint) {
+            if (state.lastEndpoint.IsValid() && !IsSameOrEquivalentEndpoint(fromEp, state.lastEndpoint)) {
                 if (!isMigrationAuthorized && !state.timedOut) {
                     return; // Reject foreign endpoint attempt to hijack or reset active session
                 }
@@ -800,12 +817,12 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
 
             // Remote sequence stream restart detection vs old duplicates
             if (!state.hasRemoteGeneration) {
-                if (state.lastEndpoint.IsValid() && fromEp != state.lastEndpoint && !isMigrationAuthorized) {
+                if (state.lastEndpoint.IsValid() && !IsSameOrEquivalentEndpoint(fromEp, state.lastEndpoint) && !isMigrationAuthorized) {
                     return;
                 }
                 state.remoteGeneration = hdr->generationId;
                 state.hasRemoteGeneration = true;
-                if (!state.lastEndpoint.IsValid()) {
+                if (!state.lastEndpoint.IsValid() || IsSameOrEquivalentEndpoint(fromEp, state.lastEndpoint)) {
                     state.lastEndpoint = fromEp;
                 }
                 state.authorizedMigrationEndpoint = LanEndpoint{};
@@ -843,7 +860,7 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
             state.lastDataRecvTime = now;
             state.lastActivityTime = now;
             state.lastReceivedTime = now;
-            if (!state.lastEndpoint.IsValid()) {
+            if (!state.lastEndpoint.IsValid() || IsSameOrEquivalentEndpoint(fromEp, state.lastEndpoint)) {
                 state.lastEndpoint = fromEp;
             }
             state.timedOut = false;

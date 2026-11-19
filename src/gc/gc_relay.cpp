@@ -1,6 +1,7 @@
 #include "gc_relay.h"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <ws2tcpip.h>
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -12,7 +13,9 @@
 #include "unreal_steam_emu.h"
 #include "lan_core/refix_lan_core.h"
 #include "lan_core/refix_lan_transport.h"
+#include "steam_link/steam_link.h"
 #include "source_main_thread_queue.h"
+#include "mods/mod_host.h"
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -101,7 +104,7 @@ static uint64_t ExtractOwnerSteamId(const uint8_t* data, size_t size) {
 } // namespace
 
 void HandleRelayPacket(const refix::lan::PeerId& sender, const uint8_t* data, size_t len) {
-    if (UnrealSteamEmu::GetAppID() != 730) return;
+    if (!refix::mods::GameFeatureRequested("csgo.gc")) return;
     if (!data || len < sizeof(GCRelayHeader)) return;
     const GCRelayHeader* hdr = reinterpret_cast<const GCRelayHeader*>(data);
     if (hdr->magic != kGCRelayMagic) return;
@@ -188,8 +191,7 @@ void HandleRelayPacket(const refix::lan::PeerId& sender, const uint8_t* data, si
 }
 
 void InitializeGCRelay() {
-    uint32_t appId = UnrealSteamEmu::GetAppID();
-    if (appId != 730 && appId != 4465480) return;
+    if (!refix::mods::GameFeatureRequested("csgo.gc")) return;
     std::lock_guard<std::mutex> lock(s_mutex);
     if (s_initialized) return;
     s_initialized = true;
@@ -208,8 +210,7 @@ void ShutdownGCRelay() {
 }
 
 void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
-    uint32_t appId = UnrealSteamEmu::GetAppID();
-    if (appId != 730 && appId != 4465480) return;
+    if (!refix::mods::GameFeatureRequested("csgo.gc")) return;
     uint64_t localSid = UnrealSteamEmu::GetLocalSteamID();
     if (clientSteamId == localSid) {
         ReFixLog("[GC] Host player SteamID %llu connected to local game server. Injecting local equipped cache...", localSid);
@@ -254,7 +255,7 @@ void OnGameServerClientAuth(uint64_t clientSteamId, uint32_t ticket) {
 }
 
 void SendQuestProgress(uint64_t steamId, const std::vector<uint8_t>& playerQuestData) {
-    if (UnrealSteamEmu::GetAppID() != 730) return;
+    if (!refix::mods::GameFeatureRequested("csgo.gc")) return;
     std::optional<refix::lan::PeerId> peerId = refix::lan::ILanCore::Get().Peers().FindBySteamId(steamId);
     if (!peerId) {
         for (const auto& p : refix::lan::ILanCore::Get().Peers().GetAllPeers())
@@ -276,7 +277,7 @@ void SendQuestProgress(uint64_t steamId, const std::vector<uint8_t>& playerQuest
 }
 
 void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlot, const std::vector<uint8_t>& soUpdateBytes) {
-    if (UnrealSteamEmu::GetAppID() != 730) return;
+    if (!refix::mods::GameFeatureRequested("csgo.gc")) return;
     if (ReFixGC::IsGameServerActive()) {
         ReFixGC::SendToGameServer(26 /* k_ESOMsg_UpdateMultiple */, soUpdateBytes);
         ReFixLog("[GC] Host injected local UpdateMultiple (26) directly into game server");
@@ -301,7 +302,7 @@ void BroadcastEquippedUpdate(uint64_t itemId, uint32_t newClass, uint32_t newSlo
 
 
 void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes) {
-    if (UnrealSteamEmu::GetAppID() != 730) return;
+    if (!refix::mods::GameFeatureRequested("csgo.gc")) return;
     std::vector<uint8_t> packet(sizeof(GCRelayHeader) + reserveBytes.size());
     GCRelayHeader* hdr = reinterpret_cast<GCRelayHeader*>(packet.data());
     hdr->magic = kGCRelayMagic;
@@ -321,8 +322,84 @@ void BroadcastMatchmakingReserve(const std::vector<uint8_t>& reserveBytes) {
     }
 }
 
+std::string ResolveReachableServerAddress(uint64_t peerSteamId, const std::string& advertisedAddr) {
+    if (peerSteamId == 0 || advertisedAddr.empty()) return advertisedAddr;
+    if (peerSteamId == UnrealSteamEmu::GetLocalSteamID()) {
+        size_t colon = advertisedAddr.rfind(':');
+        std::string portStr = colon != std::string::npos ? advertisedAddr.substr(colon) : ":27015";
+        return "127.0.0.1" + portStr;
+    }
+
+    size_t colon = advertisedAddr.rfind(':');
+    std::string ipStr = colon != std::string::npos ? advertisedAddr.substr(0, colon) : advertisedAddr;
+    std::string portStr = colon != std::string::npos ? advertisedAddr.substr(colon + 1) : "27015";
+    uint16_t port = (uint16_t)strtoul(portStr.c_str(), nullptr, 10);
+    if (!port) port = 27015;
+
+    in_addr parsedAdv{};
+    uint32_t advIp = 0;
+    if (inet_pton(AF_INET, ipStr.c_str(), &parsedAdv) == 1) {
+        advIp = ntohl(parsedAdv.s_addr);
+    }
+
+    uint32_t myIp = refix::lan::ResolveLocalIpv4();
+
+    // Check if we discovered this peer directly on LAN
+    bool isLanPeer = false;
+    uint32_t lanEpIp = 0;
+    auto pid = refix::lan::ILanCore::Get().Peers().FindBySteamId(peerSteamId);
+    if (pid) {
+        auto pinfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*pid);
+        if (pinfo && pinfo->endpoint.ipv4 != 0) {
+#if REFIX_STEAM_LINK
+            if (!steamlink::IsVirtual(pinfo->endpoint.ipv4))
+#endif
+            {
+                isLanPeer = true;
+                lanEpIp = pinfo->endpoint.ipv4;
+            }
+        }
+    }
+
+    // Check if the advertised IP is on our local subnet
+    bool sameSubnet = false;
+    if (myIp != 0 && advIp != 0) {
+        sameSubnet = ((myIp & 0xFFFFFF00) == (advIp & 0xFFFFFF00)) ||
+                     ((myIp & 0xFFFF0000) == (advIp & 0xFFFF0000));
+    }
+
+    // 1. If we discovered the peer on LAN, and either the subnets match or advertised is a virtual/internal adapter:
+    if (isLanPeer && lanEpIp != 0) {
+        if (!sameSubnet) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u",
+                     (lanEpIp >> 24) & 0xFF, (lanEpIp >> 16) & 0xFF, (lanEpIp >> 8) & 0xFF, lanEpIp & 0xFF, port);
+            ReFixLog("[GC] Rewrote advertised address %s to peer direct LAN endpoint %s", advertisedAddr.c_str(), buf);
+            return std::string(buf);
+        }
+        return advertisedAddr;
+    }
+
+#if REFIX_STEAM_LINK
+    // 2. If not a direct LAN peer, or if advertised IP is not on the same subnet (e.g. WSL 172.x),
+    // and we have an active SteamLink tunnel to them:
+    uint32_t virt = steamlink::VirtualIp(peerSteamId);
+    if (virt != 0 && steamlink::IsVirtual(virt)) {
+        if (!isLanPeer || !sameSubnet) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u",
+                     (virt >> 24) & 0xFF, (virt >> 16) & 0xFF, (virt >> 8) & 0xFF, virt & 0xFF, port);
+            ReFixLog("[GC] Rewrote advertised address %s to peer SteamLink virtual IP %s", advertisedAddr.c_str(), buf);
+            return std::string(buf);
+        }
+    }
+#endif
+
+    return advertisedAddr;
+}
+
 void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFound) {
-    if (UnrealSteamEmu::GetAppID() != 730) return;
+    if (!refix::mods::GameFeatureRequested("csgo.gc")) return;
     // Hosts advertise their listen server as rich presence "refix:server" = "ip:port" (see unreal_steam_emu).
     for (const auto& peer : UnrealSteamEmu::PeersWithPresence("refix:server")) {
         if (targetSteamId != 0 && peer.first != targetSteamId) continue;
@@ -330,8 +407,9 @@ void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFoun
             ReFixLog("[GC-Relay] Ignoring invalid server address from SteamID %llu", (unsigned long long)peer.first);
             continue;
         }
-        std::string cmd = "connect " + peer.second;
-        ReFixLog("[GC-Relay] SteamID %llu hosts a match, joining: %s", (unsigned long long)peer.first, cmd.c_str());
+        std::string resolved = ResolveReachableServerAddress(peer.first, peer.second);
+        std::string cmd = "connect " + resolved;
+        ReFixLog("[GC-Relay] SteamID %llu hosts a match on %s, joining: %s", (unsigned long long)peer.first, peer.second.c_str(), cmd.c_str());
         refix::source::MainThreadQueue::ExecuteClientCmd(cmd);
         ReFixGC::SendToClient(9104, { 0x08, 0x00 }); // MatchmakingGC2ClientUpdate: matchmaking = 0 (search over)
         return;

@@ -46,7 +46,7 @@ struct Config {
     bool blockSteamOverlay = true;
     bool isolateSaves = true;
     bool sounds = true;
-    bool firstRunDialog = false;
+    bool firstRunDialog = true;
     bool blockNvidiaReflex = true;
     char steamOnline[8] = "auto";    // ReFix.ini [Steam] OnlineServices: auto | on | off
 };
@@ -99,7 +99,7 @@ void LoadConfig(const std::string& iniPath) {
     g_cfg.blockSteamOverlay = read("BlockSteamOverlay", true);
     g_cfg.isolateSaves = read("IsolateSaves", true);
     g_cfg.sounds = read("Sounds", true);
-    g_cfg.firstRunDialog = read("FirstRunDialog", false);
+    g_cfg.firstRunDialog = read("FirstRunDialog", true);
     // The player's choice in the overlay settings (profiles.ini) wins over the game folder's ReFix.ini.
     g_cfg.blockNvidiaReflex = settings::BlockReflexEarly(read("BlockNvidiaReflex", true));
     sound::SetEnabled(g_cfg.sounds);
@@ -199,10 +199,13 @@ std::optional<Profile> PickProfile(const std::vector<Profile>& all, bool otherIn
         }
     }
     if (otherInstance) return std::nullopt;
-    if (preferred && profiles::TryLock(preferred->id)) return preferred;
+    if (all.empty() || (g_cfg.firstRunDialog && profiles::ForGame(all, profiles::GameKey()).empty())) {
+        return std::nullopt;
+    }
     if (auto last = profiles::Load(profiles::LastProfileId(profiles::GameKey()))) {
         if (profiles::UsedIn(*last, profiles::GameKey()) && profiles::TryLock(last->id)) return last;
     }
+    if (preferred && profiles::TryLock(preferred->id)) return preferred;
     for (const Profile& p : all) {   // most recently used first
         if (profiles::TryLock(p.id)) return p;
     }
@@ -235,7 +238,6 @@ void ArmEarly() {
 void WaitForRestartParent() {
     wchar_t buf[16] = {};
     if (GetEnvironmentVariableW(L"REFIX_RESTART_PID", buf, 16) == 0) return;
-    SetEnvironmentVariableW(L"REFIX_RESTART_PID", nullptr);
     const DWORD pid = wcstoul(buf, nullptr, 10);
     HANDLE h = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
     if (!h) return;
@@ -376,6 +378,7 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     out.name = ToUtf8(p.name);
     ReFixLog("[Overlay] %s %s '%s' -> SteamID %llu (app %u)", p.guest ? "Guest" : "Profile", ToUtf8(p.id).c_str(), out.name.c_str(),
              (unsigned long long)p.steamId, appId);
+    SetEnvironmentVariableW(L"REFIX_RESTART_PID", nullptr);
     return true;
 }
 
@@ -450,6 +453,11 @@ void Start() {
     refix::overlay::mods::Registry::Get().ActivateBuiltins(UnrealSteamEmu::GetAppID(), refix::mods::CurrentExeName());
     App::Get().Begin(UnrealSteamEmu::GetAppID(), active);
     ReFixLog("[Overlay] Started (%s)", active ? "profile" : "no profile");
+}
+
+void SetAppId(uint32_t appId) {
+    App::Get().SetAppId(appId);
+    net::SetLocalAppId(appId);
 }
 
 bool IsEnabled() { return g_started && host::IsRunning(); }

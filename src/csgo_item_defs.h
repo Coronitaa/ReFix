@@ -67,8 +67,7 @@ constexpr uint32_t kKeys[] = {
     1375, // Danger Zone Key
     1383, // Prisma Key
     1384, // Shattered Web Key
-    1385, // CS20 Key
-    7000  // Operation Wildfire Key
+    1385  // CS20 Key
 };
 constexpr size_t kNumKeys = sizeof(kKeys) / sizeof(kKeys[0]);
 

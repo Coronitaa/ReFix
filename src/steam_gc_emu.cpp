@@ -303,11 +303,12 @@ public:
     }
 
     std::wstring GetPath() {
-        std::wstring root = ReFixOverlay::InventoryFolder(730);
+        uint32_t curAppId = UnrealSteamEmu::GetAppID() ? UnrealSteamEmu::GetAppID() : 730;
+        std::wstring root = ReFixOverlay::InventoryFolder(curAppId);
         if (root.empty()) {
             wchar_t appData[MAX_PATH] = {};
             GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
-            root = std::wstring(appData) + L"\\ReFix\\Inventory\\730";
+            root = std::wstring(appData) + L"\\ReFix\\Inventory\\" + std::to_wstring(curAppId);
         }
         for (size_t i = 3; i <= root.size(); ++i) {
             if (i == root.size() || root[i] == L'\\')
@@ -573,11 +574,12 @@ public:
     }
 
     std::wstring GetInventoryPath() {
-        std::wstring root = ReFixOverlay::InventoryFolder(730);
+        uint32_t curAppId = UnrealSteamEmu::GetAppID() ? UnrealSteamEmu::GetAppID() : 730;
+        std::wstring root = ReFixOverlay::InventoryFolder(curAppId);
         if (root.empty()) {
             wchar_t appData[MAX_PATH] = {};
             GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
-            root = std::wstring(appData) + L"\\ReFix\\Inventory\\730";
+            root = std::wstring(appData) + L"\\ReFix\\Inventory\\" + std::to_wstring(curAppId);
         }
         for (size_t i = 3; i <= root.size(); ++i) {
             if (i == root.size() || root[i] == L'\\')
@@ -605,6 +607,19 @@ public:
                     itm.id = (accountId << 32) | (itm.id & 0xFFFFFFFFULL);
                 }
             }
+
+            // Sanitize invalid items (e.g. legacy bogus key defIndex 7000 that causes Panorama crash)
+            bool changedInvalid = false;
+            auto itmIt = m_items.begin();
+            while (itmIt != m_items.end()) {
+                if (itmIt->defIndex == 7000 || itmIt->defIndex == 0) {
+                    itmIt = m_items.erase(itmIt);
+                    changedInvalid = true;
+                } else {
+                    ++itmIt;
+                }
+            }
+            if (changedInvalid) SaveLocked();
 
             // Sanitize equipped loadout: guarantee strictly ONE item per (class, slot)
             std::set<std::pair<uint32_t, uint32_t>> seenEquipped;
@@ -1287,7 +1302,7 @@ std::vector<uint8_t> SerializeEconItem(const EconItem& item, uint32_t accountId,
         }
     }
 
-    if (item.stickerKit) PutAttribute(out, 113, item.stickerKit); // sticker slot 0 id
+    if (item.stickerKit && !item.stickers[0].kit) PutAttribute(out, 113, item.stickerKit); // sticker slot 0 id
     for (uint32_t slot = 0; slot < 5; ++slot) {
         if (!item.stickers[slot].kit) continue;
         PutAttribute(out, 113 + slot * 4, item.stickers[slot].kit);  // sticker slot N id
@@ -2229,7 +2244,8 @@ public:
             Reply(kMsgGCStorePurchaseInitResponse, initResp);
 
             // Trigger Steam microtransaction authorization callback
-            UnrealSteamEmu::AuthorizeMicroTxn(730, txn_id, true);
+            uint32_t curAppId = UnrealSteamEmu::GetAppID() ? UnrealSteamEmu::GetAppID() : 730;
+            UnrealSteamEmu::AuthorizeMicroTxn(curAppId, txn_id, true);
         } else if (msg == kMsgGCStorePurchaseFinalize) {
             // CMsgGCStorePurchaseFinalize { optional uint64 txn_id = 1; }
             uint64_t txn_id = 0;

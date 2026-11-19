@@ -27,6 +27,7 @@
 #include "../steam_p2p_hook.h"
 #include "../steam_link/steam_link.h"
 #include "../lan_core/refix_lan_core.h"
+#include "../mods/mod_host.h"
 
 #include <shellapi.h>
 #include <algorithm>
@@ -48,6 +49,15 @@ constexpr ULONGLONG kInvitePendingMs = 60000;   // after this a player who did n
 std::string Lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
     return s;
+}
+
+bool IsSameGame(uint32_t a, uint32_t b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    const auto& ids = refix::mods::GameAppIds();
+    bool hasA = std::find(ids.begin(), ids.end(), a) != ids.end();
+    bool hasB = std::find(ids.begin(), ids.end(), b) != ids.end();
+    return hasA && hasB;
 }
 
 } // namespace
@@ -127,6 +137,15 @@ void App::Begin(uint32_t appId, std::optional<Profile> active) {
     if (!host::Start(this)) return;
     host::EnableHotkey();
     net::Start();
+}
+
+void App::SetAppId(uint32_t appId) {
+    Post([this, appId] {
+        if (appId_ != appId) {
+            appId_ = appId;
+            PublishPresence();
+        }
+    });
 }
 
 host::Mode App::DesiredMode() {
@@ -235,7 +254,7 @@ void App::Refresh(const host::GameWindow& game) {
     std::vector<PlayerRow> rows;
     for (net::RemotePlayer& p : net::Players()) {
         PlayerRow r;
-        r.sameGame = p.appId == appId_;
+        r.sameGame = IsSameGame(p.appId, appId_);
         r.favorite = active_ && std::find(active_->favorites.begin(), active_->favorites.end(), p.steamId) !=
                                     active_->favorites.end();
         r.p = std::move(p);
@@ -251,7 +270,7 @@ void App::Refresh(const host::GameWindow& game) {
     // Steam shows these friends in ReFix (rich presence), but invite and join need their presence through the tunnel.
     std::map<uint64_t, FriendWait> waiting;
     for (const steamlink::Friend& f : steamlink::Friends()) {
-        if (!f.refix || f.appId != appId_ || FriendRow(f)) continue;
+        if (!f.refix || !IsSameGame(f.appId, appId_) || FriendRow(f)) continue;
         auto it = friendWait_.find(f.steamId);
         FriendWait w = it != friendWait_.end() ? it->second : FriendWait{ now, false };
         if (!w.late && now - w.since >= kTunnelGraceMs) {
@@ -306,7 +325,7 @@ void App::PollInvites() {
         const net::RemotePlayer* from = FindPlayer(inv.from);
         const std::string who = from ? from->name : i18n::T("A player", "Un jugador");
         const bool showToast = settings::Get().inviteToasts;   // the game gets the invite either way
-        if (inv.appId != appId_) {
+        if (!IsSameGame(inv.appId, appId_)) {
             ShowInfo(who + i18n::T(" invited you", " te invita"), i18n::T("to a match of another game.", "a una partida de otro juego."));
             continue;
         }
@@ -534,14 +553,14 @@ void App::OpenUrl(const std::wstring& url) {
 }
 
 void App::DeferProfile(const std::wstring& id) {
-    profiles::SetLastProfileId(id);
+    profiles::SetLastProfileId(id, profiles::GameKey());
     pendingSwitch_.clear();
     ShowInfo(i18n::T("Profile saved", "Perfil guardado"),
              i18n::T("It will be used the next time you open the game.", "Se usará la próxima vez que abras el juego."));
 }
 
 void App::RestartWithProfile(const std::wstring& id) {
-    profiles::SetLastProfileId(id);
+    profiles::SetLastProfileId(id, profiles::GameKey());
     RestoreLaunchEnvironment();
     SetEnvironmentVariableW(L"REFIX_PROFILE_ID", id.c_str());
     SetEnvironmentVariableW(L"REFIX_RESTART_PID", std::to_wstring(GetCurrentProcessId()).c_str());
@@ -634,6 +653,31 @@ ui::AvatarRef App::ProfileAvatar(const Profile& p) {
 
 ui::AvatarRef App::PlayerAvatar(const net::RemotePlayer& p) {
     ui::AvatarRef a;
+#if REFIX_STEAM_LINK
+    uint64_t sid = p.steamOnlineId != 0 ? p.steamOnlineId : p.steamId;
+    if (sid == 0 && steamlink::IsVirtual(p.ip)) {
+        sid = steamlink::SteamIdOf(p.ip);
+    }
+    const steamlink::Friend* matchedFr = nullptr;
+    for (const auto& fr : steamlink::Friends()) {
+        if ((sid != 0 && fr.steamId == sid) || (!p.name.empty() && _stricmp(fr.name.c_str(), p.name.c_str()) == 0)) {
+            matchedFr = &fr;
+            break;
+        }
+    }
+    if (matchedFr && matchedFr->avatar > 0) {
+        const std::string key = "sf:" + std::to_string(matchedFr->steamId) + ":" + std::to_string(matchedFr->avatar);
+        if (host::HasTexture(key)) {
+            a.texture = host::Texture(key, nullptr);
+            return a;
+        }
+        image::Rgba img;
+        if (steamlink::AvatarRgba(matchedFr->avatar, img.width, img.height, img.pixels)) {
+            a.texture = host::Texture(key, [&](image::Rgba& out) { out = std::move(img); return true; });
+            return a;
+        }
+    }
+#endif
     if (p.avatarKind == net::AvatarKind::Stock) {
         a.stock = (int)(p.avatarKey % (uint32_t)ui::StockCount());
         return a;

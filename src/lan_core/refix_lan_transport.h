@@ -136,6 +136,16 @@ public:
     }
     bool AuthorizePeerMigration(const PeerId& peerId, const LanEndpoint& newEndpoint);
 
+    bool IsSameOrEquivalentEndpoint(const LanEndpoint& a, const LanEndpoint& b) const noexcept {
+        if (a == b) return true;
+        if (a.port == b.port && a.port != 0) {
+            bool aLocal = (a.ipv4 == 0x7F000001 || (m_localDataEndpoint.ipv4 != 0 && a.ipv4 == m_localDataEndpoint.ipv4));
+            bool bLocal = (b.ipv4 == 0x7F000001 || (m_localDataEndpoint.ipv4 != 0 && b.ipv4 == m_localDataEndpoint.ipv4));
+            if (aLocal && bLocal) return true;
+        }
+        return false;
+    }
+
     using SocketLifecycleCallback = void (*)(uintptr_t sock, bool isCreated);
     static void SetGlobalSocketLifecycleCallback(SocketLifecycleCallback cb);
     // Steam bridge: replace the endpoint a discovery packet or a lobby join request advertises (false = no such field).

@@ -128,8 +128,9 @@ void Tick() {
     if (server.empty() || !refix::gc::IsValidLanServerAddress(server)) { g_followedServer.clear(); return; }
     if (server == g_followedServer) return;
     g_followedServer = server;
-    ReFixLog("[Rooms] Room owner started a match on %s, following", server.c_str());
-    refix::source::MainThreadQueue::ExecuteClientCmdImmediate(("connect " + server).c_str());
+    std::string resolved = refix::gc::ResolveReachableServerAddress(room, server);
+    ReFixLog("[Rooms] Room owner started a match on %s (resolved: %s), following", server.c_str(), resolved.c_str());
+    refix::source::MainThreadQueue::ExecuteClientCmdImmediate(("connect " + resolved).c_str());
 }
 
 } // namespace refix::rooms
