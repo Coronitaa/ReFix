@@ -158,25 +158,35 @@ void App::DrawOverlay(ImVec2 viewport) {
         // Left column, top to bottom: community, the game's mod card, achievements. When both a mod card and
         // achievements are present on a shorter viewport, yield the static community links first so the mod card
         // and the achievements card both fit comfortably without clipping each other.
-        const float neededWithComm = commH + gap + (actH > 0.0f ? actH + (achMin > 0.0f ? gap + achMin : 0.0f) : achMin);
-        if (HasStorePage(appId_) && (actH <= 0.0f || !hasAchievements || height >= neededWithComm)) {
+        const float neededWithComm = commH + gap + (achMin > 0.0f ? gap + achMin : 0.0f);
+        if (HasStorePage(appId_) && (!hasAchievements || height >= neededWithComm)) {
             DrawCommunity(ImVec2(m, leftY), leftW);
             leftY += commH + gap;
         }
-        const float roomH = top + height - leftY;
-        if (actH > 0.0f && roomH >= ui::S(120)) {
-            const float modsH = (std::min)(roomH, (std::min)(actH, (std::max)(ui::S(160), roomH - (achMin > 0 ? achMin + gap : 0.0f))));
-            DrawModGrid(ImVec2(m, leftY), leftW, modsH);
-            leftY += modsH + gap;
-        }
         const float achH = top + height - leftY;
         if (hasAchievements && achH >= ui::S(110)) DrawAchievementsCard(ImVec2(m, leftY), ImVec2(leftW, achH));
+
         const float px = m + leftW + ui::S(20);
         float playersW = viewport.x - px - m;
-        if (SteamPanelVisible()) {
-            const float friendsW = std::clamp(playersW * 0.42f, ui::S(280), ui::S(420));
-            playersW -= friendsW + ui::S(20);
-            DrawFriends(ImVec2(px + playersW + ui::S(20), top), ImVec2(friendsW, height));
+        const bool steamVisible = SteamPanelVisible();
+        const float rightW = std::clamp(playersW * 0.42f, ui::S(280), ui::S(420));
+        const float modGridH = (actH > 0.0f) ? (std::max)(actH, ui::S(260)) : 0.0f;
+
+        if (steamVisible) {
+            playersW -= rightW + ui::S(20);
+            const float rightX = px + playersW + ui::S(20);
+            if (modGridH > 0.0f) {
+                const float friendsH = (height > modGridH + gap + ui::S(160)) ? (height - modGridH - gap) : (height * 0.55f);
+                const float actualModH = height - friendsH - gap;
+                DrawFriends(ImVec2(rightX, top), ImVec2(rightW, friendsH));
+                DrawModGrid(ImVec2(rightX, top + friendsH + gap), rightW, actualModH);
+            } else {
+                DrawFriends(ImVec2(rightX, top), ImVec2(rightW, height));
+            }
+        } else if (modGridH > 0.0f) {
+            playersW -= rightW + ui::S(20);
+            const float rightX = px + playersW + ui::S(20);
+            DrawModGrid(ImVec2(rightX, top), rightW, height);
         }
         DrawPlayers(ImVec2(px, top), ImVec2(playersW, height), false);
     }

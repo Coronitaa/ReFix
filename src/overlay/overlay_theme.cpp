@@ -430,7 +430,7 @@ void BeginCard(const char* id, ImVec2 pos, ImVec2 size, float padding) {
     ImGui::SetCursorScreenPos(ImVec2(pos.x + pad, pos.y + pad));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::BeginChild(id, ImVec2(size.x - pad * 2, size.y - pad * 2), ImGuiChildFlags_NavFlattened,
-                      ImGuiWindowFlags_NoBackground);
+                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
 }
 
 void EndCard() {

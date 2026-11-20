@@ -256,10 +256,14 @@ void DrawDetail(float w, float h) {
     ArtBackdrop(dl, p, ImVec2(p.x + w - ui::S(8), p.y + artH), rc, ui::S(12));
     csgo_icons::DrawItemArt(dl, it, ImVec2(p.x + ui::S(14), p.y + ui::S(10)), ImVec2(p.x + w - ui::S(22), p.y + artH - ui::S(10)), ui::S(12));
     dl->AddRectFilled(ImVec2(p.x, p.y + artH - ui::S(4)), ImVec2(p.x + w - ui::S(8), p.y + artH), rc, ui::S(12), ImDrawFlags_RoundCornersBottom);
-    if (it.paintKit && !csgo_icons::HasRenderedSkin(it)) {
-        ImGui::PushFont(ui::F().caption);
-        dl->AddText(ImVec2(p.x + ui::S(10), p.y + ui::S(8)), ui::color::Muted, i18n::T("Paint pattern preview", "Vista del patrón de pintura"));
-        ImGui::PopFont();
+    if (it.paintKit != 0) {
+        if (ImTextureID sw = csgo_icons::PaintSwatch(it.pattern)) {
+            const float swSize = ui::S(28);
+            const ImVec2 swMin(p.x + w - ui::S(18) - swSize, p.y + ui::S(10));
+            const ImVec2 swMax(swMin.x + swSize, swMin.y + swSize);
+            dl->AddImageRounded(sw, swMin, swMax, ImVec2(0.1f, 0.1f), ImVec2(0.9f, 0.9f), IM_COL32_WHITE, ui::S(6));
+            dl->AddRect(swMin, swMax, ui::color::Border, ui::S(6), 0, ui::S(1));
+        }
     }
     ImGui::Dummy(ImVec2(0, artH + ui::S(8)));
 

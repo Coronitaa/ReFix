@@ -386,10 +386,99 @@ ImTextureID PaintSwatch(const std::string& pattern) {
 }
 
 std::string GloveFallbackPath(const refix::csgo::MarketItem& item);
+const std::vector<ImU32>& GlovePalette(const std::string& pattern);
+
+ImTextureID LoadSkinned(const refix::csgo::MarketItem& item) {
+    std::string key = "csgo:skin:" + Lower(item.weaponName) + ":" + Lower(item.pattern) + ":" + Lower(item.imageInventory);
+    if (!g_attempted.count(key)) {
+        if (g_budget <= 0) return 0;
+        --g_budget;
+        g_attempted.insert(key);
+        EnsureCom();
+    }
+    return host::Texture(key, [&](image::Rgba& img) {
+        try {
+            std::string basePath = BasePath(item.imageInventory);
+            if (basePath.empty()) basePath = GloveFallbackPath(item);
+            if (basePath.empty()) return false;
+            std::vector<uint8_t> baseBytes;
+            if (!ReadGameFile(basePath, baseBytes)) return false;
+            image::Rgba baseImg;
+            if (!image::DecodeMemory(baseBytes.data(), baseBytes.size(), baseImg, 0)) return false;
+
+            // Composite paint pattern VTF onto the weapon silhouette:
+            auto it = Index().paints.find(Lower(item.pattern));
+            if (it != Index().paints.end()) {
+                std::vector<uint8_t> vtfBytes;
+                if (ReadGameFile(it->second, vtfBytes)) {
+                    image::Rgba vtfImg;
+                    if (DecodeVtf(vtfBytes, vtfImg) && vtfImg.width > 0 && vtfImg.height > 0) {
+                        const int bw = baseImg.width, bh = baseImg.height;
+                        const int vw = vtfImg.width, vh = vtfImg.height;
+                        uint8_t* bp = baseImg.pixels.data();
+                        const uint8_t* vp = vtfImg.pixels.data();
+                        for (int y = 0; y < bh; ++y) {
+                            for (int x = 0; x < bw; ++x) {
+                                size_t bidx = ((size_t)y * bw + x) * 4;
+                                uint8_t a = bp[bidx + 3];
+                                if (a == 0) continue;
+
+                                int vx = ((x * vw) / bw * 2) % vw;
+                                int vy = ((y * vh) / bh * 2) % vh;
+                                if (vx < 0) vx += vw;
+                                if (vy < 0) vy += vh;
+                                size_t vidx = ((size_t)vy * vw + vx) * 4;
+
+                                uint8_t pr = vp[vidx], pg = vp[vidx + 1], pb = vp[vidx + 2];
+                                uint8_t br = bp[bidx], bg = bp[bidx + 1], bb = bp[bidx + 2];
+
+                                float lum = (0.299f * br + 0.587f * bg + 0.114f * bb) / 255.0f;
+                                float shade = std::clamp(0.25f + 1.05f * lum, 0.0f, 1.8f);
+
+                                bp[bidx]     = (uint8_t)std::clamp(pr * shade, 0.0f, 255.0f);
+                                bp[bidx + 1] = (uint8_t)std::clamp(pg * shade, 0.0f, 255.0f);
+                                bp[bidx + 2] = (uint8_t)std::clamp(pb * shade, 0.0f, 255.0f);
+                            }
+                        }
+                    }
+                }
+            } else if (const std::vector<ImU32>& palette = GlovePalette(item.pattern); !palette.empty()) {
+                const int bw = baseImg.width, bh = baseImg.height;
+                uint8_t* bp = baseImg.pixels.data();
+                for (int y = 0; y < bh; ++y) {
+                    for (int x = 0; x < bw; ++x) {
+                        size_t bidx = ((size_t)y * bw + x) * 4;
+                        uint8_t a = bp[bidx + 3];
+                        if (a == 0) continue;
+                        size_t palIdx = (size_t)(x * palette.size() / bw) % palette.size();
+                        ImU32 col = palette[palIdx];
+                        uint8_t pr = (col) & 0xFF;
+                        uint8_t pg = (col >> 8) & 0xFF;
+                        uint8_t pb = (col >> 16) & 0xFF;
+                        uint8_t br = bp[bidx], bg = bp[bidx + 1], bb = bp[bidx + 2];
+                        float lum = (0.299f * br + 0.587f * bg + 0.114f * bb) / 255.0f;
+                        float shade = std::clamp(0.25f + 1.05f * lum, 0.0f, 1.8f);
+                        bp[bidx]     = (uint8_t)std::clamp(pr * shade, 0.0f, 255.0f);
+                        bp[bidx + 1] = (uint8_t)std::clamp(pg * shade, 0.0f, 255.0f);
+                        bp[bidx + 2] = (uint8_t)std::clamp(pb * shade, 0.0f, 255.0f);
+                    }
+                }
+            }
+            img = std::move(baseImg);
+            g_sizes[key] = ImVec2((float)img.width, (float)img.height);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    });
+}
 
 ImTextureID ItemImage(const refix::csgo::MarketItem& item) {
     std::string rendered = RenderedPath(item);
     if (!rendered.empty()) return Load(rendered, false);
+    if (item.paintKit != 0) {
+        if (ImTextureID skinned = LoadSkinned(item)) return skinned;
+    }
     if (ImTextureID t = BaseImage(item.imageInventory)) return t;
     const std::string glove = GloveFallbackPath(item);
     return glove.empty() ? 0 : Load(glove, false);
@@ -426,29 +515,16 @@ std::string GloveFallbackPath(const refix::csgo::MarketItem& item) {
 }
 
 void DrawItemArt(ImDrawList* dl, const refix::csgo::MarketItem& item, ImVec2 min, ImVec2 max, float rounding) {
+    (void)rounding;
     std::string rendered = RenderedPath(item);
     if (!rendered.empty()) {
         if (ImTextureID t = Load(rendered, false)) FitImage(dl, t, SizeOf(rendered), min, max);
         return;
     }
     if (item.paintKit != 0) {
-        // No pre-rendered icon in this build: show the paint pattern behind the base weapon.
-        auto it = Index().paints.find(Lower(item.pattern));
-        if (it != Index().paints.end()) {
-            if (ImTextureID sw = Load(it->second, true)) {
-                dl->AddImageRounded(sw, min, max, ImVec2(0.1f, 0.1f), ImVec2(0.9f, 0.9f), IM_COL32(255, 255, 255, 150), rounding);
-                ui::GradientRect(dl, min, max, IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 150), rounding);
-            }
-        } else if (const std::vector<ImU32>& palette = GlovePalette(item.pattern); !palette.empty()) {
-            // Glove finish: its palette as vertical bands, darkened at the bottom like the paint swatches.
-            const float w = (max.x - min.x) / (float)palette.size();
-            for (size_t i = 0; i < palette.size(); ++i) {
-                const ImVec2 a(min.x + w * (float)i, min.y), b(i + 1 == palette.size() ? max.x : min.x + w * (float)(i + 1), max.y);
-                const ImDrawFlags corners = i == 0 ? ImDrawFlags_RoundCornersLeft
-                                          : (i + 1 == palette.size() ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersNone);
-                dl->AddRectFilled(a, b, (palette[i] & 0x00FFFFFF) | IM_COL32(0, 0, 0, 150), rounding, corners);
-            }
-            ui::GradientRect(dl, min, max, IM_COL32(0, 0, 0, 40), IM_COL32(0, 0, 0, 150), rounding);
+        if (ImTextureID skinned = LoadSkinned(item)) {
+            FitImage(dl, skinned, SizeOf("skin:" + Lower(item.weaponName) + ":" + Lower(item.pattern) + ":" + Lower(item.imageInventory)), min, max);
+            return;
         }
     }
     std::string base = BasePath(item.imageInventory);

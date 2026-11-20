@@ -46,6 +46,11 @@ if (-not $PhotonRegion -and $env:REFIX_PHOTON_REGION) { $PhotonRegion = $env:REF
 if (-not $OverlayMode -and $env:REFIX_OVERLAY_MODE) { $OverlayMode = $env:REFIX_OVERLAY_MODE }
 if (-not $PortableRuntime -and $env:REFIX_PORTABLE_RUNTIME) { $PortableRuntime = $env:REFIX_PORTABLE_RUNTIME }
 
+# Normalize all directory parameters to robust absolute paths
+if ($BinDir -and (Test-Path -LiteralPath $BinDir)) { $BinDir = (Resolve-Path -LiteralPath $BinDir).Path }
+if ($TargetDir -and (Test-Path -LiteralPath $TargetDir)) { $TargetDir = (Resolve-Path -LiteralPath $TargetDir).Path }
+if ($ExeDir -and (Test-Path -LiteralPath $ExeDir)) { $ExeDir = (Resolve-Path -LiteralPath $ExeDir).Path }
+
 # Free-to-play games (Brawlhalla) are in every Steam library and their own backend checks a Steam ticket for the
 # real AppID, so ReFix Online keeps the real AppID instead of masking it as 480. Offline lookup keeps 480.
 if ($OnlineMode -eq "valve" -and $MaskAppId -eq "480" -and $RealAppId -match '^\d+$' -and $RealAppId -ne "480") {
@@ -2626,7 +2631,8 @@ function Install-GameMods {
         $only = @($env:REFIX_GAME_MODS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     }
     $modsUrl = if ($env:REFIX_MODS_URL) { $env:REFIX_MODS_URL } else { "https://raw.githubusercontent.com/Coronitaa/ReFix/main/refix_mods" }
-    $localMods = Join-Path (Split-Path -Parent $BinDir) "refix_mods"
+    $repoRoot = if (Test-Path $BinDir) { (Resolve-Path (Join-Path $BinDir "..")).Path } else { $PSScriptRoot }
+    $localMods = Join-Path $repoRoot "refix_mods"
     $catalogPath = Join-Path $localMods "catalog.tsv"
     try {
         $lines = if (Test-Path -LiteralPath $catalogPath) { Get-Content -LiteralPath $catalogPath }

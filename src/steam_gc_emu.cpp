@@ -2477,9 +2477,10 @@ void HostLanMatch() {
     // and all mode ConVars are also applied viagamemode_*_server.cfg -> exec refix_lan_host.cfg during map load.
     const int slots = std::clamp((int)num("maxplayers", 10), 2, 64);
     const int warmupTime = std::clamp((int)num("warmuptime", 60), 0, 3600);
-    char cmd[896];
+    char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "sv_lan 1; sv_visiblemaxplayers %d; game_type %d; game_mode %d; sv_skirmish_id %d; mp_maxrounds %d; mp_roundtime %.2f; "
+             "sv_lan 1; engine_no_focus_sleep 0; fps_max 0; sv_minrate 128000; sv_maxrate 0; sv_minupdaterate 64; sv_maxupdaterate 128; sv_mincmdrate 64; sv_maxcmdrate 128; net_splitrate 4; net_maxcleartime 0.001; "
+             "sv_visiblemaxplayers %d; game_type %d; game_mode %d; sv_skirmish_id %d; mp_maxrounds %d; mp_roundtime %.2f; "
              "mp_roundtime_defuse %.2f; mp_roundtime_hostage %.2f; mp_warmuptime %d; mp_warmuptime_all_players_connected %d; "
              "mp_do_warmup_period %d; mp_do_warmup_offine %d; mp_buytime %d; mp_startmoney %d; mp_maxmoney %d; "
              "mp_friendlyfire %d; bot_quota %d; bot_difficulty %d; sv_cheats %d; mp_overtime_enable %d; "

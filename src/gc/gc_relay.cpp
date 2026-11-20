@@ -347,18 +347,29 @@ std::string ResolveReachableServerAddress(uint64_t peerSteamId, const std::strin
     // Check if we discovered this peer directly on LAN
     bool isLanPeer = false;
     uint32_t lanEpIp = 0;
+    bool isSameMachine = false;
     auto pid = refix::lan::ILanCore::Get().Peers().FindBySteamId(peerSteamId);
     if (pid) {
         auto pinfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*pid);
-        if (pinfo && pinfo->endpoint.ipv4 != 0) {
+        if (pinfo) {
+            if (pinfo->machineId != 0 && pinfo->machineId == refix::lan::ILanCore::Get().Identity().GetMachineId()) isSameMachine = true;
+            if (pinfo->endpoint.ipv4 != 0) {
 #if REFIX_STEAM_LINK
-            if (!steamlink::IsVirtual(pinfo->endpoint.ipv4))
+                if (!steamlink::IsVirtual(pinfo->endpoint.ipv4))
 #endif
-            {
-                isLanPeer = true;
-                lanEpIp = pinfo->endpoint.ipv4;
+                {
+                    isLanPeer = true;
+                    lanEpIp = pinfo->endpoint.ipv4;
+                }
             }
         }
+    }
+
+    // 0. If this peer is on the same physical machine (multi-instance, local IP match, or loopback),
+    // always connect via 127.0.0.1 to avoid NDIS network driver latency, packet queuing, and jitter:
+    if (isSameMachine || (myIp != 0 && (advIp == myIp || lanEpIp == myIp)) || (advIp == 0x7F000001)) {
+        ReFixLog("[GC] Rewrote advertised address %s to local loopback 127.0.0.1:%s", advertisedAddr.c_str(), portStr.c_str());
+        return "127.0.0.1:" + portStr;
     }
 
     // Check if the advertised IP is on our local subnet
@@ -408,6 +419,7 @@ void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFoun
             continue;
         }
         std::string resolved = ResolveReachableServerAddress(peer.first, peer.second);
+        refix::source::MainThreadQueue::ExecuteClientCmd("engine_no_focus_sleep 0; rate 786432; cl_cmdrate 128; cl_updaterate 128; cl_interp 0; cl_interp_ratio 1");
         std::string cmd = "connect " + resolved;
         ReFixLog("[GC-Relay] SteamID %llu hosts a match on %s, joining: %s", (unsigned long long)peer.first, peer.second.c_str(), cmd.c_str());
         refix::source::MainThreadQueue::ExecuteClientCmd(cmd);

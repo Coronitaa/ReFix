@@ -213,9 +213,13 @@ void ReFix_MultiInstanceAvoidExclusiveFullscreen(int instanceSlot) {
         const size_t end = at == std::string::npos ? at : at + strlen(p);
         return at != std::string::npos && (end == lower.size() || lower[end] == ' ' || lower[end] == '"');
     };
-    if (has("-fullscreen") || has("-full") || has("-windowed") || has("-window") || has("-sw")) return;
+    if (has("-fullscreen") || has("-full") || has("-windowed") || has("-window") || has("-sw")) {
+        refix::source::AppendGameParm("+engine_no_focus_sleep", "0");
+        return;
+    }
     refix::source::AppendGameParm("-windowed", nullptr);
     refix::source::AppendGameParm("-noborder", nullptr);
+    refix::source::AppendGameParm("+engine_no_focus_sleep", "0");
     ReFixLog("[MultiInstance] Instance %d: started in a borderless window (exclusive fullscreen would black out the others)",
              instanceSlot + 1);
 }

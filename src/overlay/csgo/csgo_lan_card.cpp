@@ -132,7 +132,7 @@ namespace csgo_ui {
 float LanCardHeight(float width) {
     (void)width;
     const bool inRoom = (refix::rooms::Current() != 0);
-    return inRoom ? ui::S(210) : ui::S(195);
+    return inRoom ? ui::S(260) : ui::S(240);
 }
 
 // Content of the "CS:GO LAN" grid cell; the overlay draws the card and its title.
