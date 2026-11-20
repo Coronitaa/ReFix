@@ -347,12 +347,10 @@ std::string ResolveReachableServerAddress(uint64_t peerSteamId, const std::strin
     // Check if we discovered this peer directly on LAN
     bool isLanPeer = false;
     uint32_t lanEpIp = 0;
-    bool isSameMachine = false;
     auto pid = refix::lan::ILanCore::Get().Peers().FindBySteamId(peerSteamId);
     if (pid) {
         auto pinfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(*pid);
         if (pinfo) {
-            if (pinfo->machineId != 0 && pinfo->machineId == refix::lan::ILanCore::Get().Identity().GetMachineId()) isSameMachine = true;
             if (pinfo->endpoint.ipv4 != 0) {
 #if REFIX_STEAM_LINK
                 if (!steamlink::IsVirtual(pinfo->endpoint.ipv4))
@@ -365,13 +363,6 @@ std::string ResolveReachableServerAddress(uint64_t peerSteamId, const std::strin
         }
     }
 
-    // 0. If this peer is on the same physical machine (multi-instance, local IP match, or loopback),
-    // always connect via 127.0.0.1 to avoid NDIS network driver latency, packet queuing, and jitter:
-    if (isSameMachine || (myIp != 0 && (advIp == myIp || lanEpIp == myIp)) || (advIp == 0x7F000001)) {
-        ReFixLog("[GC] Rewrote advertised address %s to local loopback 127.0.0.1:%s", advertisedAddr.c_str(), portStr.c_str());
-        return "127.0.0.1:" + portStr;
-    }
-
     // Check if the advertised IP is on our local subnet
     bool sameSubnet = false;
     if (myIp != 0 && advIp != 0) {
@@ -379,9 +370,9 @@ std::string ResolveReachableServerAddress(uint64_t peerSteamId, const std::strin
                      ((myIp & 0xFFFF0000) == (advIp & 0xFFFF0000));
     }
 
-    // 1. If we discovered the peer on LAN, and either the subnets match or advertised is a virtual/internal adapter:
+    // 1. If we discovered the peer on LAN, prioritize their reachable LAN endpoint if advertised IP is loopback or unroutable
     if (isLanPeer && lanEpIp != 0) {
-        if (!sameSubnet) {
+        if (!sameSubnet || advIp == 0x7F000001) {
             char buf[64];
             snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u",
                      (lanEpIp >> 24) & 0xFF, (lanEpIp >> 16) & 0xFF, (lanEpIp >> 8) & 0xFF, lanEpIp & 0xFF, port);

@@ -17,6 +17,7 @@ extern void ReFixLog(const char* fmt, ...);
 #include "overlay_ui_mods.h"
 #include "avatar_image.h"
 #include "overlay_host.h"
+#include "../gc/lan_rooms.h"
 #include <vector>
 
 namespace refix::overlay {
@@ -109,7 +110,12 @@ void TextAt(ImDrawList* dl, ImFont* font, ImVec2 pos, ImU32 col, const std::stri
 } // namespace
 
 bool CanJoin(const PlayerRow& r, uint64_t localLobby) {
-    if (!r.sameGame || (r.p.lobbyId && r.p.lobbyId == localLobby)) return false;
+    if (!r.sameGame) return false;
+    uint64_t curRoom = refix::rooms::Current();
+    if (curRoom != 0 && refix::rooms::PeerRoom(r.p.steamId) == curRoom) return false;
+    if (refix::rooms::OwnsRoom(r.p.steamId)) return true;
+    if (refix::rooms::PeerRoom(r.p.steamId) != 0) return true;
+    if (r.p.lobbyId && r.p.lobbyId == localLobby) return false;
     return (r.p.lobbyId && r.p.joinable) || (!r.p.lobbyId && !r.p.connect.empty());
 }
 
@@ -170,25 +176,21 @@ void App::DrawOverlay(ImVec2 viewport) {
         float playersW = viewport.x - px - m;
         const bool steamVisible = SteamPanelVisible();
         const float rightW = std::clamp(playersW * 0.42f, ui::S(280), ui::S(420));
-        const float modGridH = (actH > 0.0f) ? (std::max)(actH, ui::S(260)) : 0.0f;
-
         if (steamVisible) {
             playersW -= rightW + ui::S(20);
             const float rightX = px + playersW + ui::S(20);
-            if (modGridH > 0.0f) {
-                const float friendsH = (height > modGridH + gap + ui::S(160)) ? (height - modGridH - gap) : (height * 0.55f);
-                const float actualModH = height - friendsH - gap;
-                DrawFriends(ImVec2(rightX, top), ImVec2(rightW, friendsH));
-                DrawModGrid(ImVec2(rightX, top + friendsH + gap), rightW, actualModH);
-            } else {
-                DrawFriends(ImVec2(rightX, top), ImVec2(rightW, height));
-            }
-        } else if (modGridH > 0.0f) {
-            playersW -= rightW + ui::S(20);
-            const float rightX = px + playersW + ui::S(20);
-            DrawModGrid(ImVec2(rightX, top), rightW, height);
+            DrawFriends(ImVec2(rightX, top), ImVec2(rightW, height));
         }
-        DrawPlayers(ImVec2(px, top), ImVec2(playersW, height), false);
+
+        // Mod Grid (Room controls / Market / Server) sits horizontally below LAN players in the middle column
+        const float modGridH = (actH > 0.0f) ? (std::clamp)(actH, ui::S(130), ui::S(160)) : 0.0f;
+        if (modGridH > 0.0f && height > modGridH + gap + ui::S(140)) {
+            const float playersH = height - modGridH - gap;
+            DrawPlayers(ImVec2(px, top), ImVec2(playersW, playersH), false);
+            DrawModGrid(ImVec2(px, top + playersH + gap), playersW, modGridH);
+        } else {
+            DrawPlayers(ImVec2(px, top), ImVec2(playersW, height), false);
+        }
     }
 
     DrawProfileMenu();

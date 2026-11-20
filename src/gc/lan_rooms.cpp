@@ -52,6 +52,11 @@ bool OwnsRoom(uint64_t steamId) {
     return ParseSteamId(PeerValue(steamId, kRoomKey)) == steamId;
 }
 
+uint64_t PeerRoom(uint64_t steamId) {
+    if (steamId == UnrealSteamEmu::GetLocalSteamID()) return Current();
+    return ParseSteamId(PeerValue(steamId, kRoomKey));
+}
+
 void Create() {
     uint64_t self = UnrealSteamEmu::GetLocalSteamID();
     UnrealSteamEmu::SetLocalPresence(kRoomKey, std::to_string(self).c_str());

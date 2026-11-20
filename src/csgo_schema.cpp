@@ -638,6 +638,47 @@ public:
                 }
             }
         }
+
+        // 6. Collections (item_sets): parses all weapon collection skins (Dragon Lore, Medusa, Knight, Hot Rod, etc.)
+        const KeyValue* isKey = root->GetSubkey("item_sets");
+        if (isKey) {
+            for (const KeyValue& setSub : isKey->Subkeys()) {
+                const KeyValue* itemsList = setSub.GetSubkey("items");
+                if (!itemsList) continue;
+                for (const KeyValue& entry : itemsList->Subkeys()) {
+                    std::string_view en = entry.Name();
+                    if (en.size() > 2 && en[0] == '[') {
+                        size_t endBracket = en.find(']', 1);
+                        if (endBracket != std::string_view::npos) {
+                            std::string pkName = std::string(en.substr(1, endBracket - 1));
+                            std::string wpName = std::string(en.substr(endBracket + 1));
+                            m_paintedPairs.insert({ wpName, pkName });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Alternate icons (dynamically loads all knives, gloves, and weapon skins for this game build)
+        const KeyValue* altKey = root->GetSubkey("alternate_icons2");
+        if (altKey) {
+            const KeyValue* wpIcons = altKey->GetSubkey("weapon_icons");
+            if (wpIcons) {
+                for (const KeyValue& entry : wpIcons->Subkeys()) {
+                    uint32_t val = (uint32_t)strtoul(entry.Name().data(), nullptr, 10);
+                    if (val == 0) continue;
+                    uint32_t defId = val >> 16;
+                    uint32_t paintDef = (val & 0xFFFF) >> 2;
+                    if (defId == 0 || paintDef == 0) continue;
+                    auto itItem = m_itemInfo.find(defId);
+                    if (itItem == m_itemInfo.end()) continue;
+                    auto itPaintName = m_paintKitIdToName.find(paintDef);
+                    if (itPaintName == m_paintKitIdToName.end()) continue;
+                    m_paintedPairs.insert({ itItem->second.m_name, itPaintName->second });
+                }
+            }
+        }
+
         ReFixLog("[GC] CSGOSchema: Loaded %zu items, %zu paint kits, %zu loot lists, %zu revolving lists, %zu painted combos",
                  m_itemInfo.size(), m_paintKitInfo.size(), m_lootLists.size(), m_revolvingLootLists.size(), m_paintedPairs.size());
         return true;
@@ -829,10 +870,12 @@ bool SchemaManager::Load() {
         if (itm.m_prefab.find("case_key") != std::string::npos || (itm.m_prefab.find("tool") != std::string::npos && itm.m_name.find("key") != std::string::npos)) {
             return "Llaves";
         }
-        if (itm.m_defIndex >= 500 && itm.m_defIndex <= 530 || itm.m_prefab.find("melee") != std::string::npos) {
+        if ((itm.m_defIndex >= 500 && itm.m_defIndex <= 530) || itm.m_prefab.find("melee") != std::string::npos ||
+            itm.m_name.find("knife") != std::string::npos || itm.m_name.find("bayonet") != std::string::npos) {
             return "Cuchillos";
         }
-        if (itm.m_defIndex >= 5027 && itm.m_defIndex <= 5035 || itm.m_prefab.find("hands") != std::string::npos || itm.m_prefab.find("gloves") != std::string::npos) {
+        if ((itm.m_defIndex >= 5027 && itm.m_defIndex <= 5035) || itm.m_prefab.find("hands") != std::string::npos ||
+            itm.m_prefab.find("gloves") != std::string::npos || itm.m_name.find("gloves") != std::string::npos) {
             return "Guantes";
         }
         if (itm.m_prefab.find("customplayer") != std::string::npos || (itm.m_defIndex >= 4613 && itm.m_defIndex <= 5601)) {

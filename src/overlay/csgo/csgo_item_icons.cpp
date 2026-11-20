@@ -386,10 +386,19 @@ ImTextureID PaintSwatch(const std::string& pattern) {
 }
 
 std::string GloveFallbackPath(const refix::csgo::MarketItem& item);
-const std::vector<ImU32>& GlovePalette(const std::string& pattern);
+std::string KnifeFallbackPath(const refix::csgo::MarketItem& item);
 
-ImTextureID LoadSkinned(const refix::csgo::MarketItem& item) {
-    std::string key = "csgo:skin:" + Lower(item.weaponName) + ":" + Lower(item.pattern) + ":" + Lower(item.imageInventory);
+std::string CachedIicPath(const refix::csgo::MarketItem& item) {
+    if (item.defIndex == 0) return {};
+    uint32_t val = (item.defIndex << 16) | (item.paintKit & 0xFFFF);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "resource/flash/econ/weapons/cached/10-ffffffff-%x.iic", val);
+    if (Exists(buf)) return buf;
+    return {};
+}
+
+ImTextureID LoadIic(const std::string& path) {
+    std::string key = "csgo:iic:" + path;
     if (!g_attempted.count(key)) {
         if (g_budget <= 0) return 0;
         --g_budget;
@@ -397,120 +406,52 @@ ImTextureID LoadSkinned(const refix::csgo::MarketItem& item) {
         EnsureCom();
     }
     return host::Texture(key, [&](image::Rgba& img) {
-        try {
-            std::string basePath = BasePath(item.imageInventory);
-            if (basePath.empty()) basePath = GloveFallbackPath(item);
-            if (basePath.empty()) return false;
-            std::vector<uint8_t> baseBytes;
-            if (!ReadGameFile(basePath, baseBytes)) return false;
-            image::Rgba baseImg;
-            if (!image::DecodeMemory(baseBytes.data(), baseBytes.size(), baseImg, 0)) return false;
-
-            // Composite paint pattern VTF onto the weapon silhouette:
-            auto it = Index().paints.find(Lower(item.pattern));
-            if (it != Index().paints.end()) {
-                std::vector<uint8_t> vtfBytes;
-                if (ReadGameFile(it->second, vtfBytes)) {
-                    image::Rgba vtfImg;
-                    if (DecodeVtf(vtfBytes, vtfImg) && vtfImg.width > 0 && vtfImg.height > 0) {
-                        const int bw = baseImg.width, bh = baseImg.height;
-                        const int vw = vtfImg.width, vh = vtfImg.height;
-                        uint8_t* bp = baseImg.pixels.data();
-                        const uint8_t* vp = vtfImg.pixels.data();
-                        for (int y = 0; y < bh; ++y) {
-                            for (int x = 0; x < bw; ++x) {
-                                size_t bidx = ((size_t)y * bw + x) * 4;
-                                uint8_t a = bp[bidx + 3];
-                                if (a == 0) continue;
-
-                                int vx = ((x * vw) / bw * 2) % vw;
-                                int vy = ((y * vh) / bh * 2) % vh;
-                                if (vx < 0) vx += vw;
-                                if (vy < 0) vy += vh;
-                                size_t vidx = ((size_t)vy * vw + vx) * 4;
-
-                                uint8_t pr = vp[vidx], pg = vp[vidx + 1], pb = vp[vidx + 2];
-                                uint8_t br = bp[bidx], bg = bp[bidx + 1], bb = bp[bidx + 2];
-
-                                float lum = (0.299f * br + 0.587f * bg + 0.114f * bb) / 255.0f;
-                                float shade = std::clamp(0.25f + 1.05f * lum, 0.0f, 1.8f);
-
-                                bp[bidx]     = (uint8_t)std::clamp(pr * shade, 0.0f, 255.0f);
-                                bp[bidx + 1] = (uint8_t)std::clamp(pg * shade, 0.0f, 255.0f);
-                                bp[bidx + 2] = (uint8_t)std::clamp(pb * shade, 0.0f, 255.0f);
-                            }
-                        }
-                    }
-                }
-            } else if (const std::vector<ImU32>& palette = GlovePalette(item.pattern); !palette.empty()) {
-                const int bw = baseImg.width, bh = baseImg.height;
-                uint8_t* bp = baseImg.pixels.data();
-                for (int y = 0; y < bh; ++y) {
-                    for (int x = 0; x < bw; ++x) {
-                        size_t bidx = ((size_t)y * bw + x) * 4;
-                        uint8_t a = bp[bidx + 3];
-                        if (a == 0) continue;
-                        size_t palIdx = (size_t)(x * palette.size() / bw) % palette.size();
-                        ImU32 col = palette[palIdx];
-                        uint8_t pr = (col) & 0xFF;
-                        uint8_t pg = (col >> 8) & 0xFF;
-                        uint8_t pb = (col >> 16) & 0xFF;
-                        uint8_t br = bp[bidx], bg = bp[bidx + 1], bb = bp[bidx + 2];
-                        float lum = (0.299f * br + 0.587f * bg + 0.114f * bb) / 255.0f;
-                        float shade = std::clamp(0.25f + 1.05f * lum, 0.0f, 1.8f);
-                        bp[bidx]     = (uint8_t)std::clamp(pr * shade, 0.0f, 255.0f);
-                        bp[bidx + 1] = (uint8_t)std::clamp(pg * shade, 0.0f, 255.0f);
-                        bp[bidx + 2] = (uint8_t)std::clamp(pb * shade, 0.0f, 255.0f);
-                    }
-                }
-            }
-            img = std::move(baseImg);
-            g_sizes[key] = ImVec2((float)img.width, (float)img.height);
-            return true;
-        } catch (...) {
-            return false;
-        }
+        std::vector<uint8_t> bytes;
+        if (!ReadGameFile(path, bytes) || bytes.size() < 512 * 384 * 4) return false;
+        img.width = 512;
+        img.height = 384;
+        img.pixels.assign(bytes.begin(), bytes.begin() + (512 * 384 * 4));
+        g_sizes[key] = ImVec2(512.0f, 384.0f);
+        return true;
     });
 }
 
+// Loads item skin art: prefers official pre-rendered PNG or the game's native ItemIconCache (512x384 RGBA),
+// cleanly falling back to the base weapon/knife/glove silhouette without distorted procedural mud.
 ImTextureID ItemImage(const refix::csgo::MarketItem& item) {
     std::string rendered = RenderedPath(item);
     if (!rendered.empty()) return Load(rendered, false);
     if (item.paintKit != 0) {
-        if (ImTextureID skinned = LoadSkinned(item)) return skinned;
+        std::string iic = CachedIicPath(item);
+        if (!iic.empty()) {
+            if (ImTextureID t = LoadIic(iic)) return t;
+        }
     }
     if (ImTextureID t = BaseImage(item.imageInventory)) return t;
+    std::string knife = KnifeFallbackPath(item);
+    if (!knife.empty()) {
+        if (ImTextureID t = Load(knife, false)) return t;
+    }
     const std::string glove = GloveFallbackPath(item);
     return glove.empty() ? 0 : Load(glove, false);
 }
 
-// Colours of a glove finish: its material's $palettecolor1..8 ("[ r g b ]", 0-255). Empty when the build has none.
-const std::vector<ImU32>& GlovePalette(const std::string& pattern) {
-    static std::unordered_map<std::string, std::vector<ImU32>> cache;  // render thread only
-    auto cached = cache.find(pattern);
-    if (cached != cache.end()) return cached->second;
-    std::vector<ImU32>& colors = cache[pattern];
-    auto it = Index().glovePaints.find(Lower(pattern));
-    std::vector<uint8_t> bytes;
-    if (it == Index().glovePaints.end() || !ReadGameFile(it->second, bytes)) return colors;
-    const std::string text(bytes.begin(), bytes.end());
-    for (int i = 1; i <= 8; ++i) {
-        const std::string key = "$palettecolor" + std::to_string(i) + "\"";
-        size_t at = Lower(text).find(key);
-        if (at == std::string::npos) continue;
-        at = text.find('[', at);
-        float r = 0, g = 0, b = 0;
-        if (at != std::string::npos && sscanf(text.c_str() + at + 1, "%f %f %f", &r, &g, &b) == 3) {
-            auto c = [](float v) { return (int)std::clamp(v, 0.0f, 255.0f); };
-            colors.push_back(IM_COL32(c(r), c(g), c(b), 255));
-        }
-    }
-    return colors;
+std::string KnifeFallbackPath(const refix::csgo::MarketItem& item) {
+    if (item.category != "Cuchillos" && item.weaponName.find("knife") == std::string::npos && item.weaponName.find("bayonet") == std::string::npos) return {};
+    std::string name = Lower(item.weaponName);
+    std::string p = "resource/flash/econ/weapons/base_weapons/" + name + ".png";
+    if (Exists(p)) return p;
+    return BasePath("econ/weapons/base_weapons/weapon_knife");
 }
 
 // The generic glove picture this build ships when a glove has no picture of its own.
 std::string GloveFallbackPath(const refix::csgo::MarketItem& item) {
-    if (item.category != "Guantes") return {};
+    if (item.category != "Guantes" && item.weaponName.find("glove") == std::string::npos) return {};
+    for (const std::string& p : { "resource/flash/econ/wearables/gloves/t_defaultgloves.png",
+                                  "resource/flash/econ/wearables/gloves/ct_defaultgloves.png",
+                                  "resource/flash/econ/weapons/base_weapons/t_gloves.png" }) {
+        if (Exists(p)) return p;
+    }
     return BasePath("econ/weapons/base_weapons/ct_gloves");
 }
 
@@ -518,19 +459,20 @@ void DrawItemArt(ImDrawList* dl, const refix::csgo::MarketItem& item, ImVec2 min
     (void)rounding;
     std::string rendered = RenderedPath(item);
     if (!rendered.empty()) {
-        if (ImTextureID t = Load(rendered, false)) FitImage(dl, t, SizeOf(rendered), min, max);
-        return;
+        if (ImTextureID t = Load(rendered, false)) { FitImage(dl, t, SizeOf(rendered), min, max); return; }
     }
     if (item.paintKit != 0) {
-        if (ImTextureID skinned = LoadSkinned(item)) {
-            FitImage(dl, skinned, SizeOf("skin:" + Lower(item.weaponName) + ":" + Lower(item.pattern) + ":" + Lower(item.imageInventory)), min, max);
-            return;
+        std::string iic = CachedIicPath(item);
+        if (!iic.empty()) {
+            if (ImTextureID t = LoadIic(iic)) { FitImage(dl, t, ImVec2(512.0f, 384.0f), min, max); return; }
         }
     }
     std::string base = BasePath(item.imageInventory);
+    if (base.empty()) base = KnifeFallbackPath(item);
     if (base.empty()) base = GloveFallbackPath(item);
-    if (!base.empty())
-        if (ImTextureID t = Load(base, false)) FitImage(dl, t, SizeOf(base), min, max);
+    if (!base.empty()) {
+        if (ImTextureID t = Load(base, false)) { FitImage(dl, t, SizeOf(base), min, max); return; }
+    }
 }
 
 } // namespace refix::overlay::csgo_icons

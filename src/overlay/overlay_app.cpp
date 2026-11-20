@@ -28,6 +28,7 @@
 #include "../steam_link/steam_link.h"
 #include "../lan_core/refix_lan_core.h"
 #include "../mods/mod_host.h"
+#include "../gc/lan_rooms.h"
 
 #include <shellapi.h>
 #include <algorithm>
@@ -438,6 +439,20 @@ void App::Join(const net::RemotePlayer& p) {
         SteamP2PHook::RegisterOverlayEndpoint(p.steamId, p.ip, p.port);
     }
 
+    if (refix::rooms::OwnsRoom(p.steamId)) {
+        refix::rooms::Join(p.steamId);
+        ShowInfo(i18n::T("Joined room", "Te uniste a la sala"), p.name);
+        CloseOverlay();
+        return;
+    }
+    uint64_t peerR = refix::rooms::PeerRoom(p.steamId);
+    if (peerR != 0) {
+        refix::rooms::Join(peerR);
+        ShowInfo(i18n::T("Joined room", "Te uniste a la sala"), p.name);
+        CloseOverlay();
+        return;
+    }
+
     uint64_t targetLobbyId = p.lobbyId;
     if (targetLobbyId == 0) {
         // Search in LanCore for an active lobby owned by p.steamId
@@ -484,6 +499,17 @@ void App::Join(const net::RemotePlayer& p) {
 }
 
 InviteState App::InviteStateFor(const PlayerRow& row) const {
+    const uint64_t room = refix::rooms::Current();
+    if (room != 0) {
+        if (refix::rooms::PeerRoom(row.p.steamId) == room) return InviteState::InLobby;
+        auto it = invitedAt_.find(row.p.steamId);
+        if (it != invitedAt_.end() && it->second.lobby == room) {
+            const ULONGLONG age = GetTickCount64() - it->second.at;
+            if (age < kInviteFreshMs) return InviteState::Fresh;
+            return age < kInvitePendingMs ? InviteState::Pending : InviteState::Ready;
+        }
+        return InviteState::Ready;
+    }
     const uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
     const std::string& connect = inviteOnly_ && !inviteConnect_.empty() ? inviteConnect_ : localConnect_;
     if (lobby != 0 && row.p.lobbyId == lobby) return InviteState::InLobby;
@@ -497,6 +523,19 @@ InviteState App::InviteStateFor(const PlayerRow& row) const {
 }
 
 void App::Invite(const net::RemotePlayer& p) {
+    const uint64_t room = refix::rooms::Current();
+    if (room != 0) {
+        if (refix::rooms::PeerRoom(p.steamId) == room) return;
+        if (net::SendInvite(p.steamId, room, "refix:room")) {
+            invitedAt_[p.steamId] = SentInvite{ GetTickCount64(), room, "refix:room" };
+            sound::Play(sound::Cue::Notify);
+        } else {
+            sound::Play(sound::Cue::Denied);
+            ShowInfo(i18n::T("Could not send the invite", "No se pudo enviar la invitación"),
+                     i18n::T("The player is no longer reachable.", "El jugador ya no está accesible."));
+        }
+        return;
+    }
     uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
     if (lobby == 0) {
         lobby = UnrealSteamEmu::Matchmaking_CreateLobby(1 /* k_ELobbyTypePublic */, 5);
@@ -595,6 +634,15 @@ bool App::DeleteProfile(const std::wstring& id) {
 }
 
 void App::AcceptInvite(const net::Invite& inv) {
+    if (inv.connect == "refix:room" || (inv.lobbyId != 0 && refix::rooms::OwnsRoom(inv.lobbyId))) {
+        uint64_t targetRoom = inv.lobbyId != 0 ? inv.lobbyId : inv.from;
+        refix::rooms::Join(targetRoom);
+        const net::RemotePlayer* from = FindPlayer(inv.from);
+        std::string who = from ? from->name : i18n::T("A player", "Un jugador");
+        ShowInfo(i18n::T("Joined room", "Te uniste a la sala"), who);
+        CloseOverlay();
+        return;
+    }
     if (inv.lobbyId != 0) {
         UnrealSteamEmu::PreseedInviteLobby(inv.lobbyId, inv.from, inv.connect);
     }

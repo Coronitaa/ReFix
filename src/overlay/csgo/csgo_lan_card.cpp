@@ -17,9 +17,6 @@ namespace refix::overlay {
 
 namespace {
 
-constexpr int kMaxListedRooms = 3;
-float g_measuredHeight = 0.0f;  // content height of the last frame: the card never clips its content
-
 void Initials(ImDrawList* dl, ImVec2 center, float radius, const std::string& name, ImU32 col) {
     dl->AddCircleFilled(center, radius, ui::Fade(col, 0.25f));
     dl->AddCircle(center, radius, col, 0, ui::S(1.5f));
@@ -34,148 +31,121 @@ void Caption(const char* text, ImU32 col = ui::color::Faint) {
     ImGui::PopFont();
 }
 
-void DrawRoomList(float availW, float btnH) {
-    Caption(i18n::T("ROOMS ON THE LAN", "SALAS EN LA LAN"));
-    std::vector<refix::rooms::Room> rooms = refix::rooms::List();
-    if (rooms.empty()) {
-        ImGui::Dummy(ImVec2(0, ui::S(2)));
-        Caption(i18n::T("No rooms yet. Create one and your friends can join it.",
-                        "Todavía no hay salas. Crea una y tus amigos podrán unirse."), ui::color::Muted);
-        ImGui::Dummy(ImVec2(0, ui::S(4)));
-    } else {
-        const float rowH = ui::S(36);
-        const float joinBtnW = ui::S(74);
-        for (size_t i = 0; i < rooms.size() && i < (size_t)kMaxListedRooms; ++i) {
-            const auto& r = rooms[i];
-            ImGui::PushID((int)i);
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(p, ImVec2(p.x + availW, p.y + rowH), ui::color::Row, ui::S(8));
-            Initials(dl, ImVec2(p.x + ui::S(18), p.y + rowH * 0.5f), ui::S(11), r.ownerName, r.inMatch ? ui::color::InGame : ui::color::Accent);
-            
-            char line[128];
-            snprintf(line, sizeof(line), "%s  ·  %zu", r.ownerName.c_str(), r.memberCount);
-            const float textMaxW = (std::max)(ui::S(30), availW - joinBtnW - ui::S(48));
-            dl->AddText(ImVec2(p.x + ui::S(36), p.y + ui::S(4)), ui::color::Text, ui::Ellipsize(line, textMaxW).c_str());
-            ImGui::PushFont(ui::F().caption);
-            const char* statusTxt = r.inMatch ? i18n::T("In a match", "En partida") : i18n::T("Waiting in the room", "Esperando en la sala");
-            dl->AddText(ImVec2(p.x + ui::S(36), p.y + ui::S(19)), r.inMatch ? ui::color::InGame : ui::color::Muted, ui::Ellipsize(statusTxt, textMaxW).c_str());
-            ImGui::PopFont();
-            
-            ImGui::SetCursorScreenPos(ImVec2(p.x + availW - joinBtnW - ui::S(5), p.y + (rowH - (rowH - ui::S(10))) * 0.5f));
-            if (ui::Clicked(ui::PrimaryButton(i18n::T("Join", "Unirse"), ImVec2(joinBtnW, rowH - ui::S(10))))) refix::rooms::Join(r.ownerSteamId);
-            ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH + ui::S(4)));
-            ImGui::PopID();
-        }
-    }
-    ImGui::Dummy(ImVec2(0, ui::S(2)));
-    if (ui::Clicked(ui::SecondaryButton(i18n::T("Create room", "Crear sala"), ImVec2(availW, btnH)))) refix::rooms::Create();
-}
-
-void DrawCurrentRoom(float availW, float btnH) {
-    std::vector<refix::rooms::Member> members = refix::rooms::Members();
-    bool owner = refix::rooms::IsOwner();
-    std::string ownerName = members.empty() ? "" : members.front().name;
-    char title[128];
-    snprintf(title, sizeof(title), owner ? i18n::T("YOUR ROOM · %zu PLAYERS", "TU SALA · %zu JUGADORES")
-                                         : i18n::T("ROOM · %zu PLAYERS", "SALA · %zu JUGADORES"), members.size());
-    Caption(title, ui::color::Accent);
-
-    // Member chips, symmetrical and wrapping cleanly without overflowing availW
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 start = ImGui::GetCursorScreenPos();
-    float x = start.x, y = start.y, chipH = ui::S(26);
-    const float chipSpacing = ui::S(6);
-    for (const auto& m : members) {
-        std::string label = m.name + (m.isLocal ? i18n::T(" (you)", " (tú)") : "");
-        float chipW = ImGui::CalcTextSize(label.c_str()).x + ui::S(36);
-        if (chipW > availW) chipW = availW; // Never exceed card width
-        if (x > start.x && x + chipW > start.x + availW) {
-            x = start.x;
-            y += chipH + chipSpacing;
-        }
-        dl->AddRectFilled(ImVec2(x, y), ImVec2(x + chipW, y + chipH), ui::color::Row, chipH * 0.5f);
-        Initials(dl, ImVec2(x + chipH * 0.5f, y + chipH * 0.5f), ui::S(9), m.name, m.isOwner ? ui::color::Star : ui::color::Accent);
-        std::string fitLabel = ui::Ellipsize(label, chipW - chipH - ui::S(8));
-        dl->AddText(ImVec2(x + chipH + ui::S(3), y + (chipH - ImGui::GetFontSize()) * 0.5f), ui::color::Text, fitLabel.c_str());
-        x += chipW + chipSpacing;
-    }
-    ImGui::SetCursorScreenPos(ImVec2(start.x, y + chipH + ui::S(6)));
-
-    const float itemSpacing = ImGui::GetStyle().ItemSpacing.x;
-    const float halfW = (availW - itemSpacing) * 0.5f;
-
-    if (owner) {
-        // HOST REACTIVE VIEW: Host can start match or close room
-        Caption(i18n::T("Host · When you start, everyone in the room joins.",
-                        "Anfitrión · Al iniciar, toda la sala entrará."), ui::color::Muted);
-        ImGui::Dummy(ImVec2(0, ui::S(2)));
-        if (ui::Clicked(ui::PrimaryButton(i18n::T("Host match", "Hostear partida"), ImVec2(halfW, btnH)))) csgo_ui::OpenHud(csgo_ui::kServerHud);
-        ImGui::SameLine();
-        if (ui::Clicked(ui::DangerButton(i18n::T("Close room", "Cerrar sala"), ImVec2(halfW, btnH)))) refix::rooms::Leave();
-    } else {
-        // GUEST REACTIVE VIEW: Guest sees who they are waiting for and can leave
-        std::string waiting = std::string(i18n::T("Guest · Waiting for ", "Invitado · Esperando a que ")) + ownerName +
-                              i18n::T(" to start...", " inicie...");
-        Caption(ui::Ellipsize(waiting, availW).c_str(), ui::color::Muted);
-        ImGui::Dummy(ImVec2(0, ui::S(2)));
-        if (ui::Clicked(ui::DangerButton(i18n::T("Leave room", "Salir de la sala"), ImVec2(halfW, btnH)))) refix::rooms::Leave();
-        ImGui::SameLine();
-        ui::SecondaryButton(i18n::T("In Room", "En Sala"), ImVec2(halfW, btnH), false); // Symmetrical passive indicator
-    }
-}
-
 } // namespace
 
 namespace csgo_ui {
 
 float LanCardHeight(float width) {
     (void)width;
-    const bool inRoom = (refix::rooms::Current() != 0);
-    return inRoom ? ui::S(260) : ui::S(240);
+    return ui::S(96);
 }
 
-// Content of the "CS:GO LAN" grid cell; the overlay draws the card and its title.
+// Content of the "CS:GO LAN" horizontal bar placed under LAN players in the middle column
 void DrawLanCard(float width, float height) {
     (void)height;
-    // Always use the exact available width inside the div/card
     const float availW = ImGui::GetContentRegionAvail().x > 0.0f ? ImGui::GetContentRegionAvail().x : width;
-    const float startY = ImGui::GetCursorPosY();
-    Caption(i18n::T("Rooms, LAN matches and your inventory", "Salas, partidas LAN y tu inventario"), ui::color::Muted);
-    ImGui::Dummy(ImVec2(0, ui::S(3)));
-
-    const float btnH = ui::S(34);
-    const float itemSpacing = ImGui::GetStyle().ItemSpacing.x;
-    const float halfW = (availW - itemSpacing) * 0.5f;
+    const float pad = ui::S(16);
+    const float leftW = (availW > ui::S(480)) ? (availW - pad) * 0.52f : availW;
+    const float rightW = (availW > ui::S(480)) ? (availW - leftW - pad) : availW;
 
     const bool inRoom = (refix::rooms::Current() != 0);
     const bool isHost = inRoom && refix::rooms::IsOwner();
+    const float btnH = ui::S(32);
 
-    // Symmetrical body: Room list or active room without internal scroller
+    // Left Column: Room info & members or LAN room status
+    ImGui::BeginGroup();
     if (!inRoom) {
-        DrawRoomList(availW, btnH);
+        Caption(i18n::T("LAN ROOMS", "SALAS EN LA LAN"), ui::color::Accent);
+        std::vector<refix::rooms::Room> rooms = refix::rooms::List();
+        if (rooms.empty()) {
+            ImGui::Dummy(ImVec2(0, ui::S(2)));
+            Caption(i18n::T("No active rooms. Create one and invite your friends to play.",
+                            "No hay salas activas. Crea una e invita a tus amigos a jugar."), ui::color::Muted);
+            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            Caption(i18n::T("Invite Steam and LAN players with the buttons above.",
+                            "Invita jugadores de Steam y LAN con los botones superiores."), ui::color::Faint);
+        } else {
+            const auto& r = rooms.front();
+            ImGui::Dummy(ImVec2(0, ui::S(2)));
+            char line[128];
+            snprintf(line, sizeof(line), "%s (%zu %s)", r.ownerName.c_str(), r.memberCount,
+                     r.memberCount == 1 ? i18n::T("player", "jugador") : i18n::T("players", "jugadores"));
+            ImGui::TextUnformatted(line);
+            ImGui::SameLine();
+            if (ui::Clicked(ui::PrimaryButton(i18n::T("Join", "Unirse"), ImVec2(ui::S(70), ui::S(24))))) {
+                refix::rooms::Join(r.ownerSteamId);
+            }
+        }
     } else {
-        DrawCurrentRoom(availW, btnH);
+        std::vector<refix::rooms::Member> members = refix::rooms::Members();
+        char title[128];
+        snprintf(title, sizeof(title), isHost ? i18n::T("YOUR ROOM · %zu PLAYERS", "TU SALA · %zu JUGADORES")
+                                             : i18n::T("ROOM · %zu PLAYERS", "SALA · %zu JUGADORES"), members.size());
+        Caption(title, ui::color::Accent);
+        ImGui::Dummy(ImVec2(0, ui::S(2)));
+
+        // Member pill chips
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 start = ImGui::GetCursorScreenPos();
+        float x = start.x, y = start.y, chipH = ui::S(24);
+        const float chipSpacing = ui::S(6);
+        for (const auto& m : members) {
+            std::string label = m.name + (m.isLocal ? i18n::T(" (you)", " (tú)") : "");
+            float chipW = ImGui::CalcTextSize(label.c_str()).x + ui::S(32);
+            if (chipW > leftW) chipW = leftW;
+            if (x > start.x && x + chipW > start.x + leftW) {
+                x = start.x;
+                y += chipH + chipSpacing;
+            }
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + chipW, y + chipH), ui::color::Row, chipH * 0.5f);
+            Initials(dl, ImVec2(x + chipH * 0.5f, y + chipH * 0.5f), ui::S(8), m.name, m.isOwner ? ui::color::Star : ui::color::Accent);
+            std::string fitLabel = ui::Ellipsize(label, chipW - chipH - ui::S(6));
+            dl->AddText(ImVec2(x + chipH + ui::S(2), y + (chipH - ImGui::GetFontSize()) * 0.5f), ui::color::Text, fitLabel.c_str());
+            x += chipW + chipSpacing;
+        }
+        ImGui::SetCursorScreenPos(ImVec2(start.x, y + chipH + ui::S(4)));
+        if (isHost) {
+            Caption(i18n::T("Host · Start the match when ready, all members follow.",
+                            "Anfitrión · Inicia la partida cuando estés listo, todos entrarán."), ui::color::Muted);
+        } else {
+            Caption(i18n::T("Guest · Waiting for host to start the match...",
+                            "Invitado · Esperando a que el anfitrión inicie la partida..."), ui::color::Muted);
+        }
+    }
+    ImGui::EndGroup();
+
+    // Right Column: Symmetrical action buttons
+    if (availW > ui::S(480)) {
+        ImGui::SameLine(0, pad);
+    } else {
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
     }
 
-    ImGui::Dummy(ImVec2(0, ui::S(3)));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0, ui::S(3)));
+    ImGui::BeginGroup();
+    const float spacingX = ImGui::GetStyle().ItemSpacing.x;
+    const float halfBtnW = (rightW - spacingX) * 0.5f;
 
-    // Symmetrical bottom action row (Market & Skins vs LAN Server)
-    // Buttons are reactive to Host vs Guest
-    if (ui::Clicked(ui::PrimaryButton(i18n::T("Market & Skins", "Mercado & Skins"), ImVec2(halfW, btnH)))) OpenHud(kMarketHud);
-    ImGui::SameLine();
-    
-    if (inRoom && !isHost) {
-        // Guest mode: reactive button clearly indicates server is managed by host
-        if (ui::Clicked(ui::SecondaryButton(i18n::T("View server", "Ver servidor"), ImVec2(halfW, btnH)))) OpenHud(kServerHud);
+    if (inRoom && isHost) {
+        // Host controls: Host match + Close room, then Market & Skins
+        if (ui::Clicked(ui::PrimaryButton(i18n::T("Host match", "Hostear partida"), ImVec2(halfBtnW, btnH)))) OpenHud(kServerHud);
+        ImGui::SameLine();
+        if (ui::Clicked(ui::DangerButton(i18n::T("Close room", "Cerrar sala"), ImVec2(halfBtnW, btnH)))) refix::rooms::Leave();
+        ImGui::Dummy(ImVec2(0, ui::S(2)));
+        if (ui::Clicked(ui::SecondaryButton(i18n::T("Market & Skins", "Mercado & Skins"), ImVec2(rightW, btnH)))) OpenHud(kMarketHud);
+    } else if (inRoom && !isHost) {
+        // Guest controls: CANNOT host, only Leave room + Market & Skins
+        if (ui::Clicked(ui::DangerButton(i18n::T("Leave room", "Salir de la sala"), ImVec2(halfBtnW, btnH)))) refix::rooms::Leave();
+        ImGui::SameLine();
+        if (ui::Clicked(ui::PrimaryButton(i18n::T("Market & Skins", "Mercado & Skins"), ImVec2(halfBtnW, btnH)))) OpenHud(kMarketHud);
     } else {
-        // Host or not in room: full server management button
-        if (ui::Clicked(ui::SecondaryButton(i18n::T("LAN server", "Servidor LAN"), ImVec2(halfW, btnH)))) OpenHud(kServerHud);
+        // Not in room: Create room + LAN server, then Market & Skins
+        if (ui::Clicked(ui::PrimaryButton(i18n::T("Create room", "Crear sala"), ImVec2(halfBtnW, btnH)))) refix::rooms::Create();
+        ImGui::SameLine();
+        if (ui::Clicked(ui::SecondaryButton(i18n::T("LAN server", "Servidor LAN"), ImVec2(halfBtnW, btnH)))) OpenHud(kServerHud);
+        ImGui::Dummy(ImVec2(0, ui::S(2)));
+        if (ui::Clicked(ui::SecondaryButton(i18n::T("Market & Skins", "Mercado & Skins"), ImVec2(rightW, btnH)))) OpenHud(kMarketHud);
     }
-
-    g_measuredHeight = ImGui::GetCursorPosY() - startY + ui::S(4);
+    ImGui::EndGroup();
 }
 
 void RunOnOverlayThread(std::function<void()> fn) { App::Get().Post(std::move(fn)); }

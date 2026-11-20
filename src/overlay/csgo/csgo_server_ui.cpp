@@ -527,8 +527,15 @@ void csgo_ui::DrawServerHud(float viewportW, float viewportH) {
             });
             csgo_ui::CloseHud(csgo_ui::kServerHud);
         }
+        const bool inRoom = (refix::rooms::Current() != 0);
+        const bool isOwner = inRoom && refix::rooms::IsOwner();
         ImGui::SameLine();
-        if (ui::Clicked(ui::PrimaryButton(i18n::T("Host match", "Hostear partida"), ImVec2(btnW, ui::S(40))))) HostNow();
+        if (inRoom && !isOwner) {
+            ui::SecondaryButton(i18n::T("Host controls match", "Anfitrión inicia partida"), ImVec2(btnW, ui::S(40)), false);
+            ui::Tooltip(i18n::T("Only the room owner can start the match", "Solo el anfitrión de la sala puede iniciar la partida"));
+        } else {
+            if (ui::Clicked(ui::PrimaryButton(i18n::T("Host match", "Hostear partida"), ImVec2(btnW, ui::S(40))))) HostNow();
+        }
     }
     ImGui::End();
     ImGui::PopStyleColor(5);

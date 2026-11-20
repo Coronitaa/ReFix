@@ -3,7 +3,7 @@ param(
     [string]$BinDir = "",
     [string]$ExeDir = "",
     [string]$EngineType = "Unity",
-    [string]$OnlineMode = "valve",
+    [string]$OnlineMode = "goldberg",
     [string]$PhotonAppId = "",
     [string]$PhotonRegion = "",
     [string]$GameName = "",
@@ -51,6 +51,39 @@ if ($BinDir -and (Test-Path -LiteralPath $BinDir)) { $BinDir = (Resolve-Path -Li
 if ($TargetDir -and (Test-Path -LiteralPath $TargetDir)) { $TargetDir = (Resolve-Path -LiteralPath $TargetDir).Path }
 if ($ExeDir -and (Test-Path -LiteralPath $ExeDir)) { $ExeDir = (Resolve-Path -LiteralPath $ExeDir).Path }
 
+# Smart game detection fallback: if EngineType, RealAppId, ExeDir or GameName were omitted or default, detect them dynamically
+if ($TargetDir -and (Test-Path -LiteralPath $TargetDir)) {
+    $detectorScript = Join-Path $BinDir "detect_game.ps1"
+    if (-not (Test-Path -LiteralPath $detectorScript)) {
+        $detectorScript = Join-Path $PSScriptRoot "detect_game.ps1"
+    }
+    if (Test-Path -LiteralPath $detectorScript) {
+        $detectionOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $detectorScript -TargetDir $TargetDir
+        $detectedProps = @{}
+        foreach ($dLine in $detectionOutput) {
+            if ($dLine -match "^([^=]+)=(.*)$") {
+                $detectedProps[$Matches[1].Trim()] = $Matches[2].Trim()
+            }
+        }
+        if ((-not $EngineType -or $EngineType -eq "Unity") -and $detectedProps["ENGINE_TYPE"]) {
+            $EngineType = $detectedProps["ENGINE_TYPE"]
+            Write-Host "[AutoDetect] Engine Type: $EngineType"
+        }
+        if ((-not $ExeDir -or $ExeDir -eq $TargetDir) -and $detectedProps["EXE_DIR"]) {
+            $ExeDir = $detectedProps["EXE_DIR"]
+            Write-Host "[AutoDetect] Exe Directory: $ExeDir"
+        }
+        if ((-not $GameName) -and $detectedProps["GAME_NAME"]) {
+            $GameName = $detectedProps["GAME_NAME"]
+            Write-Host "[AutoDetect] Game Name: $GameName"
+        }
+        if ((-not $RealAppId -or $RealAppId -eq "480") -and $detectedProps["DETECTED_APPID"] -and $detectedProps["DETECTED_APPID"] -ne "0" -and $detectedProps["DETECTED_APPID"] -ne "480") {
+            $RealAppId = $detectedProps["DETECTED_APPID"]
+            Write-Host "[AutoDetect] Real AppID: $RealAppId"
+        }
+    }
+}
+
 # Free-to-play games (Brawlhalla) are in every Steam library and their own backend checks a Steam ticket for the
 # real AppID, so ReFix Online keeps the real AppID instead of masking it as 480. Offline lookup keeps 480.
 if ($OnlineMode -eq "valve" -and $MaskAppId -eq "480" -and $RealAppId -match '^\d+$' -and $RealAppId -ne "480") {
@@ -85,7 +118,7 @@ if (-not $ExeDir) { $ExeDir  = $TargetDir }
 # Offline LAN deploys exactly like ReFix LAN from here on (same files, same ReFix.ini), only from its own folder.
 $lanProduct = "lan"
 if ($OnlineMode -eq "lanoffline") { $lanProduct = "lan_offline"; $OnlineMode = "goldberg" }
-$productName = if ($OnlineMode -in @("goldberg", "offline", "lan")) { $lanProduct } else { "online" }
+$productName = if ($OnlineMode -in @("goldberg", "offline", "lan", "mixed")) { $lanProduct } else { "online" }
 $ProductBinDir = Join-Path $BinDir $productName
 if (-not (Test-Path -LiteralPath (Join-Path $ProductBinDir "steam_api64.dll"))) {
     $buildHint = if ($productName -eq "lan") { "build.bat" } elseif ($productName -eq "lan_offline") { "copy bin\lan from the previous release" } else { "build_online.bat" }
@@ -1233,11 +1266,17 @@ if ($OnlineMode -in @("goldberg", "offline", "lan")) {
     $identity = Get-Or-Generate-Identity -ConfigPath $reFixIniPath -InputName $UserName -BasePath $TargetDir -InputSteamId $SteamId
 
     $finalRealAppId = $RealAppId
-    if (-not $finalRealAppId -or $finalRealAppId -eq "0") {
+    if (-not $finalRealAppId -or $finalRealAppId -eq "0" -or $finalRealAppId -eq "480") {
         if (Test-Path $reFixIniPath) {
             $iniContent = Get-Content $reFixIniPath -ErrorAction SilentlyContinue
             foreach ($line in $iniContent) {
-                if ($line -match "^\s*RealAppId\s*=\s*([0-9]+)") { $finalRealAppId = $Matches[1].Trim() }
+                if ($line -match "^\s*RealAppId\s*=\s*([0-9]+)") {
+                    $existingId = $Matches[1].Trim()
+                    if ($existingId -and $existingId -ne "0" -and $existingId -ne "480") {
+                        $finalRealAppId = $existingId
+                        break
+                    }
+                }
             }
         }
     }

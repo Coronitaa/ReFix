@@ -31,6 +31,7 @@ bool IsOwner();
 std::vector<Room> List();      // rooms on the LAN, the local one included
 std::vector<Member> Members(); // members of the local player's room
 bool OwnsRoom(uint64_t steamId);
+uint64_t PeerRoom(uint64_t steamId);
 
 // Game thread (SteamAPI_RunCallbacks): follows the owner into its match and drops a room whose owner left.
 void Tick();
