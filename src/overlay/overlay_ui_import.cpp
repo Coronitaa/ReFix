@@ -7,6 +7,7 @@
 #include "avatar_image.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
+#include "profile_sync.h"
 #include "refix_overlay.h"
 #include "../refix_wine.h"
 #if REFIX_STEAM_LINK
@@ -246,6 +247,158 @@ void App::DrawImportPopup() {
     if (cancel || !picked.empty()) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
     if (!picked.empty()) ImportProfile(picked);
+}
+
+void App::DrawCloudImportModal() {
+    if (!sync::HasCloudImportModal()) return;
+    auto& items = sync::GetCloudImportItems();
+    if (items.empty()) return;
+
+    if (!ImGui::IsPopupOpen("##cloud_import_modal")) {
+        ImGui::OpenPopup("##cloud_import_modal");
+    }
+
+    const ImVec2 vp = ImGui::GetIO().DisplaySize;
+    constexpr float kWidth = 720.0f;
+    constexpr float kCardH = 145.0f;
+    constexpr float kGap = 12.0f;
+    constexpr int kColumns = 3;
+
+    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(ui::S(kWidth), vp.x - ui::S(24)), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(20)));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(14));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
+
+    const bool open = ImGui::BeginPopupModal("##cloud_import_modal", nullptr,
+                                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Header
+    ImGui::PushFont(f.heading);
+    ui::TextColored(ui::color::Accent, ui::icon::Cloud);
+    ImGui::SameLine();
+    ImGui::TextUnformatted(T("Cloud Profiles Detected", "Perfiles detectados en la nube"));
+    ImGui::PopFont();
+
+    ImGui::PushFont(f.caption);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+    ui::TextColored(ui::color::Muted,
+                    T("Existing profiles were detected in your cloud sync. Select which profiles you want to import to this PC:",
+                      "Se detectaron perfiles existentes en la nube. Selecciona cuáles deseas importar a este equipo:"));
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+
+    ImGui::Dummy(ImVec2(0, ui::S(10)));
+
+    // Grid of cards
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float gap = ui::S(kGap);
+    const float cardH = ui::S(kCardH);
+    const float cardW = (avail - gap * (kColumns - 1)) / kColumns;
+    const int rows = std::max(1, ((int)items.size() + kColumns - 1) / kColumns);
+    const float gridH = std::min(rows * (cardH + gap) - gap, vp.y * 0.55f);
+
+    ImGui::BeginChild("##cloudgrid", ImVec2(avail, gridH), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    for (int i = 0; i < (int)items.size(); ++i) {
+        auto& item = items[i];
+        const ImVec2 p0(origin.x + (i % kColumns) * (cardW + gap), origin.y + (i / kColumns) * (cardH + gap));
+        const ImVec2 p1(p0.x + cardW, p0.y + cardH);
+
+        ImGui::SetCursorScreenPos(p0);
+        ImGui::PushID(i);
+        if (ui::Clicked(ui::NavButton("##cloudcard", ImVec2(cardW, cardH)))) {
+            item.selected = !item.selected;
+        }
+        const bool hover = ImGui::IsItemHovered();
+        ImGui::PopID();
+        if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+        // Card background
+        dl->AddRectFilled(p0, p1, item.selected ? ui::color::AccentSoft : (hover ? ui::color::RowHover : ui::color::Row), ui::S(14));
+        if (item.selected) {
+            dl->AddRect(p0, p1, ui::color::Accent, ui::S(14), 0, ui::S(1.5f));
+        } else if (hover) {
+            dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.5f), ui::S(14), 0, ui::S(1.0f));
+        }
+
+        // Selection badge / check circle at top right
+        const ImVec2 checkC(p1.x - ui::S(18), p0.y + ui::S(18));
+        if (item.selected) {
+            dl->AddCircleFilled(checkC, ui::S(10), ui::color::Accent, 24);
+            dl->AddText(f.caption, f.caption->FontSize, ImVec2(checkC.x - ui::S(6), checkC.y - ui::S(7)), ui::color::AccentInk, ui::icon::Check);
+        } else {
+            dl->AddCircle(checkC, ui::S(10), ui::color::Faint, 24, ui::S(1.5f));
+        }
+
+        // Avatar
+        const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(18 + 30));
+        ui::AvatarRef av;
+        av.stock = item.stockAvatar;
+        av.steam = (item.steamId != 0);
+        ui::DrawAvatar(dl, ac, ui::S(28), av);
+
+        // Name
+        ImGui::PushFont(f.strong);
+        const std::string name = ui::Ellipsize(ToUtf8(item.name), cardW - ui::S(24));
+        const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
+        ImGui::PopFont();
+        dl->AddText(f.strong, f.strong->FontSize, ImVec2(ac.x - ns.x * 0.5f, p0.y + ui::S(86)), ui::color::Text, name.c_str());
+
+        // Origin game display: "Lethal Company +5 más"
+        ImGui::PushFont(f.caption);
+        std::string disp = ui::Ellipsize(item.originDisplay, cardW - ui::S(24));
+        const ImVec2 ds = ImGui::CalcTextSize(disp.c_str());
+        ImGui::PopFont();
+        dl->AddText(f.caption, f.caption->FontSize, ImVec2(ac.x - ds.x * 0.5f, p0.y + ui::S(86) + f.strong->FontSize + ui::S(4)),
+                    item.hasCurrentGame ? ui::color::Accent : ui::color::Muted, disp.c_str());
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (cardH + gap) - gap));
+    ImGui::Dummy(ImVec2(avail, 0));
+    ImGui::EndChild();
+
+    ImGui::Dummy(ImVec2(0, ui::S(12)));
+
+    // Actions footer
+    int selectedCount = 0;
+    for (const auto& item : items) if (item.selected) ++selectedCount;
+
+    const char* toggleAllText = (selectedCount == (int)items.size()) ?
+        T("Deselect all", "Desmarcar todos") : T("Select all", "Seleccionar todos");
+    if (ui::LinkButton(toggleAllText)) {
+        const bool selectAll = (selectedCount != (int)items.size());
+        for (auto& item : items) item.selected = selectAll;
+    }
+
+    ImGui::SameLine();
+    const float btnGap = ui::S(10);
+    const float totalBtnW = ui::S(190) + ui::S(110) + btnGap;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - totalBtnW);
+
+    char impBuf[64];
+    snprintf(impBuf, sizeof(impBuf), "%s (%d)", T("Import selected", "Importar seleccionados"), selectedCount);
+    if (ui::PrimaryButton(impBuf, ImVec2(ui::S(190), ui::S(38)), selectedCount > 0)) {
+        sync::ConfirmCloudImport(items);
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::SameLine(0, btnGap);
+    if (ui::SecondaryButton(T("Cancel", "Cancelar"), ImVec2(ui::S(110), ui::S(38))) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+        sync::DismissCloudImport();
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
 }
 
 } // namespace refix::overlay

@@ -634,6 +634,26 @@ void App::RestartWithProfile(const std::wstring& id) {
     TerminateProcess(GetCurrentProcess(), 0);
 }
 
+void App::RestartGame() {
+    RestoreLaunchEnvironment();
+    SetEnvironmentVariableW(L"REFIX_RESTART_PID", std::to_wstring(GetCurrentProcessId()).c_str());
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = GetCommandLineW();
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        ShowInfo(i18n::T("Could not restart", "No se pudo reiniciar"),
+                 i18n::T("Please restart the game manually.", "Por favor reinicia el juego manualmente."));
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    ReFixLog("[Overlay] Restarting game for overlay settings change");
+    UnrealSteamEmu::FlushUserStats();
+    TerminateProcess(GetCurrentProcess(), 0);
+}
+
 bool App::DeleteProfile(const std::wstring& id) {
     if ((active_ && active_->id == id) || !profiles::Remove(id)) {
         sound::Play(sound::Cue::Denied);

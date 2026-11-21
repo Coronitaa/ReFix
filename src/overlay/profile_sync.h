@@ -62,6 +62,34 @@ void ResolveConflictUseLocal();
 void ResolveConflictKeepBoth();
 void SyncAllProfilesFromCloud();
 
+// Package format (no I/O).
+using FileList = std::vector<std::pair<std::string, std::vector<uint8_t>>>;   // UTF-8 path with '/', bytes
+bool Pack(const FileList& files, uint64_t steamId, const uint8_t stateHash[32], std::vector<uint8_t>& out);
+bool Unpack(const std::vector<uint8_t>& pkg, FileList& files, uint64_t* steamId, uint8_t stateHash[32]);
+
+struct CloudProfileItem {
+    std::wstring file;
+    std::wstring name;
+    uint64_t steamId = 0;
+    std::wstring originGameKey;
+    std::wstring originGameName;
+    std::vector<GameUse> games;
+    int extraGamesCount = 0;
+    bool hasCurrentGame = false;
+    bool customAvatar = false;
+    int stockAvatar = 0;
+    bool selected = true;
+    std::string originDisplay;
+    FileList pkgFiles;
+    uint8_t remoteHash[32] = {};
+};
+
+bool HasCloudImportModal();
+std::vector<CloudProfileItem>& GetCloudImportItems();
+void ConfirmCloudImport(const std::vector<CloudProfileItem>& items);
+void DismissCloudImport();
+void CheckCloudForProfiles();
+
 struct CloudFolder {
     std::wstring label;           // "OneDrive", "Google Drive", "Dropbox"
     std::wstring path;
@@ -75,11 +103,6 @@ bool AutoSync();                                 // upload soon after the game s
 void SetAutoSync(bool on);
 bool SyncLocalProfiles();
 void SetSyncLocalProfiles(bool on);
-
-// Package format (no I/O).
-using FileList = std::vector<std::pair<std::string, std::vector<uint8_t>>>;   // UTF-8 path with '/', bytes
-bool Pack(const FileList& files, uint64_t steamId, const uint8_t stateHash[32], std::vector<uint8_t>& out);
-bool Unpack(const std::vector<uint8_t>& pkg, FileList& files, uint64_t* steamId, uint8_t stateHash[32]);
 
 // A profile's package as a file anywhere (USB, mail, another PC), and back. An imported package always becomes
 // a new local profile, so no profile, save or backup that exists is ever replaced.

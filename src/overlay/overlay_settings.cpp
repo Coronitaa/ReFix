@@ -138,4 +138,11 @@ bool ReplaceWithSteamOverlay() {
     return true;
 }
 
+bool DisableOverlayCompletely() {
+    const std::string ini = FindReFixIni();
+    WritePrivateProfileStringA("Overlay", "Enabled", "false", ini.c_str());
+    WritePrivateProfileStringA("Overlay", "BlockSteamOverlay", "true", ini.c_str());
+    return true;
+}
+
 } // namespace refix::overlay::settings

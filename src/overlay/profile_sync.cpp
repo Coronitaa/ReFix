@@ -23,6 +23,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 
 extern void ReFixLog(const char* fmt, ...);
@@ -202,6 +203,15 @@ bool BuildPackage(const Profile& p, const std::vector<Entry>& files, const uint8
     FileList list;
     const std::string name = ToUtf8(p.name);   // for "Import": the new profile takes this name
     list.emplace_back("Meta/name.txt", std::vector<uint8_t>(name.begin(), name.end()));
+    const std::string orig = ToUtf8(p.originGame);
+    list.emplace_back("Meta/origin_game.txt", std::vector<uint8_t>(orig.begin(), orig.end()));
+    std::string gamesStr;
+    for (const auto& g : p.games) {
+        gamesStr += ToUtf8(g.key) + "=" + ToUtf8(g.name) + "\n";
+    }
+    list.emplace_back("Meta/games.txt", std::vector<uint8_t>(gamesStr.begin(), gamesStr.end()));
+    const std::string stockAv = std::to_string(p.stockAvatar);
+    list.emplace_back("Meta/stock_avatar.txt", std::vector<uint8_t>(stockAv.begin(), stockAv.end()));
     for (const Entry& e : files) {
         std::vector<uint8_t> data;
         if (!ReadAll(e.path, data)) {
@@ -435,6 +445,9 @@ std::wstring EffectiveFolder() {
 void SetFolder(const std::wstring& folder) {
     WritePrivateProfileStringW(L"Sync", L"Folder", folder.empty() ? nullptr : folder.c_str(), Ini().c_str());
     SyncNow();
+    if (!folder.empty() && folder != kLocalOnly) {
+        CheckCloudForProfiles();
+    }
 }
 
 bool AutoSync() { return GetPrivateProfileIntW(L"Sync", L"AutoSync", 1, Ini().c_str()) != 0; }
@@ -708,39 +721,256 @@ void SyncAllProfilesFromCloud() {
                 }
             }
         } else {
-            std::wstring profName = file;
-            bool customAv = false;
-            for (const auto& [n, data] : pkgFiles) {
-                if (n == "Meta/name.txt" && !data.empty()) {
-                    profName = FromUtf8(std::string(data.begin(), data.end()));
-                }
-                if (n == "Profile/avatar.png") customAv = true;
-            }
-
-            Profile newP = profiles::MakeNew(profName, allProfiles);
-            if (fileSteamId != 0) newP.steamId = fileSteamId;
-            else if (pkgSteamId != 0) newP.steamId = pkgSteamId;
-            newP.originGame = curGame;
-            newP.customAvatar = customAv;
-            profiles::AddGame(newP, curGame, curGameName, false);
-
-            if (profiles::Save(newP)) {
-                Apply(newP, pkgFiles);
-                SetLastHash(newP, remoteHash);
-                allProfiles.push_back(newP);
-                anyAdded = true;
-                ReFixLog("[Sync] Downloaded and installed new profile %s (%s) from cloud", ToUtf8(newP.id).c_str(), ToUtf8(newP.name).c_str());
-            }
+            // New un-matched cloud profile found: will prompt via modal
+            anyAdded = true;
         }
     }
 
     if (anyAdded) {
-        App::Get().Post([] { App::Get().ReloadProfiles(); });
+        CheckCloudForProfiles();
     }
 
     if (activeUpdated && !activeIdToRestart.empty()) {
         App::Get().RestartWithProfile(activeIdToRestart);
     }
+}
+
+static std::mutex g_cloudImportMu;
+static bool g_cloudImportActive = false;
+static std::vector<CloudProfileItem> g_cloudImportItems;
+
+bool HasCloudImportModal() {
+    std::lock_guard<std::mutex> lock(g_cloudImportMu);
+    return g_cloudImportActive && !g_cloudImportItems.empty();
+}
+
+std::vector<CloudProfileItem>& GetCloudImportItems() {
+    return g_cloudImportItems;
+}
+
+void DismissCloudImport() {
+    std::lock_guard<std::mutex> lock(g_cloudImportMu);
+    g_cloudImportActive = false;
+    g_cloudImportItems.clear();
+}
+
+void CheckCloudForProfiles() {
+    std::thread([] {
+        auto target = Target();
+        if (!target || !target->Ready()) return;
+
+        const std::vector<std::wstring> files = target->ListFiles();
+        if (files.empty()) return;
+
+        std::vector<Profile> allProfiles = profiles::LoadAll();
+        const std::wstring curGame = profiles::GameKey();
+        const std::wstring curGameName = profiles::DefaultGameName();
+        const std::wstring stateIni = StateIni();
+
+        std::vector<CloudProfileItem> candidates;
+
+        for (const std::wstring& file : files) {
+            if (GetPrivateProfileIntW(L"Deleted", file.c_str(), 0, stateIni.c_str()) != 0) continue;
+
+            uint64_t fileSteamId = 0;
+            std::wstring fileLocalId;
+            if (file.rfind(L"steam_", 0) == 0 && file.size() > 11) {
+                fileSteamId = _wcstoui64(file.substr(6, file.size() - 11).c_str(), nullptr, 10);
+            } else if (file.rfind(L"local_", 0) == 0 && file.size() > 11) {
+                fileLocalId = file.substr(6, file.size() - 11);
+            }
+
+            // Check if this profile already exists locally
+            bool existsLocally = false;
+            for (const auto& p : allProfiles) {
+                if (fileSteamId != 0 && p.steamId == fileSteamId) {
+                    existsLocally = true;
+                    break;
+                }
+                if (!fileLocalId.empty() && _wcsicmp(p.id.c_str(), fileLocalId.c_str()) == 0) {
+                    existsLocally = true;
+                    break;
+                }
+            }
+            if (existsLocally) continue;
+
+            std::vector<uint8_t> pkg;
+            if (!target->Read(file, pkg)) continue;
+
+            FileList pkgFiles;
+            uint64_t pkgSteamId = 0;
+            uint8_t remoteHash[32] = {};
+            if (!Unpack(pkg, pkgFiles, &pkgSteamId, remoteHash)) continue;
+
+            CloudProfileItem item;
+            item.file = file;
+            item.steamId = fileSteamId != 0 ? fileSteamId : pkgSteamId;
+            memcpy(item.remoteHash, remoteHash, 32);
+            item.selected = true; // All selected by default
+
+            // Parse Meta info
+            for (const auto& [n, data] : pkgFiles) {
+                if (n == "Meta/name.txt" && !data.empty()) {
+                    item.name = FromUtf8(std::string(data.begin(), data.end()));
+                } else if (n == "Meta/origin_game.txt" && !data.empty()) {
+                    item.originGameKey = FromUtf8(std::string(data.begin(), data.end()));
+                } else if (n == "Meta/games.txt" && !data.empty()) {
+                    std::string str(data.begin(), data.end());
+                    size_t pos = 0;
+                    while (pos < str.size()) {
+                        size_t next = str.find('\n', pos);
+                        if (next == std::string::npos) next = str.size();
+                        std::string line = str.substr(pos, next - pos);
+                        pos = next + 1;
+                        size_t eq = line.find('=');
+                        if (eq != std::string::npos) {
+                            GameUse g{ FromUtf8(line.substr(0, eq)), FromUtf8(line.substr(eq + 1)) };
+                            item.games.push_back(g);
+                        }
+                    }
+                } else if (n == "Meta/stock_avatar.txt" && !data.empty()) {
+                    item.stockAvatar = atoi(std::string(data.begin(), data.end()).c_str());
+                } else if (n == "Profile/avatar.png") {
+                    item.customAvatar = true;
+                }
+            }
+
+            if (item.name.empty()) {
+                item.name = file;
+            }
+
+            // Fallback for older packages
+            if (item.originGameKey.empty() && !item.games.empty()) {
+                item.originGameKey = item.games.front().key;
+                item.originGameName = item.games.front().name;
+            }
+
+            if (item.originGameName.empty()) {
+                for (const auto& g : item.games) {
+                    if (g.key == item.originGameKey) {
+                        item.originGameName = g.name;
+                        break;
+                    }
+                }
+            }
+
+            if (item.originGameKey.empty()) {
+                for (const auto& [n, _] : pkgFiles) {
+                    if (n.rfind("Saves/", 0) == 0 && n.size() > 6) {
+                        size_t nextSlash = n.find('/', 6);
+                        std::string label = (nextSlash != std::string::npos) ? n.substr(6, nextSlash - 6) : n.substr(6);
+                        item.originGameName = FromUtf8(label);
+                        item.originGameKey = FromUtf8(label);
+                        break;
+                    } else if (n.rfind("Profile/Cloud/", 0) == 0 && n.size() > 14) {
+                        size_t nextSlash = n.find('/', 14);
+                        std::string appIdStr = (nextSlash != std::string::npos) ? n.substr(14, nextSlash - 14) : n.substr(14);
+                        if (appIdStr == "730") {
+                            item.originGameKey = L"csgo";
+                            item.originGameName = L"Counter-Strike: Global Offensive";
+                        } else if (appIdStr == "1966720") {
+                            item.originGameKey = L"lethalcompany";
+                            item.originGameName = L"Lethal Company";
+                        } else {
+                            item.originGameKey = FromUtf8(appIdStr);
+                            item.originGameName = FromUtf8(appIdStr);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (item.originGameName.empty()) {
+                item.originGameName = i18n::Spanish() ? L"Juego desconocido" : L"Unknown Game";
+            }
+
+            // Check if profile has data for current game
+            item.hasCurrentGame = false;
+            if (!item.originGameKey.empty() && _wcsicmp(item.originGameKey.c_str(), curGame.c_str()) == 0) {
+                item.hasCurrentGame = true;
+            }
+            for (const auto& g : item.games) {
+                if (_wcsicmp(g.key.c_str(), curGame.c_str()) == 0) {
+                    item.hasCurrentGame = true;
+                    break;
+                }
+            }
+            if (!item.hasCurrentGame) {
+                for (const auto& [n, _] : pkgFiles) {
+                    if (n.find(ToUtf8(curGame)) != std::string::npos) {
+                        item.hasCurrentGame = true;
+                        break;
+                    }
+                }
+            }
+
+            // Extra games count
+            if (item.games.size() > 1) {
+                item.extraGamesCount = (int)item.games.size() - 1;
+            } else {
+                item.extraGamesCount = 0;
+            }
+
+            std::string disp = ToUtf8(item.originGameName);
+            if (item.extraGamesCount > 0) {
+                disp += " +" + std::to_string(item.extraGamesCount) + (i18n::Spanish() ? " más" : " more");
+            }
+            item.originDisplay = disp;
+            item.pkgFiles = std::move(pkgFiles);
+
+            candidates.push_back(std::move(item));
+        }
+
+        if (candidates.empty()) return;
+
+        // Sort: current game profiles first, then by name
+        std::stable_sort(candidates.begin(), candidates.end(), [](const CloudProfileItem& a, const CloudProfileItem& b) {
+            if (a.hasCurrentGame != b.hasCurrentGame) return a.hasCurrentGame > b.hasCurrentGame;
+            return a.name < b.name;
+        });
+
+        std::lock_guard<std::mutex> lock(g_cloudImportMu);
+        g_cloudImportItems = std::move(candidates);
+        g_cloudImportActive = true;
+    }).detach();
+}
+
+void ConfirmCloudImport(const std::vector<CloudProfileItem>& items) {
+    std::vector<Profile> allProfiles = profiles::LoadAll();
+    const std::wstring curGame = profiles::GameKey();
+    const std::wstring curGameName = profiles::DefaultGameName();
+
+    for (const auto& item : items) {
+        if (!item.selected) continue;
+
+        Profile newP = profiles::MakeNew(item.name, allProfiles);
+        if (item.steamId != 0) newP.steamId = item.steamId;
+        newP.stockAvatar = item.stockAvatar;
+        newP.customAvatar = item.customAvatar;
+        newP.originGame = item.originGameKey.empty() ? curGame : item.originGameKey;
+
+        if (!item.games.empty()) {
+            newP.games = item.games;
+        } else {
+            newP.games = { { newP.originGame, item.originGameName } };
+        }
+
+        // Only add curGame if the profile actually had data for curGame!
+        if (item.hasCurrentGame) {
+            profiles::AddGame(newP, curGame, curGameName, false);
+        }
+
+        if (profiles::Save(newP)) {
+            Apply(newP, item.pkgFiles);
+            SetLastHash(newP, item.remoteHash);
+            allProfiles.push_back(newP);
+            ReFixLog("[Sync] Cloud imported profile %s (%s, origin: %s, hasCurrent: %d)",
+                     ToUtf8(newP.id).c_str(), ToUtf8(newP.name).c_str(), ToUtf8(newP.originGame).c_str(), (int)item.hasCurrentGame);
+        }
+    }
+
+    DismissCloudImport();
+    App::Get().Post([] { App::Get().ReloadProfiles(); });
 }
 
 } // namespace refix::overlay::sync

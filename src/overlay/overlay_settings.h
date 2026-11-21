@@ -63,4 +63,7 @@ bool BlockReflexEarly(bool iniDefault);
 // Switch overlay to Steam: writes Enabled=false, BlockSteamOverlay=false to ReFix.ini
 bool ReplaceWithSteamOverlay();
 
+// Disable overlay completely: writes Enabled=false, BlockSteamOverlay=true to ReFix.ini
+bool DisableOverlayCompletely();
+
 } // namespace refix::overlay::settings

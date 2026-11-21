@@ -123,6 +123,7 @@ public:
     void OpenWeb(const std::wstring& url);   // page inside the overlay (system browser as fallback)
     void CloseWeb();
     void RestartWithProfile(const std::wstring& id);
+    void RestartGame();
     void DeferProfile(const std::wstring& id);
     void AcceptInvite(const net::Invite& inv);
     bool DeleteProfile(const std::wstring& id);   // false when it is in use somewhere
@@ -229,6 +230,7 @@ private:
     void DrawSwitchConfirm();
     void DrawDeleteConfirm();
     void DrawSyncConflictModal();
+    void DrawCloudImportModal();
     void DrawLanguageSwitch(ImVec2 rightEdgeCenter);
     void DrawEditorModal();
     void DrawWebModal(ImVec2 viewport);
