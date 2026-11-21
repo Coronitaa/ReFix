@@ -48,7 +48,8 @@ public:
                                 const uint8_t expected_public_key_32[32],
                                 const RevocationList* revocation_list,
                                 PackageInspectInfo& out_info,
-                                std::string& out_error);
+                                std::string& out_error,
+                                bool dev_mode = false);
 
     // Read full contents of a file from disk
     static bool ReadDiskFile(const std::string& path, std::vector<uint8_t>& out_data);

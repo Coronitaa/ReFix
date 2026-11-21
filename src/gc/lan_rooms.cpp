@@ -135,7 +135,7 @@ void Tick() {
     g_followedServer = server;
     std::string resolved = refix::gc::ResolveReachableServerAddress(room, server);
     ReFixLog("[Rooms] Room owner started a match on %s (resolved: %s), following", server.c_str(), resolved.c_str());
-    refix::source::MainThreadQueue::ExecuteClientCmdImmediate("engine_no_focus_sleep 0; rate 786432; cl_cmdrate 128; cl_updaterate 128; cl_interp 0; cl_interp_ratio 1");
+    refix::source::MainThreadQueue::ExecuteClientCmdImmediate("engine_no_focus_sleep 0; fps_max 144; fps_max_menu 120; rate 786432; cl_cmdrate 64; cl_updaterate 64; cl_interp 0; cl_interp_ratio 1; mat_queue_mode 2;");
     refix::source::MainThreadQueue::ExecuteClientCmdImmediate(("connect " + resolved).c_str());
 }
 

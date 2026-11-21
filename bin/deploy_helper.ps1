@@ -312,13 +312,14 @@ function Detect-UNAE-Topology {
             UsesPhoton = $usesPhoton
         }
     } else {
+        $defaultP2PPort = if ($EngineType -eq "Source") { "27015" } else { "7777" }
         return @{
             Topology = "TopologyA"
             Name = "Topology A: direct sockets (P2P / LAN / Steam relay)"
             Transport = "Tier 1 LAN Autonoma / Tier 2 WAN Steam SDR P2P"
             Color = "Green"
             DirectP2PAllowed = $true
-            P2PPort = "7777"
+            P2PPort = $defaultP2PPort
             UsesPhoton = $usesPhoton
         }
     }
@@ -405,6 +406,9 @@ function Generate-UNAE-ReFixIni {
     }
 
     $customBroadcasts = & $Pick "Network" "CustomBroadcasts" $P.CustomBroadcasts
+
+    $modsEnabled = & $Pick "Mods" "Enabled" "true"
+    $modsDevMode = & $Pick "Mods" "DevMode" "true"
 
     $iniContent = @"
 ; =============================================================================
@@ -581,6 +585,10 @@ LocalSave = saves
 [EOS]
 Mode = $eosMode
 DeviceIdAuth = $eosAuth
+
+[Mods]
+Enabled = $modsEnabled
+DevMode = $modsDevMode
 
 [Debug]
 EnableLog = false

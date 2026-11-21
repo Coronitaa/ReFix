@@ -22,5 +22,6 @@ enum class Cue {
 
 void SetEnabled(bool enabled);
 void Play(Cue cue);
+void SetProcessAudioMute(bool mute);
 
 } // namespace refix::overlay::sound

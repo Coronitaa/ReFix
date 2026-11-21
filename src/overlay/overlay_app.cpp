@@ -177,8 +177,22 @@ void App::OnHotkey() {
 }
 
 void App::OnModeChanged(host::Mode from, host::Mode to) {
-    if (to == host::Mode::Overlay) PostOverlayActivated(true);
-    else if (from == host::Mode::Overlay) PostOverlayActivated(false);
+    const auto& s = settings::Get();
+    if (to == host::Mode::Overlay) {
+        if (s.openBehavior == settings::GameOpenBehavior::KeepActive) {
+            sound::SetProcessAudioMute(false);
+        } else if (s.openBehavior == settings::GameOpenBehavior::Mute) {
+            sound::SetProcessAudioMute(true);
+        } else if (s.openBehavior == settings::GameOpenBehavior::Pause) {
+            sound::SetProcessAudioMute(true);
+            PostOverlayActivated(true);
+        }
+    } else if (from == host::Mode::Overlay) {
+        sound::SetProcessAudioMute(false);
+        if (s.openBehavior == settings::GameOpenBehavior::Pause) {
+            PostOverlayActivated(false);
+        }
+    }
 }
 
 void App::OnCloseRequested() {

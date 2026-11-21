@@ -937,14 +937,6 @@ static bool TranslatePeerDestination(const sockaddr* originalTo, int tolen, sock
         }
     }
 
-    // Direct loopback remapping for same-machine multi-instance
-    if (destIP == 0x7F000001u) {
-        auto itRemap = g_portRemap.find(destPort);
-        if (itRemap != g_portRemap.end() && itRemap->second != destPort) {
-            SetSockaddrIpv4((sockaddr*)&outTranslated, tolen, 0x7F000001u, itRemap->second, wasV6);
-            return true;
-        }
-    }
     return false;
 }
 
@@ -1710,6 +1702,13 @@ void RegisterGameServerPort(uint64_t steamID, uint16_t port) {
     peer.steamID = steamID;
     peer.gameServerPort = port;
     Log("RegisterGameServerPort: SteamID=%llu <-> GameServerPort=%u", steamID, port);
+}
+
+uint16_t GetGameServerPort(uint64_t steamID) {
+    if (!steamID) return 0;
+    std::lock_guard<std::recursive_mutex> lg(g_peerMutex);
+    auto it = g_peersBySteamID.find(steamID);
+    return (it != g_peersBySteamID.end()) ? it->second.gameServerPort : 0;
 }
 
 void RegisterOverlayEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port) {

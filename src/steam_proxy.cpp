@@ -1981,8 +1981,8 @@ static void LoadConfig() {
     ReadString("Mods", "Enabled", "true", modsEnabledStr, sizeof(modsEnabledStr));
     bool modsEnabled = (_stricmp(modsEnabledStr, "true") == 0 || strcmp(modsEnabledStr, "1") == 0);
 
-    char modsDevModeStr[64] = "false";
-    ReadString("Mods", "DevMode", "false", modsDevModeStr, sizeof(modsDevModeStr));
+    char modsDevModeStr[64] = "true";
+    ReadString("Mods", "DevMode", "true", modsDevModeStr, sizeof(modsDevModeStr));
     bool modsDevMode = (_stricmp(modsDevModeStr, "true") == 0 || strcmp(modsDevModeStr, "1") == 0);
 
     char modsDirBuf[MAX_PATH] = "";

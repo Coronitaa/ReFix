@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
         for (const auto& entry : stdfs::recursive_directory_iterator(mod_dir)) {
             if (entry.is_regular_file()) {
                 std::string rel_path = stdfs::relative(entry.path(), mod_dir).generic_string();
-                if (rel_path == "refixmod.json" || rel_path == "refixmod.sig") {
+                if (rel_path == "refixmod.json" || (rel_path == "refixmod.sig" && has_key)) {
                     continue;
                 }
                 PackageFileEntry fe;

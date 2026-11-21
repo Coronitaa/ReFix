@@ -253,6 +253,17 @@ struct SchemaItemInfo {
     int m_seasonAccess = -1;
 };
 
+static uint32_t ParseColorString(std::string_view str) {
+    if (str.empty()) return 0;
+    int r = 0, g = 0, b = 0;
+    if (sscanf(str.data(), "%d %d %d", &r, &g, &b) >= 3) {
+        return ((static_cast<uint32_t>(r & 0xFF) << 16) |
+                (static_cast<uint32_t>(g & 0xFF) << 8)  |
+                (static_cast<uint32_t>(b & 0xFF)));
+    }
+    return 0;
+}
+
 struct SchemaPaintKitInfo {
     uint32_t m_defIndex = 0;
     std::string m_name;
@@ -261,6 +272,11 @@ struct SchemaPaintKitInfo {
     Rarity m_rarity = Rarity::Common;
     float m_minFloat = 0.0f;
     float m_maxFloat = 1.0f;
+    int m_style = 0;
+    uint32_t m_color0 = 0;
+    uint32_t m_color1 = 0;
+    uint32_t m_color2 = 0;
+    uint32_t m_color3 = 0;
 };
 
 // sticker_kits (stickers, graffiti, patches) and music_definitions entries.
@@ -500,6 +516,11 @@ public:
                 info.m_pattern = std::string(sub.GetString("pattern"));
                 info.m_minFloat = sub.GetNumber<float>("wear_remap_min", 0.0f);
                 info.m_maxFloat = sub.GetNumber<float>("wear_remap_max", 1.0f);
+                info.m_style = sub.GetNumber<int>("style", 0);
+                info.m_color0 = ParseColorString(sub.GetString("color0"));
+                info.m_color1 = ParseColorString(sub.GetString("color1"));
+                info.m_color2 = ParseColorString(sub.GetString("color2"));
+                info.m_color3 = ParseColorString(sub.GetString("color3"));
                 m_paintKitInfo[std::string(pkName)] = info;
                 m_paintKitIdToName[info.m_defIndex] = std::string(pkName);
             }
@@ -856,20 +877,23 @@ bool SchemaManager::Load() {
 
     // Categorization helper
     auto determineCategory = [](const SchemaItemInfo& itm) -> std::string {
-        // Graffiti boxes share the sticker capsule prefab.
-        if (itm.m_name.rfind("crate_graffiti_pack", 0) == 0 || itm.m_name.rfind("crate_spray_pack", 0) == 0) return "Grafitis";
-        if (itm.m_prefab.find("sticker_capsule") != std::string::npos || itm.m_prefab.find("patch_capsule") != std::string::npos ||
-            itm.m_name.rfind("crate_sticker_pack", 0) == 0 || itm.m_name.rfind("crate_signature_pack", 0) == 0 ||
-            itm.m_name.rfind("crate_patch_pack", 0) == 0) {
-            return "Pegatinas y Parches";
-        }
-        if (itm.m_name.find("musickit") != std::string::npos && itm.m_supplyCrateSeries > 0) return "Música y Coleccionables";
-        if (itm.m_supplyCrateSeries > 0 || itm.m_prefab.find("weapon_case") != std::string::npos || itm.m_prefab.find("supply_crate") != std::string::npos) {
-            return "Cajas";
-        }
-        if (itm.m_prefab.find("case_key") != std::string::npos || (itm.m_prefab.find("tool") != std::string::npos && itm.m_name.find("key") != std::string::npos)) {
+        if (itm.m_prefab.find("case_key") != std::string::npos ||
+            (itm.m_prefab.find("tool") != std::string::npos && itm.m_name.find("key") != std::string::npos) ||
+            (itm.m_name.find("key") != std::string::npos && itm.m_name.find("crate") != std::string::npos)) {
             return "Llaves";
         }
+        if (itm.m_supplyCrateSeries > 0 || !itm.m_lootListName.empty() ||
+            itm.m_prefab.find("weapon_case") != std::string::npos ||
+            itm.m_prefab.find("supply_crate") != std::string::npos ||
+            itm.m_prefab.find("sticker_capsule") != std::string::npos ||
+            itm.m_prefab.find("patch_capsule") != std::string::npos ||
+            itm.m_prefab.find("souvenirpkg") != std::string::npos ||
+            itm.m_name.rfind("crate_", 0) == 0 ||
+            itm.m_name.find("capsule") != std::string::npos) {
+            return "Cajas";
+        }
+        if (itm.m_name.rfind("crate_graffiti_pack", 0) == 0 || itm.m_name.rfind("crate_spray_pack", 0) == 0) return "Grafitis";
+        if (itm.m_prefab.find("spray") != std::string::npos || itm.m_defIndex == 1348 || itm.m_defIndex == 1349) return "Grafitis";
         if ((itm.m_defIndex >= 500 && itm.m_defIndex <= 530) || itm.m_prefab.find("melee") != std::string::npos ||
             itm.m_name.find("knife") != std::string::npos || itm.m_name.find("bayonet") != std::string::npos) {
             return "Cuchillos";
@@ -939,6 +963,11 @@ bool SchemaManager::Load() {
         mi.skinName = pk.m_name;
         mi.imageInventory = wpItem.m_imageInventory;
         mi.pattern = pk.m_pattern;
+        mi.style = pk.m_style;
+        mi.color0 = pk.m_color0;
+        mi.color1 = pk.m_color1;
+        mi.color2 = pk.m_color2;
+        mi.color3 = pk.m_color3;
 
         std::string wpDisp = ResolveToken(wpItem.m_itemNameToken);
         if (wpDisp.empty()) wpDisp = wpItem.m_name;

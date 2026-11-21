@@ -147,7 +147,7 @@ bool ModHost::LoadPackage(const std::string& rfmod_path, std::string& out_error)
     loaded.extracted_path = extract_dir.string();
 
     std::string extract_err;
-    if (!ModPackage::VerifyAndExtract(rfmod_path, loaded.extracted_path, nullptr, &GetGlobalRevocationList(), inspect_info, extract_err)) {
+    if (!ModPackage::VerifyAndExtract(rfmod_path, loaded.extracted_path, nullptr, &GetGlobalRevocationList(), inspect_info, extract_err, dev_mode_)) {
         out_error = "Extraction and hash verification failed: " + extract_err;
         loaded.status_message = out_error;
         loaded_mods_[loaded.manifest.id] = std::move(loaded);

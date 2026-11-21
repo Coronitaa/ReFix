@@ -1,8 +1,35 @@
 // Player settings of the overlay, per PC, in %APPDATA%\ReFix\profiles.ini [Overlay] (next to the language).
 // ReFix.ini [Overlay] keeps the defaults a game folder ships with; a value set here wins over it.
 #pragma once
+#include <cstdint>
+#include <string>
 
 namespace refix::overlay::settings {
+
+enum class GameOpenBehavior {
+    KeepActive = 0,   // Game continues ticking and audio keeps playing
+    Mute = 1,         // Game continues ticking, but audio is muted while overlay is open
+    Pause = 2         // Game pauses and audio is muted while overlay is open
+};
+
+enum class OverlayShortcut {
+    ShiftTab = 0,     // Shift + Tab (default)
+    CtrlTab = 1,      // Ctrl + Tab
+    ShiftF1 = 2,      // Shift + F1
+    ShiftF2 = 3,      // Shift + F2
+    F11 = 4,          // F11
+    F12 = 5,          // F12
+    Home = 6,         // Home
+    Insert = 7,       // Insert
+};
+
+struct ShortcutInfo {
+    OverlayShortcut id;
+    uint32_t mod;     // MOD_SHIFT, MOD_CONTROL, 0
+    uint32_t vk;      // VK_TAB, VK_F1, etc.
+    const char* label;
+    const char* labelEs;
+};
 
 struct Values {
     bool achievementToasts = true;   // corner notification when an achievement unlocks
@@ -13,11 +40,17 @@ struct Values {
     bool otherToasts = true;         // other notices that arrive while playing (overlay closed)
     bool uiSounds = true;            // clicks, open/close
     bool blockReflex = true;         // NVIDIA Reflex never runs in the game (from the next start)
+    GameOpenBehavior openBehavior = GameOpenBehavior::KeepActive;
+    OverlayShortcut shortcut = OverlayShortcut::ShiftTab;
 };
 
 // Host thread (UI). Loaded on first use.
 const Values& Get();
 void Set(const Values& v);           // saves at once
+
+ShortcutInfo GetShortcutInfo(OverlayShortcut sc);
+const char* GetShortcutName(OverlayShortcut sc);
+const char* GetShortcutNameEs(OverlayShortcut sc);
 
 // Steam online services (ReFix Online). Auto = the player never chose: ReFix.ini decides.
 enum class SteamOnline { Auto, On, Off };
@@ -26,5 +59,8 @@ void SetSteamOnline(bool on);
 
 // DllMain-safe read of the Reflex setting (no shell APIs): the player's choice, else `iniDefault`.
 bool BlockReflexEarly(bool iniDefault);
+
+// Switch overlay to Steam: writes Enabled=false, BlockSteamOverlay=false to ReFix.ini
+bool ReplaceWithSteamOverlay();
 
 } // namespace refix::overlay::settings

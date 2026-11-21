@@ -52,4 +52,5 @@ __declspec(dllexport) void CSGO_SetPrimeStatus(bool enabled);
 __declspec(dllexport) bool CSGO_HasOperationPass(uint32_t season);
 __declspec(dllexport) void CSGO_ActivateOperationPass(uint32_t season, uint64_t passItemId);
 __declspec(dllexport) void CSGO_SetHostConfig(const char* json);
+__declspec(dllexport) void CSGO_InspectItemInGame(uint32_t defIndex, uint32_t paintKit);
 }

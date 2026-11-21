@@ -53,6 +53,11 @@ struct MarketItem {
     uint32_t musicKit = 0;    // music kit ("music id")
     std::string pattern;      // paint kit texture name (materials/.../customization/paints/*/<pattern>.vtf)
     int seasonAccess = -1;    // operation pass: the season it unlocks ("season access" attribute)
+    int style = 0;
+    uint32_t color0 = 0;
+    uint32_t color1 = 0;
+    uint32_t color2 = 0;
+    uint32_t color3 = 0;
 };
 
 // One case/capsule roll: a skin (paintKit), a sticker/graffiti/patch (stickerKit) or a music kit (musicKit).

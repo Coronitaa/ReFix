@@ -6,6 +6,7 @@
 #include "overlay_app.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
+#include "overlay_settings.h"
 #include "../unreal_steam_emu.h"
 #include "../refix_mono.h"
 
@@ -644,7 +645,7 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             ui::DrawAvatar(dl, ac, r, active_ ? ProfileAvatar(*active_) : ui::AvatarRef{});
             const float y = ac.y - (f.strong->FontSize + ui::S(26)) * 0.5f;
             line(f.strong, y, ui::color::Text, LocalName());
-            // "Press [Shift] [Tab] to open ReFix", every piece centred on the same line.
+            // Dynamic keycap centered on the row
             const float rowY = y + f.strong->FontSize + ui::S(4) + ui::KeycapHeight() * 0.5f;
             const ImU32 muted = ui::Fade(ui::color::Muted, a);
             auto words = [&](float x, const char* text) {
@@ -652,8 +653,18 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
                 return x + f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, text).x;
             };
             float x = words(tx, i18n::T("Press", "Pulsa")) + ui::S(6);
-            x += ui::KeycapAt(dl, ImVec2(x, rowY), "Shift", a) + ui::S(4);
-            x += ui::KeycapAt(dl, ImVec2(x, rowY), "Tab", a) + ui::S(6);
+            const auto scInfo = settings::GetShortcutInfo(settings::Get().shortcut);
+            if (scInfo.mod & MOD_SHIFT) x += ui::KeycapAt(dl, ImVec2(x, rowY), "Shift", a) + ui::S(4);
+            if (scInfo.mod & MOD_CONTROL) x += ui::KeycapAt(dl, ImVec2(x, rowY), "Ctrl", a) + ui::S(4);
+            const char* keyName = "Tab";
+            if (scInfo.vk == VK_TAB) keyName = "Tab";
+            else if (scInfo.vk == VK_F1) keyName = "F1";
+            else if (scInfo.vk == VK_F2) keyName = "F2";
+            else if (scInfo.vk == VK_F11) keyName = "F11";
+            else if (scInfo.vk == VK_F12) keyName = "F12";
+            else if (scInfo.vk == VK_HOME) keyName = "Home";
+            else if (scInfo.vk == VK_INSERT) keyName = "Ins";
+            x += ui::KeycapAt(dl, ImVec2(x, rowY), keyName, a) + ui::S(6);
             words(x, i18n::T("to open ReFix", "para abrir ReFix"));
         } else if (invite) {
             const net::RemotePlayer* from = FindPlayer(t.invite.from);

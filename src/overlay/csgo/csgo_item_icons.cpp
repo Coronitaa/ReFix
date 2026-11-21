@@ -13,6 +13,9 @@
 #include "../overlay_theme.h"
 #include "../avatar_image.h"
 #include "../../csgo_schema.h"
+#include "../../unreal_steam_emu.h"
+#include "../../steam_gc_emu.h"
+#include <nlohmann/json.hpp>
 
 extern void ReFixLog(const char* fmt, ...);
 
@@ -93,7 +96,9 @@ void LoadIndex(VpkIndex& idx) {
         while (readStr(path) && !path.empty()) {
             std::string lpath = Lower(path);
             bool econPng = ext == "png" && (lpath.rfind("resource/flash/econ", 0) == 0 || lpath.rfind("panorama/images/econ", 0) == 0);
-            bool paintVtf = ext == "vtf" && lpath.find("customization/paints") != std::string::npos;
+            bool paintVtf = ext == "vtf" && (lpath.find("customization/paints") != std::string::npos ||
+                                             lpath.find("customization/materials") != std::string::npos ||
+                                             lpath.find("customization/glove") != std::string::npos);
             bool gloveVmt = ext == "vmt" && lpath.find("customization/paints_gloves") != std::string::npos;
             while (readStr(name) && !name.empty()) {
                 if (p + 18 > end) return;
@@ -113,7 +118,22 @@ void LoadIndex(VpkIndex& idx) {
                     e.offset = offset;
                     e.length = length;
                     e.preload.assign(data.begin() + p, data.begin() + p + preload);
-                    if (paintVtf) idx.paints.emplace(Lower(name), key);
+                    if (paintVtf) {
+                        std::string lname = Lower(name);
+                        if (lname.find("_normal") == std::string::npos) {
+                            idx.paints.emplace(lname, key);
+                            size_t ppos = key.find("/paints/");
+                            if (ppos != std::string::npos) {
+                                std::string sub = key.substr(ppos + 8);
+                                if (sub.size() > 4) sub = sub.substr(0, sub.size() - 4);
+                                idx.paints.emplace(Lower(sub), key);
+                                size_t wpos = sub.find("workshop/");
+                                if (wpos != std::string::npos) {
+                                    idx.paints.emplace(Lower(sub.substr(wpos)), key);
+                                }
+                            }
+                        }
+                    }
                     if (gloveVmt) idx.glovePaints.emplace(Lower(name), key);
                 }
                 p += preload;
@@ -387,13 +407,152 @@ ImTextureID PaintSwatch(const std::string& pattern) {
 
 std::string GloveFallbackPath(const refix::csgo::MarketItem& item);
 std::string KnifeFallbackPath(const refix::csgo::MarketItem& item);
+ImTextureID CompositeSkinImage(const refix::csgo::MarketItem& item);
+
+static std::unordered_map<uint32_t, std::string> s_iicCache;
+static std::unordered_map<uint64_t, uint32_t> s_accountLowIdToKey; // ((uint64_t)accountId << 32 | lowId) -> (defIndex << 16 | paintKit)
+static std::unordered_map<uint32_t, uint32_t> s_lowIdToKey;        // fallback lowId -> key
+static uint64_t s_lastInventoryScanMs = 0;
+
+void RefreshInventoryIndex(const std::wstring& gameDir) {
+    uint64_t now = GetTickCount64();
+    if (now - s_lastInventoryScanMs < 3000 && !s_accountLowIdToKey.empty()) return;
+    s_lastInventoryScanMs = now;
+
+    // 1. Query live in-memory inventory from GC emulator
+    uint32_t localAccount = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+    auto liveItems = ReFixGC::GetLocalInventory();
+    for (const auto& it : liveItems) {
+        if (it.defIndex != 0) {
+            uint32_t key = (it.defIndex << 16) | (it.paintKit & 0xFFFF);
+            uint32_t lowId = (uint32_t)(it.id & 0xFFFFFFFF);
+            if (lowId != 0) {
+                s_lowIdToKey[lowId] = key;
+                if (localAccount != 0) s_accountLowIdToKey[((uint64_t)localAccount << 32) | lowId] = key;
+            }
+        }
+    }
+
+    // 2. Inspect on-disk inventory.json files across all profiles
+    wchar_t appData[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH) > 0) {
+        std::wstring refixBase = std::wstring(appData) + L"\\ReFix\\";
+        std::vector<std::pair<uint32_t, std::wstring>> invPaths;
+        invPaths.push_back({ 0, refixBase + L"Saves\\_pc\\Inventory\\730\\inventory.json" });
+
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW((refixBase + L"Profiles\\*").c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) {
+                    uint32_t pAcc = (uint32_t)wcstoul(fd.cFileName, nullptr, 16);
+                    invPaths.push_back({ pAcc, refixBase + L"Profiles\\" + fd.cFileName + L"\\Inventory\\730\\inventory.json" });
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+
+        for (const auto& entry : invPaths) {
+            std::ifstream f(entry.second, std::ios::binary);
+            if (!f) continue;
+            std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (content.size() >= 3 && (uint8_t)content[0] == 0xEF && (uint8_t)content[1] == 0xBB && (uint8_t)content[2] == 0xBF) {
+                content.erase(0, 3);
+            }
+            try {
+                nlohmann::json j = nlohmann::json::parse(content);
+                if (j.contains("items") && j["items"].is_array()) {
+                    for (const auto& it : j["items"]) {
+                        uint32_t def = it.value("defIndex", 0u);
+                        uint32_t paint = it.value("paintKit", 0u);
+                        uint64_t id = 0;
+                        if (it.contains("id")) {
+                            if (it["id"].is_number()) id = it["id"].get<uint64_t>();
+                            else if (it["id"].is_string()) id = _strtoui64(it["id"].get<std::string>().c_str(), nullptr, 10);
+                        }
+                        if (def != 0 && id != 0) {
+                            uint32_t key = (def << 16) | (paint & 0xFFFF);
+                            uint32_t lowId = (uint32_t)(id & 0xFFFFFFFF);
+                            uint32_t itemAcc = (uint32_t)(id >> 32);
+                            if (itemAcc == 0) itemAcc = entry.first;
+                            s_lowIdToKey[lowId] = key;
+                            if (itemAcc != 0) s_accountLowIdToKey[((uint64_t)itemAcc << 32) | lowId] = key;
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+    }
+
+    // 3. Scan cached/ folder for all .iic files
+    std::wstring cachedDir = gameDir + L"resource\\flash\\econ\\weapons\\cached\\";
+    WIN32_FIND_DATAW cfd;
+    HANDLE hCached = FindFirstFileW((cachedDir + L"*.iic").c_str(), &cfd);
+    if (hCached != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(cfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                char name[128] = {};
+                WideCharToMultiByte(CP_UTF8, 0, cfd.cFileName, -1, name, sizeof(name), nullptr, nullptr);
+                char part1[32] = {}, part2[32] = {}, part3[32] = {};
+                // format: 10-<acc>-<id>.iic
+                if (sscanf_s(name, "%31[^-]-%31[^-]-%31[^.]", part1, (unsigned)sizeof(part1),
+                             part2, (unsigned)sizeof(part2), part3, (unsigned)sizeof(part3)) >= 3) {
+                    if (_stricmp(part2, "ffffffff") == 0) {
+                        uint32_t val = (uint32_t)strtoul(part3, nullptr, 16);
+                        if (val != 0) {
+                            s_iicCache[val] = std::string("resource/flash/econ/weapons/cached/") + name;
+                        }
+                    } else {
+                        uint32_t acc = (uint32_t)strtoul(part2, nullptr, 16);
+                        uint32_t lowId = (uint32_t)strtoul(part3, nullptr, 16);
+                        uint64_t accKey = ((uint64_t)acc << 32) | lowId;
+                        auto itAcc = s_accountLowIdToKey.find(accKey);
+                        if (itAcc != s_accountLowIdToKey.end()) {
+                            s_iicCache[itAcc->second] = std::string("resource/flash/econ/weapons/cached/") + name;
+                        } else {
+                            auto itLow = s_lowIdToKey.find(lowId);
+                            if (itLow != s_lowIdToKey.end()) {
+                                s_iicCache[itLow->second] = std::string("resource/flash/econ/weapons/cached/") + name;
+                            }
+                        }
+                    }
+                }
+            }
+        } while (FindNextFileW(hCached, &cfd));
+        FindClose(hCached);
+    }
+}
 
 std::string CachedIicPath(const refix::csgo::MarketItem& item) {
     if (item.defIndex == 0) return {};
-    uint32_t val = (item.defIndex << 16) | (item.paintKit & 0xFFFF);
+    VpkIndex& idx = Index();
+    RefreshInventoryIndex(idx.gameDir);
+
+    uint32_t key = (item.defIndex << 16) | (item.paintKit & 0xFFFF);
+
+    // 1. Look up in scanned / indexed .iic cache
+    auto it = s_iicCache.find(key);
+    if (it != s_iicCache.end()) {
+        return it->second;
+    }
+
     char buf[128];
-    snprintf(buf, sizeof(buf), "resource/flash/econ/weapons/cached/10-ffffffff-%x.iic", val);
+    // 2. Direct check for unowned Scaleform preview: 10-ffffffff-<val>.iic
+    snprintf(buf, sizeof(buf), "resource/flash/econ/weapons/cached/10-ffffffff-%x.iic", key);
     if (Exists(buf)) return buf;
+    for (int wear = 0; wear <= 2; ++wear) {
+        snprintf(buf, sizeof(buf), "resource/flash/econ/weapons/cached/10-ffffffff-%x-%x.iic", key, wear);
+        if (Exists(buf)) return buf;
+    }
+
+    // 3. Direct check for local account inventory items
+    uint32_t accountId = (uint32_t)(UnrealSteamEmu::GetLocalSteamID() & 0xFFFFFFFF);
+    if (accountId != 0) {
+        snprintf(buf, sizeof(buf), "resource/flash/econ/weapons/cached/10-%x-%x.iic", accountId, key);
+        if (Exists(buf)) return buf;
+    }
+
     return {};
 }
 
@@ -411,13 +570,17 @@ ImTextureID LoadIic(const std::string& path) {
         img.width = 512;
         img.height = 384;
         img.pixels.assign(bytes.begin(), bytes.begin() + (512 * 384 * 4));
+        // .iic is BGRA32 (D3DFMT_A8R8G8B8) -> swap Red and Blue channels for DXGI R8G8B8A8
+        for (size_t i = 0; i < 512 * 384 * 4; i += 4) {
+            std::swap(img.pixels[i], img.pixels[i + 2]);
+        }
         g_sizes[key] = ImVec2(512.0f, 384.0f);
         return true;
     });
 }
 
 // Loads item skin art: prefers official pre-rendered PNG or the game's native ItemIconCache (512x384 RGBA),
-// cleanly falling back to the base weapon/knife/glove silhouette without distorted procedural mud.
+// falling back cleanly to the weapon/knife/glove silhouette.
 ImTextureID ItemImage(const refix::csgo::MarketItem& item) {
     std::string rendered = RenderedPath(item);
     if (!rendered.empty()) return Load(rendered, false);
@@ -426,6 +589,7 @@ ImTextureID ItemImage(const refix::csgo::MarketItem& item) {
         if (!iic.empty()) {
             if (ImTextureID t = LoadIic(iic)) return t;
         }
+        if (ImTextureID t = CompositeSkinImage(item)) return t;
     }
     if (ImTextureID t = BaseImage(item.imageInventory)) return t;
     std::string knife = KnifeFallbackPath(item);
@@ -441,18 +605,229 @@ std::string KnifeFallbackPath(const refix::csgo::MarketItem& item) {
     std::string name = Lower(item.weaponName);
     std::string p = "resource/flash/econ/weapons/base_weapons/" + name + ".png";
     if (Exists(p)) return p;
+    p = "panorama/images/econ/weapons/base_weapons/" + name + "_png.png";
+    if (Exists(p)) return p;
     return BasePath("econ/weapons/base_weapons/weapon_knife");
 }
 
-// The generic glove picture this build ships when a glove has no picture of its own.
+// Base glove silhouette for glove finishes
 std::string GloveFallbackPath(const refix::csgo::MarketItem& item) {
     if (item.category != "Guantes" && item.weaponName.find("glove") == std::string::npos) return {};
-    for (const std::string& p : { "resource/flash/econ/wearables/gloves/t_defaultgloves.png",
+    std::string name = Lower(item.weaponName);
+    if (name.find("bloodhound") != std::string::npos || name.find("hydra") != std::string::npos) {
+        if (Exists("resource/flash/econ/weapons/base_weapons/t_gloves.png")) return "resource/flash/econ/weapons/base_weapons/t_gloves.png";
+    }
+    for (const std::string& p : { "resource/flash/econ/weapons/base_weapons/ct_gloves.png",
+                                  "resource/flash/econ/weapons/base_weapons/t_gloves.png",
                                   "resource/flash/econ/wearables/gloves/ct_defaultgloves.png",
-                                  "resource/flash/econ/weapons/base_weapons/t_gloves.png" }) {
+                                  "resource/flash/econ/wearables/gloves/t_defaultgloves.png" }) {
         if (Exists(p)) return p;
     }
     return BasePath("econ/weapons/base_weapons/ct_gloves");
+}
+
+static bool ParseGloveVmt(const std::vector<uint8_t>& bytes, std::string& outPat, uint32_t& outC0, uint32_t& outC1, uint32_t& outC2, uint32_t& outC3) {
+    if (bytes.empty()) return false;
+    std::string str(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    size_t ppos = str.find("$pattern");
+    if (ppos != std::string::npos) {
+        size_t q1 = str.find_first_of("\"'", ppos + 8);
+        if (q1 != std::string::npos) {
+            size_t q2 = str.find_first_of("\"'\r\n", q1 + 1);
+            if (q2 != std::string::npos) {
+                std::string p = str.substr(q1 + 1, q2 - q1 - 1);
+                size_t ls = p.find_last_of("/\\");
+                if (ls != std::string::npos) p = p.substr(ls + 1);
+                if (p.size() > 4 && p.substr(p.size() - 4) == ".vtf") p = p.substr(0, p.size() - 4);
+                outPat = Lower(p);
+            }
+        }
+    }
+    auto parseColor = [&](const char* tag) -> uint32_t {
+        size_t pos = str.find(tag);
+        if (pos == std::string::npos) return 0;
+        size_t b1 = str.find('[', pos);
+        if (b1 == std::string::npos) return 0;
+        float r = 0, g = 0, b = 0;
+        if (sscanf(str.c_str() + b1 + 1, "%f %f %f", &r, &g, &b) >= 3) {
+            return ((static_cast<uint32_t>(std::clamp((int)r, 0, 255)) << 16) |
+                    (static_cast<uint32_t>(std::clamp((int)g, 0, 255)) << 8)  |
+                    (static_cast<uint32_t>(std::clamp((int)b, 0, 255))));
+        }
+        return 0;
+    };
+    outC0 = parseColor("$palettecolor1");
+    outC1 = parseColor("$palettecolor2");
+    outC2 = parseColor("$palettecolor3");
+    outC3 = parseColor("$palettecolor4");
+    return !outPat.empty() || outC0 != 0 || outC1 != 0;
+}
+
+ImTextureID CompositeSkinImage(const refix::csgo::MarketItem& item) {
+    if (item.paintKit == 0) return 0;
+
+    std::string basePath = BasePath(item.imageInventory);
+    if (basePath.empty()) basePath = KnifeFallbackPath(item);
+    if (basePath.empty()) basePath = GloveFallbackPath(item);
+    if (basePath.empty()) return 0;
+
+    std::string key = "composite:" + std::to_string(item.defIndex) + ":" + std::to_string(item.paintKit);
+
+    if (!g_attempted.count(key)) {
+        if (g_budget <= 0) return 0;
+        --g_budget;
+        g_attempted.insert(key);
+        EnsureCom();
+    }
+
+    return host::Texture(key, [&](image::Rgba& out) {
+        try {
+            std::vector<uint8_t> baseBytes;
+            if (!ReadGameFile(basePath, baseBytes)) return false;
+
+            image::Rgba baseImg;
+            if (!image::DecodeMemory(baseBytes.data(), baseBytes.size(), baseImg, 0)) return false;
+            if (baseImg.width == 0 || baseImg.height == 0) return false;
+
+            const int W = baseImg.width;
+            const int H = baseImg.height;
+
+            // Find weapon bounding box
+            int minX = W, maxX = 0, minY = H, maxY = 0;
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    uint8_t a = baseImg.pixels[((size_t)y * W + x) * 4 + 3];
+                    if (a > 20) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+
+            if (maxX <= minX || maxY <= minY) {
+                out = std::move(baseImg);
+                g_sizes[key] = ImVec2((float)W, (float)H);
+                return true;
+            }
+
+            int spanX = (std::max)(1, maxX - minX);
+            int spanY = (std::max)(1, maxY - minY);
+
+            // Pattern texture
+            VpkIndex& idx = Index();
+            std::string patPath;
+            uint32_t c0 = item.color0;
+            uint32_t c1 = item.color1;
+
+            if (item.category == "Guantes" || item.weaponName.find("glove") != std::string::npos) {
+                auto itG = idx.glovePaints.find(Lower(item.skinName));
+                if (itG == idx.glovePaints.end()) itG = idx.glovePaints.find(Lower(item.pattern));
+                if (itG != idx.glovePaints.end()) {
+                    std::vector<uint8_t> vmtBytes;
+                    if (ReadGameFile(itG->second, vmtBytes)) {
+                        std::string gPat;
+                        uint32_t gc0 = 0, gc1 = 0, gc2 = 0, gc3 = 0;
+                        if (ParseGloveVmt(vmtBytes, gPat, gc0, gc1, gc2, gc3)) {
+                            if (gc0 != 0) c0 = gc0;
+                            if (gc1 != 0) c1 = gc1;
+                            if (!gPat.empty()) {
+                                auto itP = idx.paints.find(gPat);
+                                if (itP != idx.paints.end()) patPath = itP->second;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (patPath.empty() && !item.pattern.empty() && item.pattern != "none") {
+                auto itP = idx.paints.find(Lower(item.pattern));
+                if (itP != idx.paints.end()) patPath = itP->second;
+            }
+
+            image::Rgba patImg;
+            bool hasPat = false;
+            if (!patPath.empty()) {
+                std::vector<uint8_t> patBytes;
+                if (ReadGameFile(patPath, patBytes)) {
+                    hasPat = DecodeVtf(patBytes, patImg) && patImg.width > 0 && patImg.height > 0;
+                }
+            }
+
+            // If we have neither a pattern texture nor a finish color, return the crisp base weapon
+            if (!hasPat && c0 == 0 && c1 == 0) {
+                out = std::move(baseImg);
+                g_sizes[key] = ImVec2((float)W, (float)H);
+                return true;
+            }
+
+            out.width = W;
+            out.height = H;
+            out.pixels = baseImg.pixels; // start with base weapon
+
+            const int pw = hasPat ? patImg.width : 1;
+            const int ph = hasPat ? patImg.height : 1;
+
+            for (int y = minY; y <= maxY; ++y) {
+                for (int x = minX; x <= maxX; ++x) {
+                    size_t idx4 = ((size_t)y * W + x) * 4;
+                    uint8_t ba = baseImg.pixels[idx4 + 3];
+                    if (ba < 20) continue;
+
+                    uint8_t br = baseImg.pixels[idx4 + 0];
+                    uint8_t bg = baseImg.pixels[idx4 + 1];
+                    uint8_t bb = baseImg.pixels[idx4 + 2];
+
+                    float lum = (0.299f * br + 0.587f * bg + 0.114f * bb) / 255.0f;
+
+                    // Protect dark metal (scope, barrel, bipod, trigger, bolt, dark hardware)
+                    int maxC = (std::max)({br, bg, bb});
+                    int minC = (std::min)({br, bg, bb});
+                    int diff = maxC - minC;
+
+                    if (lum < 0.15f || (lum < 0.22f && diff < 15)) {
+                        continue;
+                    }
+
+                    // Smooth transition from hardware metal to paintable body
+                    float paintFactor = std::clamp((lum - 0.15f) / 0.12f, 0.0f, 1.0f);
+
+                    float pr = 0, pg = 0, pb = 0;
+                    if (hasPat) {
+                        float u = (float)(x - minX) / (float)spanX;
+                        float v = (float)(y - minY) / (float)spanY;
+                        int px = std::clamp((int)(u * pw), 0, pw - 1);
+                        int py = std::clamp((int)(v * ph), 0, ph - 1);
+                        size_t pidx = ((size_t)py * pw + px) * 4;
+                        pr = (float)patImg.pixels[pidx + 0];
+                        pg = (float)patImg.pixels[pidx + 1];
+                        pb = (float)patImg.pixels[pidx + 2];
+                    } else {
+                        uint32_t useColor = c0 != 0 ? c0 : c1;
+                        pr = (float)((useColor >> 16) & 0xFF);
+                        pg = (float)((useColor >> 8) & 0xFF);
+                        pb = (float)(useColor & 0xFF);
+                    }
+
+                    // 3D lighting modulation preserving weapon form, highlights and shadows
+                    float lighting = 0.35f + lum * 0.85f;
+                    float cr = std::clamp(pr * lighting, 0.0f, 255.0f);
+                    float cg = std::clamp(pg * lighting, 0.0f, 255.0f);
+                    float cb = std::clamp(pb * lighting, 0.0f, 255.0f);
+
+                    out.pixels[idx4 + 0] = (uint8_t)(br * (1.0f - paintFactor) + cr * paintFactor);
+                    out.pixels[idx4 + 1] = (uint8_t)(bg * (1.0f - paintFactor) + cg * paintFactor);
+                    out.pixels[idx4 + 2] = (uint8_t)(bb * (1.0f - paintFactor) + cb * paintFactor);
+                }
+            }
+
+            g_sizes[key] = ImVec2((float)W, (float)H);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    });
 }
 
 void DrawItemArt(ImDrawList* dl, const refix::csgo::MarketItem& item, ImVec2 min, ImVec2 max, float rounding) {
@@ -466,6 +841,7 @@ void DrawItemArt(ImDrawList* dl, const refix::csgo::MarketItem& item, ImVec2 min
         if (!iic.empty()) {
             if (ImTextureID t = LoadIic(iic)) { FitImage(dl, t, ImVec2(512.0f, 384.0f), min, max); return; }
         }
+        if (ImTextureID t = CompositeSkinImage(item)) { FitImage(dl, t, ImVec2(512.0f, 384.0f), min, max); return; }
     }
     std::string base = BasePath(item.imageInventory);
     if (base.empty()) base = KnifeFallbackPath(item);

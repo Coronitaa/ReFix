@@ -38,4 +38,19 @@ if %ERRORLEVEL% neq 0 (
 if not exist bin mkdir bin
 copy /Y build_csgo_mod\refix_csgo.dll bin\refix_csgo.dll >nul
 echo [OK] refix_csgo.dll build successful: bin\refix_csgo.dll
+
+if exist build_csgo_mod\unpacked (
+    echo [*] Updating unpacked mod directory and manifest...
+    copy /Y build_csgo_mod\refix_csgo.dll build_csgo_mod\unpacked\refix_csgo.dll >nul
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$h = (Get-FileHash 'build_csgo_mod\unpacked\refix_csgo.dll' -Algorithm SHA256).Hash.ToLowerInvariant(); $j = Get-Content 'build_csgo_mod\unpacked\refixmod.json' -Raw; $j2 = $j -replace '\"refix_csgo\.dll\":\s*\"[0-9a-fA-F]+\"', ('\"refix_csgo.dll\":\"' + $h + '\"'); Set-Content 'build_csgo_mod\unpacked\refixmod.json' -Value $j2 -NoNewline"
+    if exist bin\refixmod.exe (
+        echo [*] Packing refix.csgo.lan_overhaul.rfmod...
+        bin\refixmod.exe pack build_csgo_mod\unpacked refix_mods\refix.csgo.lan_overhaul.rfmod
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "$rh = (Get-FileHash 'refix_mods\refix.csgo.lan_overhaul.rfmod' -Algorithm SHA256).Hash.ToLowerInvariant(); $cl = Get-Content 'refix_mods\catalog.tsv'; $cl2 = $cl | ForEach-Object { if ($_ -match '^refix\.csgo\.lan_overhaul\t') { $p = $_ -split \"`t\"; $p[6] = $rh; $p -join \"`t\" } else { $_ } }; Set-Content 'refix_mods\catalog.tsv' -Value $cl2"
+        if exist "C:\Users\andre\Games\Counter-Strike_Global Offensive\refix_mods" (
+            copy /Y refix_mods\refix.csgo.lan_overhaul.rfmod "C:\Users\andre\Games\Counter-Strike_Global Offensive\refix_mods\refix.csgo.lan_overhaul.rfmod" >nul
+        )
+        echo [OK] Packaged and updated refix_mods\catalog.tsv
+    )
+)
 exit /b 0

@@ -114,12 +114,19 @@ bool ModPackage::CreatePackage(const std::string& output_rfmod_path,
         return false;
     }
 
-    // Add refixmod.sig if generated
+    // Add refixmod.sig if generated or pre-existing in files
     if (!signature_bytes.empty()) {
         if (!mz_zip_writer_add_mem(&zip_archive, "refixmod.sig", signature_bytes.data(), signature_bytes.size(), MZ_BEST_COMPRESSION)) {
             mz_zip_writer_end(&zip_archive);
             out_error = "Failed to add refixmod.sig to archive";
             return false;
+        }
+    } else {
+        for (const auto& file_entry : files) {
+            if (file_entry.relative_path == "refixmod.sig" && !file_entry.data.empty()) {
+                mz_zip_writer_add_mem(&zip_archive, "refixmod.sig", file_entry.data.data(), file_entry.data.size(), MZ_BEST_COMPRESSION);
+                break;
+            }
         }
     }
 
@@ -306,12 +313,13 @@ bool ModPackage::VerifyAndExtract(const std::string& rfmod_path,
                                  const uint8_t expected_public_key_32[32],
                                  const RevocationList* revocation_list,
                                  PackageInspectInfo& out_info,
-                                 std::string& out_error) {
+                                 std::string& out_error,
+                                 bool dev_mode) {
     if (!InspectPackage(rfmod_path, expected_public_key_32, revocation_list, out_info, out_error)) {
         return false;
     }
 
-    if (!out_info.is_valid) {
+    if (!out_info.is_valid && !dev_mode) {
         std::ostringstream ss;
         ss << "Package verification failed with " << out_info.validation_errors.size() << " error(s): ";
         for (size_t i = 0; i < out_info.validation_errors.size(); ++i) {

@@ -33,6 +33,7 @@ namespace SteamP2PHook {
     // Explicit endpoint registration to avoid overwriting data endpoints with presence ports
     void RegisterLanDataEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port);
     void RegisterGameServerPort(uint64_t steamID, uint16_t port);
+    uint16_t GetGameServerPort(uint64_t steamID);
     void RegisterOverlayEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port);
     void RegisterWanEndpoint(uint64_t steamID, uint32_t ipv4_host, uint16_t port);
     void RegisterWanEndpoint(uint64_t steamID, const char* ipStr, uint16_t port);

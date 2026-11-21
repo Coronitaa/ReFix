@@ -328,7 +328,7 @@ void DrawDetail(float w, float h) {
     }
 
     ImGui::Dummy(ImVec2(0, ui::S(6)));
-    if (ui::Clicked(ui::PrimaryButton(i18n::T("Add to inventory", "Añadir al inventario"), ImVec2(fullW, ui::S(40))))) {
+    if (ui::Clicked(ui::PrimaryButton(i18n::T("Add to inventory", "Añadir al inventario"), ImVec2(fullW, ui::S(38))))) {
         uint32_t quality = (g_market.statTrak && it.paintKit) ? 9 : it.quality;
         if (it.stickerKit || it.musicKit)
             CSGO_GrantKitItemToLocal(it.defIndex, (uint32_t)g_market.quantity, quality, it.rarity, it.stickerKit, it.musicKit);
@@ -338,6 +338,13 @@ void DrawDetail(float w, float h) {
         char msg[160];
         snprintf(msg, sizeof(msg), "%s %dx %s", i18n::T("Added", "Añadido"), g_market.quantity, DisplayName(it).c_str());
         SetStatus(msg);
+    }
+    if (it.paintKit != 0 || it.defIndex >= 500) {
+        ImGui::Dummy(ImVec2(0, ui::S(4)));
+        if (ui::Clicked(ui::SecondaryButton(i18n::T("Inspect in 3D (Game View)", "Inspeccionar en 3D (Juego)"), ImVec2(fullW, ui::S(34))))) {
+            CSGO_InspectItemInGame(it.defIndex, it.paintKit);
+            App::Get().CloseOverlay();
+        }
     }
     if (GetTickCount64() < g_market.statusUntil) {
         ImGui::PushTextWrapPos(w - ui::S(12));

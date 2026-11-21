@@ -8,6 +8,8 @@
 
 #include <windows.h>
 #include <mmsystem.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -144,6 +146,51 @@ void Play(Cue cue) {
     g_hdr.dwBufferLength = (DWORD)(pcm.size() * sizeof(int16_t));
     g_hdrPrepared = waveOutPrepareHeader(g_out, &g_hdr, sizeof(g_hdr)) == MMSYSERR_NOERROR;
     if (g_hdrPrepared) waveOutWrite(g_out, &g_hdr, sizeof(g_hdr));
+}
+
+void SetProcessAudioMute(bool mute) {
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* enumerator = nullptr;
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+    if (SUCCEEDED(hr) && enumerator) {
+        IMMDevice* device = nullptr;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
+        if (SUCCEEDED(hr) && device) {
+            IAudioSessionManager2* sessionManager = nullptr;
+            hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&sessionManager);
+            if (SUCCEEDED(hr) && sessionManager) {
+                IAudioSessionEnumerator* sessionList = nullptr;
+                hr = sessionManager->GetSessionEnumerator(&sessionList);
+                if (SUCCEEDED(hr) && sessionList) {
+                    int count = 0;
+                    sessionList->GetCount(&count);
+                    DWORD myPid = GetCurrentProcessId();
+                    for (int i = 0; i < count; ++i) {
+                        IAudioSessionControl* session = nullptr;
+                        if (SUCCEEDED(sessionList->GetSession(i, &session)) && session) {
+                            IAudioSessionControl2* session2 = nullptr;
+                            if (SUCCEEDED(session->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&session2)) && session2) {
+                                DWORD pid = 0;
+                                if (SUCCEEDED(session2->GetProcessId(&pid)) && pid == myPid) {
+                                    ISimpleAudioVolume* vol = nullptr;
+                                    if (SUCCEEDED(session->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&vol)) && vol) {
+                                        vol->SetMute(mute ? TRUE : FALSE, nullptr);
+                                        vol->Release();
+                                    }
+                                }
+                                session2->Release();
+                            }
+                            session->Release();
+                        }
+                    }
+                    sessionList->Release();
+                }
+                sessionManager->Release();
+            }
+            device->Release();
+        }
+        enumerator->Release();
+    }
 }
 
 } // namespace refix::overlay::sound

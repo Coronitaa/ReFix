@@ -4,6 +4,7 @@
 #include "overlay_host.h"
 #include "overlay_gamepad.h"
 #include "overlay_theme.h"
+#include "overlay_settings.h"
 #include "../refix_wine.h"
 
 #include <d3d11.h>
@@ -76,23 +77,47 @@ bool IsOurProcessWindow(HWND w) {
     return pid == GetCurrentProcessId();
 }
 
-// Shift+Tab is read by polling while a window of the game process has focus: no system-wide hook.
+// Hotkey is read by polling while a window of the game process has focus: no system-wide hook.
 // Bit 0 ("pressed since the last call") also catches taps shorter than the polling interval.
 bool PollHotkey() {
     static bool wasDown = false;
-    const SHORT tab = GetAsyncKeyState(VK_TAB);
-    const SHORT shift = GetAsyncKeyState(VK_SHIFT);
-    const bool down = (tab & 0x8001) && (shift & 0x8001) && !(GetAsyncKeyState(VK_MENU) & 0x8000) &&
-                      !(GetAsyncKeyState(VK_CONTROL) & 0x8000);
+    const settings::Values& v = settings::Get();
+    const settings::ShortcutInfo sc = settings::GetShortcutInfo(v.shortcut);
+
+    bool modOk = true;
+    if (sc.mod & MOD_SHIFT) {
+        if (!((GetAsyncKeyState(VK_SHIFT) & 0x8000) || (GetAsyncKeyState(VK_LSHIFT) & 0x8000) || (GetAsyncKeyState(VK_RSHIFT) & 0x8000))) modOk = false;
+    } else {
+        if ((GetAsyncKeyState(VK_SHIFT) & 0x8000)) modOk = false;
+    }
+    if (sc.mod & MOD_CONTROL) {
+        if (!((GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_LCONTROL) & 0x8000) || (GetAsyncKeyState(VK_RCONTROL) & 0x8000))) modOk = false;
+    } else {
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000)) modOk = false;
+    }
+    if (GetAsyncKeyState(VK_MENU) & 0x8000) modOk = false;
+
+    const SHORT keyState = GetAsyncKeyState(sc.vk);
+    const bool down = modOk && (keyState & 0x8001);
     const bool pressed = down && !wasDown;
     wasDown = down;
     return pressed && IsOurProcessWindow(GetForegroundWindow());
 }
 
-// Shift+Tab is the overlay's own hotkey: ImGui would take its Tab as "focus the previous field" and start
-// editing the search box as soon as the overlay opens.
+// Hotkey event: ImGui would take its key as "focus the previous field" or typing and start
+// editing fields as soon as the overlay opens.
 bool IsHotkeyTab(UINT msg, WPARAM wp) {
-    return (msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000);
+    if (msg != WM_KEYDOWN && msg != WM_KEYUP) return false;
+    const settings::Values& v = settings::Get();
+    const settings::ShortcutInfo sc = settings::GetShortcutInfo(v.shortcut);
+    if (wp != sc.vk) return false;
+    if (sc.mod & MOD_SHIFT) {
+        if (!(GetKeyState(VK_SHIFT) & 0x8000)) return false;
+    }
+    if (sc.mod & MOD_CONTROL) {
+        if (!(GetKeyState(VK_CONTROL) & 0x8000)) return false;
+    }
+    return true;
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

@@ -410,7 +410,7 @@ void FindLanMatch(uint64_t targetSteamId, const std::function<void()>& onNotFoun
             continue;
         }
         std::string resolved = ResolveReachableServerAddress(peer.first, peer.second);
-        refix::source::MainThreadQueue::ExecuteClientCmd("engine_no_focus_sleep 0; rate 786432; cl_cmdrate 128; cl_updaterate 128; cl_interp 0; cl_interp_ratio 1");
+        refix::source::MainThreadQueue::ExecuteClientCmd("engine_no_focus_sleep 0; fps_max 144; fps_max_menu 120; rate 786432; cl_cmdrate 64; cl_updaterate 64; cl_interp 0; cl_interp_ratio 1; mat_queue_mode 2;");
         std::string cmd = "connect " + resolved;
         ReFixLog("[GC-Relay] SteamID %llu hosts a match on %s, joining: %s", (unsigned long long)peer.first, peer.second.c_str(), cmd.c_str());
         refix::source::MainThreadQueue::ExecuteClientCmd(cmd);

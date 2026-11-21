@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <ws2tcpip.h>
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -25,6 +26,7 @@
 #include "source_main_thread_queue.h"
 #include "gc/lan_rooms.h"
 #include "lan_core/refix_lan_core.h"
+#include "steam_p2p_hook.h"
 
 namespace ReFixGC {
     void OnServerHelloHostConfig();
@@ -1168,9 +1170,14 @@ private:
         m_coupons.clear();
         if (str.empty()) return;
 
+        std::string s = str;
+        if (s.size() >= 3 && (uint8_t)s[0] == 0xEF && (uint8_t)s[1] == 0xBB && (uint8_t)s[2] == 0xBF) {
+            s.erase(0, 3);
+        }
+
         nlohmann::json j;
         try {
-            j = nlohmann::json::parse(str);
+            j = nlohmann::json::parse(s);
         } catch (const std::exception& e) {
             ReFixLog("[GC] CSGOInventory: Failed to parse inventory JSON: %s", e.what());
             return;
@@ -1466,16 +1473,49 @@ public:
             PutVarintField(updateResp, 1, 1);
             Reply(9104, updateResp);
 
-            // "Host match" hosts right away; "Start" joins a match another player hosts on the LAN, else hosts one.
-            // Start joins an open LAN match; hosting is the "LAN server" button (refix://host kept for older scripts).
-            if (ReFixGC::ConsumeHostRequest()) ReFixGC::HostLanMatch();
-            else refix::gc::FindLanMatch(0, [] {
-                std::vector<uint8_t> idle;
-                PutVarintField(idle, 1, 0); // MatchmakingGC2ClientUpdate: matchmaking = 0 (search over)
-                ReFixGC::SendToClient(9104, idle);
-                ReFixOverlay::ShowNotice("CS:GO LAN", "No hay partidas LAN abiertas. Hostea una con Servidor LAN.",
-                                         "No open LAN matches. Host one with LAN server.");
-            });
+            static std::atomic<bool> s_mmSearching{ false };
+            static std::thread s_mmSearchThread;
+
+            // If explicit host was requested (from overlay "Host match" button), host immediately.
+            if (ReFixGC::ConsumeHostRequest()) {
+                s_mmSearching = false;
+                ReFixGC::HostLanMatch();
+            } else {
+                bool hasHost = false;
+                for (const auto& peer : UnrealSteamEmu::PeersWithPresence("refix:server")) {
+                    if (refix::gc::IsValidLanServerAddress(peer.second)) {
+                        hasHost = true;
+                        break;
+                    }
+                }
+                if (hasHost) {
+                    s_mmSearching = false;
+                    refix::gc::FindLanMatch(0, nullptr);
+                } else {
+                    s_mmSearching = true;
+                    if (s_mmSearchThread.joinable()) s_mmSearchThread.detach();
+                    s_mmSearchThread = std::thread([]() {
+                        uint64_t start = GetTickCount64();
+                        while (s_mmSearching && GetTickCount64() - start < 8000) {
+                            Sleep(500);
+                            if (!s_mmSearching) return;
+                            for (const auto& peer : UnrealSteamEmu::PeersWithPresence("refix:server")) {
+                                if (refix::gc::IsValidLanServerAddress(peer.second)) {
+                                    s_mmSearching = false;
+                                    ReFixLog("[GC] Discovered LAN host during search, joining %llu", (unsigned long long)peer.first);
+                                    refix::gc::FindLanMatch(0, nullptr);
+                                    return;
+                                }
+                            }
+                        }
+                        if (s_mmSearching) {
+                            s_mmSearching = false;
+                            ReFixLog("[GC] Matchmaking search timed out, auto-hosting as match leader");
+                            ReFixGC::HostLanMatch();
+                        }
+                    });
+                }
+            }
         } else if (msg == 9102) { // MatchmakingStop
             std::vector<uint8_t> idle;
             PutVarintField(idle, 1, 0);
@@ -1642,15 +1682,55 @@ public:
             uint16_t friendPort = 27015;
             uint64_t targetServerId = 0;
 
-            // Resolve friend endpoint from LanCore peers
-            auto allPeers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
-            for (const auto& peer : allPeers) {
-                uint32_t pAcc = (uint32_t)(peer.externalId.numericId & 0xFFFFFFFF);
-                if (pAcc == friendAccountId && peer.endpoint.IsValid()) {
-                    friendIp = peer.endpoint.ipv4;
-                    friendPort = peer.endpoint.port != 0 ? peer.endpoint.port : 27015;
-                    targetServerId = peer.externalId.numericId;
-                    break;
+            uint64_t friendSteamId = 76561197960265728ULL + friendAccountId;
+            std::string serverAddr;
+            for (const auto& peer : UnrealSteamEmu::PeersWithPresence("refix:server")) {
+                if (peer.first == friendSteamId || (uint32_t)(peer.first & 0xFFFFFFFF) == friendAccountId) {
+                    if (refix::gc::IsValidLanServerAddress(peer.second)) {
+                        serverAddr = refix::gc::ResolveReachableServerAddress(peer.first, peer.second);
+                        targetServerId = peer.first;
+                        break;
+                    }
+                }
+            }
+
+            if (!serverAddr.empty()) {
+                size_t colon = serverAddr.rfind(':');
+                std::string ipPart = (colon != std::string::npos) ? serverAddr.substr(0, colon) : serverAddr;
+                std::string portPart = (colon != std::string::npos) ? serverAddr.substr(colon + 1) : "27015";
+                in_addr in{};
+                if (inet_pton(AF_INET, ipPart.c_str(), &in) == 1) {
+                    friendIp = ntohl(in.s_addr);
+                }
+                uint32_t p = (uint32_t)strtoul(portPart.c_str(), nullptr, 10);
+                if (p > 0 && p <= 65535) friendPort = (uint16_t)p;
+            } else {
+                // Fallback to LanCore peer IP, but port is always game server port (27015), never LanCore discovery port!
+                auto allPeers = refix::lan::ILanCore::Get().Peers().GetAllPeers();
+                for (const auto& peer : allPeers) {
+                    uint32_t pAcc = (uint32_t)(peer.externalId.numericId & 0xFFFFFFFF);
+                    if (pAcc == friendAccountId && peer.endpoint.IsValid()) {
+                        uint16_t knownPort = SteamP2PHook::GetGameServerPort(peer.externalId.numericId);
+                        if (!knownPort) knownPort = 27015;
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u",
+                                 (peer.endpoint.ipv4 >> 24) & 0xFF, (peer.endpoint.ipv4 >> 16) & 0xFF,
+                                 (peer.endpoint.ipv4 >> 8) & 0xFF, peer.endpoint.ipv4 & 0xFF, knownPort);
+                        std::string res = refix::gc::ResolveReachableServerAddress(peer.externalId.numericId, buf);
+                        size_t colon = res.rfind(':');
+                        std::string ipPart = (colon != std::string::npos) ? res.substr(0, colon) : res;
+                        std::string portPart = (colon != std::string::npos) ? res.substr(colon + 1) : std::to_string(knownPort);
+                        in_addr in{};
+                        if (inet_pton(AF_INET, ipPart.c_str(), &in) == 1) {
+                            friendIp = ntohl(in.s_addr);
+                        } else {
+                            friendIp = peer.endpoint.ipv4;
+                        }
+                        friendPort = (uint16_t)strtoul(portPart.c_str(), nullptr, 10);
+                        if (!friendPort) friendPort = knownPort;
+                        targetServerId = peer.externalId.numericId;
+                        break;
+                    }
                 }
             }
 
@@ -1790,6 +1870,19 @@ public:
                     PutVarintField(previewBlock, 9, 0);
                     PutVarintField(previewBlock, 10, 0);
                 }
+            } else if (param_a != 0) {
+                // Dynamic preview for unowned items: defIndex and paintKit encoded in param_a ((defIndex << 16) | paintKit)
+                uint32_t defIndex = (uint32_t)(param_a >> 16);
+                uint32_t paintKit = (uint32_t)(param_a & 0xFFFF);
+                if (defIndex != 0) {
+                    PutVarintField(previewBlock, 3, defIndex);
+                    PutVarintField(previewBlock, 4, paintKit);
+                    PutVarintField(previewBlock, 5, 6 /* Covert */);
+                    PutVarintField(previewBlock, 6, 4 /* Unique */);
+                    PutVarintField(previewBlock, 7, 420 /* Seed */);
+                    float fwear = 0.01f;
+                    PutFixed32Field(previewBlock, 8, *(uint32_t*)&fwear);
+                }
             }
             std::vector<uint8_t> resp;
             PutBytesField(resp, 1, previewBlock);
@@ -1834,7 +1927,29 @@ public:
                         }
 
                         if (itemId != 0 && newPos != 0) {
-                            CSGOInventoryManager::Get().SetItemPosition(itemId, newPos);
+                            if (CSGOInventoryManager::Get().SetItemPosition(itemId, newPos)) {
+                                auto allItems = CSGOInventoryManager::Get().GetItems();
+                                auto itUpdated = std::find_if(allItems.begin(), allItems.end(), [itemId](const EconItem& i) {
+                                    return i.id == itemId || (i.id & 0xFFFFFFFFULL) == (itemId & 0xFFFFFFFFULL);
+                                });
+                                if (itUpdated != allItems.end()) {
+                                    uint64_t localSteamId = UnrealSteamEmu::GetLocalSteamID();
+                                    uint32_t accountId = (uint32_t)(localSteamId & 0xFFFFFFFF);
+                                    static uint64_t s_posSoVersion = 500;
+
+                                    std::vector<uint8_t> soid;
+                                    PutVarintField(soid, 1, kSOTypeSteamId);
+                                    PutVarintField(soid, 2, localSteamId);
+
+                                    std::vector<uint8_t> itBytes = SerializeEconItem(*itUpdated, accountId, 1);
+                                    std::vector<uint8_t> soUpdate;
+                                    PutVarintField(soUpdate, 2, 1); // type_id = 1 (CSOEconItem)
+                                    PutBytesField(soUpdate, 3, itBytes);
+                                    PutFixed64Field(soUpdate, 4, ++s_posSoVersion);
+                                    PutBytesField(soUpdate, 5, soid);
+                                    Reply(22 /* k_ESOMsg_Update */, soUpdate);
+                                }
+                            }
                         }
                     } else if (w == 0) {
                         uint64_t val = 0;
@@ -2479,7 +2594,7 @@ void HostLanMatch() {
     const int warmupTime = std::clamp((int)num("warmuptime", 60), 0, 3600);
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "sv_lan 1; engine_no_focus_sleep 0; fps_max 0; sv_minrate 128000; sv_maxrate 0; sv_minupdaterate 64; sv_maxupdaterate 128; sv_mincmdrate 64; sv_maxcmdrate 128; net_splitrate 4; net_maxcleartime 0.001; "
+             "sv_lan 1; sv_allow_lobby_connect_only 0; engine_no_focus_sleep 0; fps_max 144; fps_max_menu 60; sv_hibernate_when_empty 0; host_timescale 1; rate 786432; cl_cmdrate 64; cl_updaterate 64; cl_interp 0; cl_interp_ratio 1; mat_queue_mode 2; sv_minrate 128000; sv_maxrate 0; sv_minupdaterate 64; sv_maxupdaterate 128; sv_mincmdrate 64; sv_maxcmdrate 128; net_splitrate 4; net_maxcleartime 0.001; "
              "sv_visiblemaxplayers %d; game_type %d; game_mode %d; sv_skirmish_id %d; mp_maxrounds %d; mp_roundtime %.2f; "
              "mp_roundtime_defuse %.2f; mp_roundtime_hostage %.2f; mp_warmuptime %d; mp_warmuptime_all_players_connected %d; "
              "mp_do_warmup_period %d; mp_do_warmup_offine %d; mp_buytime %d; mp_startmoney %d; mp_maxmoney %d; "
@@ -2494,8 +2609,13 @@ void HostLanMatch() {
              (int)num("bot_difficulty", 2), (int)num("sv_cheats", 0), (int)num("overtime", 0),
              password.c_str(), map.c_str());
 
+    // Clear any prior server presence so clients do not attempt to join before the map finishes loading.
+    // The listen server will automatically publish refix:server upon GameServer initialization.
+    UnrealSteamEmu::SetLocalPresence("refix:server", "");
+
     ReFixLog("[GC] Launching listen server on main thread: %s", cmd);
     refix::source::MainThreadQueue::Enqueue([rawJson, cmdStr = std::string(cmd)]() {
+        SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
         ApplyHostConfigToEngineAndFiles(rawJson);
         refix::source::MainThreadQueue::ExecuteClientCmdImmediate(cmdStr.c_str());
     });
@@ -3041,6 +3161,14 @@ __declspec(dllexport) void CSGO_GrantItemToLocal(uint32_t defIndex, uint32_t cou
 
 __declspec(dllexport) void CSGO_GrantKitItemToLocal(uint32_t defIndex, uint32_t count, uint32_t quality, uint32_t rarity, uint32_t stickerKit, uint32_t musicKit) {
     GrantToLocal(defIndex, count, quality, rarity, 0, 0.0f, 0, "", stickerKit, musicKit);
+}
+
+__declspec(dllexport) void CSGO_InspectItemInGame(uint32_t defIndex, uint32_t paintKit) {
+    uint64_t steamId = UnrealSteamEmu::GetLocalSteamID();
+    uint64_t assetId = ((uint64_t)defIndex << 16) | (paintKit & 0xFFFF);
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "csgo_econ_action_preview S%lluA%lluD0", (unsigned long long)steamId, (unsigned long long)assetId);
+    refix::source::MainThreadQueue::ExecuteClientCmd(cmd);
 }
 
 }
