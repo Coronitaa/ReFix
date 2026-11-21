@@ -83,6 +83,12 @@ const Values& Get() {
         if (beh >= 0 && beh <= 2) g_values.openBehavior = static_cast<GameOpenBehavior>(beh);
         int sc = ReadInt(ini, L"Shortcut", (int)OverlayShortcut::ShiftTab);
         if (sc >= 0 && sc <= (int)OverlayShortcut::Insert) g_values.shortcut = static_cast<OverlayShortcut>(sc);
+        int dm = ReadInt(ini, L"DisplayMode", (int)DisplayMode::FullscreenWindowed);
+        if (dm >= 0 && dm <= 2) g_values.displayMode = static_cast<DisplayMode>(dm);
+        g_values.windowWidth = ReadInt(ini, L"WindowWidth", 1920);
+        if (g_values.windowWidth <= 0) g_values.windowWidth = 1920;
+        g_values.windowHeight = ReadInt(ini, L"WindowHeight", 1080);
+        if (g_values.windowHeight <= 0) g_values.windowHeight = 1080;
     }
     return g_values;
 }
@@ -95,6 +101,9 @@ void Set(const Values& v) {
     for (const Key& k : kKeys) WritePrivateProfileStringW(kSection, k.name, (v.*k.field) ? L"1" : L"0", ini.c_str());
     WritePrivateProfileStringW(kSection, L"OpenBehavior", std::to_wstring((int)v.openBehavior).c_str(), ini.c_str());
     WritePrivateProfileStringW(kSection, L"Shortcut", std::to_wstring((int)v.shortcut).c_str(), ini.c_str());
+    WritePrivateProfileStringW(kSection, L"DisplayMode", std::to_wstring((int)v.displayMode).c_str(), ini.c_str());
+    WritePrivateProfileStringW(kSection, L"WindowWidth", std::to_wstring(v.windowWidth).c_str(), ini.c_str());
+    WritePrivateProfileStringW(kSection, L"WindowHeight", std::to_wstring(v.windowHeight).c_str(), ini.c_str());
     sound::SetEnabled(v.uiSounds);
 }
 

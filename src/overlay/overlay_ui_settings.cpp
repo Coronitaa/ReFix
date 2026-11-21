@@ -406,8 +406,8 @@ void App::DrawSettingsModal(ImVec2 viewport) {
     switch (settingsSection_) {
     case kGeneral: {
         SectionHeader(i18n::T("General", "General"),
-                      i18n::T("Overlay shortcut, game behavior and options.",
-                              "Atajo del overlay, comportamiento del juego y opciones."));
+                      i18n::T("Overlay shortcut, display mode, game behavior and options.",
+                              "Atajo del overlay, modo de pantalla, comportamiento del juego y opciones."));
 
         SyncSection(ui::icon::Settings, i18n::T("Overlay Shortcut", "Atajo del Overlay"));
         std::vector<std::string> scItems;
@@ -450,6 +450,58 @@ void App::DrawSettingsModal(ImVec2 viewport) {
             changed = true;
         }
 
+        SyncSection(ui::icon::OpenExternal, i18n::T("Launch Screen Mode", "Modo de pantalla al ejecutar"));
+        std::vector<std::string> dmItems = {
+            i18n::T("Fullscreen Windowed (Default)", "Ventana sin bordes (Predet.)"),
+            i18n::T("Fullscreen", "Pantalla completa"),
+            i18n::T("Windowed", "Modo ventana")
+        };
+        int curDm = (int)v.displayMode;
+        const char* dmDesc = "";
+        if (v.displayMode == settings::DisplayMode::FullscreenWindowed) {
+            dmDesc = i18n::T("Runs the game in a borderless window matching your display resolution.",
+                             "Ejecuta el juego en una ventana sin bordes adaptada a la resolución del monitor.");
+        } else if (v.displayMode == settings::DisplayMode::Fullscreen) {
+            dmDesc = i18n::T("Runs the game in exclusive fullscreen mode.",
+                             "Ejecuta el juego en modo de pantalla completa exclusiva.");
+        } else {
+            dmDesc = i18n::T("Runs the game in a bordered window with selectable resolution.",
+                             "Ejecuta el juego en modo ventana permitiendo elegir la resolución deseada.");
+        }
+        if (ComboRow("dm_combo", i18n::T("Screen mode", "Modo de pantalla"),
+                     dmDesc, dmItems[curDm].c_str(), dmItems, &curDm)) {
+            v.displayMode = static_cast<settings::DisplayMode>(curDm);
+            changed = true;
+        }
+
+        if (v.displayMode == settings::DisplayMode::Windowed) {
+            struct ResOption { int w; int h; const char* label; };
+            static const ResOption kResList[] = {
+                { 1280, 720, "1280 x 720 (16:9 HD)" },
+                { 1366, 768, "1366 x 768 (16:9)" },
+                { 1600, 900, "1600 x 900 (16:9 HD+)" },
+                { 1920, 1080, "1920 x 1080 (16:9 Full HD)" },
+                { 2560, 1440, "2560 x 1440 (16:9 2K QHD)" },
+                { 3840, 2160, "3840 x 2160 (16:9 4K UHD)" }
+            };
+            std::vector<std::string> resItems;
+            int curResIdx = 3;
+            for (size_t i = 0; i < sizeof(kResList) / sizeof(kResList[0]); ++i) {
+                resItems.push_back(kResList[i].label);
+                if (kResList[i].w == v.windowWidth && kResList[i].h == v.windowHeight) {
+                    curResIdx = (int)i;
+                }
+            }
+            if (ComboRow("res_combo", i18n::T("Window resolution", "Resolución de ventana"),
+                         i18n::T("Target resolution applied when launching or restarting the game.",
+                                 "Resolución objetivo aplicada al iniciar o reiniciar el juego."),
+                         resItems[curResIdx].c_str(), resItems, &curResIdx)) {
+                v.windowWidth = kResList[curResIdx].w;
+                v.windowHeight = kResList[curResIdx].h;
+                changed = true;
+            }
+        }
+
         SyncSection(ui::icon::Switch, i18n::T("Overlay Mode", "Modo del Overlay"));
         ImGui::PushFont(f.caption);
         ui::TextColored(ui::color::Muted,
@@ -458,21 +510,22 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         ImGui::PopFont();
         ImGui::Dummy(ImVec2(0, ui::S(8)));
 
-        const float btnW = ui::S(280);
-        const float btnH = ui::S(38);
+        // Horizontally aligned action buttons
+        const float availW = ImGui::GetContentRegionAvail().x;
+        const float gap = ui::S(12);
+        const float btnW = (availW - gap) * 0.5f;
+        const float btnH = ui::S(40);
 
-        // Button 1: Switch to Steam Overlay (Accent tint, left-aligned)
         if (ui::PrimaryButton(i18n::T("Replace with Steam Overlay", "Reemplazar por Overlay de Steam"), ImVec2(btnW, btnH))) {
             g_pendingOverlayAction = OverlayAction::Steam;
             g_overlayWarn1Open = true;
+            settingsOpen_ = false;
         }
-
-        ImGui::Dummy(ImVec2(0, ui::S(6)));
-
-        // Button 2: Disable overlay completely (Danger/Red tint, left-aligned)
+        ImGui::SameLine(0, gap);
         if (ui::DangerButton(i18n::T("Disable overlay completely", "Desactivar overlay completamente"), ImVec2(btnW, btnH))) {
             g_pendingOverlayAction = OverlayAction::DisableAll;
             g_overlayWarn1Open = true;
+            settingsOpen_ = false;
         }
         break;
     }
@@ -547,60 +600,107 @@ void App::DrawSettingsModal(ImVec2 viewport) {
     if (changed) {
         settings::Set(v);
     }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) close = true;
+    if (close) {
+        settingsOpen_ = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+void App::DrawOverlayCautionModals(ImVec2 viewport) {
+    if (!g_overlayWarn1Open && !g_overlayWarn2Open && !ImGui::IsPopupOpen("##overlay_warn1") && !ImGui::IsPopupOpen("##overlay_warn2")) {
+        return;
+    }
+    const ui::Fonts& f = ui::F();
+    const ImVec2 vp = viewport;
+
     // Confirmation Warning 1 Modal
     if (g_overlayWarn1Open) {
         ImGui::OpenPopup("##overlay_warn1");
         g_overlayWarn1Open = false;
     }
+    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ui::S(520), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(18)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(20)));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(14));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
     if (ImGui::BeginPopupModal("##overlay_warn1", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         const bool isSteam = (g_pendingOverlayAction == OverlayAction::Steam);
+        const float availW = ImGui::GetContentRegionAvail().x;
+
+        // Header
         ImGui::PushFont(f.heading);
-        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Star, isSteam ? ui::icon::Switch : ui::icon::Warning);
-        ImGui::SameLine();
-        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Star,
+        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Danger, isSteam ? ui::icon::Switch : ui::icon::Warning);
+        ImGui::SameLine(0, ui::S(8));
+        ui::TextColored(ui::color::Text,
                         isSteam ? i18n::T("Replace with Steam Overlay?", "¿Reemplazar por Overlay de Steam?")
                                 : i18n::T("Disable Overlay Completely?", "¿Desactivar Overlay Completamente?"));
         ImGui::PopFont();
 
-        ImGui::Dummy(ImVec2(0, ui::S(6)));
-        dl->AddLine(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x, ImGui::GetCursorScreenPos().y), ui::color::Border);
+        ImGui::PushFont(f.caption);
+        ui::TextColored(ui::color::Muted,
+                        isSteam ? i18n::T("Step 1 of 2: Switch overlay provider", "Paso 1 de 2: Cambiar proveedor de overlay")
+                                : i18n::T("Step 1 of 2: Disable overlay provider", "Paso 1 de 2: Desactivar proveedor de overlay"));
+        ImGui::PopFont();
+
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        dl->AddLine(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + availW, ImGui::GetCursorScreenPos().y), ui::color::Border);
         ImGui::Dummy(ImVec2(0, ui::S(10)));
+
+        // Warning card container
+        const ImVec2 cardP0 = ImGui::GetCursorScreenPos();
+        dl->ChannelsSplit(2);
+        dl->ChannelsSetCurrent(1);
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        ImGui::Indent(ui::S(12));
 
         if (isSteam) {
             DrawFormattedNotice(
                 i18n::T("Are you sure you want to **replace the ReFix overlay** with the **official Steam overlay**?\n\n"
-                        "The ReFix overlay will stop running and **Steam will take over**.\n\n"
-                        "You will be asked for a **final confirmation** in the next step.",
+                        "• The ReFix overlay will stop running and **Steam will take over**.\n"
+                        "• You will be asked for a **final confirmation** in the next step.",
                         "¿Estás seguro de que deseas **reemplazar el overlay de ReFix** por el **oficial de Steam**?\n\n"
-                        "El overlay de ReFix se cerrará para este juego y **Steam tomará el control**.\n\n"
-                        "Se te solicitará una **confirmación final** en el siguiente paso."));
+                        "• El overlay de ReFix dejará de funcionar para este juego y **Steam tomará el control**.\n"
+                        "• Se te solicitará una **confirmación final** en el siguiente paso."));
         } else {
             DrawFormattedNotice(
                 i18n::T("Are you sure you want to **completely disable the overlay**?\n\n"
-                        "**Neither ReFix nor Steam overlay** will be displayed in this game.\n\n"
-                        "You will be asked for a **final confirmation** in the next step.",
+                        "• **Neither ReFix nor Steam overlay** will be displayed in this game.\n"
+                        "• You will be asked for a **final confirmation** in the next step.",
                         "¿Estás seguro de que deseas **desactivar completamente el overlay**?\n\n"
-                        "**Ni el overlay de ReFix ni el de Steam** se mostrarán en este juego.\n\n"
-                        "Se te solicitará una **confirmación final** en el siguiente paso."));
+                        "• **Ni el overlay de ReFix ni el de Steam** se mostrarán en este juego.\n"
+                        "• Se te solicitará una **confirmación final** en el siguiente paso."));
         }
+
+        ImGui::Unindent(ui::S(12));
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
+        dl->ChannelsSetCurrent(0);
+        dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
+        dl->AddRect(cardP0, cardP1, ui::Fade(isSteam ? ui::color::Accent : ui::color::Danger, 0.4f), ui::S(10), 0, ui::S(1.0f));
+        dl->ChannelsMerge();
 
         ImGui::Dummy(ImVec2(0, ui::S(14)));
 
-        const ImVec2 bs(ui::S(140), ui::S(36));
+        const float gap = ui::S(12);
+        const float btnW = (availW - gap) * 0.5f;
+        const ImVec2 bs(btnW, ui::S(38));
+
         if (isSteam ? ui::PrimaryButton(i18n::T("Continue", "Continuar"), bs)
                     : ui::DangerButton(i18n::T("Continue", "Continuar"), bs)) {
             ImGui::CloseCurrentPopup();
             g_overlayWarn2Open = true;
             g_overlayHoldTime = 0.0f;
         }
-        ImGui::SameLine(0, ui::S(10));
-        if (ui::SecondaryButton(i18n::T("Cancel", "Cancelar"), bs)) {
+        ImGui::SameLine(0, gap);
+        if (ui::SecondaryButton(i18n::T("Cancel", "Cancelar"), bs) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             ImGui::CloseCurrentPopup();
             g_pendingOverlayAction = OverlayAction::None;
+            settingsOpen_ = true;
+            settingsRequested_ = true;
         }
         ImGui::EndPopup();
     }
@@ -613,110 +713,155 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         g_overlayWarn2Open = false;
         g_overlayHoldTime = 0.0f;
     }
+    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ui::S(540), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(18)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(20)));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(14));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
     if (ImGui::BeginPopupModal("##overlay_warn2", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         const bool isSteam = (g_pendingOverlayAction == OverlayAction::Steam);
+        const float availW = ImGui::GetContentRegionAvail().x;
+
+        // Header
         ImGui::PushFont(f.heading);
-        ui::TextColored(ui::color::Danger, ui::icon::Warning);
-        ImGui::SameLine();
-        ui::TextColored(ui::color::Danger,
+        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Danger, ui::icon::Warning);
+        ImGui::SameLine(0, ui::S(8));
+        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Danger,
                         isSteam ? i18n::T("Important Confirmation: Steam Overlay", "Confirmación importante: Overlay de Steam")
                                 : i18n::T("Important Confirmation: Disable Overlay", "Confirmación importante: Desactivar Overlay"));
         ImGui::PopFont();
 
-        ImGui::Dummy(ImVec2(0, ui::S(6)));
-        dl->AddLine(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x, ImGui::GetCursorScreenPos().y), ui::color::Border);
+        ImGui::PushFont(f.caption);
+        ui::TextColored(ui::color::Muted,
+                        i18n::T("Step 2 of 2: Critical confirmation & automatic game restart",
+                                "Paso 2 de 2: Confirmación crítica y reinicio automático del juego"));
+        ImGui::PopFont();
+
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        dl->AddLine(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + availW, ImGui::GetCursorScreenPos().y), ui::color::Border);
         ImGui::Dummy(ImVec2(0, ui::S(10)));
 
-        // Warning card container with subtle red border
-        const float cardWidth = ImGui::GetContentRegionAvail().x;
+        // Warning card container with ChannelsSplit
         const ImVec2 cardP0 = ImGui::GetCursorScreenPos();
-        ImGui::BeginGroup();
+        dl->ChannelsSplit(2);
+        dl->ChannelsSetCurrent(1);
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        ImGui::Indent(ui::S(12));
 
         if (isSteam) {
             DrawFormattedNotice(
-                i18n::T("NOTICE: This action will set **Enabled=false** and **BlockSteamOverlay=false** in **ReFix.ini**.\n\n"
-                        "Once disabled, **it CANNOT be reactivated from the in-game interface**.\n"
-                        "You will ONLY be able to reactivate it by manually editing **ReFix.ini** in the game directory.\n\n"
-                        "The game **will restart automatically** immediately upon confirmation.",
-                        "AVISO: Esta acción escribirá **Enabled=false** y **BlockSteamOverlay=false** en **ReFix.ini**.\n\n"
-                        "Una vez desactivado, **NO se podrá reactivar desde la interfaz del juego**.\n"
-                        "ÚNICAMENTE podrás reactivarlo editando manualmente el archivo **ReFix.ini** en la carpeta del juego.\n\n"
-                        "El juego **se reiniciará automáticamente** de inmediato al confirmar."));
+                i18n::T("CRITICAL NOTICE: This will write **Enabled=false** and **BlockSteamOverlay=false** in **ReFix.ini**.\n\n"
+                        "• Once disabled, **it CANNOT be reactivated from the in-game interface**.\n"
+                        "• You will ONLY be able to reactivate it by editing **ReFix.ini** manually in the game directory.\n"
+                        "• The game **will restart automatically** immediately upon confirmation.",
+                        "AVISO CRÍTICO: Esta acción escribirá **Enabled=false** y **BlockSteamOverlay=false** en **ReFix.ini**.\n\n"
+                        "• Una vez desactivado, **NO se podrá reactivar desde la interfaz del juego**.\n"
+                        "• ÚNICAMENTE podrás reactivarlo editando **ReFix.ini** manualmente en la carpeta del juego.\n"
+                        "• El juego **se reiniciará automáticamente** de inmediato al confirmar."));
         } else {
             DrawFormattedNotice(
-                i18n::T("NOTICE: This action will set **Enabled=false** and **BlockSteamOverlay=true** in **ReFix.ini**.\n\n"
-                        "Both overlays will be **completely disabled**.\n"
-                        "You will ONLY be able to reactivate it by manually editing **ReFix.ini** in the game directory.\n\n"
-                        "The game **will restart automatically** de inmediato al confirmar.",
-                        "AVISO: Esta acción escribirá **Enabled=false** y **BlockSteamOverlay=true** en **ReFix.ini**.\n\n"
-                        "Ambos overlays quedarán **completamente desactivados**.\n"
-                        "ÚNICAMENTE podrás reactivarlo editando manualmente el archivo **ReFix.ini** en la carpeta del juego.\n\n"
-                        "El juego **se reiniciará automáticamente** de inmediato al confirmar."));
+                i18n::T("CRITICAL NOTICE: This will write **Enabled=false** and **BlockSteamOverlay=true** in **ReFix.ini**.\n\n"
+                        "• Both overlays will be **completely disabled** in this game.\n"
+                        "• You will ONLY be able to reactivate it by editing **ReFix.ini** manually in the game directory.\n"
+                        "• The game **will restart automatically** immediately upon confirmation.",
+                        "AVISO CRÍTICO: Esta acción escribirá **Enabled=false** y **BlockSteamOverlay=true** en **ReFix.ini**.\n\n"
+                        "• Ambos overlays quedarán **completamente desactivados** en este juego.\n"
+                        "• ÚNICAMENTE podrás reactivarlo editando **ReFix.ini** manualmente en la carpeta del juego.\n"
+                        "• El juego **se reiniciará automáticamente** de inmediato al confirmar."));
         }
-        ImGui::EndGroup();
-        const ImVec2 cardP1(cardP0.x + cardWidth, ImGui::GetCursorScreenPos().y + ui::S(4));
-        dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.4f), ui::S(8), 0, ui::S(1.0f));
+
+        ImGui::Unindent(ui::S(12));
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
+        dl->ChannelsSetCurrent(0);
+        dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
+        dl->AddRect(cardP0, cardP1, ui::Fade(isSteam ? ui::color::Accent : ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
+        dl->ChannelsMerge();
 
         ImGui::Dummy(ImVec2(0, ui::S(14)));
 
-        // Click and Hold to Confirm button with decremental loading bar
+        // Action buttons: Hold to confirm on left, Cancel on right
         constexpr float kMaxHoldSeconds = 5.0f;
         const float dt = ImGui::GetIO().DeltaTime;
-        const ImVec2 holdBtnSize(ui::S(280), ui::S(40));
-        const ImVec2 hp0 = ImGui::GetCursorScreenPos();
-        const ImVec2 hp1(hp0.x + holdBtnSize.x, hp0.y + holdBtnSize.y);
+        const float cancelW = ui::S(110);
+        const float gap = ui::S(12);
+        const float holdW = availW - cancelW - gap;
+        const float btnH = ui::S(42);
 
-        ImGui::InvisibleButton("##hold_btn", holdBtnSize);
+        const ImVec2 hp0 = ImGui::GetCursorScreenPos();
+        const ImVec2 hp1(hp0.x + holdW, hp0.y + btnH);
+
+        ImGui::InvisibleButton("##hold_btn", ImVec2(holdW, btnH));
         const bool isHolding = ImGui::IsItemActive();
         const bool isHovered = ImGui::IsItemHovered();
+
+        if (isHovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
 
         if (isHolding) {
             g_overlayHoldTime = std::min(kMaxHoldSeconds, g_overlayHoldTime + dt);
         } else {
             // Rapid discharge when released
-            g_overlayHoldTime = std::max(0.0f, g_overlayHoldTime - dt * 6.0f);
+            g_overlayHoldTime = std::max(0.0f, g_overlayHoldTime - dt * 8.0f);
         }
 
-        // Decremental fill curve: p = 1.0 - (1.0 - (t / 5.0))^2
+        // Decremental fill curve: p = 1.0 - (1.0 - (t / 5.0))^2.2
         const float u = std::clamp(g_overlayHoldTime / kMaxHoldSeconds, 0.0f, 1.0f);
-        const float fillProgress = 1.0f - (1.0f - u) * (1.0f - u);
+        const float fillProgress = 1.0f - std::pow(1.0f - u, 2.2f);
 
         // Draw hold button base
-        dl->AddRectFilled(hp0, hp1, isHovered ? IM_COL32(50, 22, 26, 255) : IM_COL32(38, 18, 22, 255), ui::S(8));
-        dl->AddRect(hp0, hp1, isHovered ? ui::color::Danger : ui::Fade(ui::color::Danger, 0.7f), ui::S(8), 0, ui::S(1.5f));
+        const ImU32 baseBg = isSteam
+            ? (isHovered ? IM_COL32(26, 42, 62, 255) : IM_COL32(18, 30, 46, 255))
+            : (isHovered ? IM_COL32(52, 22, 26, 255) : IM_COL32(38, 16, 20, 255));
+        const ImU32 borderColor = isSteam
+            ? (isHovered ? ui::color::Accent : ui::Fade(ui::color::Accent, 0.6f))
+            : (isHovered ? ui::color::Danger : ui::Fade(ui::color::Danger, 0.6f));
+        const ImU32 fillBg = isSteam
+            ? IM_COL32(40, 140, 230, 240)
+            : IM_COL32(230, 50, 60, 240);
+
+        dl->AddRectFilled(hp0, hp1, baseBg, ui::S(8));
+        dl->AddRect(hp0, hp1, borderColor, ui::S(8), 0, ui::S(1.5f));
 
         // Draw fill bar
-        if (fillProgress > 0.005f) {
-            dl->PushClipRect(hp0, ImVec2(hp0.x + holdBtnSize.x * fillProgress, hp1.y), true);
-            dl->AddRectFilled(hp0, hp1, IM_COL32(235, 55, 65, 230), ui::S(8));
+        if (fillProgress > 0.002f) {
+            dl->PushClipRect(hp0, ImVec2(hp0.x + holdW * fillProgress, hp1.y), true);
+            dl->AddRectFilled(hp0, hp1, fillBg, ui::S(8));
             dl->PopClipRect();
         }
 
         // Button label
         ImGui::PushFont(f.strong);
-        char holdLabel[96];
+        char holdLabel[128];
         if (g_overlayHoldTime <= 0.05f) {
-            snprintf(holdLabel, sizeof(holdLabel), "%s", i18n::T("Click and hold to confirm (5s)", "Mantén presionado para confirmar (5s)"));
+            snprintf(holdLabel, sizeof(holdLabel), "%s  %s",
+                     isSteam ? ui::icon::Switch : ui::icon::Warning,
+                     i18n::T("Hold to restart (5s)", "Mantén presionado para reiniciar (5s)"));
         } else {
             float rem = std::max(0.0f, kMaxHoldSeconds - g_overlayHoldTime);
-            snprintf(holdLabel, sizeof(holdLabel), "%s (%.1fs)", i18n::T("Holding to restart...", "Manteniendo para reiniciar..."), rem);
+            snprintf(holdLabel, sizeof(holdLabel), "%s  %s (%.1fs)",
+                     ui::icon::Refresh,
+                     i18n::T("Holding to restart...", "Manteniendo para reiniciar..."), rem);
         }
         const ImVec2 lsize = ImGui::CalcTextSize(holdLabel);
         dl->AddText(f.strong, f.strong->FontSize,
-                    ImVec2(hp0.x + (holdBtnSize.x - lsize.x) * 0.5f, hp0.y + (holdBtnSize.y - lsize.y) * 0.5f),
+                    ImVec2(hp0.x + (holdW - lsize.x) * 0.5f + 1, hp0.y + (btnH - lsize.y) * 0.5f + 1),
+                    IM_COL32(0, 0, 0, 160), holdLabel);
+        dl->AddText(f.strong, f.strong->FontSize,
+                    ImVec2(hp0.x + (holdW - lsize.x) * 0.5f, hp0.y + (btnH - lsize.y) * 0.5f),
                     ui::color::Text, holdLabel);
         ImGui::PopFont();
 
         // Cancel button
-        ImGui::SameLine(0, ui::S(10));
-        if (ui::SecondaryButton(i18n::T("Cancel", "Cancelar"), ImVec2(ui::S(110), holdBtnSize.y))) {
+        ImGui::SameLine(0, gap);
+        if (ui::SecondaryButton(i18n::T("Cancel", "Cancelar"), ImVec2(cancelW, btnH)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             g_overlayHoldTime = 0.0f;
             g_pendingOverlayAction = OverlayAction::None;
             ImGui::CloseCurrentPopup();
+            settingsOpen_ = true;
+            settingsRequested_ = true;
         }
 
         // Check if hold duration completed
@@ -725,7 +870,6 @@ void App::DrawSettingsModal(ImVec2 viewport) {
             const auto action = g_pendingOverlayAction;
             g_pendingOverlayAction = OverlayAction::None;
             ImGui::CloseCurrentPopup();
-            close = true;
             CloseOverlay();
 
             if (action == OverlayAction::Steam) {
@@ -740,13 +884,6 @@ void App::DrawSettingsModal(ImVec2 viewport) {
     }
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) close = true;
-    if (close) {
-        settingsOpen_ = false;
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndPopup();
 }
 
 namespace {

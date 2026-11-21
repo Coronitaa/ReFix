@@ -12,6 +12,12 @@ enum class GameOpenBehavior {
     Pause = 2         // Game pauses and audio is muted while overlay is open
 };
 
+enum class DisplayMode {
+    FullscreenWindowed = 0,   // Fullscreen borderless window (default)
+    Fullscreen = 1,           // Exclusive fullscreen
+    Windowed = 2              // Windowed mode with selectable resolution
+};
+
 enum class OverlayShortcut {
     ShiftTab = 0,     // Shift + Tab (default)
     CtrlTab = 1,      // Ctrl + Tab
@@ -42,6 +48,9 @@ struct Values {
     bool blockReflex = true;         // NVIDIA Reflex never runs in the game (from the next start)
     GameOpenBehavior openBehavior = GameOpenBehavior::KeepActive;
     OverlayShortcut shortcut = OverlayShortcut::ShiftTab;
+    DisplayMode displayMode = DisplayMode::FullscreenWindowed;
+    int windowWidth = 1920;
+    int windowHeight = 1080;
 };
 
 // Host thread (UI). Loaded on first use.

@@ -1,5 +1,6 @@
 #include "refix_multi_instance.h"
 #include "engine/source/source_cmdline.h"
+#include "overlay/overlay_settings.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -203,7 +204,24 @@ void ReFix_MultiInstanceOnSteamInit() {
 }
 
 void ReFix_MultiInstanceAvoidExclusiveFullscreen(int instanceSlot) {
-    if (instanceSlot <= 0) return;
+    if (instanceSlot <= 0) {
+        #if !defined(REFIX_ONLINE)
+        const auto& s = refix::overlay::settings::Get();
+        if (refix::source::Tier0CommandLine()) {
+            if (s.displayMode == refix::overlay::settings::DisplayMode::Fullscreen) {
+                refix::source::AppendGameParm("-fullscreen", nullptr);
+            } else if (s.displayMode == refix::overlay::settings::DisplayMode::FullscreenWindowed) {
+                refix::source::AppendGameParm("-windowed", nullptr);
+                refix::source::AppendGameParm("-noborder", nullptr);
+            } else if (s.displayMode == refix::overlay::settings::DisplayMode::Windowed) {
+                refix::source::AppendGameParm("-windowed", nullptr);
+                refix::source::AppendGameParm("-w", std::to_string(s.windowWidth).c_str());
+                refix::source::AppendGameParm("-h", std::to_string(s.windowHeight).c_str());
+            }
+        }
+        #endif
+        return;
+    }
     const char* line = refix::source::GetGameCommandLine();
     if (!line) return;
     std::string lower(line);

@@ -38,6 +38,59 @@ extern void ReFixLog(const char* fmt, ...);
 namespace refix::overlay {
 namespace {
 
+std::wstring ApplyDisplayModeToCommandLine(const std::wstring& originalCmd) {
+    const auto& s = settings::Get();
+    std::wstring cmd = originalCmd;
+    auto stripArg = [&](const std::wstring& arg, bool hasValue) {
+        size_t pos = 0;
+        std::wstring lower = cmd;
+        for (wchar_t& c : lower) c = (wchar_t)towlower(c);
+        std::wstring larg = arg;
+        for (wchar_t& c : larg) c = (wchar_t)towlower(c);
+        while ((pos = lower.find(larg, pos)) != std::wstring::npos) {
+            if ((pos == 0 || lower[pos - 1] == L' ') &&
+                (pos + larg.size() == lower.size() || lower[pos + larg.size()] == L' ')) {
+                size_t end = pos + larg.size();
+                if (hasValue && end < lower.size() && lower[end] == L' ') {
+                    while (end < lower.size() && lower[end] == L' ') end++;
+                    while (end < lower.size() && lower[end] != L' ') end++;
+                }
+                while (end < lower.size() && lower[end] == L' ') end++;
+                cmd.erase(pos, end - pos);
+                lower = cmd;
+                for (wchar_t& c : lower) c = (wchar_t)towlower(c);
+            } else {
+                pos += larg.size();
+            }
+        }
+    };
+
+    stripArg(L"-fullscreen", false);
+    stripArg(L"-full", false);
+    stripArg(L"-windowed", false);
+    stripArg(L"-window", false);
+    stripArg(L"-sw", false);
+    stripArg(L"-noborder", false);
+    stripArg(L"-w", true);
+    stripArg(L"-h", true);
+    stripArg(L"-screen-fullscreen", true);
+    stripArg(L"-screen-width", true);
+    stripArg(L"-screen-height", true);
+    stripArg(L"-popupwindow", false);
+    stripArg(L"-borderless", false);
+
+    if (s.displayMode == settings::DisplayMode::Fullscreen) {
+        cmd += L" -fullscreen -screen-fullscreen 1";
+    } else if (s.displayMode == settings::DisplayMode::FullscreenWindowed) {
+        cmd += L" -windowed -noborder -popupwindow -screen-fullscreen 0 -borderless";
+    } else if (s.displayMode == settings::DisplayMode::Windowed) {
+        cmd += L" -windowed -w " + std::to_wstring(s.windowWidth) + L" -h " + std::to_wstring(s.windowHeight);
+        cmd += L" -screen-fullscreen 0 -screen-width " + std::to_wstring(s.windowWidth) + L" -screen-height " + std::to_wstring(s.windowHeight);
+        cmd += L" -ResX=" + std::to_wstring(s.windowWidth) + L" -ResY=" + std::to_wstring(s.windowHeight);
+    }
+    return cmd;
+}
+
 constexpr ULONGLONG kRefreshMs = 300;
 constexpr ULONGLONG kTunnelGraceMs = 15000;   // presence every 2 s; a new Steam P2P session takes a few seconds
 constexpr ULONGLONG kNvidiaCheckMs = 200;
@@ -619,7 +672,7 @@ void App::RestartWithProfile(const std::wstring& id) {
     SetEnvironmentVariableW(L"REFIX_RESTART_PID", std::to_wstring(GetCurrentProcessId()).c_str());
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring cmd = GetCommandLineW();
+    std::wstring cmd = ApplyDisplayModeToCommandLine(GetCommandLineW());
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
@@ -639,7 +692,7 @@ void App::RestartGame() {
     SetEnvironmentVariableW(L"REFIX_RESTART_PID", std::to_wstring(GetCurrentProcessId()).c_str());
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring cmd = GetCommandLineW();
+    std::wstring cmd = ApplyDisplayModeToCommandLine(GetCommandLineW());
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {

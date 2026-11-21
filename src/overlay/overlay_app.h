@@ -209,6 +209,7 @@ private:
     void DrawAchievementsCard(ImVec2 pos, ImVec2 size);
     void DrawAchievementsModal(ImVec2 viewport);
     void DrawSettingsModal(ImVec2 viewport);   // overlay_ui_settings.cpp
+    void DrawOverlayCautionModals(ImVec2 viewport);
     // overlay_ui_friends.cpp: Steam online services switch and the Steam friends card
     bool SteamPanelVisible() const;
     float DrawSteamButton(float right, float cy);   // top bar; returns the new left edge
