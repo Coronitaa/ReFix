@@ -564,6 +564,14 @@ Sounds = true
 IsolateSaves = true
 ; FirstRunDialog: true = show the first-run profile creation dialog on first game launch
 FirstRunDialog = true
+; OpenBehavior: 0 = Keep active, 1 = Mute audio while overlay is open, 2 = Pause game while overlay is open
+OpenBehavior = $(& $Pick "Overlay" "OpenBehavior" "0")
+; Shortcut: 0 = Shift+Tab, 1 = Ctrl+Tab, 2 = Shift+F1, 3 = Shift+F2, 4 = F11, 5 = F12, 6 = Home, 7 = Insert
+Shortcut = $(& $Pick "Overlay" "Shortcut" "0")
+; DisplayMode: 0 = Fullscreen, 1 = Windowed, 2 = Fullscreen Windowed (default)
+DisplayMode = $(& $Pick "Overlay" "DisplayMode" "2")
+WindowWidth = $(& $Pick "Overlay" "WindowWidth" "1920")
+WindowHeight = $(& $Pick "Overlay" "WindowHeight" "1080")
 
 [Matchmaking]
 EnableLobbyFilter = false
