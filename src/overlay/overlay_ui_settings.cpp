@@ -250,7 +250,6 @@ void DrawFormattedNotice(const char* text, float wrapWidth = 0.0f) {
     if (wrapWidth <= 0.0f) {
         wrapWidth = ImGui::GetContentRegionAvail().x;
     }
-    float curX = 0.0f;
 
     std::string str = text;
     size_t lineStart = 0;
@@ -261,80 +260,107 @@ void DrawFormattedNotice(const char* text, float wrapWidth = 0.0f) {
         lineStart = lineEnd + 1;
 
         if (line.empty()) {
-            if (curX > 0.0f) ImGui::NewLine();
-            curX = 0.0f;
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            ImGui::Dummy(ImVec2(0, ui::S(6)));
             continue;
         }
 
-        struct Word {
+        struct Fragment {
             std::string text;
             bool bold = false;
+        };
+        struct Cluster {
+            std::vector<Fragment> frags;
             bool spaceAfter = false;
         };
-        std::vector<Word> words;
 
+        std::vector<Cluster> clusters;
+        Cluster curCluster;
+        Fragment curFrag;
         bool inBold = false;
-        std::string curWord;
+        curFrag.bold = false;
+
         for (size_t i = 0; i < line.size(); ++i) {
             if (i + 1 < line.size() && line[i] == '*' && line[i + 1] == '*') {
-                if (!curWord.empty()) {
-                    words.push_back({ curWord, inBold, false });
-                    curWord.clear();
+                if (!curFrag.text.empty()) {
+                    curCluster.frags.push_back(curFrag);
+                    curFrag.text.clear();
                 }
                 inBold = !inBold;
+                curFrag.bold = inBold;
                 i++; // skip second '*'
                 continue;
             }
             if (line[i] == ' ') {
-                if (!curWord.empty()) {
-                    words.push_back({ curWord, inBold, true });
-                    curWord.clear();
-                } else if (!words.empty()) {
-                    words.back().spaceAfter = true;
+                if (!curFrag.text.empty()) {
+                    curCluster.frags.push_back(curFrag);
+                    curFrag.text.clear();
+                    curFrag.bold = inBold;
+                }
+                if (!curCluster.frags.empty()) {
+                    curCluster.spaceAfter = true;
+                    clusters.push_back(curCluster);
+                    curCluster = Cluster();
+                } else if (!clusters.empty()) {
+                    clusters.back().spaceAfter = true;
                 }
             } else {
-                curWord.push_back(line[i]);
+                curFrag.text.push_back(line[i]);
             }
         }
-        if (!curWord.empty()) {
-            words.push_back({ curWord, inBold, false });
+        if (!curFrag.text.empty()) {
+            curCluster.frags.push_back(curFrag);
+        }
+        if (!curCluster.frags.empty()) {
+            clusters.push_back(curCluster);
         }
 
-        for (const auto& w : words) {
-            ImFont* font = w.bold ? f.strong : f.body;
-            ImU32 color = w.bold ? ui::color::Star : ui::color::Text;
-            const float wordW = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, w.text.c_str()).x;
-            const float spaceW = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, " ").x;
+        float curX = 0.0f;
+        bool isFirstInLine = true;
 
-            if (curX > 0.0f && curX + wordW > wrapWidth) {
-                ImGui::NewLine();
+        for (const auto& c : clusters) {
+            // Calculate total cluster width
+            float clusterW = 0.0f;
+            for (const auto& frag : c.frags) {
+                ImFont* font = frag.bold ? f.strong : f.body;
+                clusterW += font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, frag.text.c_str()).x;
+            }
+
+            // If cluster doesn't fit on this line, wrap to new line (unless it's the first word on line)
+            if (!isFirstInLine && (curX + clusterW > wrapWidth)) {
                 curX = 0.0f;
+                isFirstInLine = true;
             }
 
-            if (curX > 0.0f) {
-                ImGui::SameLine(0, 0);
-            }
-            ImGui::PushFont(font);
-            ui::TextColored(color, w.text.c_str());
-            ImGui::PopFont();
-            curX += wordW;
+            // Draw fragments of the cluster
+            for (const auto& frag : c.frags) {
+                ImFont* font = frag.bold ? f.strong : f.body;
+                ImU32 color = frag.bold ? ui::color::Star : ui::color::Text;
+                float fw = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, frag.text.c_str()).x;
 
-            if (w.spaceAfter) {
+                if (!isFirstInLine) {
+                    ImGui::SameLine(0, 0);
+                }
+                ImGui::PushFont(font);
+                ui::TextColored(color, frag.text.c_str());
+                ImGui::PopFont();
+                curX += fw;
+                isFirstInLine = false;
+            }
+
+            if (c.spaceAfter) {
+                float spaceW = f.body->CalcTextSizeA(f.body->FontSize, FLT_MAX, 0.0f, " ").x;
                 if (curX + spaceW <= wrapWidth) {
                     ImGui::SameLine(0, 0);
-                    ImGui::PushFont(font);
-                    ui::TextColored(color, " ");
+                    ImGui::PushFont(f.body);
+                    ui::TextColored(ui::color::Text, " ");
                     ImGui::PopFont();
                     curX += spaceW;
                 } else {
-                    ImGui::NewLine();
                     curX = 0.0f;
+                    isFirstInLine = true;
                 }
             }
         }
-        if (curX > 0.0f) ImGui::NewLine();
-        curX = 0.0f;
     }
 }
 
@@ -697,9 +723,9 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         g_overlayWarn1Open = false;
     }
     ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(ui::S(520), 0));
+    ImGui::SetNextWindowSize(ImVec2(ui::S(540), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(20)));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(14));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(16));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
     if (ImGui::BeginPopupModal("##overlay_warn1", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize)) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -723,15 +749,15 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
 
         ImGui::Dummy(ImVec2(0, ui::S(8)));
         dl->AddLine(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + availW, ImGui::GetCursorScreenPos().y), ui::color::Border);
-        ImGui::Dummy(ImVec2(0, ui::S(10)));
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
 
         // Warning card container
         const ImVec2 cardP0 = ImGui::GetCursorScreenPos();
         dl->ChannelsSplit(2);
         dl->ChannelsSetCurrent(1);
-        ImGui::Dummy(ImVec2(0, ui::S(8)));
-        ImGui::Indent(ui::S(12));
-        const float cardInnerW = availW - ui::S(24);
+        ImGui::Dummy(ImVec2(0, ui::S(14)));
+        ImGui::Indent(ui::S(16));
+        const float cardInnerW = availW - ui::S(32);
 
         if (isSteam) {
             DrawFormattedNotice(
@@ -753,19 +779,19 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
                 cardInnerW);
         }
 
-        ImGui::Unindent(ui::S(12));
-        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        ImGui::Unindent(ui::S(16));
+        ImGui::Dummy(ImVec2(0, ui::S(14)));
         const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
         dl->ChannelsSetCurrent(0);
         dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
         dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
         dl->ChannelsMerge();
 
-        ImGui::Dummy(ImVec2(0, ui::S(14)));
+        ImGui::Dummy(ImVec2(0, ui::S(16)));
 
         const float gap = ui::S(12);
         const float btnW = (availW - gap) * 0.5f;
-        const ImVec2 bs(btnW, ui::S(38));
+        const ImVec2 bs(btnW, ui::S(40));
 
         if (ui::DangerButton(i18n::T("Continue", "Continuar"), bs)) {
             ImGui::CloseCurrentPopup();
@@ -793,7 +819,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
     ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ui::S(540), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(20)));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(14));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(16));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
     if (ImGui::BeginPopupModal("##overlay_warn2", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize)) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -817,15 +843,15 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
 
         ImGui::Dummy(ImVec2(0, ui::S(8)));
         dl->AddLine(ImGui::GetCursorScreenPos(), ImVec2(ImGui::GetCursorScreenPos().x + availW, ImGui::GetCursorScreenPos().y), ui::color::Border);
-        ImGui::Dummy(ImVec2(0, ui::S(10)));
+        ImGui::Dummy(ImVec2(0, ui::S(8)));
 
         // Warning card container with ChannelsSplit
         const ImVec2 cardP0 = ImGui::GetCursorScreenPos();
         dl->ChannelsSplit(2);
         dl->ChannelsSetCurrent(1);
-        ImGui::Dummy(ImVec2(0, ui::S(8)));
-        ImGui::Indent(ui::S(12));
-        const float cardInnerW = availW - ui::S(24);
+        ImGui::Dummy(ImVec2(0, ui::S(14)));
+        ImGui::Indent(ui::S(16));
+        const float cardInnerW = availW - ui::S(32);
 
         if (isSteam) {
             DrawFormattedNotice(
@@ -851,15 +877,15 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
                 cardInnerW);
         }
 
-        ImGui::Unindent(ui::S(12));
-        ImGui::Dummy(ImVec2(0, ui::S(8)));
+        ImGui::Unindent(ui::S(16));
+        ImGui::Dummy(ImVec2(0, ui::S(14)));
         const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
         dl->ChannelsSetCurrent(0);
         dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
         dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
         dl->ChannelsMerge();
 
-        ImGui::Dummy(ImVec2(0, ui::S(14)));
+        ImGui::Dummy(ImVec2(0, ui::S(16)));
 
         // Action buttons: Hold to confirm on left, Cancel on right
         constexpr float kMaxHoldSeconds = 5.0f;
@@ -867,7 +893,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         const float cancelW = ui::S(110);
         const float gap = ui::S(12);
         const float holdW = availW - cancelW - gap;
-        const float btnH = ui::S(42);
+        const float btnH = ui::S(40);
 
         const ImVec2 hp0 = ImGui::GetCursorScreenPos();
         const ImVec2 hp1(hp0.x + holdW, hp0.y + btnH);
@@ -875,6 +901,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         ImGui::InvisibleButton("##hold_btn", ImVec2(holdW, btnH));
         const bool isHolding = ImGui::IsItemActive();
         const bool isHovered = ImGui::IsItemHovered();
+        const bool isFocused = ImGui::IsItemFocused();
 
         if (isHovered) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -893,17 +920,30 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
 
         // Draw hold button base (reddish theme for both critical actions)
         const ImU32 baseBg = isHovered ? IM_COL32(52, 22, 26, 255) : IM_COL32(38, 16, 20, 255);
-        const ImU32 borderColor = isHovered ? ui::color::Danger : ui::Fade(ui::color::Danger, 0.6f);
+        const ImU32 borderColor = (isHovered || isFocused) ? ui::color::Danger : ui::Fade(ui::color::Danger, 0.6f);
         const ImU32 fillBg = IM_COL32(230, 50, 60, 240);
 
         dl->AddRectFilled(hp0, hp1, baseBg, ui::S(8));
         dl->AddRect(hp0, hp1, borderColor, ui::S(8), 0, ui::S(1.5f));
+
+        if (isFocused && !isHolding) {
+            dl->AddRect(ImVec2(hp0.x - ui::S(2), hp0.y - ui::S(2)),
+                        ImVec2(hp1.x + ui::S(2), hp1.y + ui::S(2)),
+                        ui::Fade(ui::color::Danger, 0.7f), ui::S(10), 0, ui::S(1.5f));
+        }
 
         // Draw fill bar
         if (fillProgress > 0.002f) {
             dl->PushClipRect(hp0, ImVec2(hp0.x + holdW * fillProgress, hp1.y), true);
             dl->AddRectFilled(hp0, hp1, fillBg, ui::S(8));
             dl->PopClipRect();
+
+            // Specular charging beam line at leading edge
+            if (fillProgress < 0.998f) {
+                const float leadX = hp0.x + holdW * fillProgress;
+                dl->AddLine(ImVec2(leadX, hp0.y + ui::S(1)), ImVec2(leadX, hp1.y - ui::S(1)),
+                            IM_COL32(255, 220, 220, 220), ui::S(2.0f));
+            }
         }
 
         // Button label
