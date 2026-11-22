@@ -2,7 +2,7 @@
 
 ## Summary of Changes Since v2.7.0
 
-ReFix v2.8.0 introduces an overhaul of the skin and glove preview rendering engine for the CS:GO mod, anti-slop interface design certification across all overlay caution dialogs, atomic cluster-based text wrapping with zero orphaned punctuation, unified 540px geometric rhythm, tactile decremental hold-to-confirm mechanics, and an OS-default reactive Game Language selector.
+ReFix v2.8.0 introduces an overhaul of the skin and glove preview rendering engine for the CS:GO mod, anti-slop interface design certification across all overlay caution dialogs, atomic cluster-based text wrapping with zero orphaned punctuation, unified 540px geometric rhythm, tactile decremental hold-to-confirm mechanics, an OS-default reactive Game Language selector, and robust cross-session LAN invitation delivery and acknowledgment tracking (contributed by @Syntist in PR #37).
 
 ---
 
@@ -52,7 +52,20 @@ ReFix v2.8.0 introduces an overhaul of the skin and glove preview rendering engi
 
 ---
 
-### 4. Multi-Game Deployment & Verification
+### 4. LAN Invite Session Lifecycle & Ack Matching (PR #37 by @Syntist)
+- **Session-Aware Invite IDs:**
+  - Seeded process invite ID generation using `(GetTickCount64() ^ GetCurrentProcessId())`, preventing restarted sender instances from reusing identical ID sequences starting from 1 while recipient peers remain active.
+- **Dynamic Invite Deduplication with 30s TTL:**
+  - Transitioned `g_seenInvites` from a permanent session set to a timestamped expiration map (`std::map<std::pair<uint64_t, uint32_t>, ULONGLONG>`).
+  - Automatically evicts duplicate tracking records older than 30 seconds upon incoming invitations, ensuring invitations delivered across sender restarts are reliably recognized while protecting against UDP flood.
+- **Target-Matched Acknowledgments:**
+  - Refined `OnInviteAck` outbox clearance to match both the invite ID and intended recipient (`p.invite.id == id && p.to == from`), eliminating cross-peer acknowledgment collisions on busy local networks.
+- **Contributor Credit:**
+  - Contributed by **@Syntist** ([PR #37](https://github.com/Coronitaa/ReFix/pull/37)).
+
+---
+
+### 5. Multi-Game Deployment & Verification
 - Synchronized and verified rebuilt binaries across all installed games in `C:\Users\andre\Games`:
   - `Counter-Strike_Global Offensive`: `bin\steam_api.dll` (x86 LAN edition), `refix.csgo.lan_overhaul.rfmod`.
   - `Among Us 3D`: `steam_api64.dll`, `EOSSDK-Win64-Shipping.dll`.
