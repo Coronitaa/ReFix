@@ -138,6 +138,25 @@ namespace UnrealSteamEmu {
     static bool g_autoIdentity = true;
     static uint32_t g_appID = 0; // resolved by LoadConfig (falls back to 480)
     static std::string g_language = "english";
+    static std::string g_activeIniPath = "";
+
+    static std::string DetectSystemSteamLanguage() {
+        LANGID langId = GetUserDefaultUILanguage();
+        WORD pri = PRIMARYLANGID(langId);
+        WORD sub = SUBLANGID(langId);
+        if (pri == LANG_SPANISH) return "spanish";
+        if (pri == LANG_PORTUGUESE) return (sub == SUBLANG_PORTUGUESE_BRAZILIAN) ? "brazilian" : "portuguese";
+        if (pri == LANG_FRENCH) return "french";
+        if (pri == LANG_GERMAN) return "german";
+        if (pri == LANG_ITALIAN) return "italian";
+        if (pri == LANG_RUSSIAN) return "russian";
+        if (pri == LANG_JAPANESE) return "japanese";
+        if (pri == LANG_KOREAN) return "koreana";
+        if (pri == LANG_CHINESE) return (sub == SUBLANG_CHINESE_SIMPLIFIED) ? "schinese" : "tchinese";
+        if (pri == LANG_POLISH) return "polish";
+        if (pri == LANG_TURKISH) return "turkish";
+        return "english";
+    }
     static uint16_t g_listenPort = 47584;
     static std::string g_customBroadcasts = "";
     static bool g_bypassLicenseCheck = true;
@@ -738,8 +757,17 @@ namespace UnrealSteamEmu {
             noLegacySet ? envNoLegacy : "",
             legacyFallbackActive ? "TRUE" : "FALSE");
 
-        GetPrivateProfileStringA("Unreal.Steam", "Language", "english", buf, sizeof(buf), iniPath.c_str());
-        g_language = buf;
+        g_activeIniPath = iniPath;
+        char bufLang[64] = {};
+        GetPrivateProfileStringA("Unreal.Steam", "Language", "", bufLang, sizeof(bufLang), iniPath.c_str());
+        if (bufLang[0] == '\0') {
+            GetPrivateProfileStringA("Steam", "Language", "", bufLang, sizeof(bufLang), iniPath.c_str());
+        }
+        if (bufLang[0] != '\0') {
+            g_language = bufLang;
+        } else {
+            g_language = DetectSystemSteamLanguage();
+        }
 
         // Check force_listen_port.txt in steam_settings if present
         std::vector<std::string> portFiles = {
@@ -8915,6 +8943,15 @@ namespace UnrealSteamEmu {
         return g_steamFriendsInstance.GetFriendPersonaName(CSteamID(steamIDFriend));
     }
     uint32_t GetAppID() { return g_appID; }
+    const char* GetGameLanguage() { return g_language.c_str(); }
+    void SetGameLanguage(const char* lang) {
+        if (!lang || !*lang) return;
+        g_language = lang;
+        if (!g_activeIniPath.empty()) {
+            WritePrivateProfileStringA("Unreal.Steam", "Language", lang, g_activeIniPath.c_str());
+            WritePrivateProfileStringA("Steam", "Language", lang, g_activeIniPath.c_str());
+        }
+    }
 
     // Latest-version interface accessors for generated versioned adapters
     ISteamClient* LatestClient() { return static_cast<ISteamClient*>(&g_steamClientInstance); }

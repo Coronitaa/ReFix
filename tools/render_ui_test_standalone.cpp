@@ -105,6 +105,12 @@ namespace refix::overlay {
     std::wstring PickFolder(const wchar_t*, std::string&) { return L""; }
 }
 
+namespace UnrealSteamEmu {
+    static std::string s_mockLang = "spanish";
+    const char* GetGameLanguage() { return s_mockLang.c_str(); }
+    void SetGameLanguage(const char* lang) { if (lang) s_mockLang = lang; }
+}
+
 #include "../src/overlay/overlay_ui_settings.cpp"
 
 void SaveTextureToBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D* staging, int w, int h, const char* filename) {

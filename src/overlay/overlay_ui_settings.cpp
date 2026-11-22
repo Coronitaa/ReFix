@@ -11,6 +11,7 @@
 #include "overlay_text.h"
 #include "profile_sync.h"
 #include "cloud_account.h"
+#include "../unreal_steam_emu.h"
 
 #include <algorithm>
 #include <cmath>
@@ -244,8 +245,13 @@ bool ComboRow(const char* id, const char* title, const char* desc, const char* c
     return changed;
 }
 
-void DrawFormattedNotice(const char* text) {
+void DrawFormattedNotice(const char* text, float wrapWidth = 0.0f) {
     const ui::Fonts& f = ui::F();
+    if (wrapWidth <= 0.0f) {
+        wrapWidth = ImGui::GetContentRegionAvail().x;
+    }
+    float curX = 0.0f;
+
     std::string str = text;
     size_t lineStart = 0;
     while (lineStart < str.size()) {
@@ -255,55 +261,80 @@ void DrawFormattedNotice(const char* text) {
         lineStart = lineEnd + 1;
 
         if (line.empty()) {
+            if (curX > 0.0f) ImGui::NewLine();
+            curX = 0.0f;
             ImGui::Dummy(ImVec2(0, ui::S(4)));
             continue;
         }
 
-        size_t tokenStart = 0;
-        bool isFirst = true;
-        while (tokenStart < line.size()) {
-            size_t bPos = line.find("**", tokenStart);
-            if (bPos == std::string::npos) {
-                std::string chunk = line.substr(tokenStart);
-                if (!chunk.empty()) {
-                    if (!isFirst) ImGui::SameLine(0, 0);
-                    ImGui::PushFont(f.body);
-                    ui::TextColored(ui::color::Text, chunk.c_str());
-                    ImGui::PopFont();
-                    isFirst = false;
+        struct Word {
+            std::string text;
+            bool bold = false;
+            bool spaceAfter = false;
+        };
+        std::vector<Word> words;
+
+        bool inBold = false;
+        std::string curWord;
+        for (size_t i = 0; i < line.size(); ++i) {
+            if (i + 1 < line.size() && line[i] == '*' && line[i + 1] == '*') {
+                if (!curWord.empty()) {
+                    words.push_back({ curWord, inBold, false });
+                    curWord.clear();
                 }
-                break;
+                inBold = !inBold;
+                i++; // skip second '*'
+                continue;
+            }
+            if (line[i] == ' ') {
+                if (!curWord.empty()) {
+                    words.push_back({ curWord, inBold, true });
+                    curWord.clear();
+                } else if (!words.empty()) {
+                    words.back().spaceAfter = true;
+                }
             } else {
-                if (bPos > tokenStart) {
-                    std::string chunk = line.substr(tokenStart, bPos - tokenStart);
-                    if (!chunk.empty()) {
-                        if (!isFirst) ImGui::SameLine(0, 0);
-                        ImGui::PushFont(f.body);
-                        ui::TextColored(ui::color::Text, chunk.c_str());
-                        ImGui::PopFont();
-                        isFirst = false;
-                    }
-                }
-                size_t closePos = line.find("**", bPos + 2);
-                if (closePos == std::string::npos) {
-                    std::string chunk = line.substr(bPos);
-                    if (!isFirst) ImGui::SameLine(0, 0);
-                    ImGui::PushFont(f.body);
-                    ui::TextColored(ui::color::Text, chunk.c_str());
-                    ImGui::PopFont();
-                    break;
-                }
-                std::string boldChunk = line.substr(bPos + 2, closePos - (bPos + 2));
-                if (!boldChunk.empty()) {
-                    if (!isFirst) ImGui::SameLine(0, 0);
-                    ImGui::PushFont(f.strong);
-                    ui::TextColored(ui::color::Star, boldChunk.c_str());
-                    ImGui::PopFont();
-                    isFirst = false;
-                }
-                tokenStart = closePos + 2;
+                curWord.push_back(line[i]);
             }
         }
+        if (!curWord.empty()) {
+            words.push_back({ curWord, inBold, false });
+        }
+
+        for (const auto& w : words) {
+            ImFont* font = w.bold ? f.strong : f.body;
+            ImU32 color = w.bold ? ui::color::Star : ui::color::Text;
+            const float wordW = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, w.text.c_str()).x;
+            const float spaceW = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, " ").x;
+
+            if (curX > 0.0f && curX + wordW > wrapWidth) {
+                ImGui::NewLine();
+                curX = 0.0f;
+            }
+
+            if (curX > 0.0f) {
+                ImGui::SameLine(0, 0);
+            }
+            ImGui::PushFont(font);
+            ui::TextColored(color, w.text.c_str());
+            ImGui::PopFont();
+            curX += wordW;
+
+            if (w.spaceAfter) {
+                if (curX + spaceW <= wrapWidth) {
+                    ImGui::SameLine(0, 0);
+                    ImGui::PushFont(font);
+                    ui::TextColored(color, " ");
+                    ImGui::PopFont();
+                    curX += spaceW;
+                } else {
+                    ImGui::NewLine();
+                    curX = 0.0f;
+                }
+            }
+        }
+        if (curX > 0.0f) ImGui::NewLine();
+        curX = 0.0f;
     }
 }
 
@@ -561,13 +592,57 @@ void App::DrawSettingsModal(ImVec2 viewport) {
                                   : i18n::T("Turn on an achievement notice in Notifications to hear it.",
                                             "Activa un aviso de logros en Notificaciones para oírlo."));
         break;
-    case kLanguage:
+    case kLanguage: {
         SectionHeader(i18n::T("Language", "Idioma"),
-                      i18n::T("Language of the ReFix overlay on this PC. The game keeps its own.",
-                              "Idioma del overlay de ReFix en este PC. El juego mantiene el suyo."));
+                      i18n::T("Language of the ReFix overlay and the game.",
+                              "Idioma del overlay de ReFix y del juego."));
+        SyncSection(ui::icon::Globe, i18n::T("Overlay Interface", "Interfaz del overlay"));
         if (ChoiceRow("en", "English", "Overlay in English.", i18n::Current() == i18n::Lang::En)) i18n::Set(i18n::Lang::En);
         if (ChoiceRow("es", "Español", "Overlay en español.", i18n::Current() == i18n::Lang::Es)) i18n::Set(i18n::Lang::Es);
+
+        SyncSection(ui::icon::Game, i18n::T("Game Language", "Idioma del juego"));
+        struct SteamLang {
+            const char* code;
+            const char* en;
+            const char* es;
+        };
+        static const SteamLang kSteamLangs[] = {
+            { "english", "English", "Inglés" },
+            { "spanish", "Spanish (Spain)", "Español (España)" },
+            { "latam", "Spanish (Latin America)", "Español (Latinoamérica)" },
+            { "brazilian", "Portuguese (Brazil)", "Portugués (Brasil)" },
+            { "portuguese", "Portuguese (Portugal)", "Portugués (Portugal)" },
+            { "french", "French", "Francés" },
+            { "german", "German", "Alemán" },
+            { "italian", "Italian", "Italiano" },
+            { "russian", "Russian", "Ruso" },
+            { "japanese", "Japanese", "Japonés" },
+            { "koreana", "Korean", "Coreano" },
+            { "schinese", "Simplified Chinese", "Chino simplificado" },
+            { "tchinese", "Traditional Chinese", "Chino tradicional" },
+            { "polish", "Polish", "Polaco" },
+            { "turkish", "Turkish", "Turco" }
+        };
+
+        const char* curGameLang = UnrealSteamEmu::GetGameLanguage();
+        int curLangIdx = 0;
+        std::vector<std::string> langItems;
+        for (size_t i = 0; i < sizeof(kSteamLangs) / sizeof(kSteamLangs[0]); ++i) {
+            std::string label = std::string(i18n::T(kSteamLangs[i].en, kSteamLangs[i].es)) + " (" + kSteamLangs[i].code + ")";
+            langItems.push_back(label);
+            if (curGameLang && _stricmp(curGameLang, kSteamLangs[i].code) == 0) {
+                curLangIdx = (int)i;
+            }
+        }
+
+        if (ComboRow("game_lang_combo", i18n::T("Game language", "Idioma del juego"),
+                     i18n::T("Language reported to the game by Steam. Reactive to in-game changes.",
+                             "Idioma reportado al juego por Steam. Reactivo a cambios dentro del juego."),
+                     langItems[curLangIdx].c_str(), langItems, &curLangIdx)) {
+            UnrealSteamEmu::SetGameLanguage(kSteamLangs[curLangIdx].code);
+        }
         break;
+    }
     case kPerformance: {
         SectionHeader(i18n::T("Performance", "Rendimiento"),
                       i18n::T("How the overlay gets along with the game.", "Cómo convive el overlay con el juego."));
@@ -633,9 +708,9 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
 
         // Header
         ImGui::PushFont(f.heading);
-        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Danger, isSteam ? ui::icon::Switch : ui::icon::Warning);
+        ui::TextColored(ui::color::Danger, ui::icon::Warning);
         ImGui::SameLine(0, ui::S(8));
-        ui::TextColored(ui::color::Text,
+        ui::TextColored(ui::color::Danger,
                         isSteam ? i18n::T("Replace with Steam Overlay?", "¿Reemplazar por Overlay de Steam?")
                                 : i18n::T("Disable Overlay Completely?", "¿Desactivar Overlay Completamente?"));
         ImGui::PopFont();
@@ -656,6 +731,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         dl->ChannelsSetCurrent(1);
         ImGui::Dummy(ImVec2(0, ui::S(8)));
         ImGui::Indent(ui::S(12));
+        const float cardInnerW = availW - ui::S(24);
 
         if (isSteam) {
             DrawFormattedNotice(
@@ -664,7 +740,8 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
                         "• You will be asked for a **final confirmation** in the next step.",
                         "¿Estás seguro de que deseas **reemplazar el overlay de ReFix** por el **oficial de Steam**?\n\n"
                         "• El overlay de ReFix dejará de funcionar para este juego y **Steam tomará el control**.\n"
-                        "• Se te solicitará una **confirmación final** en el siguiente paso."));
+                        "• Se te solicitará una **confirmación final** en el siguiente paso."),
+                cardInnerW);
         } else {
             DrawFormattedNotice(
                 i18n::T("Are you sure you want to **completely disable the overlay**?\n\n"
@@ -672,7 +749,8 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
                         "• You will be asked for a **final confirmation** in the next step.",
                         "¿Estás seguro de que deseas **desactivar completamente el overlay**?\n\n"
                         "• **Ni el overlay de ReFix ni el de Steam** se mostrarán en este juego.\n"
-                        "• Se te solicitará una **confirmación final** en el siguiente paso."));
+                        "• Se te solicitará una **confirmación final** en el siguiente paso."),
+                cardInnerW);
         }
 
         ImGui::Unindent(ui::S(12));
@@ -680,7 +758,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
         dl->ChannelsSetCurrent(0);
         dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
-        dl->AddRect(cardP0, cardP1, ui::Fade(isSteam ? ui::color::Accent : ui::color::Danger, 0.4f), ui::S(10), 0, ui::S(1.0f));
+        dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
         dl->ChannelsMerge();
 
         ImGui::Dummy(ImVec2(0, ui::S(14)));
@@ -689,8 +767,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         const float btnW = (availW - gap) * 0.5f;
         const ImVec2 bs(btnW, ui::S(38));
 
-        if (isSteam ? ui::PrimaryButton(i18n::T("Continue", "Continuar"), bs)
-                    : ui::DangerButton(i18n::T("Continue", "Continuar"), bs)) {
+        if (ui::DangerButton(i18n::T("Continue", "Continuar"), bs)) {
             ImGui::CloseCurrentPopup();
             g_overlayWarn2Open = true;
             g_overlayHoldTime = 0.0f;
@@ -725,9 +802,9 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
 
         // Header
         ImGui::PushFont(f.heading);
-        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Danger, ui::icon::Warning);
+        ui::TextColored(ui::color::Danger, ui::icon::Warning);
         ImGui::SameLine(0, ui::S(8));
-        ui::TextColored(isSteam ? ui::color::Accent : ui::color::Danger,
+        ui::TextColored(ui::color::Danger,
                         isSteam ? i18n::T("Important Confirmation: Steam Overlay", "Confirmación importante: Overlay de Steam")
                                 : i18n::T("Important Confirmation: Disable Overlay", "Confirmación importante: Desactivar Overlay"));
         ImGui::PopFont();
@@ -748,6 +825,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         dl->ChannelsSetCurrent(1);
         ImGui::Dummy(ImVec2(0, ui::S(8)));
         ImGui::Indent(ui::S(12));
+        const float cardInnerW = availW - ui::S(24);
 
         if (isSteam) {
             DrawFormattedNotice(
@@ -758,7 +836,8 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
                         "AVISO CRÍTICO: Esta acción escribirá **Enabled=false** y **BlockSteamOverlay=false** en **ReFix.ini**.\n\n"
                         "• Una vez desactivado, **NO se podrá reactivar desde la interfaz del juego**.\n"
                         "• ÚNICAMENTE podrás reactivarlo editando **ReFix.ini** manualmente en la carpeta del juego.\n"
-                        "• El juego **se reiniciará automáticamente** de inmediato al confirmar."));
+                        "• El juego **se reiniciará automáticamente** de inmediato al confirmar."),
+                cardInnerW);
         } else {
             DrawFormattedNotice(
                 i18n::T("CRITICAL NOTICE: This will write **Enabled=false** and **BlockSteamOverlay=true** in **ReFix.ini**.\n\n"
@@ -768,7 +847,8 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
                         "AVISO CRÍTICO: Esta acción escribirá **Enabled=false** y **BlockSteamOverlay=true** en **ReFix.ini**.\n\n"
                         "• Ambos overlays quedarán **completamente desactivados** en este juego.\n"
                         "• ÚNICAMENTE podrás reactivarlo editando **ReFix.ini** manualmente en la carpeta del juego.\n"
-                        "• El juego **se reiniciará automáticamente** de inmediato al confirmar."));
+                        "• El juego **se reiniciará automáticamente** de inmediato al confirmar."),
+                cardInnerW);
         }
 
         ImGui::Unindent(ui::S(12));
@@ -776,7 +856,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
         dl->ChannelsSetCurrent(0);
         dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
-        dl->AddRect(cardP0, cardP1, ui::Fade(isSteam ? ui::color::Accent : ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
+        dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
         dl->ChannelsMerge();
 
         ImGui::Dummy(ImVec2(0, ui::S(14)));
@@ -811,16 +891,10 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         const float u = std::clamp(g_overlayHoldTime / kMaxHoldSeconds, 0.0f, 1.0f);
         const float fillProgress = 1.0f - std::pow(1.0f - u, 2.2f);
 
-        // Draw hold button base
-        const ImU32 baseBg = isSteam
-            ? (isHovered ? IM_COL32(26, 42, 62, 255) : IM_COL32(18, 30, 46, 255))
-            : (isHovered ? IM_COL32(52, 22, 26, 255) : IM_COL32(38, 16, 20, 255));
-        const ImU32 borderColor = isSteam
-            ? (isHovered ? ui::color::Accent : ui::Fade(ui::color::Accent, 0.6f))
-            : (isHovered ? ui::color::Danger : ui::Fade(ui::color::Danger, 0.6f));
-        const ImU32 fillBg = isSteam
-            ? IM_COL32(40, 140, 230, 240)
-            : IM_COL32(230, 50, 60, 240);
+        // Draw hold button base (reddish theme for both critical actions)
+        const ImU32 baseBg = isHovered ? IM_COL32(52, 22, 26, 255) : IM_COL32(38, 16, 20, 255);
+        const ImU32 borderColor = isHovered ? ui::color::Danger : ui::Fade(ui::color::Danger, 0.6f);
+        const ImU32 fillBg = IM_COL32(230, 50, 60, 240);
 
         dl->AddRectFilled(hp0, hp1, baseBg, ui::S(8));
         dl->AddRect(hp0, hp1, borderColor, ui::S(8), 0, ui::S(1.5f));

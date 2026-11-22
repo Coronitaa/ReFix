@@ -23,7 +23,7 @@ namespace refix::overlay::csgo_icons {
 
 namespace {
 
-constexpr int kLoadsPerFrame = 4;  // decoding is synchronous on the render thread: keep scrolling smooth
+constexpr int kLoadsPerFrame = 8;  // decoding is synchronous on the render thread: keep scrolling smooth
 constexpr int kSwatchMaxSize = 256;
 
 struct VpkEntry {
@@ -153,6 +153,16 @@ VpkIndex& Index() {
 
 bool Exists(const std::string& path) {
     static std::unordered_map<std::string, bool> cache;  // render thread only; asked every frame per visible card
+    static uint64_t lastPurge = 0;
+    uint64_t now = GetTickCount64();
+    if (now - lastPurge > 2000) {
+        lastPurge = now;
+        // Evict negative hits so engine-generated .iic files are picked up dynamically
+        for (auto it = cache.begin(); it != cache.end(); ) {
+            if (!it->second) it = cache.erase(it);
+            else ++it;
+        }
+    }
     auto it = cache.find(path);
     if (it != cache.end()) return it->second;
     VpkIndex& idx = Index();
@@ -646,7 +656,7 @@ static bool ParseGloveVmt(const std::vector<uint8_t>& bytes, std::string& outPat
     auto parseColor = [&](const char* tag) -> uint32_t {
         size_t pos = str.find(tag);
         if (pos == std::string::npos) return 0;
-        size_t b1 = str.find('[', pos);
+        size_t b1 = str.find_first_of("[{\"", pos);
         if (b1 == std::string::npos) return 0;
         float r = 0, g = 0, b = 0;
         if (sscanf(str.c_str() + b1 + 1, "%f %f %f", &r, &g, &b) >= 3) {
@@ -660,6 +670,10 @@ static bool ParseGloveVmt(const std::vector<uint8_t>& bytes, std::string& outPat
     outC1 = parseColor("$palettecolor2");
     outC2 = parseColor("$palettecolor3");
     outC3 = parseColor("$palettecolor4");
+    if (outC0 == 0) outC0 = parseColor("$palettecolor5");
+    if (outC1 == 0) outC1 = parseColor("$palettecolor6");
+    if (outC2 == 0) outC2 = parseColor("$palettecolor7");
+    if (outC3 == 0) outC3 = parseColor("$palettecolor8");
     return !outPat.empty() || outC0 != 0 || outC1 != 0;
 }
 
@@ -717,11 +731,14 @@ ImTextureID CompositeSkinImage(const refix::csgo::MarketItem& item) {
 
             // Pattern texture
             VpkIndex& idx = Index();
+            const bool isGlove = (item.category == "Guantes" || item.weaponName.find("glove") != std::string::npos);
             std::string patPath;
             uint32_t c0 = item.color0;
             uint32_t c1 = item.color1;
+            uint32_t c2 = item.color2;
+            uint32_t c3 = item.color3;
 
-            if (item.category == "Guantes" || item.weaponName.find("glove") != std::string::npos) {
+            if (isGlove) {
                 auto itG = idx.glovePaints.find(Lower(item.skinName));
                 if (itG == idx.glovePaints.end()) itG = idx.glovePaints.find(Lower(item.pattern));
                 if (itG != idx.glovePaints.end()) {
@@ -732,23 +749,21 @@ ImTextureID CompositeSkinImage(const refix::csgo::MarketItem& item) {
                         if (ParseGloveVmt(vmtBytes, gPat, gc0, gc1, gc2, gc3)) {
                             if (gc0 != 0) c0 = gc0;
                             if (gc1 != 0) c1 = gc1;
-                            if (!gPat.empty()) {
-                                auto itP = idx.paints.find(gPat);
-                                if (itP != idx.paints.end()) patPath = itP->second;
-                            }
+                            if (gc2 != 0) c2 = gc2;
+                            if (gc3 != 0) c3 = gc3;
                         }
                     }
                 }
-            }
-
-            if (patPath.empty() && !item.pattern.empty() && item.pattern != "none") {
-                auto itP = idx.paints.find(Lower(item.pattern));
-                if (itP != idx.paints.end()) patPath = itP->second;
+            } else {
+                if (patPath.empty() && !item.pattern.empty() && item.pattern != "none") {
+                    auto itP = idx.paints.find(Lower(item.pattern));
+                    if (itP != idx.paints.end()) patPath = itP->second;
+                }
             }
 
             image::Rgba patImg;
             bool hasPat = false;
-            if (!patPath.empty()) {
+            if (!isGlove && !patPath.empty()) {
                 std::vector<uint8_t> patBytes;
                 if (ReadGameFile(patPath, patBytes)) {
                     hasPat = DecodeVtf(patBytes, patImg) && patImg.width > 0 && patImg.height > 0;
@@ -756,7 +771,7 @@ ImTextureID CompositeSkinImage(const refix::csgo::MarketItem& item) {
             }
 
             // If we have neither a pattern texture nor a finish color, return the crisp base weapon
-            if (!hasPat && c0 == 0 && c1 == 0) {
+            if (!hasPat && c0 == 0 && c1 == 0 && c2 == 0) {
                 out = std::move(baseImg);
                 g_sizes[key] = ImVec2((float)W, (float)H);
                 return true;
@@ -780,18 +795,39 @@ ImTextureID CompositeSkinImage(const refix::csgo::MarketItem& item) {
                     uint8_t bb = baseImg.pixels[idx4 + 2];
 
                     float lum = (0.299f * br + 0.587f * bg + 0.114f * bb) / 255.0f;
-
-                    // Protect dark metal (scope, barrel, bipod, trigger, bolt, dark hardware)
                     int maxC = (std::max)({br, bg, bb});
                     int minC = (std::min)({br, bg, bb});
                     int diff = maxC - minC;
 
-                    if (lum < 0.15f || (lum < 0.22f && diff < 15)) {
+                    if (isGlove) {
+                        // 3D diffuse glove tinting preserving genuine 3D lighting, creases, and knuckles
+                        const bool isKnuckle = lum > 0.40f && (bg > 90 || br > 90);
+                        const uint32_t chosenColor = (isKnuckle && c1 != 0) ? c1 : (c0 != 0 ? c0 : (c1 != 0 ? c1 : c2));
+                        if (chosenColor != 0) {
+                            float pr = (float)((chosenColor >> 16) & 0xFF);
+                            float pg = (float)((chosenColor >> 8) & 0xFF);
+                            float pb = (float)(chosenColor & 0xFF);
+
+                            float lighting = 0.38f + lum * 0.82f;
+                            float cr = std::clamp(pr * lighting, 0.0f, 255.0f);
+                            float cg = std::clamp(pg * lighting, 0.0f, 255.0f);
+                            float cb = std::clamp(pb * lighting, 0.0f, 255.0f);
+
+                            float paintFactor = std::clamp((lum - 0.08f) / 0.16f, 0.0f, 1.0f);
+                            out.pixels[idx4 + 0] = (uint8_t)(br * (1.0f - paintFactor) + cr * paintFactor);
+                            out.pixels[idx4 + 1] = (uint8_t)(bg * (1.0f - paintFactor) + cg * paintFactor);
+                            out.pixels[idx4 + 2] = (uint8_t)(bb * (1.0f - paintFactor) + cb * paintFactor);
+                        }
+                        continue;
+                    }
+
+                    // Weapons: Protect only true dark recesses/screws/scope interiors
+                    if (lum < 0.06f || (lum < 0.10f && diff < 6)) {
                         continue;
                     }
 
                     // Smooth transition from hardware metal to paintable body
-                    float paintFactor = std::clamp((lum - 0.15f) / 0.12f, 0.0f, 1.0f);
+                    float paintFactor = std::clamp((lum - 0.06f) / 0.08f, 0.0f, 1.0f);
 
                     float pr = 0, pg = 0, pb = 0;
                     if (hasPat) {
@@ -804,14 +840,14 @@ ImTextureID CompositeSkinImage(const refix::csgo::MarketItem& item) {
                         pg = (float)patImg.pixels[pidx + 1];
                         pb = (float)patImg.pixels[pidx + 2];
                     } else {
-                        uint32_t useColor = c0 != 0 ? c0 : c1;
+                        uint32_t useColor = c0 != 0 ? c0 : (c1 != 0 ? c1 : c2);
                         pr = (float)((useColor >> 16) & 0xFF);
                         pg = (float)((useColor >> 8) & 0xFF);
                         pb = (float)(useColor & 0xFF);
                     }
 
                     // 3D lighting modulation preserving weapon form, highlights and shadows
-                    float lighting = 0.35f + lum * 0.85f;
+                    float lighting = 0.40f + lum * 0.75f;
                     float cr = std::clamp(pr * lighting, 0.0f, 255.0f);
                     float cg = std::clamp(pg * lighting, 0.0f, 255.0f);
                     float cb = std::clamp(pb * lighting, 0.0f, 255.0f);
