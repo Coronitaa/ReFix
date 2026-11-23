@@ -846,6 +846,22 @@ DWORD WINAPI Thread(LPVOID) {
             }
         }
         std::lock_guard<std::mutex> lock(g_discoveryMutex);
+        for (const char* key : { kPresenceKey, "connect" }) {
+            for (const auto& entry : ReFixSteamFlat::FriendsWithRichPresence(key)) {
+                if (entry.value.empty()) continue;
+                g_resolvedRooms[entry.value] = entry.steamID;
+                g_resolvedRooms[entry.value + "_voice"] = entry.steamID;
+                if (g_remotePublicLobbies.find(entry.value) == g_remotePublicLobbies.end()) {
+                    PnProto18::Table props;
+                    props.Set(PnProto18::Byte(255), PnProto18::Int(8));
+                    props.Set(PnProto18::Byte(253), PnProto18::Bool(true));
+                    props.Set(PnProto18::Byte(254), PnProto18::Bool(true));
+                    props.Set(PnProto18::Byte(252), PnProto18::Int(1));
+                    g_remotePublicLobbies[entry.value] = props;
+                }
+                g_remoteLobbySeen[entry.value] = GetTickCount();
+            }
+        }
         return g_remotePublicLobbies;
     };
     env.startFusionShared = [] {

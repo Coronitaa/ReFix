@@ -408,36 +408,41 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
 //    connects once it has the server's ReflexiveInfo, and Fusion hosts here never send one, so the emulator
 //    sends each client one without addresses shortly after Start: the client then connects through the relay
 //    (Photon events to the server's actor), which is what the Steam tunnel carries.
-void Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
+bool Emulator::HandleFusionProtocol(Peer& peer, const Raw& data) {
     std::string buffer;
-    if (!AsBytes(data, buffer) || !peer.room) return;
+    if (!AsBytes(data, buffer) || !peer.room) return false;
     Room& room = *peer.room;
     switch (PnFusion::FirstMessageId(buffer)) {
-        case PnFusion::MSG_JOIN: HandleFusionJoin(peer, room, buffer); return;
-        case PnFusion::MSG_NETWORK_CONFIG_SYNC: HandleFusionConfigSync(peer, room, buffer); return;
-        case PnFusion::MSG_SNAPSHOT: HandleFusionSnapshot(peer, room, buffer); return;
+        case PnFusion::MSG_JOIN: return HandleFusionJoin(peer, room, buffer);
+        case PnFusion::MSG_NETWORK_CONFIG_SYNC: return HandleFusionConfigSync(peer, room, buffer);
+        case PnFusion::MSG_SNAPSHOT: return HandleFusionSnapshot(peer, room, buffer);
         case PnFusion::MSG_REFLEXIVE_INFO:
             if (peer.actor == room.fusionServer) {
                 room.fusionRelayInfo.clear(); // the host's own addresses replace the relay-only ones
                 for (const auto& [nr, a] : room.actors)
                     if (nr != room.fusionServer) SendFusionMessage(room, nr, buffer);
+                return true;
             } else if (room.fusionServer) {
                 SendFusionMessage(room, room.fusionServer, buffer);
+                return true;
             }
-            return;
+            return false;
         default:
-            m_env.log("[Photon] Fusion: unhandled protocol message %d from actor %d (%zu bytes)",
-                      PnFusion::FirstMessageId(buffer), peer.actor, buffer.size());
+            return false;
     }
 }
 
-void Emulator::HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer) {
+bool Emulator::HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer) {
     PnFusion::Header header;
     PnFusion::Join join;
-    if (!PnFusion::ParseJoin(buffer, header, join) || join.type != PnFusion::JOIN_REQUEST) return;
+    if (!PnFusion::ParseJoin(buffer, header, join) || join.type != PnFusion::JOIN_REQUEST) return false;
+    if (header.versionMajor != 1 && header.versionMajor != 2) return false;
+    if (join.gameMode != PnFusion::GAME_MODE_CLIENT_SERVER && join.gameMode != PnFusion::GAME_MODE_SHARED) return false;
+    if (join.peerMode != PnFusion::PEER_SERVER && join.peerMode != PnFusion::PEER_CLIENT) return false;
+
     if (join.gameMode == PnFusion::GAME_MODE_SHARED) {
         HandleFusionSharedJoin(peer, room, header, join);
-        return;
+        return true;
     }
     if (join.peerMode == PnFusion::PEER_SERVER) room.fusionServer = peer.actor;
     join.type = PnFusion::JOIN_CONFIRMATION;
@@ -454,37 +459,38 @@ void Emulator::HandleFusionJoin(Peer& peer, Room& room, const std::string& buffe
                           PnFusion::BuildNetworkConfigSync(header, PnFusion::SYNC_REQUEST, PnFusion::OptionalBytes()));
         m_env.log("[Photon] Fusion: actor %d joined; NetworkConfig requested from server actor %d", peer.actor,
                   room.fusionServer);
-        return;
+        return true;
     }
     StartFusionPeer(room, peer.actor, header);
     m_env.log("[Photon] Fusion: actor %d joined and started (mode %u, peer %u, protocol %u, Fusion %d.%d.%d)", peer.actor,
               join.gameMode, join.peerMode, header.protocolVersion, header.versionMajor, header.versionMinor,
               header.versionBuild);
+    return true;
 }
 
-void Emulator::HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer) {
+bool Emulator::HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer) {
     PnFusion::Header header;
     uint8_t type = 0;
     PnFusion::OptionalBytes config;
     if (room.fusionShared) {
         if (!PnFusion::ParseNetworkConfigSync(buffer, header, type, config) || type != PnFusion::SYNC_RESPONSE ||
             !config.present || room.fusionSharedConfigSent) {
-            return;
+            return false;
         }
         room.fusionSharedConfigSent = true;
         room.fusionShared->Config(room.maxPlayers, config.bytes);
         m_env.log("[Photon] Fusion Shared: actor %d sent the NetworkProjectConfig (%zu bytes)", peer.actor,
                   config.bytes.size());
-        return;
+        return true;
     }
     if (peer.actor != room.fusionServer || !PnFusion::ParseNetworkConfigSync(buffer, header, type, config)) {
         m_env.log("[Photon] Fusion: ignored NetworkConfigSync from actor %d", peer.actor);
-        return;
+        return false;
     }
     if (type == PnFusion::SYNC_OVERRIDE) { // host pushes a new config to everyone
         for (const auto& [nr, a] : room.actors)
             if (nr != room.fusionServer) SendFusionMessage(room, nr, buffer);
-        return;
+        return true;
     }
     auto waiters = std::move(room.fusionConfigWaiters);
     room.fusionConfigWaiters.clear();
@@ -495,14 +501,14 @@ void Emulator::HandleFusionConfigSync(Peer& peer, Room& room, const std::string&
         m_env.log("[Photon] Fusion: forwarded host NetworkConfig (%zu bytes) to actor %d and started it",
                   config.bytes.size(), actor);
     }
+    return true;
 }
 
-void Emulator::HandleFusionSnapshot(Peer& peer, Room& room, const std::string& buffer) {
+bool Emulator::HandleFusionSnapshot(Peer& peer, Room& room, const std::string& buffer) {
     PnFusion::Header header;
     PnFusion::Snapshot snap;
     if (!PnFusion::ParseSnapshot(buffer, header, snap)) {
-        m_env.log("[Photon] Fusion: failed to parse snapshot from actor %d", peer.actor);
-        return;
+        return false;
     }
     m_env.log("[Photon] Fusion: snapshot from actor %d (type %u, tick %d, netId %u, size %d)",
               peer.actor, (unsigned)snap.snapshotType, snap.tick, snap.networkId, snap.totalSize);
@@ -512,6 +518,7 @@ void Emulator::HandleFusionSnapshot(Peer& peer, Room& room, const std::string& b
         m_env.log("[Photon] Fusion: confirmed snapshot tick %d (netId %u) to actor %d",
                   snap.tick, snap.networkId, peer.actor);
     }
+    return true;
 }
 
 // Shared mode: every client connects to the plugin's server simulation (actor 0), which the emulator runs in the
@@ -681,8 +688,7 @@ void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8
     if (code == PnFusion::EV_DATA) LogRelaySample(peer.actor, targets, data.size(), reliable, channel);
     else LogEventSample(peer, code, receivers, targets, params);
     if (code == PnFusion::EV_PROTOCOL && targets.size() == 1 && targets[0] == PnFusion::SERVER_ACTOR) {
-        HandleFusionProtocol(peer, data);
-        return;
+        if (HandleFusionProtocol(peer, data)) return;
     }
     if (code == PnFusion::EV_DATA && room.fusionShared && targets.size() == 1 && targets[0] == PnFusion::SERVER_ACTOR) {
         std::string packet;
@@ -702,7 +708,19 @@ void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8
     Params ev = { { P_ACTOR_NR, Int(peer.actor) } };
     if (!data.empty()) ev[P_DATA] = data;
     if (!targets.empty()) {
-        for (int32_t nr : targets) SendEvent(room, nr, code, ev, reliable, channel);
+        for (int32_t nr : targets) {
+            if (nr == 0) {
+                if (peer.actor == room.master) {
+                    for (const auto& [actNr, _] : room.actors) {
+                        SendEvent(room, actNr, code, ev, reliable, channel);
+                    }
+                } else {
+                    SendEvent(room, room.master, code, ev, reliable, channel);
+                }
+            } else {
+                SendEvent(room, nr, code, ev, reliable, channel);
+            }
+        }
         return;
     }
     for (const auto& [nr, actor] : room.actors) {

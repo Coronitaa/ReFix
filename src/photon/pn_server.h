@@ -143,10 +143,10 @@ private:
 
     void EnterRoom(Peer& peer, uint64_t key, uint8_t op, const PnProto18::Params& params);
     void RaiseEvent(Peer& peer, const PnProto18::Params& params, bool reliable, uint8_t channel);
-    void HandleFusionProtocol(Peer& peer, const PnProto18::Raw& data);
-    void HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer);
-    void HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
-    void HandleFusionSnapshot(Peer& peer, Room& room, const std::string& buffer);
+    bool HandleFusionProtocol(Peer& peer, const PnProto18::Raw& data);
+    bool HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer);
+    bool HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
+    bool HandleFusionSnapshot(Peer& peer, Room& room, const std::string& buffer);
     void HandleFusionSharedJoin(Peer& peer, Room& room, const PnFusion::Header& header, PnFusion::Join join);
     void StartFusionSharedPeer(Room& room, int32_t actor, const PnFusion::Header& header);
     void PumpFusionShared(Room& room);
