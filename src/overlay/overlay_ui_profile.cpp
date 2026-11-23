@@ -725,6 +725,7 @@ void App::DrawPicker() {
         if (hover && enabled) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         dl->AddRectFilled(p0, p1, hover && enabled ? ui::color::RowHover : ui::color::Row, ui::S(14));
         if (hover && enabled) dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.7f), ui::S(14), 0, ui::S(1.5f));
+        else dl->AddRect(p0, p1, ui::color::Border, ui::S(14), 0, 1.0f);
         const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(18 + 34));
         if (isNew || isImport) {
             dl->AddCircle(ac, ui::S(34), enabled ? ui::color::Accent : ui::color::Faint, 48, ui::S(2));

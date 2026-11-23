@@ -784,10 +784,13 @@ $candidateExes += ($gameExesInDir | Where-Object { $_.Name -like "*Launcher*" })
 
 foreach ($ge in $candidateExes) {
     try {
-        $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
-        if ($peBytes.Length -ge 0x40) {
+        $fs = [System.IO.File]::OpenRead($ge.FullName)
+        $peBytes = New-Object byte[] 1024
+        $read = $fs.Read($peBytes, 0, 1024)
+        $fs.Close()
+        if ($read -ge 0x40) {
             $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
-            if ($peOffset + 6 -le $peBytes.Length) {
+            if ($peOffset + 6 -le $read) {
                 $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
                 if ($mach -eq 0x014c) { $isX86Game = $true; break }
                 elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
