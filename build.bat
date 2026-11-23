@@ -52,7 +52,8 @@ cl /nologo /O2 /EHsc /LD /Fobuild\ src\winmm_proxy.cpp src\server_browser_gui.cp
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling winmm.dll & exit /b 1 )
 
 echo [*] Building winhttp.dll proxy (Anti-Cheat / EAC bypass proxy)...
-cl /nologo /O2 /EHsc /LD /Fobuild\ src\winhttp_proxy.cpp build\winhttp_fwd.obj /Febuild\winhttp.dll user32.lib kernel32.lib advapi32.lib /link /DEF:src\winhttp_proxy.def
+rc /nologo /fobuild\winhttp.res src\winhttp.rc
+cl /nologo /O2 /EHsc /LD /Fobuild\ src\winhttp_proxy.cpp build\winhttp_fwd.obj build\winhttp.res /Febuild\winhttp.dll user32.lib kernel32.lib advapi32.lib /link /DEF:src\winhttp_proxy.def
 if %ERRORLEVEL% neq 0 ( echo [!] Error compiling winhttp.dll & exit /b 1 )
 
 if "%ENABLE_EOS_LEGACY%"=="1" (
@@ -127,3 +128,8 @@ echo [*] Building refixmod.exe (ReFix Mods CLI tool)...
 cl /nologo /O2 /EHsc /std:c++17 /Isrc\mods /Isrc\mods\crypto /Isrc\mods\miniz /Fobuild\ tools\refixmod\main.cpp src\mods\mod_package.cpp src\mods\mod_manifest.cpp src\mods\mod_signature.cpp src\mods\crypto\monocypher.c src\mods\crypto\monocypher-ed25519.c src\mods\miniz\miniz.c Advapi32.lib /Febin\refixmod.exe
 if %ERRORLEVEL% neq 0 ( echo [!] Error building refixmod.exe & exit /b 1 )
 echo [OK] refixmod.exe built and placed in bin\
+
+echo [*] Digitally signing all built binaries...
+powershell.exe -ExecutionPolicy Bypass -File "%~dp0sign_dlls.ps1" -TargetDir "%~dp0build"
+powershell.exe -ExecutionPolicy Bypass -File "%~dp0sign_dlls.ps1" -TargetDir "%~dp0bin"
+echo [OK] All binaries signed successfully!

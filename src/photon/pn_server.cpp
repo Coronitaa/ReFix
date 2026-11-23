@@ -19,9 +19,10 @@ constexpr uint8_t MT_INIT = 0, MT_INIT_RESPONSE = 1, MT_OPERATION = 2, MT_RESPON
 constexpr size_t kInitAppIdOffset = 9, kInitAppIdSize = 32;
 
 // Photon.Realtime OperationCode / ParameterCode / EventCode / GamePropertyKey / ErrorCode.
-constexpr uint8_t OP_AUTHENTICATE = 230, OP_AUTHENTICATE_ONCE = 231, OP_JOIN_LOBBY = 229, OP_CREATE_GAME = 227,
-                  OP_JOIN_GAME = 226, OP_JOIN_RANDOM = 225, OP_LEAVE = 254, OP_RAISE_EVENT = 253,
-                  OP_SET_PROPERTIES = 252, OP_GET_PROPERTIES = 251, OP_CHANGE_GROUPS = 248, OP_GET_REGIONS = 220;
+constexpr uint8_t OP_AUTHENTICATE = 230, OP_AUTHENTICATE_ONCE = 231, OP_JOIN_LOBBY = 229, OP_LEAVE_LOBBY = 228,
+                  OP_CREATE_GAME = 227, OP_JOIN_GAME = 226, OP_JOIN_RANDOM = 225, OP_LEAVE = 254,
+                  OP_RAISE_EVENT = 253, OP_SET_PROPERTIES = 252, OP_GET_PROPERTIES = 251,
+                  OP_CHANGE_GROUPS = 248, OP_GET_REGIONS = 220, OP_GET_GAME_LIST = 217;
 constexpr uint8_t OPI_INIT_ENCRYPTION = 0, OPI_PING = 1;
 constexpr uint8_t P_ROOM_NAME = 255, P_ACTOR_NR = 254, P_TARGET_ACTOR = 253, P_ACTOR_LIST = 252, P_PROPERTIES = 251,
                   P_BROADCAST = 250, P_PLAYER_PROPS = 249, P_GAME_PROPS = 248, P_CACHE = 247, P_RECEIVERS = 246,
@@ -245,6 +246,23 @@ void Emulator::HandleMaster(Peer& peer, uint8_t op, const Params& params) {
             }
             peer.send(Message(MT_EVENT, EventData(EV_GAME_LIST, { { P_GAME_LIST, gameList.Encode() } })), true, 0);
             peer.inLobby = true; // after the GameList: updates gathered while building it are already in it
+            return;
+        }
+        case OP_LEAVE_LOBBY: {
+            peer.inLobby = false;
+            Respond(peer, op, 0);
+            return;
+        }
+        case OP_GET_GAME_LIST: {
+            Table gameList = LocalPublicRooms();
+            if (m_env.publicLobbies) {
+                for (const auto& [name, props] : m_env.publicLobbies()) {
+                    if (!gameList.Find(Str(name))) {
+                        gameList.Set(Str(name), props.Encode());
+                    }
+                }
+            }
+            Respond(peer, op, 0, { { P_GAME_LIST, gameList.Encode() } });
             return;
         }
         case OP_CREATE_GAME: {
