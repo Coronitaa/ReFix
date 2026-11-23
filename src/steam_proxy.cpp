@@ -2248,10 +2248,6 @@ static void ApplySteamEnv() {
     if (!g_config.language.empty()) {
         SetEnvironmentVariableA("SteamLanguage", g_config.language.c_str());
     }
-
-    if (g_config.enableOverlay && !ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
-        InjectSteamOverlay();
-    }
 }
 
 // =============================================================================
@@ -5409,6 +5405,9 @@ static void ReFixInitializePost(bool success) {
 #endif
     } else {
         SteamNetCompat::OnSteamInitialized(false, g_config.maskAppIdNum, g_config.realAppIdNum);
+        if (g_config.enableOverlay && !ReFix::NetworkModeManager::IsGoldbergBackendActive()) {
+            InjectSteamOverlay();
+        }
     }
 
     if (!ReFix::NetworkModeManager::IsOnline()) {

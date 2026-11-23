@@ -365,13 +365,13 @@ function Generate-UNAE-ReFixIni {
     $defRegion     = & $Pick "Photon" "DefaultRegion" $regionCandidate
     $bypassVal     = if ($P.DLCMode -eq "none") { "false" } else { "true" }
     $hasEosOrig    = (Get-ChildItem -LiteralPath $TargetDir -Filter "EOSSDK_original.dll" -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-    $eosModeDefault = if ($hasEosOrig) { "passthrough" } elseif ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "emulated" } else { "passthrough" }
+    $eosModeDefault = if ($hasEosOrig) { "passthrough" } elseif ($P.OnlineMode -in @("goldberg", "offline", "lan", "mixed")) { "emulated" } else { "passthrough" }
     $eosMode       = & $Pick "EOS" "Mode" $eosModeDefault
-    $eosAuthDefault = if ($eosMode -eq "passthrough") { "true" } elseif ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "false" } else { "true" }
+    $eosAuthDefault = if ($eosMode -eq "passthrough") { "true" } elseif ($P.OnlineMode -in @("goldberg", "offline", "lan", "mixed")) { "false" } else { "true" }
     $eosAuth       = & $Pick "EOS" "DeviceIdAuth" $eosAuthDefault
     # ReFix decides the Photon backend: a detected Photon stack (PUN2/Realtime/Voice/Fusion) in a
     # no-third-party mode uses the local emulator (ReFixCloud over Steam P2P); otherwise real Photon.
-    $photonDefault = if ($P.UsesPhoton -and ($P.OnlineMode -in @("valve","goldberg","offline","lan"))) { "ReFixCloud" } else { "OfficialPhoton" }
+    $photonDefault = if ($P.UsesPhoton -and ($P.OnlineMode -in @("valve","goldberg","offline","lan","mixed"))) { "ReFixCloud" } else { "OfficialPhoton" }
     $photonBackend = & $Pick "Photon" "Backend" $photonDefault
     # OfficialPhoton is what older ReFix versions wrote for every game, so an existing value is not a user
     # choice: re-decide it. Without this a redeploy keeps the emulator off on one PC while the other uses it,
@@ -388,7 +388,7 @@ function Generate-UNAE-ReFixIni {
     if (-not $serverListAppId -or $serverListAppId -eq "480") { $serverListAppId = if ($realId -and $realId -ne "0") { $realId } else { "480" } }
     # Fast-failing cloud TCP (443/80) only helps when there is no internet backend to reach; online it would
     # block EOS sign-in, PlayFab and other official services.
-    $fastCloudFailDefault = if ($P.OnlineMode -in @("goldberg", "offline", "lan")) { "true" } else { "false" }
+    $fastCloudFailDefault = if ($P.OnlineMode -in @("goldberg", "offline", "lan", "mixed")) { "true" } else { "false" }
     $fastCloudFail = & $Pick "P2P" "FastCloudFail" $fastCloudFailDefault
 
     $existingDiscoveryPort = if ($existing.ContainsKey("Network/DiscoveryPort") -and $existing["Network/DiscoveryPort"] -ne "") {
@@ -1071,7 +1071,7 @@ switch ($OnlineMode) {
         Write-Host "  [OK] Configured unified ReFix.ini in $ExeDir" -ForegroundColor Green
     }
 
-    { $_ -in @("goldberg", "offline", "lan") } {
+    { $_ -in @("goldberg", "offline", "lan", "mixed") } {
         # --- Mode 2: Re:Goldberg LAN sin Steam ---
         # Deploys Goldberg Steam Emulator backend with complete local settings synchronization,
         # persistent identity, LAN matchmaking discovery, and portable saves.
@@ -1278,7 +1278,7 @@ switch ($OnlineMode) {
 # ============================================================
 # Step 3: Engine-specific patches + Mode-specific deployment
 # ============================================================
-if ($OnlineMode -in @("goldberg", "offline", "lan")) {
+if ($OnlineMode -in @("goldberg", "offline", "lan", "mixed")) {
     # ------------------------------------------------------------
     # Mode 2: ReFix LAN sin Steam - Full Configuration Sync
     # ------------------------------------------------------------
@@ -2648,7 +2648,7 @@ function Verify-ReFixDeployment {
     }
 
     # 6. Goldberg mode specific verification
-    if ($OnlineMode -in @("goldberg", "offline", "lan")) {
+    if ($OnlineMode -in @("goldberg", "offline", "lan", "mixed")) {
         $settingsDir = Join-Path $ExeDir "steam_settings"
         if (-not (Test-Path -LiteralPath $settingsDir)) {
             $errors += "steam_settings directory missing in $ExeDir"

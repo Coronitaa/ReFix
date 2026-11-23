@@ -550,9 +550,17 @@ static void LoadAndApplyConfig() {
         SetEnvironmentVariableA("DXVK_NVAPI_VKREFLEX", "0");
     }
 
-    // Perform early Steam Overlay injection in Valve mode
+    // Perform deferred Steam Overlay injection in Valve mode outside loader lock
     if (enableOverlay && (_stricmp(mode, "valve") == 0 || _stricmp(mode, "steam") == 0)) {
-        InjectSteamOverlayWinmm(overlayAppId);
+        std::string sAppId = (overlayAppId && overlayAppId[0] != '\0') ? overlayAppId : "480";
+        char* pAppId = _strdup(sAppId.c_str());
+        CreateThread(NULL, 0, [](LPVOID param) -> DWORD {
+            char* appId = (char*)param;
+            Sleep(800);
+            InjectSteamOverlayWinmm(appId);
+            free(appId);
+            return 0;
+        }, pAppId, 0, NULL);
     }
 
     // --- EOS Config ---
