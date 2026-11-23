@@ -187,7 +187,7 @@ void DrawItemCard(int idx, const MarketItem& it, float cw, float ch) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     bool sel = g_market.selected == idx;
     ImU32 rc = RarityColor(it.rarity);
-    float r = ui::S(10);
+    float r = ui::S(8);
     dl->AddRectFilled(p, ImVec2(p.x + cw, p.y + ch), hov || sel ? ui::color::RowHover : ui::color::Panel, r);
     ImVec2 artMin(p.x + ui::S(6), p.y + ui::S(6)), artMax(p.x + cw - ui::S(6), p.y + ch * 0.62f);
     ArtBackdrop(dl, artMin, artMax, rc, ui::S(8));
@@ -288,8 +288,14 @@ void DrawDetail(float w, float h) {
             if (i) ImGui::SameLine();
             bool clicked = active ? ui::PrimaryButton(c.tag, ImVec2(segW, ui::S(28)), possible)
                                   : ui::SecondaryButton(c.tag, ImVec2(segW, ui::S(28)), possible);
-            if (ImGui::IsItemHovered()) ui::Tooltip(i18n::T(c.en, c.es));
-            if (ui::Clicked(clicked)) g_market.wear = (std::max)(c.lo, it.minWear) + ((std::min)(c.hi, it.maxWear) - (std::max)(c.lo, it.minWear)) * 0.5f;
+            if (ImGui::IsItemHovered()) {
+                if (possible) {
+                    ui::Tooltip(i18n::T(c.en, c.es));
+                } else {
+                    ui::Tooltip(i18n::T("Unavailable for this finish", "No disponible para este acabado"));
+                }
+            }
+            if (possible && ui::Clicked(clicked)) g_market.wear = (std::max)(c.lo, it.minWear) + ((std::min)(c.hi, it.maxWear) - (std::max)(c.lo, it.minWear)) * 0.5f;
         }
         char wearFmt[64];
         snprintf(wearFmt, sizeof(wearFmt), "%%.4f  %s", i18n::T(ConditionOf(g_market.wear).en, ConditionOf(g_market.wear).es));

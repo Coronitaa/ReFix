@@ -50,7 +50,7 @@ namespace SteamP2PHook {
     // Remove a peer mapping (e.g. when they leave the lobby).
     void UnregisterPeer(uint64_t steamID);
 
-    // Log wrapper — forwards to ReFix.log via steam_proxy's logger.
+    // Log wrapper - forwards to ReFix.log via steam_proxy's logger.
     void Log(const char* fmt, ...);
 
     // Returns virtualized or actual bound game port (for lobby metadata advertising).

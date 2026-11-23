@@ -5,7 +5,7 @@
 // using MinHook (inline hooks).
 //
 // Packets destined for known peer IPs are forwarded through ISteamNetworking
-// P2P API instead of raw UDP — achieving transparent NAT traversal via
+// P2P API instead of raw UDP - achieving transparent NAT traversal via
 // Valve's Steam Datagram Relay (SDR) network.
 //
 // Hardened against Red Team vulnerabilities:
@@ -800,7 +800,7 @@ void SteamP2PHook::FlushHoldBuffer() {
 }
 
 // =============================================================================
-// Background Pump Thread — Drains P2P packets into isolated queues
+// Background Pump Thread - Drains P2P packets into isolated queues
 // =============================================================================
 static bool P2PPumpStep() {
     static uint8_t pktBuf[k_maxPacketSize];

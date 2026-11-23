@@ -1,5 +1,5 @@
 // =============================================================================
-// ReFix - EOSSDK-Win64-Shipping.dll — EOS Auth Emulator v3
+// ReFix - EOSSDK-Win64-Shipping.dll - EOS Auth Emulator v3
 // =============================================================================
 // Full Epic Online Services authentication emulator.
 // Resolves the "Signing in..." loop by:
@@ -21,7 +21,7 @@
 #include <atomic>
 #include <stdarg.h>
 
-// Steam P2P peer notification — calls into steam_api64.dll (loaded in same process)
+// Steam P2P peer notification - calls into steam_api64.dll (loaded in same process)
 // We use GetProcAddress to avoid a cross-DLL link dependency.
 static void ReFix_NotifyLobbyID(uint64_t lobbyID) {
     static bool resolved = false;
@@ -2942,7 +2942,7 @@ static EOS_EResult eos_SessionSearch_CopySearchResultByIndex(void* H, void* O, v
     uint32_t index = ((EOS_SessionSearch_CopySearchResultByIndexOptions*)O)->SessionIndex;
     
     if (index < (uint32_t)g_foundLobbies.size()) {
-        // Remote lobby from Steam search — use 0x3000+ range (distinct from 0x2002 = local session)
+        // Remote lobby from Steam search - use 0x3000+ range (distinct from 0x2002 = local session)
         *OutSessionDetailsHandle = (void*)(uintptr_t)(0x3000 + index);
         Log("  Returning session handle %p for REMOTE search result index %u", *OutSessionDetailsHandle, index);
     } else if (index == 0 && g_hasActiveSession) {
@@ -2976,7 +2976,7 @@ typedef bool (*fn_ISN_ReadP2PPacket_t)(void* self, void* pubDest, uint32_t cubDe
 typedef bool (*fn_ISN_AcceptP2PSession_t)(void* self, uint64_t steamIDRemote);
 typedef bool (*fn_ISN_CloseP2PSession_t)(void* self, uint64_t steamIDRemote);
 
-// ISteamNetworking getter — loaded from steam_api64.dll in-process
+// ISteamNetworking getter - loaded from steam_api64.dll in-process
 static void* GetSteamNetworkingInterface_EOS() {
     static void* s_iface = nullptr;
     if (s_iface) return s_iface;
@@ -3036,7 +3036,7 @@ static inline fn_ISN_AcceptP2PSession_t GetSN_Accept() {
     return ((fn_ISN_AcceptP2PSession_t**)iface)[0][ISTEAMNETWORKING_ACCEPTP2PSESSION_IDX];
 }
 
-// EOS_P2P_SendPacketOptions — we only need ApiVersion, RemoteUserId (SteamID64), and packet data.
+// EOS_P2P_SendPacketOptions - we only need ApiVersion, RemoteUserId (SteamID64), and packet data.
 // Layout based on EOS SDK 1.x (ApiVersion=1):
 //   [0]  int32_t  ApiVersion
 //   [4]  int32_t  pad
@@ -3093,7 +3093,7 @@ static EOS_EResult eos_P2P_SendPacket(void* H, void* O) {
     }
 
     if (remoteSteamID == 0 || !opts->Data || opts->DataLengthBytes == 0) {
-        // No valid peer — silently drop (avoids spam log when lobby not joined yet)
+        // No valid peer - silently drop (avoids spam log when lobby not joined yet)
         return EOS_Success;
     }
 
@@ -3121,7 +3121,7 @@ static EOS_EResult eos_P2P_SendPacket(void* H, void* O) {
 static EOS_EResult eos_P2P_GetNextReceivedPacketSize(void* H, void* O, uint32_t* OutPacketSizeBytes) {
     if (OutPacketSizeBytes) *OutPacketSizeBytes = 0;
 
-    // Don't poll Steam networking if no lobby is active yet — avoids crash on early ticks
+    // Don't poll Steam networking if no lobby is active yet - avoids crash on early ticks
     if (!g_currentSteamLobbyId.load()) return EOS_NotFound;
 
     void* iface = GetSteamNetworkingInterface_EOS();
@@ -3139,8 +3139,8 @@ static EOS_EResult eos_P2P_GetNextReceivedPacketSize(void* H, void* O, uint32_t*
 // EOS_P2P_ReceivePacketOptions/Out layout (EOS SDK 1.x)
 // Out params are separate out-pointers passed by the game
 static EOS_EResult eos_P2P_ReceivePacket(void* H, void* O,
-    void* OutPeerId,        // EOS_ProductUserId* — peer who sent this
-    void* OutSocketId,      // EOS_P2P_SocketId*  — socket name
+    void* OutPeerId,        // EOS_ProductUserId* - peer who sent this
+    void* OutSocketId,      // EOS_P2P_SocketId*  - socket name
     uint8_t* OutChannel,    // uint8_t*
     void* OutData,          // void*  (pre-allocated by game)
     uint32_t* OutBytesWritten)

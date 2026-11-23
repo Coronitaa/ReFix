@@ -1257,7 +1257,7 @@ static char g_gameFilterSP[128] = "";  // Set dynamically by LoadConfig() from [
 static char g_maskAppId[16] = "480";
 static uint32_t g_maskAppIdNum = 480;
 static char g_realAppId[64] = "";
-static uint32_t g_realAppIdNum = 0;    // Numeric RealAppId — used for workshop UGC and server browser
+static uint32_t g_realAppIdNum = 0;    // Numeric RealAppId - used for workshop UGC and server browser
 static char g_language[32] = "english";
 static std::string g_hostPublicIP = "";
 static std::string g_hostLocalIP = "";
@@ -1540,14 +1540,14 @@ static CRefixLobbyCreatedCallResult g_lobbyCreatedCallResult;
 // Called whenever a lobby member joins or lobby data changes
 // =============================================================================
 // =============================================================================
-// Godot (GodotSteam) — Synthetic LobbyEnter_t callback injection
+// Godot (GodotSteam) - Synthetic LobbyEnter_t callback injection
 // =============================================================================
 // When EngineType=Godot, the game uses steam-multiplayer-peer.dll which
 // listens for LobbyEnter_t (iCallback=504) to know the lobby join succeeded,
 // and only then calls ISteamNetworkingSockets::ConnectP2P(hostSteamID, 0).
 //
 // When our lobby is synthetic (not a real Steam lobby), JoinLobby() returns
-// without firing LobbyEnter_t — causing a timeout. We inject the callback
+// without firing LobbyEnter_t - causing a timeout. We inject the callback
 // manually so Godot can proceed with the P2P connection.
 // =============================================================================
 static bool g_godotIsEngine = false;  // Set to true once config is loaded and EngineType=Godot
@@ -2898,7 +2898,7 @@ static uint64_t Hooked_ISteamMatchmaking_CreateLobby(void* self, int eLobbyType,
     ReFixLog("  -> CreateLobby APICall handle: %llu", hResult);
 
     std::thread([]() {
-        // Wait before fallback — Godot/Unreal lobby creation can take up to 2-3s
+        // Wait before fallback - Godot/Unreal lobby creation can take up to 2-3s
         int waitMs = (g_godotIsEngine || g_unrealIsEngine) ? 3000 : 1000;
         Sleep(waitMs);
         if (g_activeLobbyID == 0) {
@@ -5285,7 +5285,7 @@ static bool EnsureOriginal() {
     }
 
     // SteamInternal_SteamAPI_Init is handled via C++ __declspec(dllexport) below
-    // (no slot redirect needed — dllexport takes precedence over the .def passthrough)
+    // (no slot redirect needed - dllexport takes precedence over the .def passthrough)
 
 
     // Intercept SteamNetworkingSockets APIs for generic networking compatibility (SteamNetCompat)

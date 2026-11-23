@@ -200,7 +200,7 @@ bool ComboRow(const char* id, const char* title, const char* desc, const char* c
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const ImVec2 p1(p0.x + width, p0.y + h);
 
-    dl->AddRectFilled(p0, p1, ui::color::Row, ui::S(12));
+    dl->AddRectFilled(p0, p1, ui::color::Row, ui::S(8));
     float y = p0.y + pad;
     dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + pad, y), ui::color::Text, title);
     y += f.strong->FontSize + ui::S(4);
@@ -225,6 +225,19 @@ bool ComboRow(const char* id, const char* title, const char* desc, const char* c
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ui::S(12), ui::S(7)));
 
     if (ImGui::BeginCombo("##combo", currentLabel)) {
+        // Direct keyboard & gamepad navigation inside combo popup
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown)) {
+            if (*selectedIndex < (int)items.size() - 1) {
+                (*selectedIndex)++;
+                changed = true;
+            }
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp)) {
+            if (*selectedIndex > 0) {
+                (*selectedIndex)--;
+                changed = true;
+            }
+        }
         for (int i = 0; i < (int)items.size(); ++i) {
             const bool isSelected = (*selectedIndex == i);
             if (ImGui::Selectable(items[i].c_str(), isSelected)) {
@@ -725,7 +738,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
     ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ui::S(540), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(20)));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(16));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(8));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
     if (ImGui::BeginPopupModal("##overlay_warn1", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize)) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -742,7 +755,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         ImGui::PopFont();
 
         ImGui::PushFont(f.caption);
-        ui::TextColored(ui::color::Muted,
+        ui::TextColored(ui::color::DangerMuted,
                         isSteam ? i18n::T("Step 1 of 2: Switch overlay provider", "Paso 1 de 2: Cambiar proveedor de overlay")
                                 : i18n::T("Step 1 of 2: Disable overlay provider", "Paso 1 de 2: Desactivar proveedor de overlay"));
         ImGui::PopFont();
@@ -783,8 +796,8 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         ImGui::Dummy(ImVec2(0, ui::S(14)));
         const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
         dl->ChannelsSetCurrent(0);
-        dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
-        dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
+        dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(8));
+        dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(8), 0, ui::S(1.0f));
         dl->ChannelsMerge();
 
         ImGui::Dummy(ImVec2(0, ui::S(16)));
@@ -793,7 +806,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         const float btnW = (availW - gap) * 0.5f;
         const ImVec2 bs(btnW, ui::S(40));
 
-        if (ui::DangerButton(i18n::T("Continue", "Continuar"), bs)) {
+        if (ui::DangerButton(i18n::T("Proceed to Step 2", "Proceder al Paso 2"), bs)) {
             ImGui::CloseCurrentPopup();
             g_overlayWarn2Open = true;
             g_overlayHoldTime = 0.0f;
@@ -819,7 +832,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
     ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ui::S(540), 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(20)));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(16));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(8));
     ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
     if (ImGui::BeginPopupModal("##overlay_warn2", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize)) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -836,7 +849,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         ImGui::PopFont();
 
         ImGui::PushFont(f.caption);
-        ui::TextColored(ui::color::Muted,
+        ui::TextColored(ui::color::DangerMuted,
                         i18n::T("Step 2 of 2: Critical confirmation & automatic game restart",
                                 "Paso 2 de 2: Confirmación crítica y reinicio automático del juego"));
         ImGui::PopFont();
@@ -881,8 +894,8 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         ImGui::Dummy(ImVec2(0, ui::S(14)));
         const ImVec2 cardP1(cardP0.x + availW, ImGui::GetCursorScreenPos().y);
         dl->ChannelsSetCurrent(0);
-        dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(10));
-        dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(10), 0, ui::S(1.0f));
+        dl->AddRectFilled(cardP0, cardP1, ui::color::Row, ui::S(8));
+        dl->AddRect(cardP0, cardP1, ui::Fade(ui::color::Danger, 0.45f), ui::S(8), 0, ui::S(1.0f));
         dl->ChannelsMerge();
 
         ImGui::Dummy(ImVec2(0, ui::S(16)));
@@ -929,7 +942,7 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
         if (isFocused && !isHolding) {
             dl->AddRect(ImVec2(hp0.x - ui::S(2), hp0.y - ui::S(2)),
                         ImVec2(hp1.x + ui::S(2), hp1.y + ui::S(2)),
-                        ui::Fade(ui::color::Danger, 0.7f), ui::S(10), 0, ui::S(1.5f));
+                        ui::Fade(ui::color::Danger, 0.7f), ui::S(8), 0, ui::S(1.5f));
         }
 
         // Draw fill bar

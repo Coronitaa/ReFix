@@ -58,24 +58,37 @@ std::string SystemIconFontPath();
 const wchar_t* GdiIconFamily(bool* isMdl2);
 
 namespace color {
+// Dark background scrims for overlay immersion without obstructing gameplay context
 constexpr ImU32 Backdrop = IM_COL32(6, 9, 14, 235);
 constexpr ImU32 BackdropSolid = IM_COL32(8, 11, 16, 250);
+// Structural card and panel surfaces providing clear depth elevation
 constexpr ImU32 Panel = IM_COL32(18, 22, 29, 242);
 constexpr ImU32 PanelRaised = IM_COL32(26, 31, 40, 255);
+// Table and list rows with deliberate interactive hover states
 constexpr ImU32 Row = IM_COL32(28, 34, 44, 255);
 constexpr ImU32 RowHover = IM_COL32(36, 43, 55, 255);
+// Subtle border token separating visual layers without harsh contrast
 constexpr ImU32 Border = IM_COL32(255, 255, 255, 22);
+// High-legibility foreground text meeting WCAG AA standards (>7:1 on dark)
 constexpr ImU32 Text = IM_COL32(232, 237, 244, 255);
+// Secondary text for labels and non-critical descriptions (>4.5:1 ratio)
 constexpr ImU32 Muted = IM_COL32(140, 150, 165, 255);
+// Low-emphasis token reserved for disabled items and dividers
 constexpr ImU32 Faint = IM_COL32(90, 100, 114, 255);
+// Primary brand mint-green accent color for active interactive elements
 constexpr ImU32 Accent = IM_COL32(43, 212, 164, 255);
 constexpr ImU32 AccentHover = IM_COL32(72, 227, 182, 255);
 constexpr ImU32 AccentInk = IM_COL32(6, 37, 28, 255);
 constexpr ImU32 AccentSoft = IM_COL32(43, 212, 164, 34);    // selected item fill (settings sidebar, choices)
 constexpr ImU32 AccentLine = IM_COL32(43, 212, 164, 110);   // its outline
+// Contextual blue for invites and network discovery
 constexpr ImU32 Invite = IM_COL32(90, 169, 255, 255);
+// Gold accent for high-value items, passes, and achievements
 constexpr ImU32 Star = IM_COL32(255, 192, 70, 255);
+// High-visibility coral-red for destructive operations and warning modals
 constexpr ImU32 Danger = IM_COL32(255, 107, 107, 255);
+// WCAG AA compliant muted text against dark crimson backgrounds (>4.5:1 ratio)
+constexpr ImU32 DangerMuted = IM_COL32(240, 185, 190, 255);
 constexpr ImU32 Online = IM_COL32(43, 212, 164, 255);
 constexpr ImU32 InGame = IM_COL32(90, 169, 255, 255);
 // Steam's own friend colours, so the friends list reads like Steam's.
