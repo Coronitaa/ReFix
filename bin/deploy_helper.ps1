@@ -772,30 +772,33 @@ if ($pluginDirs32.Count -gt 0) {
 if ($pluginDirs.Count -eq 0 -and $pluginDirs32.Count -eq 0) { $pluginDirs += $ExeDir }
 
 # Detect if game is 32-bit (x86) to prevent fatal 64-bit DLL injection into 32-bit processes
-$isX86Game = ($pluginDirs32.Count -gt 0)
-if (-not $isX86Game) {
-    $gameExesInDir = Get-ChildItem -LiteralPath $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
-    
-    $candidateExes = @()
-    $mainExe = $gameExesInDir | Where-Object { $_.Name -like "*$GameName*" } | Select-Object -First 1
-    if ($mainExe) { $candidateExes += $mainExe }
-    $candidateExes += ($gameExesInDir | Where-Object { $_.Name -notlike "*Launcher*" -and ($mainExe -eq $null -or $_.FullName -ne $mainExe.FullName) })
-    $candidateExes += ($gameExesInDir | Where-Object { $_.Name -like "*Launcher*" })
+$isX86Game = $null
+$gameExesInDir = Get-ChildItem -LiteralPath $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
 
-    foreach ($ge in $candidateExes) {
-        try {
-            $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
-            if ($peBytes.Length -ge 0x40) {
-                $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
-                if ($peOffset + 6 -le $peBytes.Length) {
-                    $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
-                    if ($mach -eq 0x014c) { $isX86Game = $true; break }
-                    elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
-                }
+$candidateExes = @()
+$mainExe = $gameExesInDir | Where-Object { $_.Name -like "*$GameName*" } | Select-Object -First 1
+if ($mainExe) { $candidateExes += $mainExe }
+$candidateExes += ($gameExesInDir | Where-Object { $_.Name -notlike "*Launcher*" -and ($mainExe -eq $null -or $_.FullName -ne $mainExe.FullName) })
+$candidateExes += ($gameExesInDir | Where-Object { $_.Name -like "*Launcher*" })
+
+foreach ($ge in $candidateExes) {
+    try {
+        $peBytes = [System.IO.File]::ReadAllBytes($ge.FullName)
+        if ($peBytes.Length -ge 0x40) {
+            $peOffset = [System.BitConverter]::ToInt32($peBytes, 0x3C)
+            if ($peOffset + 6 -le $peBytes.Length) {
+                $mach = [System.BitConverter]::ToUInt16($peBytes, $peOffset + 4)
+                if ($mach -eq 0x014c) { $isX86Game = $true; break }
+                elseif ($mach -eq 0x8664) { $isX86Game = $false; break }
             }
-        } catch {}
-    }
+        }
+    } catch {}
+}
+
+# If no candidate exe was conclusive, infer from steam_api DLLs present
+if ($isX86Game -eq $null) {
+    $isX86Game = ($pluginDirs32.Count -gt 0 -and $pluginDirs.Count -eq 0)
 }
 
 switch ($OnlineMode) {
