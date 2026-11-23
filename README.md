@@ -1,6 +1,6 @@
 # ReFix
 
-[![Release](https://img.shields.io/badge/version-v2.5.5-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.5.5)
+[![Release](https://img.shields.io/badge/version-v2.6.1-blue.svg)](https://github.com/Coronitaa/ReFix/releases/tag/v2.6.1)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20x86%20%7C%20Proton-lightgrey.svg)](https://github.com/Coronitaa/ReFix)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
