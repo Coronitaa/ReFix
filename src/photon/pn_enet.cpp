@@ -2,9 +2,9 @@
 
 namespace {
 
-constexpr uint8_t CT_ACK = 1, CT_CONNECT = 2, CT_VERIFYCONNECT = 3, CT_DISCONNECT = 4, CT_SENDRELIABLE = 6,
-                  CT_SENDUNRELIABLE = 7, CT_SENDFRAGMENT = 8, CT_SENDUNSEQUENCED = 11, CT_RELIABLE_UNSEQUENCED = 14,
-                  CT_FRAGMENT_UNSEQUENCED = 15, CT_ACK_UNSEQUENCED = 16;
+constexpr uint8_t CT_ACK = 1, CT_CONNECT = 2, CT_VERIFYCONNECT = 3, CT_DISCONNECT = 4, CT_PING = 5,
+                  CT_SENDRELIABLE = 6, CT_SENDUNRELIABLE = 7, CT_SENDFRAGMENT = 8, CT_SENDUNSEQUENCED = 11,
+                  CT_RELIABLE_UNSEQUENCED = 14, CT_FRAGMENT_UNSEQUENCED = 15, CT_ACK_UNSEQUENCED = 16;
 constexpr uint8_t FV_RELIABLE = 1, FV_UNRELIABLE_UNSEQUENCED = 2, FV_RELIABLE_UNSEQUENCED = 3;
 constexpr uint8_t kFlagCrc = 204, kFlagEncrypted = 1;
 constexpr uint8_t kControlChannel = 255;
@@ -260,10 +260,14 @@ void PnEnetConnection::Tick(uint32_t nowMs) {
         out.lastSentMs = nowMs;
         commands.push_back(out.bytes);
     }
+    if (m_connected && commands.empty() && (m_lastSendMs == 0 || nowMs - m_lastSendMs >= 2000)) {
+        commands.push_back(CommandHeader(CT_PING, kControlChannel, 0, (int32_t)kHeaderSize, 0));
+    }
     if (!commands.empty()) SendCommands(commands, nowMs);
 }
 
 void PnEnetConnection::SendCommands(const std::vector<std::string>& commands, uint32_t nowMs) {
+    m_lastSendMs = nowMs;
     std::string body;
     uint8_t count = 0;
     auto flush = [&]() {

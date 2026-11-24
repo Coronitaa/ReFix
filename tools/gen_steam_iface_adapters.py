@@ -35,6 +35,7 @@ FAMILIES = [
     ("screenshots",   "isteamscreenshots",   "STEAMSCREENSHOTS_INTERFACE_VERSION{v}", "ISteamScreenshots",   "isteamscreenshots.h",   "Screenshots",   set()),
     ("controller",    "isteamcontroller",    "SteamController{v}",                    "ISteamController",    "isteamcontroller.h",    "Controller",    {"008"}),
     ("gameserver",    "isteamgameserver",    "SteamGameServer{v}",                    "ISteamGameServer",    "isteamgameserver.h",    "GameServer",    {"012"}),
+    ("input",         "isteaminput",         "SteamInput{v}",                         "ISteamInput",         "isteaminput.h",         "Input",         {"006"}),
 ]
 
 # (family, version) -> reason; filled from compile probing of the SDK headers.
@@ -45,6 +46,10 @@ SKIP = {
 # Hand written bodies for versioned-only methods that have a clear equivalent.
 SPECIAL_BODIES = {
     ("user", "GetHSteamUser"): "return UnrealSteamEmu::GetHSteamUser();",
+    ("input", "Init"): "return true;",
+    ("input", "RunFrame"): "UnrealSteamEmu::LatestInput()->RunFrame();",
+    ("input", "TriggerHapticPulse"): "UnrealSteamEmu::LatestInput()->Legacy_TriggerHapticPulse(a0, a1, a2);",
+    ("input", "TriggerRepeatedHapticPulse"): "UnrealSteamEmu::LatestInput()->Legacy_TriggerRepeatedHapticPulse(a0, a1, a2, a3, a4, a5);",
 }
 
 BASIC_TYPE_WORDS = {"int", "char", "short", "long", "unsigned", "signed", "float",

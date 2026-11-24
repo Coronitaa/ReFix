@@ -1,8 +1,4 @@
-// =============================================================================
-// ReFix - Forwarded winhttp.dll Proxy (100% Crash-Proof Dynamic MASM Forwarding)
-// Used for generic DLL proxying in games protected by EAC / Anti-Cheat
-// where version.dll or dxgi.dll are blocked or not imported.
-// =============================================================================
+// ReFix - winhttp.dll 64-bit forwarder proxy
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincrypt.h>
@@ -117,22 +113,41 @@ static const char* g_winhttpNames[WINHTTP_FORWARD_COUNT] = {
 
 static HMODULE g_hRealWinHttp = NULL;
 
+static void WINAPI DummyWinHttpStub() {
+    SetLastError(ERROR_NOT_SUPPORTED);
+}
+
 static void InitWinHttpProxy() {
+    for (int i = 0; i < WINHTTP_FORWARD_COUNT; ++i) {
+        g_winhttpProcs[i] = reinterpret_cast<FARPROC>(&DummyWinHttpStub);
+    }
+
     char sysDir[MAX_PATH];
-    GetSystemDirectoryA(sysDir, MAX_PATH);
+    if (GetSystemDirectoryA(sysDir, MAX_PATH) == 0) return;
     std::string realDllPath = std::string(sysDir) + "\\winhttp.dll";
 
     g_hRealWinHttp = LoadLibraryA(realDllPath.c_str());
     if (!g_hRealWinHttp) return;
 
     for (int i = 0; i < WINHTTP_FORWARD_COUNT; ++i) {
-        g_winhttpProcs[i] = GetProcAddress(g_hRealWinHttp, g_winhttpNames[i]);
+        FARPROC proc = GetProcAddress(g_hRealWinHttp, g_winhttpNames[i]);
+        if (proc) {
+            g_winhttpProcs[i] = proc;
+        }
     }
 }
 
 static uint64_t GenerateMachineUniqueSteamId() {
     DWORD serialNum = 0;
-    GetVolumeInformationA("C:\\", NULL, 0, &serialNum, NULL, NULL, NULL, 0);
+    char sysDrive[4] = "C:\\";
+    char sysDir[MAX_PATH];
+    if (GetSystemDirectoryA(sysDir, MAX_PATH) >= 3) {
+        sysDrive[0] = sysDir[0];
+        sysDrive[1] = ':';
+        sysDrive[2] = '\\';
+        sysDrive[3] = '\0';
+    }
+    GetVolumeInformationA(sysDrive, NULL, 0, &serialNum, NULL, NULL, NULL, 0);
 
     char compName[MAX_COMPUTERNAME_LENGTH + 1] = { 0 };
     DWORD compNameLen = sizeof(compName);
@@ -149,6 +164,34 @@ static uint64_t GenerateMachineUniqueSteamId() {
     uint32_t accountId = (uint32_t)(hash & 0xFFFFFFFF);
     if (accountId == 0) accountId = 1;
     return 0x0110000100000000ULL | (uint64_t)accountId;
+}
+
+static void LoadExtraDLLs(const std::string& iniPath) {
+    char buf[1024];
+    GetPrivateProfileStringA("Paths", "ExtraDLLs", "", buf, sizeof(buf), iniPath.c_str());
+    if (buf[0] != '\0') {
+        std::stringstream ss(buf);
+        std::string dllPath;
+        while (std::getline(ss, dllPath, ',')) {
+            size_t first = dllPath.find_first_not_of(" \t\r\n");
+            size_t last = dllPath.find_last_of(" \t\r\n");
+            if (first != std::string::npos && last != std::string::npos) {
+                dllPath = dllPath.substr(first, (last - first + 1));
+                if (!dllPath.empty()) {
+                    LoadLibraryA(dllPath.c_str());
+                }
+            }
+        }
+    }
+}
+
+static DWORD WINAPI ExtraDllsThread(LPVOID param) {
+    char* pIni = reinterpret_cast<char*>(param);
+    if (pIni) {
+        LoadExtraDLLs(std::string(pIni));
+        free(pIni);
+    }
+    return 0;
 }
 
 static void LoadAndApplyConfig() {
@@ -168,9 +211,6 @@ static void LoadAndApplyConfig() {
         if (attrib == INVALID_FILE_ATTRIBUTES) return;
     }
 
-    char buf[1024];
-
-    // --- Steam Config ---
     char mode[64] = "valve";
     GetPrivateProfileStringA("Steam", "Mode", "valve", mode, sizeof(mode), iniPath.c_str());
 
@@ -196,7 +236,6 @@ static void LoadAndApplyConfig() {
     GetPrivateProfileStringA("Steam", "Language", "english", language, sizeof(language), iniPath.c_str());
     SetEnvironmentVariableA("SteamLanguage", language);
 
-    // --- User Config ---
     char playerName[256] = "Player";
     GetPrivateProfileStringA("User", "Name", "", playerName, sizeof(playerName), iniPath.c_str());
     if (playerName[0] == '\0') {
@@ -225,20 +264,15 @@ static void LoadAndApplyConfig() {
     SetEnvironmentVariableA("REFIX_STEAM_ID", finalSteamId.c_str());
     SetEnvironmentVariableA("SteamID", finalSteamId.c_str());
 
-    // --- Extra DLLs to Load ---
-    GetPrivateProfileStringA("Paths", "ExtraDLLs", "", buf, sizeof(buf), iniPath.c_str());
-    if (buf[0] != '\0') {
-        std::stringstream ss(buf);
-        std::string dllPath;
-        while (std::getline(ss, dllPath, ',')) {
-            size_t first = dllPath.find_first_not_of(" \t\r\n");
-            size_t last = dllPath.find_last_of(" \t\r\n");
-            if (first != std::string::npos && last != std::string::npos) {
-                dllPath = dllPath.substr(first, (last - first + 1));
-                if (!dllPath.empty()) {
-                    LoadLibraryA(dllPath.c_str());
-                }
-            }
+    char extraBuf[1024];
+    GetPrivateProfileStringA("Paths", "ExtraDLLs", "", extraBuf, sizeof(extraBuf), iniPath.c_str());
+    if (extraBuf[0] != '\0') {
+        char* pCopy = _strdup(iniPath.c_str());
+        HANDLE hThread = CreateThread(NULL, 0, ExtraDllsThread, pCopy, 0, NULL);
+        if (hThread) {
+            CloseHandle(hThread);
+        } else {
+            free(pCopy);
         }
     }
 }

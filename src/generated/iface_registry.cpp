@@ -16,6 +16,7 @@ extern const ReFixIfaceEntry g_ReFixIfaceTable_http[];
 extern const ReFixIfaceEntry g_ReFixIfaceTable_screenshots[];
 extern const ReFixIfaceEntry g_ReFixIfaceTable_controller[];
 extern const ReFixIfaceEntry g_ReFixIfaceTable_gameserver[];
+extern const ReFixIfaceEntry g_ReFixIfaceTable_input[];
 
 static const ReFixIfaceEntry* const kTables[] = {
     g_ReFixIfaceTable_client,
@@ -32,6 +33,7 @@ static const ReFixIfaceEntry* const kTables[] = {
     g_ReFixIfaceTable_screenshots,
     g_ReFixIfaceTable_controller,
     g_ReFixIfaceTable_gameserver,
+    g_ReFixIfaceTable_input,
 };
 
 void* ReFixVersionedInterface(const char* pchVersion) {

@@ -72,6 +72,7 @@ private:
     bool m_closed = false;
     int32_t m_challenge = 0;
     uint32_t m_lastReceiveMs = 0;
+    uint32_t m_lastSendMs = 0;
     uint32_t m_nowMs = 0;
 
     std::vector<std::string> m_acks;

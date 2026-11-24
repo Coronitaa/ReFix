@@ -979,24 +979,30 @@ namespace UnrealSteamEmu {
 
         if (iCallback == LobbyDataUpdate_t::k_iCallback && pData && dataSize >= sizeof(LobbyDataUpdate_t)) {
             const auto* ldu = reinterpret_cast<const LobbyDataUpdate_t*>(pData);
-            for (const auto& q : g_manualCallbackQueue) {
+            bool updated = false;
+            for (auto& q : g_manualCallbackQueue) {
                 if (q.iCallback == LobbyDataUpdate_t::k_iCallback && q.data.size() >= sizeof(LobbyDataUpdate_t)) {
-                    const auto* existing = reinterpret_cast<const LobbyDataUpdate_t*>(q.data.data());
+                    auto* existing = reinterpret_cast<LobbyDataUpdate_t*>(q.data.data());
                     if (existing->m_ulSteamIDLobby == ldu->m_ulSteamIDLobby &&
                         existing->m_ulSteamIDMember == ldu->m_ulSteamIDMember) {
-                        return; // Deduplicate pending 505
+                        *existing = *ldu; // Update in place to preserve freshest success state
+                        updated = true;
+                        break;
                     }
                 }
             }
-            for (const auto& q : g_callbackQueue) {
+            for (auto& q : g_callbackQueue) {
                 if (q.iCallback == LobbyDataUpdate_t::k_iCallback && q.data.size() >= sizeof(LobbyDataUpdate_t)) {
-                    const auto* existing = reinterpret_cast<const LobbyDataUpdate_t*>(q.data.data());
+                    auto* existing = reinterpret_cast<LobbyDataUpdate_t*>(q.data.data());
                     if (existing->m_ulSteamIDLobby == ldu->m_ulSteamIDLobby &&
                         existing->m_ulSteamIDMember == ldu->m_ulSteamIDMember) {
-                        return; // Deduplicate pending 505
+                        *existing = *ldu; // Update in place to preserve freshest success state
+                        updated = true;
+                        break;
                     }
                 }
             }
+            if (updated) return;
         }
 
         QueuedCallbackItem item;
@@ -1349,11 +1355,17 @@ namespace UnrealSteamEmu {
                     if (sId == 0) continue;
                     LobbyInfo& lob = g_lobbies[sId];
                     lob.id = sId;
-                    lob.maxMembers = rec.maxMembers;
+                    lob.maxMembers = (rec.maxMembers > 0 ? rec.maxMembers : 8);
                     lob.joinable = rec.joinable;
                     lob.lastSeen = now;
                     for (const auto& [k, v] : rec.attributes) {
                         lob.data[k] = v.asString;
+                    }
+                    if (lob.data.find("id") == lob.data.end() || lob.data["id"].empty() || lob.data["id"] == "--") {
+                        lob.data["id"] = std::to_string(sId);
+                    }
+                    if (lob.data.find("member") == lob.data.end() || lob.data["member"].empty()) {
+                        lob.data["member"] = std::to_string(rec.members.size() > 0 ? rec.members.size() : 1);
                     }
                     matchingLobbyIDs.push_back(sId);
                 }
@@ -5290,6 +5302,17 @@ namespace UnrealSteamEmu {
                 }
             }
 
+            // Generic fallback for matchmaking games inspecting "id" and "member" (PICO PARK, etc.)
+            if (view.find("id") == view.end() || view["id"].empty() || view["id"] == "--") {
+                uint64_t targetId = ownerSteamId != 0 ? ownerSteamId : lID;
+                if (targetId != 0) {
+                    view["id"] = std::to_string(targetId);
+                }
+            }
+            if (view.find("member") == view.end() || view["member"].empty()) {
+                view["member"] = "1";
+            }
+
             // Post-merge unified generic rewriting for view
             if (ownerSteamId != 0 && ownerSteamId != g_localSteamID) {
                 // Determine target IP: loopback (same machine) vs LAN vs P2P
@@ -5574,9 +5597,20 @@ namespace UnrealSteamEmu {
         }
 
         virtual int GetLobbyMemberLimit(CSteamID steamIDLobby) override {
-            int limit = 4;
-            auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
-            if (it != g_lobbies.end()) limit = it->second.maxMembers;
+            int limit = 0;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
+                if (it != g_lobbies.end()) limit = it->second.maxMembers;
+            }
+            if (limit <= 0) {
+                std::string coreId = GetCoreLobbyId(steamIDLobby.ConvertToUint64());
+                if (!coreId.empty()) {
+                    auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreId);
+                    if (rec && rec->maxMembers > 0) limit = (int)rec->maxMembers;
+                }
+            }
+            if (limit <= 0) limit = 8;
             if (TraceLobbyReads()) ReFixLog("[LobbyRead] GetLobbyMemberLimit(%llu) -> %d", steamIDLobby.ConvertToUint64(), limit);
             return limit;
         }
@@ -8968,6 +9002,7 @@ namespace UnrealSteamEmu {
     ISteamHTTP* LatestHTTP() { return static_cast<ISteamHTTP*>(&g_steamHTTPInstance); }
     ISteamScreenshots* LatestScreenshots() { return static_cast<ISteamScreenshots*>(&g_steamScreenshotsInstance); }
     ISteamController* LatestController() { return static_cast<ISteamController*>(&g_steamControllerInstance); }
+    ISteamInput* LatestInput() { return static_cast<ISteamInput*>(&g_steamInputInstance); }
 
     // Latest-version object by SDK class name, for the generated flat dispatcher.
     // static_cast keeps each entry compile-checked against the SDK class it serves.

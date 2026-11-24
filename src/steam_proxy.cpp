@@ -1,14 +1,5 @@
 #include "panorama/refix_play_menu_js.h"
-// =============================================================================
-// ReFix - steam_api64.dll Proxy (Active Matchmaking & Direct P2P UPnP Helper)
-// =============================================================================
-// Forwards 1055 exports to steam_api64_valve.dll via ASM jump table (g_steamProcs).
-// Intercepts SteamAPI_Init, ISteamMatchmaking (CreateLobby, RequestLobbyList, SetLobbyData),
-// and callbacks (GameLobbyJoinRequested_t, GameRichPresenceJoinRequested_t).
-//
-// Native UPnP Router Port Forwarding & Windows Firewall rule added on startup.
-// Registers Direct P2P Connect string in Steam Rich Presence (+connect <PUBLIC_IP>:7777).
-// =============================================================================
+// ReFix - steam_api64.dll proxy forwarder and LAN multiplayer layer
 
 #pragma comment(lib, "user32.lib")
 #define WIN32_LEAN_AND_MEAN
@@ -3882,7 +3873,15 @@ static uint64_t GetMachineUniqueHash() {
     GetComputerNameA(compName, &compLen);
 
     DWORD volSerial = 0;
-    GetVolumeInformationA("C:\\", NULL, 0, &volSerial, NULL, NULL, NULL, 0);
+    char sysDrive[4] = "C:\\";
+    char sysDir[MAX_PATH];
+    if (GetSystemDirectoryA(sysDir, MAX_PATH) >= 3) {
+        sysDrive[0] = sysDir[0];
+        sysDrive[1] = ':';
+        sysDrive[2] = '\\';
+        sysDrive[3] = '\0';
+    }
+    GetVolumeInformationA(sysDrive, NULL, 0, &volSerial, NULL, NULL, NULL, 0);
 
     // FNV-1a 64-bit hash
     uint64_t h = 14695981039346656037ULL;
@@ -5352,10 +5351,12 @@ static void CapturePersonaName() {
 
 // Intercepted Exports implemented directly
 extern "C" void SteamP2PHook_ForceResolve();
+static void InstallD3D9CompatHook();
 
 static void ReFixInitializePre() {
     ApplySteamEnv();
     ReFix_InstallPortableXAudio2();  // before the engine starts its sound system
+    InstallD3D9CompatHook();
     if (!ReFix::NetworkModeManager::IsOnline()) {
         InitializeLanForwardTable();
         auto provider = ReFix::ProviderFactory::GetSteamProvider();
@@ -5367,12 +5368,158 @@ static void ReFixInitializePre() {
     }
 }
 
+typedef void* (WINAPI *pfnDirect3DCreate9)(UINT);
+typedef HRESULT (WINAPI *pfnDirect3DCreate9Ex)(UINT, void**);
+static pfnDirect3DCreate9 g_origDirect3DCreate9 = nullptr;
+static std::atomic<bool> s_d3d9HookInstalled{ false };
+
+static void* SafeCallDirect3DCreate9(pfnDirect3DCreate9 fn, UINT sdkVersion) {
+    if (!fn) return nullptr;
+    __try {
+        return fn(sdkVersion);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+static std::string GetReFixD3D9IniPath() {
+    std::string ini = GetExeDir() + "ReFix.ini";
+    if (GetFileAttributesA(ini.c_str()) != INVALID_FILE_ATTRIBUTES) return ini;
+    ini = GetProxyDllDir() + "ReFix.ini";
+    if (GetFileAttributesA(ini.c_str()) != INVALID_FILE_ATTRIBUTES) return ini;
+    ini = GetExeDir() + "..\\ReFix.ini";
+    if (GetFileAttributesA(ini.c_str()) != INVALID_FILE_ATTRIBUTES) return ini;
+    return GetExeDir() + "ReFix.ini";
+}
+
+static void* WINAPI Hooked_Direct3DCreate9(UINT SDKVersion) {
+    ReFixLog("[D3D9Compat] Hooked_Direct3DCreate9 called: SDKVersion=%u", SDKVersion);
+    if (!g_origDirect3DCreate9) {
+        HMODULE hD3D9 = GetModuleHandleW(L"d3d9.dll");
+        if (hD3D9) {
+            g_origDirect3DCreate9 = reinterpret_cast<pfnDirect3DCreate9>(GetProcAddress(hD3D9, "Direct3DCreate9"));
+        }
+    }
+
+    std::string ini = GetReFixD3D9IniPath();
+    char modeBuf[32] = { 0 };
+    GetPrivateProfileStringA("Compat", "D3D9Ex", "auto", modeBuf, sizeof(modeBuf), ini.c_str());
+    bool forceEx = (_stricmp(modeBuf, "true") == 0 || strcmp(modeBuf, "1") == 0);
+    bool disableEx = (_stricmp(modeBuf, "false") == 0 || strcmp(modeBuf, "0") == 0);
+    if (!forceEx && !disableEx) {
+        char exePath[MAX_PATH] = { 0 };
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        const char* pName = strrchr(exePath, '\\');
+        if (!pName) pName = strrchr(exePath, '/');
+        pName = pName ? pName + 1 : exePath;
+        if (_stricmp(pName, "pico_park.exe") == 0 || _stricmp(pName, "pico_park2.exe") == 0) {
+            forceEx = true;
+        }
+    }
+
+    if (!forceEx && g_origDirect3DCreate9) {
+        void* pNative = SafeCallDirect3DCreate9(g_origDirect3DCreate9, SDKVersion);
+        if (pNative) {
+            ReFixLog("[D3D9Compat] Native Direct3DCreate9 succeeded -> %p", pNative);
+            return pNative;
+        }
+        ReFixLog("[D3D9Compat] Native Direct3DCreate9 returned null or faulted; evaluating D3D9Ex fallback");
+    }
+
+    if (!disableEx) {
+        HMODULE hD3D9 = GetModuleHandleW(L"d3d9.dll");
+        if (!hD3D9) hD3D9 = LoadLibraryW(L"d3d9.dll");
+        if (hD3D9) {
+            auto pCreate9Ex = reinterpret_cast<pfnDirect3DCreate9Ex>(GetProcAddress(hD3D9, "Direct3DCreate9Ex"));
+            if (pCreate9Ex) {
+                void* pEx = nullptr;
+                HRESULT hr = pCreate9Ex(SDKVersion, &pEx);
+                if (SUCCEEDED(hr) && pEx) {
+                    ReFixLog("[D3D9Compat] Direct3DCreate9 upgraded to Direct3DCreate9Ex -> %p", pEx);
+                    return pEx;
+                }
+            }
+        }
+    }
+
+    if (g_origDirect3DCreate9) {
+        return SafeCallDirect3DCreate9(g_origDirect3DCreate9, SDKVersion);
+    }
+    return nullptr;
+}
+
+static void HookD3D9InModuleIAT(HMODULE hMod) {
+    if (!hMod) return;
+    __try {
+        auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(hMod);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+        if (dos->e_lfanew <= 0 || dos->e_lfanew > 0x10000000) return;
+        
+        auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>((uintptr_t)hMod + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+        
+        auto importDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (importDir.VirtualAddress == 0 || importDir.Size == 0) return;
+        
+        auto desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>((uintptr_t)hMod + importDir.VirtualAddress);
+        for (; desc->Name != 0; ++desc) {
+            const char* modName = reinterpret_cast<const char*>((uintptr_t)hMod + desc->Name);
+            if (_stricmp(modName, "d3d9.dll") == 0) {
+                if (desc->FirstThunk == 0) break;
+                auto thunk = reinterpret_cast<IMAGE_THUNK_DATA*>((uintptr_t)hMod + desc->FirstThunk);
+                auto origThunk = desc->OriginalFirstThunk ? 
+                    reinterpret_cast<IMAGE_THUNK_DATA*>((uintptr_t)hMod + desc->OriginalFirstThunk) : nullptr;
+                
+                HMODULE hD3D9 = GetModuleHandleW(L"d3d9.dll");
+                void* pRealFunc = hD3D9 ? reinterpret_cast<void*>(GetProcAddress(hD3D9, "Direct3DCreate9")) : nullptr;
+
+                for (; thunk->u1.Function != 0; ++thunk) {
+                    bool match = false;
+                    if (origThunk) {
+                        if (!IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal)) {
+                            auto importByName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>((uintptr_t)hMod + origThunk->u1.AddressOfData);
+                            if (strcmp(reinterpret_cast<const char*>(importByName->Name), "Direct3DCreate9") == 0) {
+                                match = true;
+                            }
+                        }
+                        ++origThunk;
+                    } else if (pRealFunc && thunk->u1.Function == reinterpret_cast<uintptr_t>(pRealFunc)) {
+                        match = true;
+                    }
+
+                    if (match) {
+                        DWORD oldProtect;
+                        if (VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
+                            if (!g_origDirect3DCreate9) {
+                                g_origDirect3DCreate9 = reinterpret_cast<pfnDirect3DCreate9>(thunk->u1.Function);
+                            }
+                            thunk->u1.Function = (uintptr_t)&Hooked_Direct3DCreate9;
+                            VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
+                            ReFixLog("[D3D9Compat] IAT hook installed for Direct3DCreate9 in module %p (orig=%p)", hMod, g_origDirect3DCreate9);
+                        }
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReFixLog("[D3D9Compat] Exception caught during IAT traversal in module %p", hMod);
+    }
+}
+
+static void InstallD3D9CompatHook() {
+    if (s_d3d9HookInstalled.exchange(true)) return;
+    HookD3D9InModuleIAT(GetModuleHandleW(NULL));
+}
+
 static std::atomic<bool> s_refixInitializedPost{ false };
 
 static void ReFixInitializePost(bool success) {
     if (!success) return;
     if (s_refixInitializedPost.exchange(true)) return;
     
+    InstallD3D9CompatHook();
     g_steamInitTick = GetTickCount();
     CapturePersonaName();
     TriggerSyntheticRelayCallback();
@@ -7440,6 +7587,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_hSelfModule = hModule;
             DisableThreadLibraryCalls(hModule);
             ApplySteamEnv();
+            InstallD3D9CompatHook();
             if (!ReFix::NetworkModeManager::IsOnline()) {
                 InitializeLanForwardTable();
 #if REFIX_LAN_EDITION

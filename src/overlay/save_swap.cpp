@@ -697,6 +697,44 @@ void WaitForProfileGate() {
 
 namespace {
 
+static void PatchPlayerConfigXml(const std::wstring& filePath, const std::string& personaName) {
+    std::ifstream in(filePath, std::ios::binary);
+    if (!in.is_open()) return;
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+
+    std::string safeName;
+    for (char c : personaName) {
+        if (c == '&') safeName += "&amp;";
+        else if (c == '"') safeName += "&quot;";
+        else if (c == '<') safeName += "&lt;";
+        else if (c == '>') safeName += "&gt;";
+        else safeName += c;
+    }
+
+    size_t playerPos = content.find("<player");
+    if (playerPos == std::string::npos) playerPos = content.find("<Player");
+    if (playerPos != std::string::npos) {
+        size_t namePos = content.find("name=\"", playerPos);
+        if (namePos != std::string::npos) {
+            size_t tagEnd = content.find(">", playerPos);
+            if (namePos < tagEnd) {
+                size_t valStart = namePos + 6;
+                size_t valEnd = content.find("\"", valStart);
+                if (valEnd != std::string::npos && valEnd <= tagEnd) {
+                    content.replace(valStart, valEnd - valStart, safeName);
+                    std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+                    if (out.is_open()) {
+                        out.write(content.data(), content.size());
+                    }
+                    ReFixLog("[Saves] Patched player config XML: '%s' name set to '%s'",
+                             ToUtf8(filePath).c_str(), safeName.c_str());
+                }
+            }
+        }
+    }
+}
+
 bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
     if (!originalPath || !*originalPath) return false;
     std::wstring s = originalPath;
@@ -707,6 +745,12 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
     }
     for (auto& c : s) {
         if (c == L'/') c = L'\\';
+    }
+
+    wchar_t fullPath[MAX_PATH * 2] = {};
+    DWORD fullLen = GetFullPathNameW(s.c_str(), _countof(fullPath), fullPath, nullptr);
+    if (fullLen > 0 && fullLen < _countof(fullPath)) {
+        s = fullPath;
     }
 
     // 1. Fast path: check already registered rules
@@ -788,6 +832,85 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
 
                 std::wstring rest = s.substr(livePrefix.size());
                 out = (hasLong ? L"\\\\?\\" : L"") + stashPrefix + rest;
+                return true;
+            }
+        }
+    }
+
+    // 3. Game root directory check for secondary instances / guest profiles (Barotrauma, etc.)
+    static std::wstring s_gameDir = []() {
+        wchar_t buf[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        wchar_t* lastSlash = wcsrchr(buf, L'\\');
+        if (lastSlash) *lastSlash = L'\0';
+        return NormalizePath(buf);
+    }();
+
+    if (!s_gameDir.empty() && s.size() > s_gameDir.size() &&
+        _wcsnicmp(s.c_str(), s_gameDir.c_str(), s_gameDir.size()) == 0 && s[s_gameDir.size()] == L'\\') {
+        std::wstring rel = s.substr(s_gameDir.size() + 1);
+        bool isCandidate = false;
+        if (_wcsicmp(rel.c_str(), L"config_player.xml") == 0 ||
+            _wcsicmp(rel.c_str(), L"creature_metrics.xml") == 0 ||
+            _wcsicmp(rel.c_str(), L"local_save.txt") == 0 ||
+            _wcsicmp(rel.c_str(), L"userdata.sav") == 0 ||
+            _wcsnicmp(rel.c_str(), L"save\\", 5) == 0 ||
+            _wcsnicmp(rel.c_str(), L"saves\\", 6) == 0 ||
+            _wcsnicmp(rel.c_str(), L"userdata\\", 9) == 0) {
+            isCandidate = true;
+        }
+
+        if (isCandidate) {
+            wchar_t slotBuf[16] = {};
+            int instanceSlot = 0;
+            if (GetEnvironmentVariableW(L"REFIX_INSTANCE_SLOT", slotBuf, 16) > 0) {
+                instanceSlot = wcstol(slotBuf, nullptr, 10);
+            }
+
+            std::wstring profileId = g_activeProfileId;
+            if (profileId.empty()) profileId = ReFixOverlay::ActiveProfileId();
+            if (profileId.empty()) {
+                wchar_t envId[64] = {};
+                if (GetEnvironmentVariableW(L"REFIX_PROFILE_ID", envId, 64) > 0) profileId = envId;
+            }
+            if (profileId.empty() && instanceSlot > 0) {
+                profileId = L"Guest_Slot" + std::to_wstring(instanceSlot);
+            }
+
+            bool shouldRedirect = (instanceSlot > 0);
+            if (!shouldRedirect && !profileId.empty() && profileId != L"_pc") {
+                auto prof = profiles::Load(profileId);
+                if (prof && (prof->guest || !prof->nativeSaves)) {
+                    shouldRedirect = true;
+                }
+            }
+
+            if (shouldRedirect && !profileId.empty()) {
+                std::wstring stashFile = profiles::ProfileDir(profileId) + L"\\Saves\\Game\\" + rel;
+                size_t slash = stashFile.rfind(L'\\');
+                if (slash != std::wstring::npos) {
+                    EnsureDir(stashFile.substr(0, slash));
+                }
+
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_redirectMutex);
+                    DWORD attr = GetFileAttributesW(stashFile.c_str());
+                    if (attr == INVALID_FILE_ATTRIBUTES) {
+                        if (GetFileAttributesW(s.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                            CopyFileW(s.c_str(), stashFile.c_str(), FALSE);
+                        }
+                        if (_wcsicmp(rel.c_str(), L"config_player.xml") == 0) {
+                            std::string persona = "Invitado";
+                            auto prof = profiles::Load(profileId);
+                            if (prof && !prof->name.empty()) {
+                                persona = ToUtf8(prof->name);
+                            }
+                            PatchPlayerConfigXml(stashFile, persona);
+                        }
+                    }
+                }
+
+                out = (hasLong ? L"\\\\?\\" : L"") + stashFile;
                 return true;
             }
         }

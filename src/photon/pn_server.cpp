@@ -381,9 +381,9 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
     peer.actor = number;
     if (!room.master) SetMaster(room, number);
 
-    Respond(peer, op, 0, { { P_ACTOR_NR, Int(number) }, { P_PLAYER_PROPS, ActorTable(room) },
-                           { P_GAME_PROPS, room.props.Encode() }, { P_ACTOR_LIST, IntArray(ActorNumbers(room)) },
-                           { P_MASTER_CLIENT, Int(room.master) } });
+    Respond(peer, op, 0, { { P_ROOM_NAME, Str(room.name) }, { P_ACTOR_NR, Int(number) },
+                           { P_PLAYER_PROPS, ActorTable(room) }, { P_GAME_PROPS, room.props.Encode() },
+                           { P_ACTOR_LIST, IntArray(ActorNumbers(room)) }, { P_MASTER_CLIENT, Int(room.master) } });
     if (!(room.flags & RF_SUPPRESS_ROOM_EVENTS)) {
         Params join = { { P_ACTOR_NR, Int(number) }, { P_PLAYER_PROPS, room.actors[number].props.Encode() },
                         { P_ACTOR_LIST, IntArray(ActorNumbers(room)) } };
