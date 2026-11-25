@@ -1,17 +1,21 @@
 # ReFix v2.6.2
 
-## Summary of Changes
+## Summary of Changes Since v2.6.1
 
-ReFix v2.6.2 resolves Photon Realtime room initialization timeouts and improves P2P lobby discovery for friends.
+ReFix v2.6.2 improves multiplayer lobby discovery and joining across Photon and Steamworks games, fixes multi-instance name conflicts, adds live display and resolution management across games, and verifies Authenticode signatures across all binaries.
 
 ---
 
-### 1. Generic Photon Realtime Event Routing (Resolves #40)
-- **Strict Protocol Discrimination**: Differentiated Photon Fusion protocol messages from generic Photon Realtime / PUN 2 custom room events (Event Code 100). Validates protocol versions and modes so non-Fusion room setup packets are never swallowed.
-- **Actor 0 Multiplexing**: Implemented generic routing for events targeted to Actor 0. Non-master client events route directly to the authoritative room master, while room master broadcasts deliver to all peers in the room.
+### Multiplayer, Lobbies & Multi-Instance
+- **Generic Steamworks Lobby & P2P Fixes:** Fixed friend and public lobby discovery (`GetFriendGamePlayed`, `RequestLobbyData`), separate `LobbyDataUpdate_t` deduplication across standard and `ManualDispatch` callback queues, deferred `JoinLobby` call results, `SteamNetworkingMessagesSessionRequest_t` delivery, and expanded lobby metadata string buffers.
+- **Photon Realtime & Friend Rooms (#40):** Fixed Photon Realtime room setup event routing (`Actor 0` routing and Fusion vs. Realtime/PUN 2 discrimination), added ENet keepalive pings, and surfaced friends' Photon rooms in public lobby lists via Steam Rich Presence.
+- **Multi-Instance Profile Isolation:** Updates game player XML configs (`config_player.xml`) with each instance's ReFix profile or guest name so multiple instances on one PC no longer collide with duplicate host names.
+- **SteamInput & Proxy Compatibility:** Added `ISteamInput` interface support, missing legacy `ISteamFriends` method stubs, and updated `winhttp.dll` proxy forwarding.
 
-### 2. Friend Room Discovery in Public Lobbies
-- **Rich Presence Synthesis**: Integrated Steam Rich Presence (`refix_photon_room` and `connect`) into the public lobby list (`OpGetGameList` / opcode 217). Friends hosting games are now immediately visible and joinable in game browser lists even prior to active P2P broadcast discovery.
+### Overlay & Display Settings
+- **Live Display & Resolution Settings:** Added OS-supported resolution detection (Windows and Wine/Proton) for Windowed, Fullscreen, and Fullscreen Windowed modes with a 15-second Keep / Auto-Revert confirmation modal.
+- **Cross-Game Persistence:** Automatically applies your saved display mode and resolution whenever you launch any game, including re-checking right after game startup.
+- **Generic Overlay Invite Detection:** Automatically detects when a game does not implement Steam overlay invite/join callbacks and prompts you to join from the in-game lobby list.
 
-### 3. Binary Security & Code Signing
-- **Authenticode Signatures**: All proxy DLLs (`winhttp.dll`, `winmm.dll`, `steam_api64.dll`, `steam_api.dll`, `EOSSDK-Win64-Shipping.dll`, `RedboneEOS.dll`) and executables across all configurations are signed with Authenticode certificates and RFC 3161 timestamps to prevent antivirus heuristic false positives.
+### Security & Binaries
+- **Authenticode Signing & Metadata:** Updated `winhttp.dll` to v2.6.2.0, fixed signature status verification, and signed all 24 distribution binaries across `lan`, `lan_offline`, `online`, and `x86`/`x64`.
