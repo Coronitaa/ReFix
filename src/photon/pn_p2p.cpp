@@ -72,6 +72,8 @@ struct Forwarder {
 };
 
 std::atomic<bool> g_started{ false };
+std::atomic<bool> g_stopRequested{ false };
+HANDLE g_thread = nullptr;
 std::atomic<bool> g_photonActive{ false };  // true once the game actually uses Photon (hit our
                                             // loopback listeners or hosts a room); gates all background
                                             // Steam calls so non-Photon games never touch Steamworks here.
@@ -811,7 +813,7 @@ void ConfigureSteamNetworking() {
     // Photon clients give up after ~10 s; let the Steam session itself ride out a host's unstable link longer.
     config.timeoutInitialMs = GetPrivateProfileIntA("Photon", "SessionConnectTimeoutMs", 20000, ini.c_str());
     config.timeoutConnectedMs = GetPrivateProfileIntA("Photon", "SessionTimeoutMs", 30000, ini.c_str());
-    while (!ReFixSteamFlat::ConfigureNetworking(config)) Sleep(200);
+    while (!g_stopRequested.load(std::memory_order_relaxed) && !ReFixSteamFlat::ConfigureNetworking(config)) Sleep(50);
 }
 
 void StartPumpTimer() {
@@ -828,7 +830,8 @@ void StartPumpTimer() {
 }
 
 DWORD WINAPI Thread(LPVOID) {
-    while (!(g_self = ReFixSteamFlat::LocalSteamID())) Sleep(200); // wait for Steam
+    while (!g_stopRequested.load(std::memory_order_relaxed) && !(g_self = ReFixSteamFlat::LocalSteamID())) Sleep(50); // wait for Steam
+    if (g_stopRequested.load(std::memory_order_relaxed)) return 0;
     PnServer::Environment env;
     env.localUserId = std::to_string(g_self);
     env.masterAddress = g_masterAddress;
@@ -878,7 +881,8 @@ DWORD WINAPI Thread(LPVOID) {
     ReFixSteamFlat::FriendsWithRichPresence("refix_photon_voice");
     Log("[Photon] P2P emulator ready (self %llu, master %s, game %s, Steam channel %d)", (unsigned long long)g_self,
         g_masterAddress.c_str(), g_gameAddress.c_str(), g_channel);
-    for (;;) Pump();
+    while (!g_stopRequested.load(std::memory_order_relaxed)) Pump();
+    return 0;
 }
 
 bool OpenListeners(const uint16_t* ports, size_t count, PnServer::Role role, std::string* firstAddress) {
@@ -953,10 +957,10 @@ bool DetectPhotonStack() {
     size_t dot = stem.find_last_of('.');
     if (dot != std::string::npos) stem.resize(dot);
     const std::string data = stem + "_Data\\";
-    for (const char* dll : { "Photon3Unity3D.dll", "PhotonRealtime.dll", "Fusion.Runtime.dll", "PhotonUnityNetworking.dll" })
+    for (const char* dll : { "Photon3Unity3D.dll", "PhotonRealtime.dll", "Fusion.Runtime.dll", "PhotonUnityNetworking.dll", "PhotonDeterministic.dll" })
         if (FileExists(data + "Managed\\" + dll)) return true;
     return FileContains(data + "il2cpp_data\\Metadata\\global-metadata.dat",
-                        { "ExitGames.Client.Photon", "Photon.Realtime", "Fusion.NetworkRunner" });
+                        { "ExitGames.Client.Photon", "Photon.Realtime", "Fusion.NetworkRunner", "Photon.Deterministic" });
 }
 #endif
 
@@ -964,6 +968,7 @@ bool DetectPhotonStack() {
 
 void Initialize() {
     if (g_started.exchange(true)) return;
+    g_stopRequested.store(false, std::memory_order_relaxed);
     std::string ini = IniPath();
     char backend[64] = { 0 };
     // Off unless ReFix.ini selects it: deploy_helper writes Backend=ReFixCloud only for games where it detected
@@ -995,8 +1000,37 @@ void Initialize() {
     const std::string listenAddress = AddressString(g_listenIp, 0);
     PnDns::Install(Split(suffixes, ';'), listenAddress.substr(0, listenAddress.find(':')));
     if (g_instance) Log("[Photon] Another instance holds 127.0.0.1: this one listens on %s", g_masterAddress.c_str());
-    HANDLE h = CreateThread(nullptr, 0, Thread, nullptr, 0, nullptr);
-    if (h) CloseHandle(h);
+    g_thread = CreateThread(nullptr, 0, Thread, nullptr, 0, nullptr);
+}
+
+void Shutdown() {
+    if (!g_started.exchange(false)) return;
+    g_stopRequested.store(true, std::memory_order_relaxed);
+    if (g_socketEvent != WSA_INVALID_EVENT) WSASetEvent(g_socketEvent);
+    bool joined = true;
+    if (g_thread) {
+        joined = (WaitForSingleObject(g_thread, 300) == WAIT_OBJECT_0);
+        CloseHandle(g_thread);
+        g_thread = nullptr;
+    }
+    if (joined) {
+        if (g_pumpTimer) {
+            CancelWaitableTimer(g_pumpTimer);
+            CloseHandle(g_pumpTimer);
+            g_pumpTimer = nullptr;
+        }
+        CloseListeners();
+        for (auto& [_, f] : g_forwarders) {
+            for (SOCKET s : f.sockets) closesocket(s);
+        }
+        g_forwarders.clear();
+        g_connections.clear();
+        g_emulator.reset();
+        if (g_socketEvent != WSA_INVALID_EVENT) {
+            WSACloseEvent(g_socketEvent);
+            g_socketEvent = WSA_INVALID_EVENT;
+        }
+    }
 }
 
 void RegisterRoomHost(const std::string& roomName, uint64_t hostSteamID) {

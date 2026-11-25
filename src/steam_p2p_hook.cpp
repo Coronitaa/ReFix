@@ -1485,6 +1485,8 @@ uint16_t GetBoundGamePort() {
     return 0;
 }
 
+static std::vector<void*> g_hookTargets;
+
 void Install(void* hSteamOriginal) {
     if (hSteamOriginal) g_hSteamOriginal = hSteamOriginal;
     if (g_hooksInstalled) return;
@@ -1505,109 +1507,29 @@ void Install(void* hSteamOriginal) {
         return;
     }
 
-    // Hook sendto
-    {
-        void* target = GetProcAddress(hWs2, "sendto");
-        if (MH_CreateHook(target, (void*)Hook_sendto, (void**)&g_orig_sendto) == MH_OK)
+    g_hookTargets.clear();
+    auto installHook = [&](const char* name, void* detour, void** orig) {
+        void* target = GetProcAddress(hWs2, name);
+        if (target && MH_CreateHook(target, detour, orig) == MH_OK) {
             MH_EnableHook(target);
-        Log("sendto hook: %s", g_orig_sendto ? "OK" : "FAIL");
-    }
+            g_hookTargets.push_back(target);
+        }
+        Log("%s hook: %s", name, *orig ? "OK" : "FAIL");
+    };
 
-    // Hook recvfrom
-    {
-        void* target = GetProcAddress(hWs2, "recvfrom");
-        if (MH_CreateHook(target, (void*)Hook_recvfrom, (void**)&g_orig_recvfrom) == MH_OK)
-            MH_EnableHook(target);
-        Log("recvfrom hook: %s", g_orig_recvfrom ? "OK" : "FAIL");
-    }
-
-    // Hook connect
-    {
-        void* target = GetProcAddress(hWs2, "connect");
-        if (MH_CreateHook(target, (void*)Hook_connect, (void**)&g_orig_connect) == MH_OK)
-            MH_EnableHook(target);
-        Log("connect hook: %s", g_orig_connect ? "OK" : "FAIL");
-    }
-
-    // Hook select
-    {
-        void* target = GetProcAddress(hWs2, "select");
-        if (MH_CreateHook(target, (void*)Hook_select, (void**)&g_orig_select) == MH_OK)
-            MH_EnableHook(target);
-        Log("select hook: %s", g_orig_select ? "OK" : "FAIL");
-    }
-
-    // Hook bind
-    {
-        void* target = GetProcAddress(hWs2, "bind");
-        if (MH_CreateHook(target, (void*)Hook_bind, (void**)&g_orig_bind) == MH_OK)
-            MH_EnableHook(target);
-        Log("bind hook: %s", g_orig_bind ? "OK" : "FAIL");
-    }
-
-    // Hook closesocket
-    {
-        void* target = GetProcAddress(hWs2, "closesocket");
-        if (MH_CreateHook(target, (void*)Hook_closesocket, (void**)&g_orig_closesocket) == MH_OK)
-            MH_EnableHook(target);
-        Log("closesocket hook: %s", g_orig_closesocket ? "OK" : "FAIL");
-    }
-
-    // Hook send
-    {
-        void* target = GetProcAddress(hWs2, "send");
-        if (MH_CreateHook(target, (void*)Hook_send, (void**)&g_orig_send) == MH_OK)
-            MH_EnableHook(target);
-        Log("send hook: %s", g_orig_send ? "OK" : "FAIL");
-    }
-
-    // Hook recv
-    {
-        void* target = GetProcAddress(hWs2, "recv");
-        if (MH_CreateHook(target, (void*)Hook_recv, (void**)&g_orig_recv) == MH_OK)
-            MH_EnableHook(target);
-        Log("recv hook: %s", g_orig_recv ? "OK" : "FAIL");
-    }
-
-    // Hook WSASendTo
-    {
-        void* target = GetProcAddress(hWs2, "WSASendTo");
-        if (MH_CreateHook(target, (void*)Hook_WSASendTo, (void**)&g_orig_WSASendTo) == MH_OK)
-            MH_EnableHook(target);
-        Log("WSASendTo hook: %s", g_orig_WSASendTo ? "OK" : "FAIL");
-    }
-
-    // Hook WSARecvFrom
-    {
-        void* target = GetProcAddress(hWs2, "WSARecvFrom");
-        if (MH_CreateHook(target, (void*)Hook_WSARecvFrom, (void**)&g_orig_WSARecvFrom) == MH_OK)
-            MH_EnableHook(target);
-        Log("WSARecvFrom hook: %s", g_orig_WSARecvFrom ? "OK" : "FAIL");
-    }
-
-    // Hook WSAConnect
-    {
-        void* target = GetProcAddress(hWs2, "WSAConnect");
-        if (MH_CreateHook(target, (void*)Hook_WSAConnect, (void**)&g_orig_WSAConnect) == MH_OK)
-            MH_EnableHook(target);
-        Log("WSAConnect hook: %s", g_orig_WSAConnect ? "OK" : "FAIL");
-    }
-
-    // Hook WSASend
-    {
-        void* target = GetProcAddress(hWs2, "WSASend");
-        if (MH_CreateHook(target, (void*)Hook_WSASend, (void**)&g_orig_WSASend) == MH_OK)
-            MH_EnableHook(target);
-        Log("WSASend hook: %s", g_orig_WSASend ? "OK" : "FAIL");
-    }
-
-    // Hook WSARecv
-    {
-        void* target = GetProcAddress(hWs2, "WSARecv");
-        if (MH_CreateHook(target, (void*)Hook_WSARecv, (void**)&g_orig_WSARecv) == MH_OK)
-            MH_EnableHook(target);
-        Log("WSARecv hook: %s", g_orig_WSARecv ? "OK" : "FAIL");
-    }
+    installHook("sendto", (void*)Hook_sendto, (void**)&g_orig_sendto);
+    installHook("recvfrom", (void*)Hook_recvfrom, (void**)&g_orig_recvfrom);
+    installHook("connect", (void*)Hook_connect, (void**)&g_orig_connect);
+    installHook("select", (void*)Hook_select, (void**)&g_orig_select);
+    installHook("bind", (void*)Hook_bind, (void**)&g_orig_bind);
+    installHook("closesocket", (void*)Hook_closesocket, (void**)&g_orig_closesocket);
+    installHook("send", (void*)Hook_send, (void**)&g_orig_send);
+    installHook("recv", (void*)Hook_recv, (void**)&g_orig_recv);
+    installHook("WSASendTo", (void*)Hook_WSASendTo, (void**)&g_orig_WSASendTo);
+    installHook("WSARecvFrom", (void*)Hook_WSARecvFrom, (void**)&g_orig_WSARecvFrom);
+    installHook("WSAConnect", (void*)Hook_WSAConnect, (void**)&g_orig_WSAConnect);
+    installHook("WSASend", (void*)Hook_WSASend, (void**)&g_orig_WSASend);
+    installHook("WSARecv", (void*)Hook_WSARecv, (void**)&g_orig_WSARecv);
 
     g_hooksInstalled = true;
 
@@ -1632,8 +1554,12 @@ void Uninstall() {
         g_pumpThread = nullptr;
     }
 
-    MH_DisableHook(MH_ALL_HOOKS);
-    MH_Uninitialize();
+    // Disable only our Winsock hooks; other subsystems share MinHook in this process.
+    for (void* target : g_hookTargets) {
+        MH_DisableHook(target);
+        MH_RemoveHook(target);
+    }
+    g_hookTargets.clear();
 
     g_pSteamNetworking = nullptr;
     g_hooksInstalled = false;

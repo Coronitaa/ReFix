@@ -121,6 +121,7 @@ private:
         int32_t fusionSharedConfigActor = 0;                // actor asked for the NetworkProjectConfig
         bool fusionSharedConfigSent = false;
         bool fusionSharedRunning = false;
+        bool quantumWarned = false;
         std::map<int32_t, Actor> actors;
         std::vector<CachedEvent> cache;
     };

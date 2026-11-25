@@ -53,6 +53,7 @@ struct Values {
     DisplayMode displayMode = DisplayMode::FullscreenWindowed;
     int windowWidth = 1920;
     int windowHeight = 1080;
+    bool perGameDisplay = false;     // keep display mode/resolution only for the current game
 };
 
 struct ResolutionOption {

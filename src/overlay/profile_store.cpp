@@ -501,7 +501,7 @@ std::vector<Profile> ForGame(const std::vector<Profile>& all, const std::wstring
 std::vector<Profile> FromOtherGames(const std::vector<Profile>& all, const std::wstring& gameKey) {
     std::vector<Profile> out;
     for (const Profile& p : all) {
-        if (!UsedIn(p, gameKey)) out.push_back(p);
+        if (!UsedIn(p, gameKey) && !IsSteamProfile(p)) out.push_back(p);
     }
     return out;
 }

@@ -661,11 +661,12 @@ namespace UnrealSteamEmu {
             }
         }
 
-        // ReFix LAN profile (IdentityMode=auto, no SteamID forced through the environment): the profile's
-        // SteamID and name replace the machine identity, and the instance slot no longer offsets the ID
-        // because every instance of a game holds a different profile.
+        // ReFix LAN profile (IdentityMode=auto): resolve when no SteamID was forced via environment,
+        // or whenever REFIX_PROFILE_ID explicitly requests a profile (e.g. profile switch restart).
+        char envProfileId[64] = { 0 };
+        bool hasExplicitProfile = (GetEnvironmentVariableA("REFIX_PROFILE_ID", envProfileId, sizeof(envProfileId)) > 0 && envProfileId[0] != '\0');
         bool profileIdentity = false;
-        if (!envSid[0] && bAutoIdentity) {
+        if (bAutoIdentity && (!envSid[0] || hasExplicitProfile)) {
             ReFixOverlay::Identity profile;
             if (ReFixOverlay::ResolveIdentity(g_appID, iniPath, profile) && profile.steamId != 0) {
                 profileIdentity = true;

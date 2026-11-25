@@ -14,6 +14,9 @@ namespace ReFixPhotonP2P {
     // Call once Steam is initialized. Idempotent; does nothing when disabled in ReFix.ini.
     void Initialize();
 
+    // Signals the emulator thread to stop and closes its sockets/handles cleanly.
+    void Shutdown();
+
     // Directly registers the SteamID hosting a room name (and its voice room counterpart).
     void RegisterRoomHost(const std::string& roomName, uint64_t hostSteamID);
 }

@@ -236,33 +236,46 @@ static void LoadAndApplyConfig() {
     GetPrivateProfileStringA("Steam", "Language", "english", language, sizeof(language), iniPath.c_str());
     SetEnvironmentVariableA("SteamLanguage", language);
 
-    char playerName[256] = "Player";
-    GetPrivateProfileStringA("User", "Name", "", playerName, sizeof(playerName), iniPath.c_str());
-    if (playerName[0] == '\0') {
-        GetPrivateProfileStringA("User", "PersonaName", "Player", playerName, sizeof(playerName), iniPath.c_str());
+    // Respect [User] IdentityMode=auto and active ReFix Overlay so we do not mask profile identities
+    // with machine-generated SteamIDs or default PersonaNames before steam_api initializes.
+    char identityMode[32] = "auto";
+    GetPrivateProfileStringA("User", "IdentityMode", "auto", identityMode, sizeof(identityMode), iniPath.c_str());
+    char overlayEnabledBuf[32] = "true";
+    GetPrivateProfileStringA("Overlay", "Enabled", "true", overlayEnabledBuf, sizeof(overlayEnabledBuf), iniPath.c_str());
+    char envProfileId[64] = "";
+    const bool hasProfileEnv = (GetEnvironmentVariableA("REFIX_PROFILE_ID", envProfileId, sizeof(envProfileId)) > 0 && envProfileId[0] != '\0');
+    const bool fixedIdentity = (_stricmp(identityMode, "fixed") == 0);
+    const bool overlayEnabled = (_stricmp(overlayEnabledBuf, "true") == 0 || strcmp(overlayEnabledBuf, "1") == 0);
+
+    if (!hasProfileEnv && (fixedIdentity || !overlayEnabled)) {
+        char playerName[256] = "Player";
+        GetPrivateProfileStringA("User", "Name", "", playerName, sizeof(playerName), iniPath.c_str());
+        if (playerName[0] == '\0') {
+            GetPrivateProfileStringA("User", "PersonaName", "Player", playerName, sizeof(playerName), iniPath.c_str());
+        }
+        SetEnvironmentVariableA("REFIX_USERNAME", playerName);
+        SetEnvironmentVariableA("REFIX_USER_NAME", playerName);
+        SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", playerName);
+        SetEnvironmentVariableA("SteamPersonaName", playerName);
+
+        char autoSteamIdStr[64] = "true";
+        GetPrivateProfileStringA("User", "AutoGenerateSteamId", "true", autoSteamIdStr, sizeof(autoSteamIdStr), iniPath.c_str());
+        bool autoSteamId = (_stricmp(autoSteamIdStr, "true") == 0 || strcmp(autoSteamIdStr, "1") == 0);
+
+        char steamIdBuf[64] = "";
+        GetPrivateProfileStringA("User", "SteamId", "", steamIdBuf, sizeof(steamIdBuf), iniPath.c_str());
+        std::string finalSteamId = steamIdBuf;
+
+        if (autoSteamId || finalSteamId.empty() || finalSteamId == "0") {
+            uint64_t uniqueSid = GenerateMachineUniqueSteamId();
+            char sidStr[64];
+            sprintf_s(sidStr, sizeof(sidStr), "%llu", uniqueSid);
+            finalSteamId = sidStr;
+        }
+        SetEnvironmentVariableA("REFIX_STEAMID", finalSteamId.c_str());
+        SetEnvironmentVariableA("REFIX_STEAM_ID", finalSteamId.c_str());
+        SetEnvironmentVariableA("SteamID", finalSteamId.c_str());
     }
-    SetEnvironmentVariableA("REFIX_USERNAME", playerName);
-    SetEnvironmentVariableA("REFIX_USER_NAME", playerName);
-    SetEnvironmentVariableA("REFIX_STEAM_PERSONA_NAME", playerName);
-    SetEnvironmentVariableA("SteamPersonaName", playerName);
-
-    char autoSteamIdStr[64] = "true";
-    GetPrivateProfileStringA("User", "AutoGenerateSteamId", "true", autoSteamIdStr, sizeof(autoSteamIdStr), iniPath.c_str());
-    bool autoSteamId = (_stricmp(autoSteamIdStr, "true") == 0 || strcmp(autoSteamIdStr, "1") == 0);
-
-    char steamIdBuf[64] = "";
-    GetPrivateProfileStringA("User", "SteamId", "", steamIdBuf, sizeof(steamIdBuf), iniPath.c_str());
-    std::string finalSteamId = steamIdBuf;
-
-    if (autoSteamId || finalSteamId.empty() || finalSteamId == "0") {
-        uint64_t uniqueSid = GenerateMachineUniqueSteamId();
-        char sidStr[64];
-        sprintf_s(sidStr, sizeof(sidStr), "%llu", uniqueSid);
-        finalSteamId = sidStr;
-    }
-    SetEnvironmentVariableA("REFIX_STEAMID", finalSteamId.c_str());
-    SetEnvironmentVariableA("REFIX_STEAM_ID", finalSteamId.c_str());
-    SetEnvironmentVariableA("SteamID", finalSteamId.c_str());
 
     char extraBuf[1024];
     GetPrivateProfileStringA("Paths", "ExtraDLLs", "", extraBuf, sizeof(extraBuf), iniPath.c_str());

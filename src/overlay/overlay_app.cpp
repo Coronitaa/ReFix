@@ -705,6 +705,11 @@ void App::DeferProfile(const std::wstring& id) {
 void App::RestartWithProfile(const std::wstring& id) {
     profiles::SetLastProfileId(id, profiles::GameKey());
     RestoreLaunchEnvironment();
+    // Clear identity overrides so the newly chosen profile takes effect even if a proxy DLL populated them earlier.
+    for (const wchar_t* key : { L"REFIX_STEAM_ID", L"REFIX_STEAMID", L"SteamID", L"SteamId",
+                                L"REFIX_STEAM_PERSONA_NAME", L"SteamPersonaName", L"REFIX_USERNAME", L"REFIX_USER_NAME" }) {
+        SetEnvironmentVariableW(key, nullptr);
+    }
     SetEnvironmentVariableW(L"REFIX_PROFILE_ID", id.c_str());
     SetEnvironmentVariableW(L"REFIX_RESTART_PID", std::to_wstring(GetCurrentProcessId()).c_str());
     wchar_t exe[MAX_PATH] = {};
@@ -746,11 +751,13 @@ void App::RestartGame() {
 
 void App::ApplyDisplaySettingsWithConfirm(const settings::Values& newVals) {
     displayConfirm_.previous = settings::Get();
+    displayConfirm_.previousCustomized = settings::HasSavedDisplay();
     displayConfirm_.pending = newVals;
     const HWND gw = host::CurrentGame().hwnd;
     if (settings::ApplyDisplayToWindow(gw, newVals)) {
-        ReFixLog("[Overlay] Applied display mode=%d (%dx%d) to HWND %p; awaiting confirmation",
-                 (int)newVals.displayMode, newVals.windowWidth, newVals.windowHeight, (void*)gw);
+        ReFixLog("[Overlay] Applied display mode=%d (%dx%d, perGame=%d) to HWND %p; awaiting confirmation",
+                 (int)newVals.displayMode, newVals.windowWidth, newVals.windowHeight,
+                 newVals.perGameDisplay ? 1 : 0, (void*)gw);
     }
     displayConfirm_.active = true;
     displayConfirm_.deadlineMs = GetTickCount64() + DisplayConfirm::kTimeoutMs;
@@ -759,12 +766,12 @@ void App::ApplyDisplaySettingsWithConfirm(const settings::Values& newVals) {
 
 void App::ConfirmDisplaySettings() {
     if (!displayConfirm_.active) return;
-    settings::MarkDisplayCustomized(true);
     settings::Set(displayConfirm_.pending);
+    settings::MarkDisplayCustomized(true);
     appliedDisplayHwnd_ = host::CurrentGame().hwnd;
     appliedDisplayDone_ = true;
     displayConfirm_.active = false;
-    ReFixLog("[Overlay] Display settings confirmed by user");
+    ReFixLog("[Overlay] Display settings confirmed by user (perGame=%d)", displayConfirm_.pending.perGameDisplay ? 1 : 0);
 }
 
 void App::RevertDisplaySettings() {
@@ -772,6 +779,7 @@ void App::RevertDisplaySettings() {
     const HWND gw = host::CurrentGame().hwnd;
     settings::ApplyDisplayToWindow(gw, displayConfirm_.previous);
     settings::Set(displayConfirm_.previous);
+    settings::MarkDisplayCustomized(displayConfirm_.previousCustomized);
     displayConfirm_.active = false;
     ReFixLog("[Overlay] Reverted display settings to previous mode=%d (%dx%d)",
              (int)displayConfirm_.previous.displayMode,

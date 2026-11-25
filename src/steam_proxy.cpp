@@ -6133,6 +6133,7 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
 #if REFIX_LAN_EDITION
     ReFixOverlay::Shutdown();   // after the stats flush, so the last achievements go up too
 #endif
+    ReFixPhotonP2P::Shutdown();
     SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
     g_hotkeyRunning.store(false, std::memory_order_relaxed);
@@ -7602,10 +7603,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             if (ReFix_ModuleDedupeDetach(hModule, lpReserved != nullptr)) return TRUE;
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
-            SteamP2PHook::Uninstall();
+            // Skip thread waits and MinHook teardown during process termination (OS loader lock).
+            if (lpReserved == nullptr) {
+                SteamP2PHook::Uninstall();
 #if REFIX_LAN_EDITION
-            refix::mods::ModHost::GetInstance().Shutdown();
+                refix::mods::ModHost::GetInstance().Shutdown();
 #endif
+            }
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary
             // during DLL_PROCESS_DETACH. Calling COM/FreeLibrary in DllMain violates loader lock
             // and causes crashes on process exit. OS cleans up process memory safely.

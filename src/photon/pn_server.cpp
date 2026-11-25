@@ -91,6 +91,45 @@ std::string Message(uint8_t type, const Bytes& body) {
     return std::string{ (char)kMagic, (char)type } + body;
 }
 
+bool DetectQuantumStartRequest(const Raw& data, std::string& versionOut) {
+    std::string bytes;
+    if (!AsBytes(data, bytes) || bytes.size() < 8 || (uint8_t)bytes[0] != 0x01) return false;
+    size_t bitPos = 8;
+    auto readBits = [&](int count, uint32_t& out) -> bool {
+        if (bitPos + (size_t)count > bytes.size() * 8) return false;
+        uint32_t v = 0;
+        for (int i = 0; i < count; i++) {
+            uint32_t b = ((uint8_t)bytes[bitPos >> 3] >> (bitPos & 7)) & 1u;
+            v |= (b << i);
+            bitPos++;
+        }
+        out = v;
+        return true;
+    };
+    auto readString = [&](std::string& out) -> bool {
+        uint32_t isNull = 0, len = 0;
+        if (!readBits(1, isNull) || isNull != 0) return false;
+        if (!readBits(16, len) || len == 0 || len > 128) return false;
+        out.resize(len);
+        for (uint32_t i = 0; i < len; i++) {
+            uint32_t ch = 0;
+            if (!readBits(8, ch)) return false;
+            out[i] = (char)ch;
+        }
+        return true;
+    };
+    std::string id, ver;
+    if (!readString(id) || !readString(ver)) return false;
+    int dots = 0;
+    for (char c : ver) {
+        if (c == '.') dots++;
+        else if (c < '0' || c > '9') return false;
+    }
+    if (dots < 2 || ver.empty()) return false;
+    versionOut = ver;
+    return true;
+}
+
 } // namespace
 
 Emulator::Emulator(Environment env) : m_env(std::move(env)) {}
@@ -689,6 +728,16 @@ void Emulator::RaiseEvent(Peer& peer, const Params& params, bool reliable, uint8
     else LogEventSample(peer, code, receivers, targets, params);
     if (code == PnFusion::EV_PROTOCOL && targets.size() == 1 && targets[0] == PnFusion::SERVER_ACTOR) {
         if (HandleFusionProtocol(peer, data)) return;
+        std::string quantumVer;
+        if (DetectQuantumStartRequest(data, quantumVer)) {
+            if (!room.quantumWarned) {
+                room.quantumWarned = true;
+                m_env.log("[Photon] Quantum deterministic protocol (v%s) detected from actor %d: "
+                          "Photon Quantum simulation server plugin is not supported by the local emulator",
+                          quantumVer.c_str(), peer.actor);
+            }
+            return;
+        }
     }
     if (code == PnFusion::EV_DATA && room.fusionShared && targets.size() == 1 && targets[0] == PnFusion::SERVER_ACTOR) {
         std::string packet;
