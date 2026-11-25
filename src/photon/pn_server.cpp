@@ -568,16 +568,13 @@ bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Ra
                 SendQuantumMessage(room, peer.actor, PnQuantum::EV_UNRELIABLE, PnQuantum::BuildRttUpdate(m.rtt), false);
                 break;
             }
-            case PnQuantum::MSG_COMMAND: {
+            case PnQuantum::MSG_COMMAND:
+            case PnQuantum::MSG_SET_PLAYER_DATA: {
                 if (!m.rawSlice.empty()) {
                     for (const auto& [nr, st] : room.quantum.actors) {
                         if (st.started) SendQuantumMessage(room, nr, PnQuantum::EV_PROTOCOL, m.rawSlice, true);
                     }
                 }
-                break;
-            }
-            case PnQuantum::MSG_SET_PLAYER_DATA: {
-                m_env.log("[Photon] Quantum: SetPlayerData from actor %d (%zu bytes)", peer.actor, m.rawSlice.size());
                 break;
             }
             default:
