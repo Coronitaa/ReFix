@@ -283,8 +283,7 @@ bool ParseProtocolPacket(const std::string& buffer, int protoHint, std::vector<P
                 return !out.empty();
             }
         }
-        r.RoundToByte();
-        size_t endByte = r.BitPos() >> 3;
+        size_t endByte = (r.BitPos() + 7) >> 3;
         if (endByte <= buffer.size() && endByte > startByte) {
             m.rawSlice = buffer.substr(startByte, endByte - startByte);
         }
