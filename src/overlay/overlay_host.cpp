@@ -779,7 +779,7 @@ DWORD WINAPI HostThread(LPVOID) {
             if (IsWindowVisible(g_hwnd)) ShowWindow(g_hwnd, SW_HIDE);
         } else {
             if (m == Mode::Overlay || m == Mode::Dialog) SuspendGameRawInput();
-            if (m != Mode::Hidden && m != g_mode) MaybeRescale(gw);
+            if (m != Mode::Hidden) MaybeRescale(gw);
             ApplyMode(m, gw);
         }
         if (g_mode == Mode::Hidden || away) {

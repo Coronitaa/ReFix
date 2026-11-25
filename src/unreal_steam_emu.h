@@ -162,6 +162,7 @@ namespace UnrealSteamEmu {
     // Matchmaking helpers
     uint64_t Matchmaking_CreateLobby(int eLobbyType, int cMaxMembers);
     uint64_t Matchmaking_JoinLobby(uint64_t steamIDLobby);
+    bool HasClientCallback(int iCallback);
     void Matchmaking_LeaveLobby(uint64_t steamIDLobby);
     bool Matchmaking_SetLobbyData(uint64_t steamIDLobby, const char* pchKey, const char* pchValue);
     const char* Matchmaking_GetLobbyData(uint64_t steamIDLobby, const char* pchKey);

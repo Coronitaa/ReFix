@@ -482,6 +482,10 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
                                  [&](const Toast& t) { return t.closing && now - t.closingAt > kToastFadeMs; }),
                   toasts_.end());
 
+    if (displayConfirm_.active && now >= displayConfirm_.deadlineMs) {
+        RevertDisplaySettings();
+    }
+
     {
         refix::IRefixServices& svc = refix::GetRefixServices();
         ImGui::GetAllocatorFunctions(&svc.imgui_alloc, &svc.imgui_free, &svc.imgui_alloc_user_data);
@@ -544,7 +548,15 @@ void App::Join(const net::RemotePlayer& p) {
         cb.m_steamIDLobby = CSteamID(targetLobbyId);
         cb.m_steamIDFriend = CSteamID(p.steamId);
         UnrealSteamEmu::PostCallback(GameLobbyJoinRequested_t::k_iCallback, &cb, sizeof(cb));
-        UnrealSteamEmu::Matchmaking_JoinLobby(targetLobbyId);
+        const bool hasJoinReq = UnrealSteamEmu::HasClientCallback(GameLobbyJoinRequested_t::k_iCallback);
+        const bool hasLobbyEnter = UnrealSteamEmu::HasClientCallback(LobbyEnter_t::k_iCallback);
+        if (!hasJoinReq && hasLobbyEnter) {
+            UnrealSteamEmu::Matchmaking_JoinLobby(targetLobbyId);
+        } else if (!hasJoinReq && !hasLobbyEnter) {
+            ShowInfo(i18n::T("Join in-game", "Únete desde el juego"),
+                     i18n::T("Select the room in the game lobby list.",
+                             "Elige la sala en la lista del juego."));
+        }
     } else if (!p.connect.empty()) {
         GameRichPresenceJoinRequested_t cb = {};
         cb.m_steamIDFriend = CSteamID(p.steamId);
@@ -706,6 +718,38 @@ void App::RestartGame() {
     ReFixLog("[Overlay] Restarting game for overlay settings change");
     UnrealSteamEmu::FlushUserStats();
     TerminateProcess(GetCurrentProcess(), 0);
+}
+
+void App::ApplyDisplaySettingsWithConfirm(const settings::Values& newVals) {
+    displayConfirm_.previous = settings::Get();
+    displayConfirm_.pending = newVals;
+    const HWND gw = host::CurrentGame().hwnd;
+    if (settings::ApplyDisplayToWindow(gw, newVals)) {
+        ReFixLog("[Overlay] Applied display mode=%d (%dx%d) to HWND %p; awaiting confirmation",
+                 (int)newVals.displayMode, newVals.windowWidth, newVals.windowHeight, (void*)gw);
+    }
+    displayConfirm_.active = true;
+    displayConfirm_.deadlineMs = GetTickCount64() + DisplayConfirm::kTimeoutMs;
+    host::Wake();
+}
+
+void App::ConfirmDisplaySettings() {
+    if (!displayConfirm_.active) return;
+    settings::Set(displayConfirm_.pending);
+    displayConfirm_.active = false;
+    ReFixLog("[Overlay] Display settings confirmed by user");
+}
+
+void App::RevertDisplaySettings() {
+    if (!displayConfirm_.active) return;
+    const HWND gw = host::CurrentGame().hwnd;
+    settings::ApplyDisplayToWindow(gw, displayConfirm_.previous);
+    settings::Set(displayConfirm_.previous);
+    displayConfirm_.active = false;
+    ReFixLog("[Overlay] Reverted display settings to previous mode=%d (%dx%d)",
+             (int)displayConfirm_.previous.displayMode,
+             displayConfirm_.previous.windowWidth,
+             displayConfirm_.previous.windowHeight);
 }
 
 bool App::DeleteProfile(const std::wstring& id) {

@@ -6,6 +6,7 @@
 #include "profile_store.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <string>
 
 namespace refix::overlay::settings {
@@ -105,6 +106,124 @@ void Set(const Values& v) {
     WritePrivateProfileStringW(kSection, L"WindowWidth", std::to_wstring(v.windowWidth).c_str(), ini.c_str());
     WritePrivateProfileStringW(kSection, L"WindowHeight", std::to_wstring(v.windowHeight).c_str(), ini.c_str());
     sound::SetEnabled(v.uiSounds);
+}
+
+bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v) {
+    if (!gameHwnd || !IsWindow(gameHwnd)) return false;
+
+    HMONITOR mon = MonitorFromWindow(gameHwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(mon, &mi)) return false;
+
+    if (IsIconic(gameHwnd)) {
+        ShowWindowAsync(gameHwnd, SW_RESTORE);
+    }
+
+    const LONG_PTR curStyle = GetWindowLongPtrW(gameHwnd, GWL_STYLE);
+    const LONG_PTR curExStyle = GetWindowLongPtrW(gameHwnd, GWL_EXSTYLE);
+    const UINT swpFlags = SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS;
+
+    if (v.displayMode == DisplayMode::Windowed) {
+        const LONG_PTR newStyle = (curStyle & ~(WS_POPUP | WS_MAXIMIZE)) | WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+        const LONG_PTR newExStyle = curExStyle | WS_EX_WINDOWEDGE;
+        SetWindowLongPtrW(gameHwnd, GWL_STYLE, newStyle);
+        SetWindowLongPtrW(gameHwnd, GWL_EXSTYLE, newExStyle);
+
+        int reqW = (v.windowWidth >= 320) ? v.windowWidth : 1280;
+        int reqH = (v.windowHeight >= 240) ? v.windowHeight : 720;
+        RECT rc = { 0, 0, reqW, reqH };
+        AdjustWindowRectEx(&rc, (DWORD)newStyle, FALSE, (DWORD)newExStyle);
+
+        int winW = rc.right - rc.left;
+        int winH = rc.bottom - rc.top;
+        const int workW = mi.rcWork.right - mi.rcWork.left;
+        const int workH = mi.rcWork.bottom - mi.rcWork.top;
+        if (winW > workW) winW = workW;
+        if (winH > workH) winH = workH;
+
+        const int x = mi.rcWork.left + (workW - winW) / 2;
+        const int y = mi.rcWork.top + (workH - winH) / 2;
+        SetWindowPos(gameHwnd, nullptr, x, y, winW, winH, swpFlags);
+    } else {
+        const LONG_PTR newStyle = (curStyle & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_POPUP | WS_VISIBLE;
+        const LONG_PTR newExStyle = curExStyle & ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE);
+        SetWindowLongPtrW(gameHwnd, GWL_STYLE, newStyle);
+        SetWindowLongPtrW(gameHwnd, GWL_EXSTYLE, newExStyle);
+
+        const int monW = mi.rcMonitor.right - mi.rcMonitor.left;
+        const int monH = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        SetWindowPos(gameHwnd, nullptr, mi.rcMonitor.left, mi.rcMonitor.top, monW, monH, swpFlags);
+    }
+    return true;
+}
+
+std::vector<ResolutionOption> GetSupportedResolutions(HWND gameHwnd) {
+    struct Pair { int w; int h; };
+    std::vector<Pair> modes;
+    auto addUnique = [&](int w, int h) {
+        if (w < 640 || h < 480) return;
+        for (const auto& m : modes) {
+            if (m.w == w && m.h == h) return;
+        }
+        modes.push_back({ w, h });
+    };
+
+#if defined(_WIN32)
+    // Enumerate OS display modes (on Linux under Wine/Proton, EnumDisplaySettingsW exposes XRandR/Wayland modes)
+    HMONITOR mon = (gameHwnd && IsWindow(gameHwnd))
+        ? MonitorFromWindow(gameHwnd, MONITOR_DEFAULTTONEAREST)
+        : MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    const wchar_t* device = nullptr;
+    if (GetMonitorInfoW(mon, &mi)) {
+        device = mi.szDevice;
+    }
+
+    DEVMODEW curDm = {};
+    curDm.dmSize = sizeof(curDm);
+    if (EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &curDm)) {
+        addUnique((int)curDm.dmPelsWidth, (int)curDm.dmPelsHeight);
+    }
+
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    for (DWORD i = 0; EnumDisplaySettingsW(device, i, &dm); ++i) {
+        if (dm.dmBitsPerPel == 0 || dm.dmBitsPerPel >= 24) {
+            addUnique((int)dm.dmPelsWidth, (int)dm.dmPelsHeight);
+        }
+        dm.dmSize = sizeof(dm);
+    }
+#endif
+
+    if (modes.empty()) {
+        const int maxW = GetSystemMetrics(SM_CXSCREEN);
+        const int maxH = GetSystemMetrics(SM_CYSCREEN);
+        static const Pair kFallback[] = {
+            { 800, 600 }, { 1024, 768 }, { 1280, 720 }, { 1366, 768 },
+            { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 }, { 3840, 2160 }
+        };
+        for (const auto& f : kFallback) {
+            if ((maxW <= 0 || f.w <= maxW) && (maxH <= 0 || f.h <= maxH)) {
+                addUnique(f.w, f.h);
+            }
+        }
+        if (maxW >= 640 && maxH >= 480) addUnique(maxW, maxH);
+    }
+
+    std::sort(modes.begin(), modes.end(), [](const Pair& a, const Pair& b) {
+        if (a.w != b.w) return a.w < b.w;
+        return a.h < b.h;
+    });
+
+    std::vector<ResolutionOption> out;
+    out.reserve(modes.size());
+    for (const auto& m : modes) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d x %d", m.w, m.h);
+        out.push_back({ m.w, m.h, buf });
+    }
+    return out;
 }
 
 ShortcutInfo GetShortcutInfo(OverlayShortcut sc) {

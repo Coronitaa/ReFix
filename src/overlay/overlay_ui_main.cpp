@@ -206,6 +206,7 @@ void App::DrawOverlay(ImVec2 viewport) {
     if (!inviteOnly_) DrawAchievementsModal(viewport);
     if (!inviteOnly_) DrawSettingsModal(viewport);
     DrawOverlayCautionModals(viewport);
+    DrawDisplayConfirmModal(viewport);
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
     DrawToasts(viewport, false);

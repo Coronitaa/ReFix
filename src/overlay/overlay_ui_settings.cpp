@@ -379,11 +379,19 @@ void DrawFormattedNotice(const char* text, float wrapWidth = 0.0f) {
 
 } // namespace
 
+static settings::DisplayMode g_draftDisplayMode = settings::DisplayMode::FullscreenWindowed;
+static int g_draftWindowW = 1920;
+static int g_draftWindowH = 1080;
+
 void App::DrawSettingsModal(ImVec2 viewport) {
     if (settingsRequested_) {
         settingsRequested_ = false;
         settingsOpen_ = true;
         settingsOpenedAt_ = GetTickCount64();
+        const settings::Values& cur = settings::Get();
+        g_draftDisplayMode = cur.displayMode;
+        g_draftWindowW = cur.windowWidth;
+        g_draftWindowH = cur.windowHeight;
     }
     if (!settingsOpen_) return;
     if (!ImGui::IsPopupOpen("##settings")) ImGui::OpenPopup("##settings");
@@ -520,18 +528,18 @@ void App::DrawSettingsModal(ImVec2 viewport) {
             changed = true;
         }
 
-        SyncSection(ui::icon::OpenExternal, i18n::T("Launch Screen Mode", "Modo de pantalla al ejecutar"));
+        SyncSection(ui::icon::OpenExternal, i18n::T("Screen Mode", "Modo de pantalla"));
         std::vector<std::string> dmItems = {
             i18n::T("Fullscreen Windowed (Default)", "Ventana sin bordes (Predet.)"),
             i18n::T("Fullscreen", "Pantalla completa"),
             i18n::T("Windowed", "Modo ventana")
         };
-        int curDm = (int)v.displayMode;
+        int curDm = (int)g_draftDisplayMode;
         const char* dmDesc = "";
-        if (v.displayMode == settings::DisplayMode::FullscreenWindowed) {
+        if (g_draftDisplayMode == settings::DisplayMode::FullscreenWindowed) {
             dmDesc = i18n::T("Runs the game in a borderless window matching your display resolution.",
                              "Ejecuta el juego en una ventana sin bordes adaptada a la resolución del monitor.");
-        } else if (v.displayMode == settings::DisplayMode::Fullscreen) {
+        } else if (g_draftDisplayMode == settings::DisplayMode::Fullscreen) {
             dmDesc = i18n::T("Runs the game in exclusive fullscreen mode.",
                              "Ejecuta el juego en modo de pantalla completa exclusiva.");
         } else {
@@ -540,36 +548,59 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         }
         if (ComboRow("dm_combo", i18n::T("Screen mode", "Modo de pantalla"),
                      dmDesc, dmItems[curDm].c_str(), dmItems, &curDm)) {
-            v.displayMode = static_cast<settings::DisplayMode>(curDm);
-            changed = true;
+            g_draftDisplayMode = static_cast<settings::DisplayMode>(curDm);
         }
 
-        if (v.displayMode == settings::DisplayMode::Windowed) {
-            struct ResOption { int w; int h; const char* label; };
-            static const ResOption kResList[] = {
-                { 1280, 720, "1280 x 720 (16:9 HD)" },
-                { 1366, 768, "1366 x 768 (16:9)" },
-                { 1600, 900, "1600 x 900 (16:9 HD+)" },
-                { 1920, 1080, "1920 x 1080 (16:9 Full HD)" },
-                { 2560, 1440, "2560 x 1440 (16:9 2K QHD)" },
-                { 3840, 2160, "3840 x 2160 (16:9 4K UHD)" }
-            };
-            std::vector<std::string> resItems;
-            int curResIdx = 3;
-            for (size_t i = 0; i < sizeof(kResList) / sizeof(kResList[0]); ++i) {
-                resItems.push_back(kResList[i].label);
-                if (kResList[i].w == v.windowWidth && kResList[i].h == v.windowHeight) {
-                    curResIdx = (int)i;
+        if (g_draftDisplayMode == settings::DisplayMode::Windowed) {
+            static std::vector<settings::ResolutionOption> s_resOptions;
+            static HWND s_resHwnd = nullptr;
+            const HWND curHwnd = host::CurrentGame().hwnd;
+            if (s_resOptions.empty() || s_resHwnd != curHwnd) {
+                s_resOptions = settings::GetSupportedResolutions(curHwnd);
+                s_resHwnd = curHwnd;
+            }
+            if (!s_resOptions.empty()) {
+                std::vector<std::string> resItems;
+                resItems.reserve(s_resOptions.size());
+                int curResIdx = (int)s_resOptions.size() - 1;
+                bool resMatched = false;
+                for (size_t i = 0; i < s_resOptions.size(); ++i) {
+                    resItems.push_back(s_resOptions[i].label);
+                    if (s_resOptions[i].width == g_draftWindowW && s_resOptions[i].height == g_draftWindowH) {
+                        curResIdx = (int)i;
+                        resMatched = true;
+                    }
+                }
+                if (!resMatched) {
+                    g_draftWindowW = s_resOptions[curResIdx].width;
+                    g_draftWindowH = s_resOptions[curResIdx].height;
+                }
+                if (ComboRow("res_combo", i18n::T("Window resolution", "Resolución de ventana"),
+                             i18n::T("Resolutions reported by your display; select one and click Apply.",
+                                     "Resoluciones compatibles con tu pantalla; elige una y pulsa Aplicar."),
+                             resItems[curResIdx].c_str(), resItems, &curResIdx)) {
+                    g_draftWindowW = s_resOptions[curResIdx].width;
+                    g_draftWindowH = s_resOptions[curResIdx].height;
                 }
             }
-            if (ComboRow("res_combo", i18n::T("Window resolution", "Resolución de ventana"),
-                         i18n::T("Target resolution applied when launching or restarting the game.",
-                                 "Resolución objetivo aplicada al iniciar o reiniciar el juego."),
-                         resItems[curResIdx].c_str(), resItems, &curResIdx)) {
-                v.windowWidth = kResList[curResIdx].w;
-                v.windowHeight = kResList[curResIdx].h;
-                changed = true;
+        }
+
+        {
+            const bool displayDirty = (g_draftDisplayMode != v.displayMode) ||
+                                      (g_draftDisplayMode == settings::DisplayMode::Windowed &&
+                                       (g_draftWindowW != v.windowWidth || g_draftWindowH != v.windowHeight));
+            const char* applyLabel = i18n::T("Apply display changes", "Aplicar cambios de pantalla");
+            const float btnW = std::min(ImGui::GetContentRegionAvail().x, ui::S(240));
+            const float btnH = ui::S(34);
+            if (ui::PrimaryButton(applyLabel, ImVec2(btnW, btnH), displayDirty)) {
+                settings::Values target = v;
+                target.displayMode = g_draftDisplayMode;
+                target.windowWidth = g_draftWindowW;
+                target.windowHeight = g_draftWindowH;
+                ApplyDisplaySettingsWithConfirm(target);
+                close = true;
             }
+            ImGui::Dummy(ImVec2(0, ui::S(4)));
         }
 
         SyncSection(ui::icon::Switch, i18n::T("Overlay Mode", "Modo del Overlay"));
@@ -709,6 +740,10 @@ void App::DrawSettingsModal(ImVec2 viewport) {
 
     if (restore) {
         v = settings::Values();
+        g_draftDisplayMode = v.displayMode;
+        g_draftWindowW = v.windowWidth;
+        g_draftWindowH = v.windowHeight;
+        settings::ApplyDisplayToWindow(host::CurrentGame().hwnd, v);
         changed = true;
     }
     if (changed) {
@@ -1011,6 +1046,103 @@ void App::DrawOverlayCautionModals(ImVec2 viewport) {
     }
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
+}
+
+void App::DrawDisplayConfirmModal(ImVec2 viewport) {
+    if (!displayConfirm_.active && !ImGui::IsPopupOpen("##display_confirm")) return;
+    if (!ui::BeginCenteredModal("##display_confirm", 400.0f)) return;
+    if (!displayConfirm_.active) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG remMs = (displayConfirm_.deadlineMs > now) ? (displayConfirm_.deadlineMs - now) : 0;
+    const int remSec = (int)((remMs + 999) / 1000);
+    const float frac = std::clamp((float)remMs / (float)DisplayConfirm::kTimeoutMs, 0.0f, 1.0f);
+
+    ImGui::PushFont(f.heading);
+    ui::TextColored(ui::color::Text, i18n::T("Keep display changes?", "¿Mantener cambios de pantalla?"));
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(10)));
+
+    // Framed notice card matching overlay theme tokens
+    const ImVec2 cardMin = ImGui::GetCursorScreenPos();
+    const float cardW = ImGui::GetContentRegionAvail().x;
+    const float pad = ui::S(12);
+    dl->ChannelsSplit(2);
+    dl->ChannelsSetCurrent(1);
+    ImGui::SetCursorScreenPos(ImVec2(cardMin.x + pad, cardMin.y + pad));
+    ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(cardMin.x + cardW - pad);
+
+    char modeBuf[128];
+    if (displayConfirm_.pending.displayMode == settings::DisplayMode::Windowed) {
+        snprintf(modeBuf, sizeof(modeBuf), "%s (%d x %d)",
+                 i18n::T("Windowed", "Modo ventana"),
+                 displayConfirm_.pending.windowWidth,
+                 displayConfirm_.pending.windowHeight);
+    } else if (displayConfirm_.pending.displayMode == settings::DisplayMode::Fullscreen) {
+        snprintf(modeBuf, sizeof(modeBuf), "%s", i18n::T("Fullscreen", "Pantalla completa"));
+    } else {
+        snprintf(modeBuf, sizeof(modeBuf), "%s", i18n::T("Fullscreen Windowed", "Ventana sin bordes"));
+    }
+
+    ImGui::PushFont(f.strong);
+    ui::TextColored(ui::color::Text, modeBuf);
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+    char timerBuf[128];
+    snprintf(timerBuf, sizeof(timerBuf),
+             i18n::T("Reverting automatically in %d s", "Revertiendo automáticamente en %d s"),
+             remSec);
+    ImGui::PushFont(f.caption);
+    ui::TextColored(ui::color::Muted, timerBuf);
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(8)));
+
+    // Smooth countdown progress bar
+    const ImVec2 barPos = ImGui::GetCursorScreenPos();
+    const float barW = cardW - 2 * pad;
+    const float barH = ui::S(5);
+    dl->AddRectFilled(barPos, ImVec2(barPos.x + barW, barPos.y + barH),
+                      ui::color::Border, ui::S(3));
+    if (frac > 0.0f) {
+        dl->AddRectFilled(barPos, ImVec2(barPos.x + barW * frac, barPos.y + barH),
+                          ui::color::Accent, ui::S(3));
+    }
+    ImGui::Dummy(ImVec2(barW, barH));
+
+    ImGui::PopTextWrapPos();
+    ImGui::EndGroup();
+    const ImVec2 cardMax(cardMin.x + cardW, ImGui::GetItemRectMax().y + pad);
+    dl->ChannelsSetCurrent(0);
+    dl->AddRectFilled(cardMin, cardMax, ui::color::Row, ui::S(8));
+    dl->AddRect(cardMin, cardMax, ui::color::Border, ui::S(8), 0, 1.0f);
+    dl->ChannelsMerge();
+    ImGui::SetCursorScreenPos(ImVec2(cardMin.x, cardMax.y));
+    ImGui::Dummy(ImVec2(0, ui::S(14)));
+
+    const float gap = ui::S(10);
+    const float btnW = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+    const float btnH = ui::S(36);
+    if (ui::PrimaryButton(i18n::T("Keep changes", "Mantener"), ImVec2(btnW, btnH))) {
+        ConfirmDisplaySettings();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine(0, gap);
+    if (ui::SecondaryButton(i18n::T("Revert", "Revertir"), ImVec2(btnW, btnH)) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+        RevertDisplaySettings();
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
 }
 
 namespace {

@@ -1,8 +1,10 @@
 // Player settings of the overlay, per PC, in %APPDATA%\ReFix\profiles.ini [Overlay] (next to the language).
 // ReFix.ini [Overlay] keeps the defaults a game folder ships with; a value set here wins over it.
 #pragma once
+#include <windows.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace refix::overlay::settings {
 
@@ -53,9 +55,17 @@ struct Values {
     int windowHeight = 1080;
 };
 
+struct ResolutionOption {
+    int width = 0;
+    int height = 0;
+    std::string label;
+};
+
 // Host thread (UI). Loaded on first use.
 const Values& Get();
 void Set(const Values& v);           // saves at once
+bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v); // applies DisplayMode + WindowWidth/Height at runtime
+std::vector<ResolutionOption> GetSupportedResolutions(HWND gameHwnd);
 
 ShortcutInfo GetShortcutInfo(OverlayShortcut sc);
 const char* GetShortcutName(OverlayShortcut sc);

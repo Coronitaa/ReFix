@@ -3,6 +3,7 @@
 #pragma once
 #include "achievements.h"
 #include "overlay_host.h"
+#include "overlay_settings.h"
 #include "overlay_theme.h"
 #include "presence_net.h"
 #include "profile_store.h"
@@ -168,6 +169,19 @@ public:
     PendingPurchase pendingPurchase_;
     void OpenPurchasePrompt(uint32_t appId, uint64_t orderId, const std::string& itemName, const std::string& itemDesc, bool isMicroTxn, std::function<void(bool)> onComplete = nullptr);
     void DrawPurchaseModal(ImVec2 viewport);
+
+    struct DisplayConfirm {
+        bool active = false;
+        settings::Values previous{};
+        settings::Values pending{};
+        ULONGLONG deadlineMs = 0;
+        static constexpr ULONGLONG kTimeoutMs = 15000;
+    };
+    DisplayConfirm displayConfirm_;
+    void ApplyDisplaySettingsWithConfirm(const settings::Values& newVals);
+    void ConfirmDisplaySettings();
+    void RevertDisplaySettings();
+    void DrawDisplayConfirmModal(ImVec2 viewport);
     void ExecutePurchase(bool authorized);
 
     ui::AvatarRef ProfileAvatar(const Profile& p);
