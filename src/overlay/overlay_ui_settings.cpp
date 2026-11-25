@@ -743,6 +743,7 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         g_draftDisplayMode = v.displayMode;
         g_draftWindowW = v.windowWidth;
         g_draftWindowH = v.windowHeight;
+        settings::MarkDisplayCustomized(false);
         settings::ApplyDisplayToWindow(host::CurrentGame().hwnd, v);
         changed = true;
     }

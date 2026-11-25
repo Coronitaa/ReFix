@@ -64,7 +64,10 @@ struct ResolutionOption {
 // Host thread (UI). Loaded on first use.
 const Values& Get();
 void Set(const Values& v);           // saves at once
+bool HasSavedDisplay();              // true once the user explicitly saved/customized display settings
+void MarkDisplayCustomized(bool customized);
 bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v); // applies DisplayMode + WindowWidth/Height at runtime
+bool WindowMatchesDisplay(HWND gameHwnd, const Values& v); // checks if gameHwnd style/rect already matches v
 std::vector<ResolutionOption> GetSupportedResolutions(HWND gameHwnd);
 
 ShortcutInfo GetShortcutInfo(OverlayShortcut sc);

@@ -178,6 +178,10 @@ public:
         static constexpr ULONGLONG kTimeoutMs = 15000;
     };
     DisplayConfirm displayConfirm_;
+    HWND appliedDisplayHwnd_ = nullptr;
+    ULONGLONG appliedDisplayStartMs_ = 0;
+    ULONGLONG appliedDisplayLastCheckMs_ = 0;
+    bool appliedDisplayDone_ = false;
     void ApplyDisplaySettingsWithConfirm(const settings::Values& newVals);
     void ConfirmDisplaySettings();
     void RevertDisplaySettings();

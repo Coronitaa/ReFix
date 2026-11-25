@@ -452,6 +452,30 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
         PollInvites();
         PollAchievements();
         PollNvidiaReflexHooks();
+        if (dialog_ == DialogKind::None && game.hwnd && !game.minimized &&
+            !displayConfirm_.active && settings::HasSavedDisplay()) {
+            const settings::Values& disp = settings::Get();
+            if (game.hwnd != appliedDisplayHwnd_) {
+                if (settings::ApplyDisplayToWindow(game.hwnd, disp)) {
+                    appliedDisplayHwnd_ = game.hwnd;
+                    appliedDisplayStartMs_ = now;
+                    appliedDisplayLastCheckMs_ = now;
+                    appliedDisplayDone_ = false;
+                    ReFixLog("[Overlay] Applied saved display mode=%d (%dx%d) to HWND %p",
+                             (int)disp.displayMode, disp.windowWidth, disp.windowHeight, (void*)game.hwnd);
+                }
+            } else if (!appliedDisplayDone_ && now - appliedDisplayLastCheckMs_ >= 800) {
+                appliedDisplayLastCheckMs_ = now;
+                if (!settings::WindowMatchesDisplay(game.hwnd, disp)) {
+                    settings::ApplyDisplayToWindow(game.hwnd, disp);
+                    ReFixLog("[Overlay] Re-applied saved display mode=%d (%dx%d) after init to HWND %p",
+                             (int)disp.displayMode, disp.windowWidth, disp.windowHeight, (void*)game.hwnd);
+                }
+                if (now - appliedDisplayStartMs_ >= 5000) {
+                    appliedDisplayDone_ = true;
+                }
+            }
+        }
         if (!welcomed_ && game.hwnd && game.foreground) {
             welcomed_ = true;
             if (settings::Get().welcomeToast) {
@@ -735,7 +759,10 @@ void App::ApplyDisplaySettingsWithConfirm(const settings::Values& newVals) {
 
 void App::ConfirmDisplaySettings() {
     if (!displayConfirm_.active) return;
+    settings::MarkDisplayCustomized(true);
     settings::Set(displayConfirm_.pending);
+    appliedDisplayHwnd_ = host::CurrentGame().hwnd;
+    appliedDisplayDone_ = true;
     displayConfirm_.active = false;
     ReFixLog("[Overlay] Display settings confirmed by user");
 }

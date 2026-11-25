@@ -42,6 +42,7 @@ const ShortcutInfo kShortcuts[] = {
 
 Values g_values;
 bool g_loaded = false;
+bool g_displayCustomized = false;
 
 std::wstring Ini() { return profiles::RootDir() + L"\\profiles.ini"; }
 
@@ -90,8 +91,25 @@ const Values& Get() {
         if (g_values.windowWidth <= 0) g_values.windowWidth = 1920;
         g_values.windowHeight = ReadInt(ini, L"WindowHeight", 1080);
         if (g_values.windowHeight <= 0) g_values.windowHeight = 1080;
+        const int customDisp = ReadBool(ini, L"DisplayCustomized");
+        g_displayCustomized = (customDisp >= 0)
+            ? (customDisp == 1)
+            : (g_values.displayMode != DisplayMode::FullscreenWindowed ||
+               g_values.windowWidth != 1920 || g_values.windowHeight != 1080);
     }
     return g_values;
+}
+
+bool HasSavedDisplay() {
+    Get();
+    return g_displayCustomized;
+}
+
+void MarkDisplayCustomized(bool customized) {
+    Get();
+    g_displayCustomized = customized;
+    CreateDirectoryW(profiles::RootDir().c_str(), nullptr);
+    WritePrivateProfileStringW(kSection, L"DisplayCustomized", customized ? L"1" : L"0", Ini().c_str());
 }
 
 void Set(const Values& v) {
@@ -115,7 +133,7 @@ bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v) {
     MONITORINFO mi = { sizeof(mi) };
     if (!GetMonitorInfoW(mon, &mi)) return false;
 
-    if (IsIconic(gameHwnd)) {
+    if (IsIconic(gameHwnd) || (v.displayMode == DisplayMode::Windowed && IsZoomed(gameHwnd))) {
         ShowWindowAsync(gameHwnd, SW_RESTORE);
     }
 
@@ -155,6 +173,37 @@ bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v) {
         SetWindowPos(gameHwnd, nullptr, mi.rcMonitor.left, mi.rcMonitor.top, monW, monH, swpFlags);
     }
     return true;
+}
+
+bool WindowMatchesDisplay(HWND gameHwnd, const Values& v) {
+    if (!gameHwnd || !IsWindow(gameHwnd)) return true;
+
+    HMONITOR mon = MonitorFromWindow(gameHwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(mon, &mi)) return true;
+
+    RECT wr{};
+    if (!GetWindowRect(gameHwnd, &wr)) return true;
+    const int curW = wr.right - wr.left;
+    const int curH = wr.bottom - wr.top;
+    const LONG_PTR style = GetWindowLongPtrW(gameHwnd, GWL_STYLE);
+
+    if (v.displayMode == DisplayMode::Windowed) {
+        if ((style & WS_CAPTION) == 0 || (style & WS_POPUP) != 0) return false;
+        const int reqW = (v.windowWidth >= 320) ? v.windowWidth : 1280;
+        const int reqH = (v.windowHeight >= 240) ? v.windowHeight : 720;
+        RECT rc = { 0, 0, reqW, reqH };
+        const LONG_PTR exStyle = GetWindowLongPtrW(gameHwnd, GWL_EXSTYLE);
+        AdjustWindowRectEx(&rc, (DWORD)style, FALSE, (DWORD)exStyle);
+        const int expW = std::min<int>(rc.right - rc.left, mi.rcWork.right - mi.rcWork.left);
+        const int expH = std::min<int>(rc.bottom - rc.top, mi.rcWork.bottom - mi.rcWork.top);
+        return (curW >= expW - 8 && curW <= expW + 8) && (curH >= expH - 8 && curH <= expH + 8);
+    }
+
+    if ((style & WS_CAPTION) != 0) return false;
+    const int monW = mi.rcMonitor.right - mi.rcMonitor.left;
+    const int monH = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    return (curW >= monW - 4 && curW <= monW + 4) && (curH >= monH - 4 && curH <= monH + 4);
 }
 
 std::vector<ResolutionOption> GetSupportedResolutions(HWND gameHwnd) {
