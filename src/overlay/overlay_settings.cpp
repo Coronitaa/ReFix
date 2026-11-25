@@ -153,7 +153,7 @@ void Set(const Values& v) {
 }
 
 bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v) {
-    if (!gameHwnd || !IsWindow(gameHwnd)) return false;
+    if (!gameHwnd || !IsWindow(gameHwnd) || IsHungAppWindow(gameHwnd)) return false;
 
     HMONITOR mon = MonitorFromWindow(gameHwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(mi) };
@@ -202,7 +202,7 @@ bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v) {
 }
 
 bool WindowMatchesDisplay(HWND gameHwnd, const Values& v) {
-    if (!gameHwnd || !IsWindow(gameHwnd)) return true;
+    if (!gameHwnd || !IsWindow(gameHwnd) || IsHungAppWindow(gameHwnd)) return true;
 
     HMONITOR mon = MonitorFromWindow(gameHwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(mi) };

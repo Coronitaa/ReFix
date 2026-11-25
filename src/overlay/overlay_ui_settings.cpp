@@ -588,21 +588,15 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         }
 
         {
-            ImGui::Dummy(ImVec2(0, ui::S(2)));
-            ImGui::Checkbox(i18n::T("Keep display settings only for this game##pergame_disp",
-                                    "Mantener configuración solo para este juego##pergame_disp"),
-                            &g_draftPerGameDisplay);
-            ui::Tooltip(i18n::T("When ticked, screen mode and resolution are saved only for this game instead of globally.",
-                                "Si se marca, el modo de pantalla y la resolución se guardan solo para este juego en lugar de usarse en todos."));
-            ImGui::Dummy(ImVec2(0, ui::S(6)));
-
             const bool displayDirty = (g_draftDisplayMode != v.displayMode) ||
                                       (g_draftPerGameDisplay != v.perGameDisplay) ||
                                       (g_draftDisplayMode == settings::DisplayMode::Windowed &&
                                        (g_draftWindowW != v.windowWidth || g_draftWindowH != v.windowHeight));
             const char* applyLabel = i18n::T("Apply display changes", "Aplicar cambios de pantalla");
-            const float btnW = std::min(ImGui::GetContentRegionAvail().x, ui::S(240));
+            const float avail = ImGui::GetContentRegionAvail().x;
+            const float btnW = std::min(avail, ui::S(240));
             const float btnH = ui::S(34);
+            const float rowStartY = ImGui::GetCursorPosY();
             if (ui::PrimaryButton(applyLabel, ImVec2(btnW, btnH), displayDirty)) {
                 settings::Values target = v;
                 target.displayMode = g_draftDisplayMode;
@@ -612,7 +606,15 @@ void App::DrawSettingsModal(ImVec2 viewport) {
                 ApplyDisplaySettingsWithConfirm(target);
                 close = true;
             }
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            const float cbH = ImGui::GetFrameHeight();
+            ImGui::SameLine(0, ui::S(14));
+            if (btnH > cbH) ImGui::SetCursorPosY(rowStartY + (btnH - cbH) * 0.5f);
+            ImGui::Checkbox(i18n::T("Keep only for this game##pergame_disp",
+                                    "Solo para este juego##pergame_disp"),
+                            &g_draftPerGameDisplay);
+            ui::Tooltip(i18n::T("When ticked, screen mode and resolution are saved only for this game instead of globally.",
+                                "Si se marca, el modo de pantalla y la resolución se guardan solo para este juego en lugar de usarse en todos."));
+            ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), rowStartY + btnH + ui::S(4)));
         }
 
         SyncSection(ui::icon::Switch, i18n::T("Overlay Mode", "Modo del Overlay"));
