@@ -21,7 +21,9 @@ namespace ReFixIL2CPP {
 
 // IL2CPP C API function pointer types
 typedef void* (*fn_il2cpp_domain_get)();
+typedef void* (*fn_il2cpp_thread_current)();
 typedef void* (*fn_il2cpp_thread_attach)(void* domain);
+typedef void (*fn_il2cpp_thread_detach)(void* thread);
 typedef void** (*fn_il2cpp_domain_get_assemblies)(void* domain, size_t* size);
 typedef void* (*fn_il2cpp_assembly_get_image)(void* assembly);
 typedef const char* (*fn_il2cpp_image_get_name)(void* image);
@@ -48,7 +50,9 @@ typedef const char* (*fn_il2cpp_method_get_name)(void* method);
 
 // Resolved function pointers
 static fn_il2cpp_domain_get g_pfn_domain_get = nullptr;
+static fn_il2cpp_thread_current g_pfn_thread_current = nullptr;
 static fn_il2cpp_thread_attach g_pfn_thread_attach = nullptr;
+static fn_il2cpp_thread_detach g_pfn_thread_detach = nullptr;
 static fn_il2cpp_domain_get_assemblies g_pfn_domain_get_assemblies = nullptr;
 static fn_il2cpp_assembly_get_image g_pfn_assembly_get_image = nullptr;
 static fn_il2cpp_image_get_name g_pfn_image_get_name = nullptr;
@@ -207,11 +211,33 @@ static const DWORD kWatchdogDelayMs = 25000;
 // MenuSceneLoader interruption id of the TrailBlazer world (server selection) modal
 static const uintptr_t kWorldSelectInterruption = 9;
 
-// Internal helpers
-static bool EnsureThreadAttached() {
-    if (!g_pfn_thread_attach || !g_il2cppDomain) return false;
-    g_pfn_thread_attach(g_il2cppDomain);
-    return true;
+// Internal helpers: attaches only when the calling OS thread is not already registered with IL2CPP
+// and detaches on scope exit so background threads do not block il2cpp_shutdown() on process exit.
+struct ScopedThreadAttach {
+    void* attachedThread = nullptr;
+
+    ScopedThreadAttach() {
+        if (!g_pfn_thread_attach || !g_il2cppDomain) return;
+        if (g_pfn_thread_current && g_pfn_thread_current()) return;
+        attachedThread = g_pfn_thread_attach(g_il2cppDomain);
+    }
+
+    ~ScopedThreadAttach() {
+        if (attachedThread && g_pfn_thread_detach) {
+            g_pfn_thread_detach(attachedThread);
+        }
+    }
+};
+
+// Manual attach/detach for functions that use __try (MSVC forbids C++ destructors + SEH in one scope).
+static void* ManualThreadAttach() {
+    if (!g_pfn_thread_attach || !g_il2cppDomain) return nullptr;
+    if (g_pfn_thread_current && g_pfn_thread_current()) return nullptr;
+    return g_pfn_thread_attach(g_il2cppDomain);
+}
+
+static void ManualThreadDetach(void* attached) {
+    if (attached && g_pfn_thread_detach) g_pfn_thread_detach(attached);
 }
 
 static std::unordered_map<std::string, void*> s_classCache;
@@ -247,79 +273,80 @@ static void* FindClassAcrossImages(const char* namespaze, const char* name) {
 }
 
 static void* FindLiveObjectInScene(const char* namespaze, const char* className) {
-    EnsureThreadAttached();
+    void* attached = ManualThreadAttach();
+    void* result = nullptr;
     void* klass = FindClassAcrossImages(namespaze, className);
-    if (!klass || !g_pfn_class_get_type || !g_pfn_type_get_object) return nullptr;
+    if (!klass || !g_pfn_class_get_type || !g_pfn_type_get_object) goto done;
+    {
+        void* klassUnityObj = FindClassAcrossImages("UnityEngine", "Object");
+        if (!klassUnityObj) goto done;
+        if (g_pfn_class_is_assignable_from && !g_pfn_class_is_assignable_from(klassUnityObj, klass)) goto done;
 
-    void* klassUnityObj = FindClassAcrossImages("UnityEngine", "Object");
-    if (!klassUnityObj) return nullptr;
+        void* type = g_pfn_class_get_type(klass);
+        if (!type) goto done;
+        void* typeObj = g_pfn_type_get_object(type);
+        if (!typeObj) goto done;
 
-    // Safety check: FindObjectOfType requires klass to derive from UnityEngine.Object
-    if (g_pfn_class_is_assignable_from && !g_pfn_class_is_assignable_from(klassUnityObj, klass)) {
-        return nullptr;
+        void* methodFind = g_pfn_class_get_method_from_name(klassUnityObj, "FindObjectOfType", 1);
+        if (methodFind) {
+            void* args[1] = { typeObj };
+            void* exc = nullptr;
+            __try {
+                void* res = g_pfn_runtime_invoke(methodFind, nullptr, args, &exc);
+                if (!exc && res) { result = res; goto done; }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+
+        void* methodFind2 = g_pfn_class_get_method_from_name(klassUnityObj, "FindObjectOfType", 2);
+        if (methodFind2) {
+            bool includeInactive = true;
+            void* args2[2] = { typeObj, &includeInactive };
+            void* exc2 = nullptr;
+            __try {
+                void* res2 = g_pfn_runtime_invoke(methodFind2, nullptr, args2, &exc2);
+                if (!exc2 && res2) { result = res2; goto done; }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
     }
-
-    void* type = g_pfn_class_get_type(klass);
-    if (!type) return nullptr;
-    void* typeObj = g_pfn_type_get_object(type);
-    if (!typeObj) return nullptr;
-
-    void* methodFind = g_pfn_class_get_method_from_name(klassUnityObj, "FindObjectOfType", 1);
-    if (methodFind) {
-        void* args[1] = { typeObj };
-        void* exc = nullptr;
-        __try {
-            void* res = g_pfn_runtime_invoke(methodFind, nullptr, args, &exc);
-            if (!exc && res) return res;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-
-    void* methodFind2 = g_pfn_class_get_method_from_name(klassUnityObj, "FindObjectOfType", 2);
-    if (methodFind2) {
-        bool includeInactive = true;
-        void* args2[2] = { typeObj, &includeInactive };
-        void* exc2 = nullptr;
-        __try {
-            void* res2 = g_pfn_runtime_invoke(methodFind2, nullptr, args2, &exc2);
-            if (!exc2 && res2) return res2;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-
-    return nullptr;
+done:
+    ManualThreadDetach(attached);
+    return result;
 }
 
 static bool SetObjectActive(void* unityComponentOrGameObject, bool active) {
     if (!unityComponentOrGameObject) return false;
-    EnsureThreadAttached();
+    void* attached = ManualThreadAttach();
+    bool success = false;
 
     void* klassGO = FindClassAcrossImages("UnityEngine", "GameObject");
     void* klassComp = FindClassAcrossImages("UnityEngine", "Component");
-    if (!klassGO || !klassComp) return false;
+    if (!klassGO || !klassComp) goto setactive_done;
+    {
+        void* gameObject = unityComponentOrGameObject;
+        void* methodGetGO = g_pfn_class_get_method_from_name(klassComp, "get_gameObject", 0);
+        if (methodGetGO) {
+            void* exc = nullptr;
+            __try {
+                void* go = g_pfn_runtime_invoke(methodGetGO, unityComponentOrGameObject, nullptr, &exc);
+                if (!exc && go) gameObject = go;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                goto setactive_done;
+            }
+        }
 
-    void* gameObject = unityComponentOrGameObject;
-    void* methodGetGO = g_pfn_class_get_method_from_name(klassComp, "get_gameObject", 0);
-    if (methodGetGO) {
-        void* exc = nullptr;
-        __try {
-            void* go = g_pfn_runtime_invoke(methodGetGO, unityComponentOrGameObject, nullptr, &exc);
-            if (!exc && go) gameObject = go;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
+        void* methodSetActive = g_pfn_class_get_method_from_name(klassGO, "SetActive", 1);
+        if (methodSetActive) {
+            void* args[1] = { &active };
+            void* exc = nullptr;
+            __try {
+                g_pfn_runtime_invoke(methodSetActive, gameObject, args, &exc);
+                success = (!exc);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
     }
-
-    void* methodSetActive = g_pfn_class_get_method_from_name(klassGO, "SetActive", 1);
-    if (methodSetActive) {
-        void* args[1] = { &active };
-        void* exc = nullptr;
-        __try {
-            g_pfn_runtime_invoke(methodSetActive, gameObject, args, &exc);
-            return (!exc);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
-        }
-    }
-    return false;
+setactive_done:
+    ManualThreadDetach(attached);
+    return success;
 }
 
 static void* GetMenuSceneLoaderInstance() {
@@ -431,7 +458,7 @@ static void* FindClassMethod(void* klass, const char* methodName) {
 static bool ReadIniBool(const char* section, const char* key, bool defaultValue);
 
 static bool ActivateP2PModeInternal() {
-    EnsureThreadAttached();
+    ScopedThreadAttach il2cppAttach;
 
     void* klassUtils = FindClassAcrossImages("Recreate.Scripts.Network.P2PRoom", "P2PRoomUtils");
     if (!klassUtils) return false;
@@ -475,11 +502,11 @@ static bool ActivateP2PModeInternal() {
 
 static bool SetCanEnterNemoLandOnInstance(void* instance, bool canEnter) {
     if (!instance) return false;
-    EnsureThreadAttached();
+    void* attached = ManualThreadAttach();
 
     void* klassLoader = FindClassAcrossImages("", "MenuSceneLoader");
     if (!klassLoader) klassLoader = FindClassAcrossImages("Recreate", "MenuSceneLoader");
-    if (!klassLoader) return false;
+    if (!klassLoader) { ManualThreadDetach(attached); return false; }
     if (g_pfn_runtime_class_init) g_pfn_runtime_class_init(klassLoader);
 
     // 1. set_canEnterNemoLand (param_count = 1, instance)
@@ -545,6 +572,7 @@ static bool SetCanEnterNemoLandOnInstance(void* instance, bool canEnter) {
         }
     }
 
+    ManualThreadDetach(attached);
     return true;
 }
 
@@ -850,7 +878,7 @@ static void ArmPostTransitionProbes(bool cameraSafeguard) {
 }
 
 static bool TransitionToMainMenuInternal() {
-    EnsureThreadAttached();
+    void* attached = ManualThreadAttach();
 
     bool anySuccess = false;
 
@@ -989,6 +1017,7 @@ static bool TransitionToMainMenuInternal() {
 
     ArmPostTransitionProbes(true);
     ReFixLog("[IL2CPP] TransitionToMainMenuInternal completed (anySuccess=%s)", anySuccess ? "true" : "false");
+    ManualThreadDetach(attached);
     return anySuccess;
 }
 
@@ -1508,7 +1537,9 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     }
 
     g_pfn_domain_get = (fn_il2cpp_domain_get)GetProcAddress(hGA, "il2cpp_domain_get");
+    g_pfn_thread_current = (fn_il2cpp_thread_current)GetProcAddress(hGA, "il2cpp_thread_current");
     g_pfn_thread_attach = (fn_il2cpp_thread_attach)GetProcAddress(hGA, "il2cpp_thread_attach");
+    g_pfn_thread_detach = (fn_il2cpp_thread_detach)GetProcAddress(hGA, "il2cpp_thread_detach");
     g_pfn_domain_get_assemblies = (fn_il2cpp_domain_get_assemblies)GetProcAddress(hGA, "il2cpp_domain_get_assemblies");
     g_pfn_assembly_get_image = (fn_il2cpp_assembly_get_image)GetProcAddress(hGA, "il2cpp_assembly_get_image");
     g_pfn_image_get_name = (fn_il2cpp_image_get_name)GetProcAddress(hGA, "il2cpp_image_get_name");
@@ -1554,7 +1585,7 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     }
 
     g_il2cppDomain = domain;
-    g_pfn_thread_attach(domain);
+    void* watcherThread = g_pfn_thread_attach(domain);
     ReFixLog("[IL2CPP] Successfully attached to IL2CPP domain %p", domain);
 
     // Wait until assemblies are loaded
@@ -1571,6 +1602,7 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
 
     if (!hasAssemblies) {
         ReFixLog("[IL2CPP] No assemblies loaded in domain");
+        if (watcherThread && g_pfn_thread_detach) g_pfn_thread_detach(watcherThread);
         return 0;
     }
 
@@ -2015,6 +2047,24 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     g_initialized.store(true);
     ReFixLog("[IL2CPP] Initialization and hook installation completed successfully.");
 
+    bool hasRecreateFlow =
+        FindClassAcrossImages("Recreate", "StaticGameInfoAot") != nullptr ||
+        FindClassAcrossImages("Network.Account", "AccountManager") != nullptr ||
+        FindClassAcrossImages("", "MenuSceneLoader") != nullptr ||
+        FindClassAcrossImages("Recreate", "MenuSceneLoader") != nullptr;
+
+    // Detach immediately so no sleeping background thread remains registered with IL2CPP,
+    // otherwise il2cpp_shutdown() deadlocks waiting for attached foreground threads on exit.
+    if (watcherThread && g_pfn_thread_detach) {
+        g_pfn_thread_detach(watcherThread);
+        watcherThread = nullptr;
+    }
+
+    if (!hasRecreateFlow) {
+        ReFixLog("[IL2CPP] Standard IL2CPP title detected; watcher thread exiting cleanly.");
+        return 0;
+    }
+
     ReFixPAOffline::Initialize();
 
     // Drives the offline-login mode switch and, while the game is not on its login-free path, the
@@ -2022,6 +2072,8 @@ static DWORD WINAPI WatcherThreadProc(LPVOID) {
     bool watchdogDone = false;
     while (g_watcherRunning.load()) {
         Sleep(kWatcherPollMs);
+        if (!g_watcherRunning.load()) break;
+        ScopedThreadAttach tickAttach;
         ReFixPAOffline::Tick();
         bool engaged = ReFixPAOffline::IsEngaged();
         if (engaged && !s_offlineProbesArmed.exchange(true)) {

@@ -14,7 +14,9 @@ namespace {
 
 // Mono API function pointer types
 typedef void* (*fn_mono_domain_get)();
+typedef void* (*fn_mono_thread_current)();
 typedef void* (*fn_mono_thread_attach)(void* domain);
+typedef void (*fn_mono_thread_detach)(void* thread);
 typedef void (*fn_mono_assembly_foreach)(void (*func)(void* assembly, void* user_data), void* user_data);
 typedef void* (*fn_mono_assembly_get_image)(void* assembly);
 typedef const char* (*fn_mono_image_get_name)(void* image);
@@ -38,7 +40,9 @@ typedef void* (*fn_mono_class_from_mono_type)(void* type);
 typedef void* (*fn_mono_array_new)(void* domain, void* eclass, uintptr_t n);
 
 static fn_mono_domain_get g_pfn_domain_get = nullptr;
+static fn_mono_thread_current g_pfn_thread_current = nullptr;
 static fn_mono_thread_attach g_pfn_thread_attach = nullptr;
+static fn_mono_thread_detach g_pfn_thread_detach = nullptr;
 static fn_mono_assembly_foreach g_pfn_assembly_foreach = nullptr;
 static fn_mono_assembly_get_image g_pfn_assembly_get_image = nullptr;
 static fn_mono_image_get_name g_pfn_image_get_name = nullptr;
@@ -593,7 +597,9 @@ void ReFixMono_Init() {
     ReFixLog("[ReFixMono] Found Mono runtime module: %p", hMono);
 
     g_pfn_domain_get = (fn_mono_domain_get)GetProcAddress(hMono, "mono_domain_get");
+    g_pfn_thread_current = (fn_mono_thread_current)GetProcAddress(hMono, "mono_thread_current");
     g_pfn_thread_attach = (fn_mono_thread_attach)GetProcAddress(hMono, "mono_thread_attach");
+    g_pfn_thread_detach = (fn_mono_thread_detach)GetProcAddress(hMono, "mono_thread_detach");
     g_pfn_assembly_foreach = (fn_mono_assembly_foreach)GetProcAddress(hMono, "mono_assembly_foreach");
     g_pfn_assembly_get_image = (fn_mono_assembly_get_image)GetProcAddress(hMono, "mono_assembly_get_image");
     g_pfn_image_get_name = (fn_mono_image_get_name)GetProcAddress(hMono, "mono_image_get_name");
@@ -626,7 +632,18 @@ void ReFixMono_Init() {
         ReFixLog("[ReFixMono] No active Mono domain yet");
         return;
     }
-    if (g_pfn_thread_attach) g_pfn_thread_attach(domain);
+    void* attachedThread = nullptr;
+    if (g_pfn_thread_attach && (!g_pfn_thread_current || !g_pfn_thread_current())) {
+        attachedThread = g_pfn_thread_attach(domain);
+    }
+    struct AutoDetach {
+        void* t;
+        ~AutoDetach() {
+            if (t && g_pfn_thread_detach && g_pfn_thread_current) {
+                g_pfn_thread_detach(t);
+            }
+        }
+    } monoDetach{ attachedThread };
 
     void* img = nullptr;
     g_pfn_assembly_foreach(FindAssemblyCallback, &img);
@@ -783,11 +800,17 @@ void ReFixMono_UnlockDLC(uint32_t dlcId) {
     if (!g_consumeInventoryMethod || !g_pfn_runtime_invoke) return;
 
     void* domain = g_pfn_domain_get ? g_pfn_domain_get() : nullptr;
-    if (domain && g_pfn_thread_attach) g_pfn_thread_attach(domain);
+    void* attachedThread = nullptr;
+    if (domain && g_pfn_thread_attach && (!g_pfn_thread_current || !g_pfn_thread_current())) {
+        attachedThread = g_pfn_thread_attach(domain);
+    }
 
     uint8_t validateEntitlements = 0;
     void* args[1] = { &validateEntitlements };
     void* exc = nullptr;
     g_pfn_runtime_invoke(g_consumeInventoryMethod, nullptr, args, &exc);
+    if (attachedThread && g_pfn_thread_detach && g_pfn_thread_current) {
+        g_pfn_thread_detach(attachedThread);
+    }
     ReFixLog("[ReFixMono] Invoked ConsumeCachedBlayFapInventory after DLC %u unlock", dlcId);
 }

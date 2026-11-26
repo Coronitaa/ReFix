@@ -40,6 +40,7 @@ struct Client {
 
 // Starts the host thread (idempotent). Returns false when the window or D3D11 could not be created.
 bool Start(Client* client);
+void Stop();
 bool IsRunning();
 void Wake();                                  // re-evaluate the mode now
 void EnableHotkey();                          // start watching Shift+Tab

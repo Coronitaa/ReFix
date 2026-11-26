@@ -32,7 +32,7 @@ namespace refix::overlay::sync {
 namespace {
 
 constexpr DWORD kCheckEveryMs = 60000;
-constexpr DWORD kShutdownWaitMs = 8000;
+constexpr DWORD kShutdownWaitMs = 800;
 constexpr ULONGLONG kAutoSyncQuietMs = 5000;        // the game's save has finished writing
 constexpr ULONGLONG kAutoSyncCooldownMs = 300000;   // at most one autosync upload every 5 minutes
 constexpr int kBackupsKept = 3;
@@ -539,9 +539,10 @@ void SyncNow() {
 
 void Shutdown() {
     if (!g_started) return;
+    if (Get().state == State::Off) return;
     SyncNow();
-    for (DWORD waited = 0; waited < kShutdownWaitMs; waited += 100) {
-        Sleep(100);
+    for (DWORD waited = 0; waited < kShutdownWaitMs; waited += 50) {
+        Sleep(50);
         if (!g_busy && Get().state != State::Pending) break;
     }
 }

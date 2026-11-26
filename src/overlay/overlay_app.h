@@ -173,6 +173,7 @@ public:
     struct DisplayConfirm {
         bool active = false;
         settings::Values previous{};
+        bool previousCustomized = false;
         settings::Values pending{};
         ULONGLONG deadlineMs = 0;
         static constexpr ULONGLONG kTimeoutMs = 15000;
@@ -262,6 +263,7 @@ private:
     void ImportFromSteam();
     void ImportProfile(const std::wstring& id);   // a profile of another game, into this one
     void DrawImportPopup();
+    void DrawSteamImportPopup();
 
     std::mutex postMu_;
     std::vector<std::function<void()>> posts_;
@@ -284,8 +286,9 @@ private:
     bool webOpenRequested_ = false;  // (re)open the modal popup on the next overlay frame
     bool webDrawn_ = false;
     bool focusOverlay_ = false;
-    bool importRequested_ = false;   // open "Import from another game" next frame
-    bool gameNamed_ = false;         // the window title was recorded as this game's name      // give the overlay window the keyboard/controller focus next frame          // the modal was drawn this frame: the web view may show
+    bool importRequested_ = false;      // open "Import from another game" next frame
+    bool steamImportRequested_ = false; // open "Import from Steam" next frame
+    bool gameNamed_ = false;            // the window title was recorded as this game's name
 };
 
 } // namespace refix::overlay

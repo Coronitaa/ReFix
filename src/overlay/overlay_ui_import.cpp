@@ -109,6 +109,146 @@ void App::ImportImage() {
     editor_.info = T("Picture ready: it was cropped to a square.", "Imagen lista: se ha recortado en cuadrado.");
 }
 
+namespace {
+
+struct ImportCardItem {
+    bool isExistingProfile = false;
+    bool enabled = true;
+    std::wstring profileId;
+    uint64_t steamId = 0;
+    std::wstring name;
+    std::string subtitle;
+    ImU32 subtitleColor = ui::color::Accent;
+    std::wstring avatarPath;
+    int stockAvatar = 0;
+    bool isSteam = false;
+};
+
+std::string ProfileOriginLabel(const Profile& p, bool steamFallback) {
+    std::wstring from;
+    for (const GameUse& g : p.games) {
+        if (g.key == p.originGame) from = g.name;
+    }
+    if (from.empty() && !p.games.empty()) from = p.games.front().name;
+    if (from.empty()) {
+        return steamFallback ? T("Steam profile", "Perfil de Steam") : T("Another game", "Otro juego");
+    }
+    const std::string more = p.games.size() > 1 ? " +" + std::to_string(p.games.size() - 1) : "";
+    return ToUtf8(from) + more;
+}
+
+template <typename AvatarFn>
+int DrawProfileGridModal(const char* popupId, const char* title, const char* subtitle,
+                         const std::vector<ImportCardItem>& items, const std::string& emptyMessage,
+                         AvatarFn&& avatarForItem) {
+    constexpr float kWidth = 640.0f, kCardH = 150.0f, kGap = 12.0f;
+    constexpr int kColumns = 3;
+    const ImVec2 vp = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(ui::S(kWidth), vp.x - ui::S(24)), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(22)));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(8));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
+    const bool open = ImGui::BeginPopupModal(popupId, nullptr,
+                                             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                                 ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    if (!open) return -1;
+
+    const ui::Fonts& f = ui::F();
+    ImGui::PushFont(f.heading);
+    ImGui::TextUnformatted(title);
+    ImGui::PopFont();
+    ImGui::PushFont(f.caption);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+    ui::TextColored(ui::color::Muted, subtitle);
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, ui::S(10)));
+
+    const float avail = ImGui::GetContentRegionAvail().x;
+    int pickedIdx = -1;
+
+    if (items.empty()) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 cardMin = ImGui::GetCursorScreenPos();
+        const float pad = ui::S(14);
+        dl->ChannelsSplit(2);
+        dl->ChannelsSetCurrent(1);
+        ImGui::SetCursorScreenPos(ImVec2(cardMin.x + pad, cardMin.y + pad));
+        ImGui::BeginGroup();
+        ImGui::PushTextWrapPos(cardMin.x + avail - pad);
+        ImGui::PushFont(f.strong);
+        ui::TextColored(ui::color::Text, emptyMessage.empty()
+                                             ? T("Nothing available to import.", "No hay elementos disponibles para importar.")
+                                             : emptyMessage.c_str());
+        ImGui::PopFont();
+        ImGui::PopTextWrapPos();
+        ImGui::EndGroup();
+        const ImVec2 cardMax(cardMin.x + avail, ImGui::GetItemRectMax().y + pad);
+        dl->ChannelsSetCurrent(0);
+        dl->AddRectFilled(cardMin, cardMax, ui::color::Row, ui::S(8));
+        dl->AddRect(cardMin, cardMax, ui::color::Border, ui::S(8), 0, 1.0f);
+        dl->ChannelsMerge();
+        ImGui::SetCursorScreenPos(ImVec2(cardMin.x, cardMax.y));
+    } else {
+        const float gap = ui::S(kGap), cardH = ui::S(kCardH);
+        const float cardW = (avail - gap * (kColumns - 1)) / kColumns;
+        const int rows = std::max(1, ((int)items.size() + kColumns - 1) / kColumns);
+        const float gridH = std::min(rows * (cardH + gap) - gap, vp.y * 0.6f);
+        std::string childId = std::string(popupId) + "_grid";
+        ImGui::BeginChild(childId.c_str(), ImVec2(avail, gridH), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        for (int i = 0; i < (int)items.size(); ++i) {
+            const ImportCardItem& item = items[i];
+            const ImVec2 p0(origin.x + (i % kColumns) * (cardW + gap), origin.y + (i / kColumns) * (cardH + gap));
+            const ImVec2 p1(p0.x + cardW, p0.y + cardH);
+            ImGui::SetCursorScreenPos(p0);
+            ImGui::PushID(i);
+            if (ui::Clicked(ui::NavButton("##card", ImVec2(cardW, cardH))) && item.enabled) pickedIdx = i;
+            const bool hover = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+            ImGui::PopID();
+            if (ImGui::IsItemHovered() && item.enabled) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            const ImU32 fill = (hover && item.enabled) ? ui::color::RowHover : ui::color::Row;
+            dl->AddRectFilled(p0, p1, fill, ui::S(14));
+            if (hover && item.enabled) dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.7f), ui::S(14), 0, ui::S(1.5f));
+            else dl->AddRect(p0, p1, ui::color::Border, ui::S(14), 0, 1.0f);
+            const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(18 + 34));
+            ui::DrawAvatar(dl, ac, ui::S(34), avatarForItem(item));
+            ImGui::PushFont(f.strong);
+            const std::string name = ui::Ellipsize(ToUtf8(item.name), cardW - ui::S(20));
+            const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
+            ImGui::PopFont();
+            dl->AddText(f.strong, f.strong->FontSize, ImVec2(ac.x - ns.x * 0.5f, p0.y + ui::S(98)),
+                        item.enabled ? ui::color::Text : ui::color::Muted, name.c_str());
+            ImGui::PushFont(f.caption);
+            const std::string sub = ui::Ellipsize(item.subtitle, cardW - ui::S(20));
+            const ImVec2 os = ImGui::CalcTextSize(sub.c_str());
+            ImGui::PopFont();
+            dl->AddText(f.caption, f.caption->FontSize,
+                        ImVec2(ac.x - os.x * 0.5f, p0.y + ui::S(98) + f.strong->FontSize + ui::S(4)),
+                        item.enabled ? item.subtitleColor : ui::color::Muted, sub.c_str());
+        }
+        ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (cardH + gap) - gap));
+        ImGui::Dummy(ImVec2(avail, 0));
+        ImGui::EndChild();
+    }
+
+    ImGui::Dummy(ImVec2(0, ui::S(10)));
+    const float bw = ui::S(140);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - bw);
+    const bool cancel = ui::SecondaryButton(T("Cancel", "Cancelar"), ImVec2(bw, ui::S(40))) ||
+                        ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false);
+    if (cancel || pickedIdx >= 0) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    return pickedIdx;
+}
+
+} // namespace
+
 void App::ImportFromSteam() {
     editor_.error.clear();
     editor_.info.clear();
@@ -120,31 +260,126 @@ void App::ImportFromSteam() {
         return;
     }
 #endif
-    std::wstring err;
-    const std::optional<SteamSession> s = profiles::ReadSteamSession(err);
-    if (!s) {
-        editor_.error = ToUtf8(err);
+    steamImportRequested_ = true;
+}
+
+void App::DrawSteamImportPopup() {
+    static std::vector<ImportCardItem> s_items;
+    static std::string s_emptyMsg;
+    if (steamImportRequested_) {
+        steamImportRequested_ = false;
+        s_items.clear();
+        s_emptyMsg.clear();
+
+        auto hasSteamId = [&](uint64_t sid) {
+            return std::any_of(s_items.begin(), s_items.end(), [&](const ImportCardItem& c) { return c.steamId == sid; });
+        };
+
+        // 1. Existing Steam profiles created across ReFix games on this PC.
+        for (const Profile& p : allProfiles_) {
+            if (!profiles::IsSteamProfile(p)) continue;
+            const bool usedHere = profiles::UsedIn(p, profiles::GameKey());
+            ImportCardItem item;
+            item.isExistingProfile = true;
+            item.profileId = p.id;
+            item.steamId = p.steamId;
+            item.name = p.name;
+            item.stockAvatar = p.stockAvatar;
+            item.isSteam = true;
+            item.enabled = !editor_.creating || !usedHere;
+            item.subtitle = (!item.enabled)
+                                ? std::string(T("Already in this game", "Ya en este juego"))
+                                : ProfileOriginLabel(p, true);
+            item.subtitleColor = ui::color::Accent;
+            s_items.push_back(std::move(item));
+        }
+
+        // 2. Signed-in Steam session + remembered local Steam accounts (deduplicated against ReFix Steam profiles).
+        std::wstring sessionErr;
+        const std::optional<SteamSession> activeSession = profiles::ReadSteamSession(sessionErr);
+        auto addSession = [&](const SteamSession& s, bool active) {
+            if (s.steamId == 0 || hasSteamId(s.steamId)) return;
+            const bool usedHere = std::any_of(allProfiles_.begin(), allProfiles_.end(), [&](const Profile& p) {
+                return p.steamId == s.steamId && profiles::UsedIn(p, profiles::GameKey());
+            });
+            ImportCardItem item;
+            item.isExistingProfile = false;
+            item.steamId = s.steamId;
+            item.name = s.name;
+            item.avatarPath = s.avatarPath;
+            item.stockAvatar = (int)(s.steamId % (uint64_t)ui::StockCount());
+            item.isSteam = true;
+            item.enabled = !editor_.creating || !usedHere;
+            item.subtitle = (!item.enabled)
+                                ? std::string(T("Already in this game", "Ya en este juego"))
+                                : (active ? std::string(T("Signed in on Steam", "Sesión activa en Steam"))
+                                          : std::string(T("Steam account", "Cuenta de Steam")));
+            item.subtitleColor = active ? ui::color::SteamOnline : ui::color::Muted;
+            s_items.push_back(std::move(item));
+        };
+        if (activeSession) addSession(*activeSession, true);
+        for (const SteamSession& acc : profiles::ReadSteamAccounts()) {
+            addSession(acc, activeSession && activeSession->steamId == acc.steamId);
+        }
+
+        if (s_items.empty()) {
+            s_emptyMsg = !sessionErr.empty()
+                             ? ToUtf8(sessionErr)
+                             : std::string(T("No Steam profiles or accounts were found on this PC.",
+                                             "No se encontraron perfiles ni cuentas de Steam en este PC."));
+        }
+        ImGui::OpenPopup("##importsteam");
+    }
+    if (!ImGui::IsPopupOpen("##importsteam")) return;
+
+    const char* title = T("Import from Steam", "Importar desde Steam");
+    const char* subtitle = editor_.creating
+                               ? T("Pick a Steam profile you already imported in another game or a Steam account on this PC.",
+                                   "Elige un perfil de Steam ya importado en otro juego o una cuenta de Steam de este PC.")
+                               : T("Pick a Steam profile or Steam account to copy its name and avatar.",
+                                   "Elige un perfil o cuenta de Steam para copiar su nombre y avatar.");
+
+    const int picked = DrawProfileGridModal("##importsteam", title, subtitle, s_items, s_emptyMsg, [&](const ImportCardItem& item) {
+        if (item.isExistingProfile) {
+            auto it = std::find_if(allProfiles_.begin(), allProfiles_.end(), [&](const Profile& p) { return p.id == item.profileId; });
+            if (it != allProfiles_.end()) return ProfileAvatar(*it);
+        }
+        ui::AvatarRef a;
+        a.stock = item.stockAvatar;
+        a.steam = true;
+        if (!item.avatarPath.empty()) {
+            const std::string key = "sc:" + std::to_string(item.steamId);
+            const std::wstring path = item.avatarPath;
+            a.texture = host::Texture(key, [path](image::Rgba& img) { return image::LoadFile(path, img); });
+        }
+        return a;
+    });
+
+    if (picked < 0 || picked >= (int)s_items.size()) return;
+    const ImportCardItem& c = s_items[picked];
+    if (c.isExistingProfile && editor_.creating) {
+        ImportProfile(c.profileId);
         return;
     }
+
+    strncpy_s(editor_.name, ToUtf8(c.name.substr(0, kMaxNameChars)).c_str(), _TRUNCATE);
     if (editor_.creating) {
-        for (const Profile& p : allProfiles_) {
-            if (p.steamId != s->steamId) continue;
-            editor_.error = profiles::UsedIn(p, profiles::GameKey())
-                                ? std::string(T("You already have a profile with this Steam account (",
-                                                "Ya tienes un perfil con esta cuenta de Steam (")) + ToUtf8(p.name) + ")."
-                                : std::string(T("Another game already has a profile with this Steam account (",
-                                                "Otro juego ya tiene un perfil con esta cuenta de Steam (")) +
-                                      ToUtf8(p.name) + T("): import it from that game.", "): impórtalo de ese juego.");
-            return;
-        }
-        editor_.steamId = s->steamId;
+        editor_.steamId = c.steamId;
         editor_.steamIdFromSteam = true;
     }
-    strncpy_s(editor_.name, ToUtf8(s->name.substr(0, kMaxNameChars)).c_str(), _TRUNCATE);
     bool avatar = false;
-    if (!s->avatarPath.empty()) {
+    std::wstring srcAvatar = c.avatarPath;
+    if (c.isExistingProfile) {
+        auto it = std::find_if(allProfiles_.begin(), allProfiles_.end(), [&](const Profile& p) { return p.id == c.profileId; });
+        if (it != allProfiles_.end() && it->customAvatar) srcAvatar = profiles::AvatarPath(it->id);
+        else if (it != allProfiles_.end()) {
+            editor_.custom = false;
+            editor_.stock = it->stockAvatar;
+        }
+    }
+    if (!srcAvatar.empty()) {
         std::wstring imgErr;
-        avatar = image::ImportAvatar(s->avatarPath, EditorTempAvatarPath(), imgErr);
+        avatar = image::ImportAvatar(srcAvatar, EditorTempAvatarPath(), imgErr);
         if (avatar) {
             editor_.custom = true;
             editor_.imagePath = EditorTempAvatarPath();
@@ -156,97 +391,46 @@ void App::ImportFromSteam() {
                               : T("Imported your Steam name and SteamID (Steam has no cached avatar).",
                                   "Importados tu nombre y tu SteamID (Steam no tiene tu avatar en caché).");
     else
-        editor_.info = avatar ? T("Imported your Steam name and avatar.", "Importados tu nombre y tu avatar de Steam.")
-                              : T("Imported your Steam name.", "Importado tu nombre de Steam.");
+        editor_.info = avatar ? T("Imported Steam name and avatar.", "Importados el nombre y el avatar de Steam.")
+                              : T("Imported Steam name.", "Importado el nombre de Steam.");
 }
 
-// "Import from another game": every profile of the PC that this game does not list yet, with its picture,
-// its name and the game it comes from ("Lethal Company +2" when two more games used it too).
+// "Import from another game": non-Steam profiles on this PC that this game does not list yet.
 void App::DrawImportPopup() {
-    constexpr float kWidth = 640.0f, kCardH = 150.0f, kGap = 12.0f;
-    constexpr int kColumns = 3;
     if (importRequested_) {
         ImGui::OpenPopup("##importprofile");
         importRequested_ = false;
     }
     if (!ImGui::IsPopupOpen("##importprofile")) return;
-    const ImVec2 vp = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(ui::S(kWidth), vp.x - ui::S(24)), 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui::S(24), ui::S(22)));
-    const bool open = ImGui::BeginPopupModal("##importprofile", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                                                                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                                                         ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::PopStyleVar();
-    if (!open) return;
-    const ui::Fonts& f = ui::F();
-    ImGui::PushFont(f.heading);
-    ImGui::TextUnformatted(T("Import a profile from another game", "Importar un perfil de otro juego"));
-    ImGui::PopFont();
-    ImGui::PushFont(f.caption);
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
-    ui::TextColored(ui::color::Muted, T("It is the same player in both games: same name, picture and SteamID.",
-                                        "Es el mismo jugador en los dos juegos: mismo nombre, imagen y SteamID."));
-    ImGui::PopTextWrapPos();
-    ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0, ui::S(8)));
 
     const std::vector<Profile> others = profiles::FromOtherGames(allProfiles_, profiles::GameKey());
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float gap = ui::S(kGap), cardH = ui::S(kCardH);
-    const float cardW = (avail - gap * (kColumns - 1)) / kColumns;
-    const int rows = std::max(1, ((int)others.size() + kColumns - 1) / kColumns);
-    const float gridH = std::min(rows * (cardH + gap) - gap, vp.y * 0.6f);
-    std::wstring picked;
-    ImGui::BeginChild("##importgrid", ImVec2(avail, gridH), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    for (int i = 0; i < (int)others.size(); ++i) {
-        const Profile& p = others[i];
-        const ImVec2 p0(origin.x + (i % kColumns) * (cardW + gap), origin.y + (i / kColumns) * (cardH + gap));
-        const ImVec2 p1(p0.x + cardW, p0.y + cardH);
-        ImGui::SetCursorScreenPos(p0);
-        ImGui::PushID(i);
-        if (ui::Clicked(ui::NavButton("##other", ImVec2(cardW, cardH)))) picked = p.id;
-        const bool hover = ImGui::IsItemHovered();
-        ImGui::PopID();
-        if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        dl->AddRectFilled(p0, p1, hover ? ui::color::RowHover : ui::color::Row, ui::S(14));
-        if (hover) dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.7f), ui::S(14), 0, ui::S(1.5f));
-        const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(18 + 34));
-        ui::DrawAvatar(dl, ac, ui::S(34), ProfileAvatar(p));
-        ImGui::PushFont(f.strong);
-        const std::string name = ui::Ellipsize(ToUtf8(p.name), cardW - ui::S(20));
-        const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
-        ImGui::PopFont();
-        dl->AddText(f.strong, f.strong->FontSize, ImVec2(ac.x - ns.x * 0.5f, p0.y + ui::S(98)), ui::color::Text, name.c_str());
-        // Where it comes from: the game it was created in, "+N" for the other games that use it too.
-        std::wstring from;
-        for (const GameUse& g : p.games) {
-            if (g.key == p.originGame) from = g.name;
-        }
-        if (from.empty() && !p.games.empty()) from = p.games.front().name;
-        std::string origin = from.empty() ? std::string(T("Another game", "Otro juego")) : ToUtf8(from);
-        ImGui::PushFont(f.caption);
-        const std::string more = p.games.size() > 1 ? " +" + std::to_string(p.games.size() - 1) : "";
-        origin = ui::Ellipsize(origin, cardW - ui::S(20) - ImGui::CalcTextSize(more.c_str()).x) + more;
-        const ImVec2 os = ImGui::CalcTextSize(origin.c_str());
-        ImGui::PopFont();
-        dl->AddText(f.caption, f.caption->FontSize, ImVec2(ac.x - os.x * 0.5f, p0.y + ui::S(98) + f.strong->FontSize + ui::S(4)),
-                    ui::color::Accent, origin.c_str());
+    std::vector<ImportCardItem> items;
+    items.reserve(others.size());
+    for (const Profile& p : others) {
+        ImportCardItem item;
+        item.isExistingProfile = true;
+        item.profileId = p.id;
+        item.steamId = p.steamId;
+        item.name = p.name;
+        item.subtitle = ProfileOriginLabel(p, false);
+        item.subtitleColor = ui::color::Accent;
+        item.stockAvatar = p.stockAvatar;
+        items.push_back(std::move(item));
     }
-    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (cardH + gap) - gap));
-    ImGui::Dummy(ImVec2(avail, 0));
-    ImGui::EndChild();
 
-    ImGui::Dummy(ImVec2(0, ui::S(10)));
-    const float bw = ui::S(140);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - bw);
-    const bool cancel = ui::SecondaryButton(T("Cancel", "Cancelar"), ImVec2(bw, ui::S(40))) ||
-                        ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false);
-    if (cancel || !picked.empty()) ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
-    if (!picked.empty()) ImportProfile(picked);
+    const int picked = DrawProfileGridModal(
+        "##importprofile",
+        T("Import a profile from another game", "Importar un perfil de otro juego"),
+        T("It is the same player in both games: same name, picture and SteamID.",
+          "Es el mismo jugador en los dos juegos: mismo nombre, imagen y SteamID."),
+        items,
+        T("Your other ReFix games have no local profiles to import.",
+          "Tus otros juegos con ReFix no tienen perfiles locales para importar."),
+        [&](const ImportCardItem& item) {
+            auto it = std::find_if(others.begin(), others.end(), [&](const Profile& p) { return p.id == item.profileId; });
+            return it != others.end() ? ProfileAvatar(*it) : ui::AvatarRef{};
+        });
+    if (picked >= 0 && picked < (int)items.size()) ImportProfile(items[picked].profileId);
 }
 
 void App::DrawCloudImportModal() {

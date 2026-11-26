@@ -384,6 +384,10 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
 
 void Shutdown() {
     SetNvidiaOverlayHidden(false);   // never leave NVIDIA's overlay hidden after the game
+    refix::overlay::host::Stop();
+#if REFIX_STEAM_LINK
+    refix::steamlink::Disable();
+#endif
     sync::Shutdown();
 }
 

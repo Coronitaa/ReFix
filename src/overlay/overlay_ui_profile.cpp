@@ -537,12 +537,12 @@ bool App::DrawEditorBody(bool firstRun) {
     // Import buttons.
     const float bw = (w - ui::S(10)) * 0.5f;
     const std::string imgLabel = std::string(ui::icon::Folder) + "  " + T("Import picture…", "Importar imagen…") + "##img";
-    const std::string steamLabel = std::string(ui::icon::Import) + "  " + T("Import from Steam", "Importar desde Steam") + "##steam";
+    const std::string steamLabel = std::string(ui::icon::Import) + "  " + T("Import from Steam…", "Importar desde Steam…") + "##steam";
     if (ui::SecondaryButton(imgLabel.c_str(), ImVec2(bw, ui::S(40)))) ImportImage();
     ImGui::SameLine(0, ui::S(10));
     if (ui::SecondaryButton(steamLabel.c_str(), ImVec2(bw, ui::S(40)))) ImportFromSteam();
-    ui::Tooltip(T("Uses the name, avatar and SteamID of the account signed in to Steam",
-                  "Usa el nombre, el avatar y el SteamID de la cuenta abierta en Steam"));
+    ui::Tooltip(T("Choose a Steam profile from this PC or an account signed in to Steam",
+                  "Elige un perfil de Steam de este PC o una cuenta iniciada en Steam"));
     if (editor_.creating) {
         const bool others = !profiles::FromOtherGames(allProfiles_, profiles::GameKey()).empty();
         const std::string otherLabel = std::string(ui::icon::Game) + "  " +
@@ -550,9 +550,10 @@ bool App::DrawEditorBody(bool firstRun) {
         if (ui::SecondaryButton(otherLabel.c_str(), ImVec2(w, ui::S(40)), others)) importRequested_ = true;
         ui::Tooltip(others ? T("Play with a profile you made in another ReFix game: same name, picture and SteamID",
                                "Juega con un perfil que creaste en otro juego con ReFix: mismo nombre, imagen y SteamID")
-                           : T("Your other ReFix games have no profiles yet", "Tus otros juegos con ReFix aún no tienen perfiles"));
+                           : T("Your other ReFix games have no local profiles yet", "Tus otros juegos con ReFix aún no tienen perfiles locales"));
         DrawImportPopup();
     }
+    DrawSteamImportPopup();
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
     // Name.

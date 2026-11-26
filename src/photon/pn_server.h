@@ -1,6 +1,7 @@
 #pragma once
 #include "pn_fusion.h"
 #include "pn_proto18.h"
+#include "pn_quantum.h"
 #include "pn_shared.h"
 #include <cstdint>
 #include <functional>
@@ -121,6 +122,7 @@ private:
         int32_t fusionSharedConfigActor = 0;                // actor asked for the NetworkProjectConfig
         bool fusionSharedConfigSent = false;
         bool fusionSharedRunning = false;
+        PnQuantum::RoomState quantum;
         std::map<int32_t, Actor> actors;
         std::vector<CachedEvent> cache;
     };
@@ -147,6 +149,10 @@ private:
     bool HandleFusionJoin(Peer& peer, Room& room, const std::string& buffer);
     bool HandleFusionConfigSync(Peer& peer, Room& room, const std::string& buffer);
     bool HandleFusionSnapshot(Peer& peer, Room& room, const std::string& buffer);
+    bool HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const PnProto18::Raw& data);
+    void StartQuantumActor(Room& room, int32_t actor, uint32_t nowMs);
+    void PumpQuantum(Room& room, uint32_t nowMs);
+    void SendQuantumMessage(Room& room, int32_t actor, uint8_t code, const std::string& buffer, bool reliable);
     void HandleFusionSharedJoin(Peer& peer, Room& room, const PnFusion::Header& header, PnFusion::Join join);
     void StartFusionSharedPeer(Room& room, int32_t actor, const PnFusion::Header& header);
     void PumpFusionShared(Room& room);

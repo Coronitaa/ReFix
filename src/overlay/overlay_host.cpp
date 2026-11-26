@@ -39,10 +39,12 @@ struct TextureEntry {
 
 Client* g_client = nullptr;
 std::atomic<bool> g_running{false};
+std::atomic<bool> g_stopRequested{false};
 std::atomic<bool> g_hotkeyPending{false};
 std::atomic<bool> g_wantHotkeyHook{false};
 DWORD g_threadId = 0;
 HANDLE g_ready = nullptr;
+HANDLE g_hostThread = nullptr;
 bool g_initOk = false;
 
 HWND g_hwnd = nullptr;
@@ -747,7 +749,7 @@ DWORD WINAPI HostThread(LPVOID) {
         return 0;
     }
     ULONGLONG lastScan = 0;
-    for (;;) {
+    while (!g_stopRequested.load(std::memory_order_relaxed)) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
@@ -805,6 +807,10 @@ DWORD WINAPI HostThread(LPVOID) {
         Render(gw, padState);
         MsgWaitForMultipleObjects(0, nullptr, FALSE, 2, QS_ALLINPUT);
     }
+    ResumeGameRawInput();
+    if (g_hwnd && IsWindow(g_hwnd)) DestroyWindow(g_hwnd);
+    g_running = false;
+    return 0;
 }
 
 } // namespace
@@ -812,13 +818,28 @@ DWORD WINAPI HostThread(LPVOID) {
 bool Start(Client* client) {
     if (g_running) return true;
     if (g_ready) return false;   // a previous start failed
+    g_stopRequested.store(false, std::memory_order_relaxed);
     g_client = client;
     g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE t = CreateThread(nullptr, 0, HostThread, nullptr, 0, &g_threadId);
     if (!t) return false;
-    CloseHandle(t);
+    g_hostThread = t;
     WaitForSingleObject(g_ready, INFINITE);
+    if (!g_initOk && g_hostThread) {
+        CloseHandle(g_hostThread);
+        g_hostThread = nullptr;
+    }
     return g_initOk;
+}
+
+void Stop() {
+    g_stopRequested.store(true, std::memory_order_relaxed);
+    Wake();
+    if (g_hostThread) {
+        WaitForSingleObject(g_hostThread, 300);
+        CloseHandle(g_hostThread);
+        g_hostThread = nullptr;
+    }
 }
 
 bool IsRunning() { return g_running; }

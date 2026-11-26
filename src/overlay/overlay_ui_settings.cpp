@@ -382,6 +382,7 @@ void DrawFormattedNotice(const char* text, float wrapWidth = 0.0f) {
 static settings::DisplayMode g_draftDisplayMode = settings::DisplayMode::FullscreenWindowed;
 static int g_draftWindowW = 1920;
 static int g_draftWindowH = 1080;
+static bool g_draftPerGameDisplay = false;
 
 void App::DrawSettingsModal(ImVec2 viewport) {
     if (settingsRequested_) {
@@ -392,6 +393,7 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         g_draftDisplayMode = cur.displayMode;
         g_draftWindowW = cur.windowWidth;
         g_draftWindowH = cur.windowHeight;
+        g_draftPerGameDisplay = cur.perGameDisplay;
     }
     if (!settingsOpen_) return;
     if (!ImGui::IsPopupOpen("##settings")) ImGui::OpenPopup("##settings");
@@ -587,20 +589,32 @@ void App::DrawSettingsModal(ImVec2 viewport) {
 
         {
             const bool displayDirty = (g_draftDisplayMode != v.displayMode) ||
+                                      (g_draftPerGameDisplay != v.perGameDisplay) ||
                                       (g_draftDisplayMode == settings::DisplayMode::Windowed &&
                                        (g_draftWindowW != v.windowWidth || g_draftWindowH != v.windowHeight));
             const char* applyLabel = i18n::T("Apply display changes", "Aplicar cambios de pantalla");
-            const float btnW = std::min(ImGui::GetContentRegionAvail().x, ui::S(240));
+            const float avail = ImGui::GetContentRegionAvail().x;
+            const float btnW = std::min(avail, ui::S(240));
             const float btnH = ui::S(34);
+            const float rowStartY = ImGui::GetCursorPosY();
             if (ui::PrimaryButton(applyLabel, ImVec2(btnW, btnH), displayDirty)) {
                 settings::Values target = v;
                 target.displayMode = g_draftDisplayMode;
                 target.windowWidth = g_draftWindowW;
                 target.windowHeight = g_draftWindowH;
+                target.perGameDisplay = g_draftPerGameDisplay;
                 ApplyDisplaySettingsWithConfirm(target);
                 close = true;
             }
-            ImGui::Dummy(ImVec2(0, ui::S(4)));
+            const float cbH = ImGui::GetFrameHeight();
+            ImGui::SameLine(0, ui::S(14));
+            if (btnH > cbH) ImGui::SetCursorPosY(rowStartY + (btnH - cbH) * 0.5f);
+            ImGui::Checkbox(i18n::T("Keep only for this game##pergame_disp",
+                                    "Solo para este juego##pergame_disp"),
+                            &g_draftPerGameDisplay);
+            ui::Tooltip(i18n::T("When ticked, screen mode and resolution are saved only for this game instead of globally.",
+                                "Si se marca, el modo de pantalla y la resolución se guardan solo para este juego en lugar de usarse en todos."));
+            ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), rowStartY + btnH + ui::S(4)));
         }
 
         SyncSection(ui::icon::Switch, i18n::T("Overlay Mode", "Modo del Overlay"));
@@ -739,13 +753,16 @@ void App::DrawSettingsModal(ImVec2 viewport) {
     ImGui::EndChild();
 
     if (restore) {
+        settings::MarkDisplayCustomized(false);
         v = settings::Values();
         g_draftDisplayMode = v.displayMode;
         g_draftWindowW = v.windowWidth;
         g_draftWindowH = v.windowHeight;
+        g_draftPerGameDisplay = v.perGameDisplay;
+        settings::Set(v);
         settings::MarkDisplayCustomized(false);
         settings::ApplyDisplayToWindow(host::CurrentGame().hwnd, v);
-        changed = true;
+        changed = false;
     }
     if (changed) {
         settings::Set(v);
@@ -1095,6 +1112,12 @@ void App::DrawDisplayConfirmModal(ImVec2 viewport) {
     ImGui::PushFont(f.strong);
     ui::TextColored(ui::color::Text, modeBuf);
     ImGui::PopFont();
+    if (displayConfirm_.pending.perGameDisplay) {
+        ImGui::Dummy(ImVec2(0, ui::S(2)));
+        ImGui::PushFont(f.caption);
+        ui::TextColored(ui::color::Accent, i18n::T("Saved only for this game", "Guardado solo para este juego"));
+        ImGui::PopFont();
+    }
     ImGui::Dummy(ImVec2(0, ui::S(6)));
 
     char timerBuf[128];

@@ -26,7 +26,9 @@ constexpr int kFieldAttributeStatic = 0x0010; // FIELD_ATTRIBUTE_STATIC
 
 struct Api {
     void* (*domain_get)() = nullptr;
+    void* (*thread_current)() = nullptr;
     void* (*thread_attach)(void*) = nullptr;
+    void (*thread_detach)(void*) = nullptr;
     void** (*domain_get_assemblies)(void*, size_t*) = nullptr;
     void* (*assembly_get_image)(void*) = nullptr;
     const char* (*image_get_name)(void*) = nullptr;
@@ -65,7 +67,9 @@ const Api* GetApi() {
         HMODULE ga = GetModuleHandleA("GameAssembly.dll");
         if (!ga) return;
         Resolve(ga, g_api.domain_get, "il2cpp_domain_get");
+        Resolve(ga, g_api.thread_current, "il2cpp_thread_current");
         Resolve(ga, g_api.thread_attach, "il2cpp_thread_attach");
+        Resolve(ga, g_api.thread_detach, "il2cpp_thread_detach");
         Resolve(ga, g_api.domain_get_assemblies, "il2cpp_domain_get_assemblies");
         Resolve(ga, g_api.assembly_get_image, "il2cpp_assembly_get_image");
         Resolve(ga, g_api.image_get_name, "il2cpp_image_get_name");
@@ -96,9 +100,29 @@ const Api* GetApi() {
     if (!g_api.ready) return nullptr;
     void* domain = g_api.domain_get();
     if (!domain) return nullptr;
-    g_api.thread_attach(domain);
     return &g_api;
 }
+
+// Attaches only when the current OS thread is not already registered with IL2CPP,
+// and detaches on exit so background/overlay threads never linger and block il2cpp_shutdown().
+struct ScopedAttach {
+    const Api* api = nullptr;
+    void* attachedThread = nullptr;
+
+    explicit ScopedAttach(const Api* a) : api(a) {
+        if (!api || !api->thread_attach) return;
+        void* domain = api->domain_get ? api->domain_get() : nullptr;
+        if (!domain) return;
+        if (api->thread_current && api->thread_current()) return;
+        attachedThread = api->thread_attach(domain);
+    }
+
+    ~ScopedAttach() {
+        if (attachedThread && api && api->thread_detach) {
+            api->thread_detach(attachedThread);
+        }
+    }
+};
 
 // --- SEH-guarded primitives (no C++ objects with destructors allowed in these frames) ---
 
@@ -371,6 +395,7 @@ void LogFlowNodeRecursive(const Api* api, void* node, int depth, int* budget) {
 
 void LogCameraInventory(const char* tag) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api) return;
     std::vector<CameraInfo> cams = CollectCameras(api);
     ReFixLog("[IL2CPP-Scene] Camera inventory (%s): %zu camera(s)", tag ? tag : "", cams.size());
@@ -386,6 +411,7 @@ void LogCameraInventory(const char* tag) {
 
 bool EnsureScreenCamera() {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api) return false;
     std::vector<CameraInfo> cams = CollectCameras(api);
     for (const CameraInfo& c : cams) {
@@ -414,6 +440,7 @@ bool EnsureScreenCamera() {
 
 void LogFlowNodeTree(const char* label, void* rootNode) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api) return;
     ReFixLog("[IL2CPP-Scene] Flow tree '%s' root=%p", label ? label : "", rootNode);
     int budget = kMaxFlowTreeNodes;
@@ -422,6 +449,7 @@ void LogFlowNodeTree(const char* label, void* rootNode) {
 
 void LogObjectClass(const char* label, void* obj) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !obj) return;
     void* klass = api->object_get_class(obj);
     void* image = (klass && api->class_get_image) ? api->class_get_image(klass) : nullptr;
@@ -432,16 +460,19 @@ void LogObjectClass(const char* label, void* obj) {
 
 void* FindClassByName(const char* ns, const char* className) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api ? FindClass(api, ns, className) : nullptr;
 }
 
 bool GetStaticFieldValue(void* klass, const char* fieldName, void* out) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && SafeGetStaticField(api, klass, fieldName, out);
 }
 
 bool SetStaticFieldValue(void* klass, const char* fieldName, void* value) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && SafeSetStaticField(api, klass, fieldName, value);
 }
 
@@ -449,11 +480,13 @@ bool SetStaticReference(void* klass, const char* fieldName, void* object) {
     // il2cpp_field_static_set_value stores a reference-type value as given (the object pointer itself),
     // unlike value types where `value` points to the data to copy.
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && SafeSetStaticField(api, klass, fieldName, object);
 }
 
 void* FindFirstObjectOfType(const char* ns, const char* className) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api) return nullptr;
     void* klass = FindClass(api, ns, className);
     void* klassObject = FindClass(api, "UnityEngine", "Object");
@@ -469,11 +502,13 @@ void* FindFirstObjectOfType(const char* ns, const char* className) {
 
 void* NewString(const char* utf8) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return (api && api->string_new && utf8) ? api->string_new(utf8) : nullptr;
 }
 
 void* NewPinnedString(const char* utf8) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !api->string_new || !api->gchandle_new || !utf8) return nullptr;
     void* str = api->string_new(utf8);
     // Strong GC handle, intentionally never freed: native code stores the string in a static, and the
@@ -484,6 +519,7 @@ void* NewPinnedString(const char* utf8) {
 
 bool InvokeStaticBoolSetter(void* klass, const char* methodName, bool value) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !klass) return false;
     void* args[1] = { &value };
     bool ok = false;
@@ -493,6 +529,7 @@ bool InvokeStaticBoolSetter(void* klass, const char* methodName, bool value) {
 
 bool InvokeStaticBoolGetter(void* klass, const char* methodName, bool* out) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !klass) return false;
     bool ok = false;
     void* boxed = SafeInvoke(api, api->class_get_method_from_name(klass, methodName, 0), nullptr, nullptr, &ok);
@@ -503,6 +540,7 @@ bool InvokeStaticBoolGetter(void* klass, const char* methodName, bool* out) {
 
 void* GetMethodCode(void* klass, const char* methodName, int argc) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !klass) return nullptr;
     void* method = api->class_get_method_from_name(klass, methodName, argc);
     return method ? *reinterpret_cast<void**>(method) : nullptr;
@@ -510,6 +548,7 @@ void* GetMethodCode(void* klass, const char* methodName, int argc) {
 
 std::string ObjectToDisplayString(void* obj) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !obj) return "<null>";
     std::string cls = ClassName(api, obj);
     if (cls == "System.String") return ToUtf8(obj);
@@ -520,6 +559,7 @@ std::string ObjectToDisplayString(void* obj) {
 
 void* NewObject(void* klass) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !api->object_new || !klass) return nullptr;
     void* obj = api->object_new(klass);
     if (!obj) return nullptr;
@@ -530,32 +570,38 @@ void* NewObject(void* klass) {
 
 bool SetFieldValue(void* obj, const char* fieldName, void* value) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && SafeSetField(api, obj, fieldName, value);
 }
 
 bool SetFieldReference(void* obj, const char* fieldName, void* object) {
     // Like static fields, il2cpp_field_set_value stores reference-type values as given (the object pointer).
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && SafeSetField(api, obj, fieldName, object);
 }
 
 void* GetParentClass(void* klass) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return (api && klass && api->class_get_parent) ? api->class_get_parent(klass) : nullptr;
 }
 
 bool GetFieldValue(void* obj, const char* fieldName, void* out) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && SafeGetField(api, obj, fieldName, out);
 }
 
 void* CallObjectGetter(void* obj, const char* getter) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api ? CallObject(api, obj, getter) : nullptr;
 }
 
 bool CallMethodWithObject(void* obj, const char* method, void* arg) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !obj) return false;
     void* args[1] = { arg }; // reference-type arguments are passed as the object pointer itself
     bool ok = false;
@@ -565,16 +611,19 @@ bool CallMethodWithObject(void* obj, const char* method, void* arg) {
 
 bool CallBoolGetter(void* obj, const char* getter, bool* out) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && CallValue(api, obj, getter, out);
 }
 
 bool CallInt32Getter(void* obj, const char* getter, int32_t* out) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     return api && CallValue(api, obj, getter, out);
 }
 
 void LogStaticReference(const char* ns, const char* className, const char* fieldName) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api) return;
     void* klass = FindClass(api, ns, className);
     if (!klass) {
@@ -591,6 +640,7 @@ void LogStaticReference(const char* ns, const char* className, const char* field
 
 void LogClassPresence(const char* ns, const char* className) {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api) return;
     void* klass = FindClass(api, ns, className);
     void* image = (klass && api->class_get_image) ? api->class_get_image(klass) : nullptr;
@@ -601,6 +651,7 @@ void LogClassPresence(const char* ns, const char* className) {
 
 void LogManagedAssemblies() {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api) return;
     void* klassDomain = FindClass(api, "System", "AppDomain");
     if (!klassDomain) return;
@@ -631,6 +682,7 @@ std::string StringToUtf8(void* il2cppString) {
 
 void LogLoadedAssemblies() {
     const Api* api = GetApi();
+    ScopedAttach il2cppAttach(api);
     if (!api || !api->image_get_name) return;
     size_t count = 0;
     void** assemblies = api->domain_get_assemblies(api->domain_get(), &count);

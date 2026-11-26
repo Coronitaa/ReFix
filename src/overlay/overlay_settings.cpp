@@ -46,16 +46,22 @@ bool g_displayCustomized = false;
 
 std::wstring Ini() { return profiles::RootDir() + L"\\profiles.ini"; }
 
+std::wstring DisplaySectionForGame() {
+    const std::wstring gk = profiles::GameKey();
+    if (gk.empty()) return kSection;
+    return std::wstring(L"OverlayDisplay.") + gk;
+}
+
 // -1 = not set by the player.
-int ReadBool(const std::wstring& ini, const wchar_t* key) {
+int ReadBool(const std::wstring& ini, const wchar_t* sec, const wchar_t* key) {
     wchar_t buf[8] = {};
-    GetPrivateProfileStringW(kSection, key, L"", buf, 8, ini.c_str());
+    GetPrivateProfileStringW(sec, key, L"", buf, 8, ini.c_str());
     if (!buf[0]) return -1;
     return (buf[0] == L'1' || _wcsicmp(buf, L"true") == 0) ? 1 : 0;
 }
 
-int ReadInt(const std::wstring& ini, const wchar_t* key, int def) {
-    return (int)GetPrivateProfileIntW(kSection, key, def, ini.c_str());
+int ReadInt(const std::wstring& ini, const wchar_t* sec, const wchar_t* key, int def) {
+    return (int)GetPrivateProfileIntW(sec, key, def, ini.c_str());
 }
 
 std::string FindReFixIni() {
@@ -78,24 +84,37 @@ const Values& Get() {
         g_loaded = true;
         const std::wstring ini = Ini();
         for (const Key& k : kKeys) {
-            const int v = ReadBool(ini, k.name);
+            const int v = ReadBool(ini, kSection, k.name);
             if (v >= 0) g_values.*k.field = v == 1;
         }
-        int beh = ReadInt(ini, L"OpenBehavior", (int)GameOpenBehavior::KeepActive);
+        int beh = ReadInt(ini, kSection, L"OpenBehavior", (int)GameOpenBehavior::KeepActive);
         if (beh >= 0 && beh <= 2) g_values.openBehavior = static_cast<GameOpenBehavior>(beh);
-        int sc = ReadInt(ini, L"Shortcut", (int)OverlayShortcut::ShiftTab);
+        int sc = ReadInt(ini, kSection, L"Shortcut", (int)OverlayShortcut::ShiftTab);
         if (sc >= 0 && sc <= (int)OverlayShortcut::Insert) g_values.shortcut = static_cast<OverlayShortcut>(sc);
-        int dm = ReadInt(ini, L"DisplayMode", (int)DisplayMode::FullscreenWindowed);
+        int dm = ReadInt(ini, kSection, L"DisplayMode", (int)DisplayMode::FullscreenWindowed);
         if (dm >= 0 && dm <= 2) g_values.displayMode = static_cast<DisplayMode>(dm);
-        g_values.windowWidth = ReadInt(ini, L"WindowWidth", 1920);
+        g_values.windowWidth = ReadInt(ini, kSection, L"WindowWidth", 1920);
         if (g_values.windowWidth <= 0) g_values.windowWidth = 1920;
-        g_values.windowHeight = ReadInt(ini, L"WindowHeight", 1080);
+        g_values.windowHeight = ReadInt(ini, kSection, L"WindowHeight", 1080);
         if (g_values.windowHeight <= 0) g_values.windowHeight = 1080;
-        const int customDisp = ReadBool(ini, L"DisplayCustomized");
+        const int customDisp = ReadBool(ini, kSection, L"DisplayCustomized");
         g_displayCustomized = (customDisp >= 0)
             ? (customDisp == 1)
             : (g_values.displayMode != DisplayMode::FullscreenWindowed ||
                g_values.windowWidth != 1920 || g_values.windowHeight != 1080);
+
+        const std::wstring gameSec = DisplaySectionForGame();
+        if (gameSec != kSection && ReadBool(ini, gameSec.c_str(), L"PerGame") == 1) {
+            g_values.perGameDisplay = true;
+            const int gdm = ReadInt(ini, gameSec.c_str(), L"DisplayMode", (int)g_values.displayMode);
+            if (gdm >= 0 && gdm <= 2) g_values.displayMode = static_cast<DisplayMode>(gdm);
+            const int gw = ReadInt(ini, gameSec.c_str(), L"WindowWidth", g_values.windowWidth);
+            if (gw > 0) g_values.windowWidth = gw;
+            const int gh = ReadInt(ini, gameSec.c_str(), L"WindowHeight", g_values.windowHeight);
+            if (gh > 0) g_values.windowHeight = gh;
+            const int gCustom = ReadBool(ini, gameSec.c_str(), L"DisplayCustomized");
+            g_displayCustomized = (gCustom >= 0) ? (gCustom == 1) : true;
+        }
     }
     return g_values;
 }
@@ -109,7 +128,9 @@ void MarkDisplayCustomized(bool customized) {
     Get();
     g_displayCustomized = customized;
     CreateDirectoryW(profiles::RootDir().c_str(), nullptr);
-    WritePrivateProfileStringW(kSection, L"DisplayCustomized", customized ? L"1" : L"0", Ini().c_str());
+    const std::wstring ini = Ini();
+    const std::wstring sec = g_values.perGameDisplay ? DisplaySectionForGame() : kSection;
+    WritePrivateProfileStringW(sec.c_str(), L"DisplayCustomized", customized ? L"1" : L"0", ini.c_str());
 }
 
 void Set(const Values& v) {
@@ -120,14 +141,19 @@ void Set(const Values& v) {
     for (const Key& k : kKeys) WritePrivateProfileStringW(kSection, k.name, (v.*k.field) ? L"1" : L"0", ini.c_str());
     WritePrivateProfileStringW(kSection, L"OpenBehavior", std::to_wstring((int)v.openBehavior).c_str(), ini.c_str());
     WritePrivateProfileStringW(kSection, L"Shortcut", std::to_wstring((int)v.shortcut).c_str(), ini.c_str());
-    WritePrivateProfileStringW(kSection, L"DisplayMode", std::to_wstring((int)v.displayMode).c_str(), ini.c_str());
-    WritePrivateProfileStringW(kSection, L"WindowWidth", std::to_wstring(v.windowWidth).c_str(), ini.c_str());
-    WritePrivateProfileStringW(kSection, L"WindowHeight", std::to_wstring(v.windowHeight).c_str(), ini.c_str());
+    const std::wstring gameSec = DisplaySectionForGame();
+    if (gameSec != kSection) {
+        WritePrivateProfileStringW(gameSec.c_str(), L"PerGame", v.perGameDisplay ? L"1" : L"0", ini.c_str());
+    }
+    const std::wstring dispSec = (v.perGameDisplay && gameSec != kSection) ? gameSec : kSection;
+    WritePrivateProfileStringW(dispSec.c_str(), L"DisplayMode", std::to_wstring((int)v.displayMode).c_str(), ini.c_str());
+    WritePrivateProfileStringW(dispSec.c_str(), L"WindowWidth", std::to_wstring(v.windowWidth).c_str(), ini.c_str());
+    WritePrivateProfileStringW(dispSec.c_str(), L"WindowHeight", std::to_wstring(v.windowHeight).c_str(), ini.c_str());
     sound::SetEnabled(v.uiSounds);
 }
 
 bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v) {
-    if (!gameHwnd || !IsWindow(gameHwnd)) return false;
+    if (!gameHwnd || !IsWindow(gameHwnd) || IsHungAppWindow(gameHwnd)) return false;
 
     HMONITOR mon = MonitorFromWindow(gameHwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(mi) };
@@ -176,7 +202,7 @@ bool ApplyDisplayToWindow(HWND gameHwnd, const Values& v) {
 }
 
 bool WindowMatchesDisplay(HWND gameHwnd, const Values& v) {
-    if (!gameHwnd || !IsWindow(gameHwnd)) return true;
+    if (!gameHwnd || !IsWindow(gameHwnd) || IsHungAppWindow(gameHwnd)) return true;
 
     HMONITOR mon = MonitorFromWindow(gameHwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(mi) };
@@ -292,7 +318,7 @@ const char* GetShortcutNameEs(OverlayShortcut sc) {
 }
 
 SteamOnline SteamOnlineChoice() {
-    const int v = ReadBool(Ini(), L"SteamOnline");
+    const int v = ReadBool(Ini(), kSection, L"SteamOnline");
     return v < 0 ? SteamOnline::Auto : v == 1 ? SteamOnline::On : SteamOnline::Off;
 }
 
@@ -304,7 +330,7 @@ void SetSteamOnline(bool on) {
 bool BlockReflexEarly(bool iniDefault) {
     wchar_t appdata[MAX_PATH] = {};
     if (!GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH)) return iniDefault;
-    const int v = ReadBool(std::wstring(appdata) + L"\\ReFix\\profiles.ini", L"BlockNvidiaReflex");
+    const int v = ReadBool(std::wstring(appdata) + L"\\ReFix\\profiles.ini", kSection, L"BlockNvidiaReflex");
     return v < 0 ? iniDefault : v == 1;
 }
 
