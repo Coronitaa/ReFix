@@ -231,7 +231,7 @@ bool ParseProtocolPacket(const std::string& buffer, int protoHint, std::vector<P
     while (r.BitsLeft() >= 8) {
         size_t startByte = r.BitPos() >> 3;
         uint8_t id = r.U8();
-        if (!r.ok) return false;
+        if (!r.ok) return !out.empty();
         ParsedMessage m;
         m.msgId = id;
         switch (id) {
@@ -268,9 +268,21 @@ bool ParseProtocolPacket(const std::string& buffer, int protoHint, std::vector<P
             }
             case MSG_COMMAND:
             case MSG_SET_PLAYER_DATA: {
-                r.I32();
-                OptionalBytes payload;
-                r.Bytes(payload);
+                m.player = r.I32();
+                r.Bytes(m.payload);
+                if (!r.ok) return false;
+                break;
+            }
+            case MSG_FRAME_SNAPSHOT_REQUEST: {
+                m.snapshotReq.referenceTick = r.I32();
+                if (!r.ok) return false;
+                break;
+            }
+            case MSG_FRAME_SNAPSHOT: {
+                m.frameSnapshot.tick = r.I32();
+                m.frameSnapshot.totalSize = r.I32();
+                m.frameSnapshot.last = r.Bool();
+                r.Bytes(m.frameSnapshot.data);
                 if (!r.ok) return false;
                 break;
             }
@@ -294,10 +306,10 @@ bool ParseProtocolPacket(const std::string& buffer, int protoHint, std::vector<P
 
 bool ParseClientInputs(const std::string& buffer, std::vector<ClientInput>& out) {
     out.clear();
-    if (buffer.size() < 7) return false;
+    if (buffer.size() < 6) return false;
     BitReader r(buffer);
-    // Shortest input record is player(8) + tick(32) + data_present(1) + rpc_present(1) + flags(8) = 50 bits.
-    while (r.BitsLeft() >= 50) {
+    // Shortest input record is player(8) + tick(32) + data_present(1) + rpc_present(1) + flags(4) = 46 bits.
+    while (r.BitsLeft() >= 46) {
         ClientInput in;
         in.player = r.U8();
         in.tick = r.I32();
@@ -308,12 +320,12 @@ bool ParseClientInputs(const std::string& buffer, std::vector<ClientInput>& out)
         if (!r.ok) break;
         if (hasRpc) {
             uint16_t rpcLen = r.U16();
-            if (!r.ok || r.BitsLeft() < (size_t)rpcLen * 8 + 8) break;
+            if (!r.ok || r.BitsLeft() < (size_t)rpcLen * 8 + 4) break;
             in.rpc.present = true;
             in.rpc.bytes.resize(rpcLen);
             for (uint16_t i = 0; i < rpcLen; i++) in.rpc.bytes[i] = (char)r.U8();
         }
-        in.flags = r.U8();
+        in.flags = (uint8_t)r.Bits(4);
         if (!r.ok) break;
         out.push_back(std::move(in));
     }
@@ -365,6 +377,23 @@ std::string BuildRttUpdate(int32_t rtt) {
     BitWriter w;
     w.U8(MSG_RTT_UPDATE);
     w.I32(rtt);
+    return w.Finish();
+}
+
+std::string BuildFrameSnapshotRequest(int32_t referenceTick) {
+    BitWriter w;
+    w.U8(MSG_FRAME_SNAPSHOT_REQUEST);
+    w.I32(referenceTick);
+    return w.Finish();
+}
+
+std::string BuildFrameSnapshot(const FrameSnapshotMsg& msg) {
+    BitWriter w;
+    w.U8(MSG_FRAME_SNAPSHOT);
+    w.I32(msg.tick);
+    w.I32(msg.totalSize);
+    w.Bool(msg.last);
+    w.Bytes(msg.data);
     return w.Finish();
 }
 

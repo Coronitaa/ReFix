@@ -440,25 +440,62 @@ void Emulator::SendQuantumMessage(Room& room, int32_t actor, uint8_t code, const
 void Emulator::StartQuantumActor(Room& room, int32_t actor, uint32_t nowMs) {
     auto it = room.quantum.actors.find(actor);
     if (it == room.quantum.actors.end() || it->second.started) return;
-    it->second.started = true;
+    const bool isLateJoin = room.quantum.running && room.quantum.nextTick > 0;
+    it->second.started = !isLateJoin;
     if (!room.quantum.running) {
         room.quantum.running = true;
         room.quantum.startMs = nowMs;
         room.quantum.nextTick = 0;
         room.quantum.lastPacketTime = 0.0;
     }
-    double serverTimeSec = (nowMs >= room.quantum.startMs) ? (nowMs - room.quantum.startMs) / 1000.0 : 0.0;
+    double serverTimeSec = (nowMs - room.quantum.startMs) / 1000.0;
     if (serverTimeSec < room.quantum.lastPacketTime) serverTimeSec = room.quantum.lastPacketTime;
 
     PnQuantum::SimulationStart start;
-    start.reconnect = false;
+    start.reconnect = isLateJoin;
     start.serverTime = serverTimeSec;
     start.runtimeConfig = room.quantum.runtimeConfig;
     start.sessionConfig = room.quantum.sessionConfig;
     SendQuantumMessage(room, actor, PnQuantum::EV_PROTOCOL, PnQuantum::BuildSimulationStart(start), true);
+    if (isLateJoin) {
+        int32_t snapshotProvider = 0;
+        for (const auto& [nr, st] : room.quantum.actors) {
+            if (nr != actor && st.started) {
+                snapshotProvider = nr;
+                break;
+            }
+        }
+        if (snapshotProvider) {
+            if (!room.quantum.snapshotRequested) {
+                room.quantum.activeSnapshotWaiters.push_back(actor);
+                room.quantum.snapshotRequested = true;
+                room.quantum.snapshotRequester = snapshotProvider;
+                m_env.log("[Photon] Quantum: requesting snapshot for actor %d from actor %d (nextTick=%d)",
+                          actor, snapshotProvider, room.quantum.nextTick);
+                SendQuantumMessage(room, snapshotProvider, PnQuantum::EV_PROTOCOL,
+                                   PnQuantum::BuildFrameSnapshotRequest(room.quantum.nextTick), true);
+            } else {
+                room.quantum.pendingSnapshotWaiters.push_back(actor);
+            }
+        } else {
+            it->second.started = true;
+        }
+    }
     m_env.log("[Photon] Quantum: started actor %d (playerCount=%d fps=%d)",
               actor, room.quantum.playerCount, room.quantum.updateFps);
 }
+
+namespace {
+
+bool ActorOwnsQuantumSlot(const PnQuantum::RoomState& q, int32_t actor, int32_t slot) {
+    if (slot < 0 || slot >= q.playerCount || slot >= 64) return false;
+    auto it = q.actors.find(actor);
+    if (it == q.actors.end()) return false;
+    const auto& slots = it->second.slots;
+    return std::find(slots.begin(), slots.end(), slot) != slots.end();
+}
+
+} // namespace
 
 bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Raw& data) {
     std::string buffer;
@@ -469,8 +506,15 @@ bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Ra
         std::vector<PnQuantum::ClientInput> inputs;
         if (!PnQuantum::ParseClientInputs(buffer, inputs)) return true;
         for (const auto& in : inputs) {
-            if (in.player < 64) {
-                room.quantum.pendingInputs[in.tick][in.player] = in;
+            if (in.tick < room.quantum.nextTick || in.tick > room.quantum.nextTick + 300) continue;
+            if (!ActorOwnsQuantumSlot(room.quantum, peer.actor, static_cast<int32_t>(in.player))) continue;
+            auto& slotEntry = room.quantum.pendingInputs[in.tick][in.player];
+            if (slotEntry.rpc.present && !in.rpc.present) {
+                slotEntry.data = in.data;
+                slotEntry.flags = (slotEntry.flags & PnQuantum::INPUT_FLAG_COMMAND) |
+                                  (in.flags & ~PnQuantum::INPUT_FLAG_COMMAND);
+            } else {
+                slotEntry = in;
             }
         }
         return true;
@@ -483,7 +527,13 @@ bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Ra
     }
 
     std::vector<PnQuantum::ParsedMessage> msgs;
-    if (!PnQuantum::ParseProtocolPacket(buffer, room.quantum.protoVer, msgs)) return room.quantum.active;
+    if (!PnQuantum::ParseProtocolPacket(buffer, room.quantum.protoVer, msgs)) {
+        if (code == PnQuantum::EV_PROTOCOL) {
+            m_env.log("[Photon] Quantum: ParseProtocolPacket failed from actor %d (code=%u len=%zu first=0x%02x)",
+                      peer.actor, code, buffer.size(), static_cast<unsigned>(static_cast<uint8_t>(buffer[0])));
+        }
+        return room.quantum.active;
+    }
 
     for (const auto& m : msgs) {
         switch (m.msgId) {
@@ -570,9 +620,66 @@ bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Ra
             }
             case PnQuantum::MSG_COMMAND:
             case PnQuantum::MSG_SET_PLAYER_DATA: {
-                if (!m.rawSlice.empty()) {
-                    for (const auto& [nr, st] : room.quantum.actors) {
-                        if (st.started) SendQuantumMessage(room, nr, PnQuantum::EV_PROTOCOL, m.rawSlice, true);
+                if (ActorOwnsQuantumSlot(room.quantum, peer.actor, m.player) && m.payload.present && !m.payload.bytes.empty()) {
+                    uint8_t slot = static_cast<uint8_t>(m.player);
+                    bool isCmd = (m.msgId == PnQuantum::MSG_COMMAND);
+                    auto& q = room.quantum.pendingRpcs[slot];
+                    if (q.size() < 64) {
+                        q.push_back({ isCmd, m.payload.bytes });
+                    }
+                }
+                break;
+            }
+            case PnQuantum::MSG_FRAME_SNAPSHOT: {
+                if (peer.actor != room.quantum.snapshotRequester) break;
+                const std::string encoded = PnQuantum::BuildFrameSnapshot(m.frameSnapshot);
+                for (int32_t waiter : room.quantum.activeSnapshotWaiters) {
+                    SendQuantumMessage(room, waiter, PnQuantum::EV_PROTOCOL, encoded, true);
+                }
+                if (m.frameSnapshot.last) {
+                    m_env.log("[Photon] Quantum: forwarded snapshot (tick=%d, %d bytes) to %zu waiter(s)",
+                              m.frameSnapshot.tick, m.frameSnapshot.totalSize, room.quantum.activeSnapshotWaiters.size());
+                    std::vector<PnQuantum::ServerTickEntry> catchup;
+                    for (const auto& t : room.quantum.recentTicks) {
+                        if (t.tick > m.frameSnapshot.tick) catchup.push_back(t);
+                    }
+                    for (int32_t waiter : room.quantum.activeSnapshotWaiters) {
+                        auto ait = room.quantum.actors.find(waiter);
+                        if (ait == room.quantum.actors.end()) continue;
+                        if (!catchup.empty()) {
+                            std::string pkt = PnQuantum::BuildServerTickPacket(
+                                ait->second.lastRttMs, room.quantum.playerCount, room.quantum.lastPacketTime, catchup);
+                            SendQuantumMessage(room, waiter, PnQuantum::EV_INPUT, pkt, true);
+                        }
+                        ait->second.started = true;
+                    }
+                    room.quantum.activeSnapshotWaiters.clear();
+                    room.quantum.snapshotRequested = false;
+                    room.quantum.snapshotRequester = 0;
+
+                    if (!room.quantum.pendingSnapshotWaiters.empty()) {
+                        int32_t provider = 0;
+                        for (const auto& [nr, st] : room.quantum.actors) {
+                            if (st.started) {
+                                provider = nr;
+                                break;
+                            }
+                        }
+                        if (provider) {
+                            room.quantum.activeSnapshotWaiters = std::move(room.quantum.pendingSnapshotWaiters);
+                            room.quantum.pendingSnapshotWaiters.clear();
+                            room.quantum.snapshotRequested = true;
+                            room.quantum.snapshotRequester = provider;
+                            SendQuantumMessage(room, provider, PnQuantum::EV_PROTOCOL,
+                                               PnQuantum::BuildFrameSnapshotRequest(room.quantum.nextTick), true);
+                        } else {
+                            for (int32_t waiter : room.quantum.pendingSnapshotWaiters) {
+                                if (auto ait = room.quantum.actors.find(waiter); ait != room.quantum.actors.end()) {
+                                    ait->second.started = true;
+                                }
+                            }
+                            room.quantum.pendingSnapshotWaiters.clear();
+                        }
                     }
                 }
                 break;
@@ -586,9 +693,17 @@ bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Ra
 
 void Emulator::PumpQuantum(Room& room, uint32_t nowMs) {
     if (!room.quantum.active || !room.quantum.running || room.quantum.actors.empty()) return;
-    uint32_t elapsedMs = (nowMs >= room.quantum.startMs) ? (nowMs - room.quantum.startMs) : 0;
+    uint32_t elapsedMs = nowMs - room.quantum.startMs;
     int32_t targetTick = static_cast<int32_t>((static_cast<uint64_t>(elapsedMs) * static_cast<uint64_t>(room.quantum.updateFps)) / 1000ULL);
     if (room.quantum.nextTick > targetTick) return;
+
+    const int pCount = std::clamp(room.quantum.playerCount, 1, 64);
+    uint64_t occupiedMask = 0;
+    for (const auto& [nr, st] : room.quantum.actors) {
+        for (int32_t s : st.slots) {
+            if (s >= 0 && s < pCount) occupiedMask |= (1ULL << s);
+        }
+    }
 
     std::vector<PnQuantum::ServerTickEntry> batch;
     batch.reserve(8);
@@ -600,13 +715,54 @@ void Emulator::PumpQuantum(Room& room, uint32_t nowMs) {
         auto pit = room.quantum.pendingInputs.find(tick);
         if (pit != room.quantum.pendingInputs.end()) {
             for (const auto& [slot, input] : pit->second) {
-                if (slot < room.quantum.playerCount && slot < 64) {
+                if (slot < pCount) {
                     entry.playerMask |= (1ULL << slot);
                     entry.inputs[slot] = input;
                 }
             }
             room.quantum.pendingInputs.erase(pit);
         }
+        for (auto rit = room.quantum.pendingRpcs.begin(); rit != room.quantum.pendingRpcs.end(); ) {
+            uint8_t slot = rit->first;
+            auto& q = rit->second;
+            if (static_cast<int32_t>(slot) >= pCount) {
+                rit = room.quantum.pendingRpcs.erase(rit);
+                continue;
+            }
+            if (!q.empty()) {
+                auto& inp = entry.inputs[slot];
+                if (!inp.rpc.present) {
+                    inp.player = slot;
+                    inp.tick = tick;
+                    inp.rpc.present = true;
+                    inp.rpc.bytes = std::move(q.front().payload);
+                    if (q.front().isCommand) {
+                        inp.flags |= PnQuantum::INPUT_FLAG_COMMAND;
+                    } else {
+                        inp.flags &= ~PnQuantum::INPUT_FLAG_COMMAND;
+                    }
+                    entry.playerMask |= (1ULL << slot);
+                    q.pop_front();
+                }
+            }
+            if (q.empty()) rit = room.quantum.pendingRpcs.erase(rit);
+            else ++rit;
+        }
+        // AdvanceVerifiedTicks (0x1819cdafe) requires VerifiedPlayerMask to cover all playerCount slots.
+        for (int p = 0; p < pCount; ++p) {
+            if (((entry.playerMask >> p) & 1ULL) == 0) {
+                entry.playerMask |= (1ULL << p);
+                auto& filler = entry.inputs[static_cast<uint8_t>(p)];
+                filler.player = static_cast<uint8_t>(p);
+                filler.tick = tick;
+                filler.flags = ((occupiedMask >> p) & 1ULL) ? PnQuantum::INPUT_FLAG_REPLACED_BY_SERVER
+                                                            : PnQuantum::INPUT_FLAG_PLAYER_NOT_PRESENT;
+            }
+        }
+        room.quantum.recentTicks.push_back(entry);
+        const size_t fpsTicks = (room.quantum.updateFps > 0 ? static_cast<size_t>(room.quantum.updateFps) : 60u) * 10u;
+        const size_t maxRecent = fpsTicks > 120u ? fpsTicks : 120u;
+        while (room.quantum.recentTicks.size() > maxRecent) room.quantum.recentTicks.pop_front();
         batch.push_back(std::move(entry));
     }
     while (!room.quantum.pendingInputs.empty() && room.quantum.pendingInputs.begin()->first < room.quantum.nextTick) {
@@ -620,7 +776,7 @@ void Emulator::PumpQuantum(Room& room, uint32_t nowMs) {
     for (const auto& [nr, st] : room.quantum.actors) {
         if (!st.started) continue;
         std::string pkt = PnQuantum::BuildServerTickPacket(st.lastRttMs, room.quantum.playerCount, serverTimeSec, batch);
-        SendQuantumMessage(room, nr, PnQuantum::EV_INPUT, pkt, false);
+        SendQuantumMessage(room, nr, PnQuantum::EV_INPUT, pkt, true);
     }
 }
 
@@ -834,8 +990,8 @@ void Emulator::SendFusionMessage(Room& room, int32_t actor, const std::string& b
 // server-plugin protocols (e.g. Photon Fusion's handshake to the server actor) can be read from ReFix.log.
 void Emulator::LogEventSample(const Peer& peer, uint8_t code, int64_t receivers, const std::vector<int32_t>& targets,
                               const Params& params) {
-    constexpr int kMaxSampledEvents = 24;
-    constexpr size_t kMaxHexBytes = 96;
+    constexpr int kMaxSampledEvents = 16;
+    constexpr size_t kMaxHexBytes = 64;
     if (m_sampledEvents >= kMaxSampledEvents) return;
     m_sampledEvents++;
     std::string detail;
@@ -1002,7 +1158,66 @@ void Emulator::LeaveRoom(uint64_t key, bool sendResponse) {
         room.fusionShared->Leave(actor);
         if (room.fusionSharedConfigActor == actor && !room.fusionSharedConfigSent) room.fusionSharedConfigActor = 0;
     }
-    room.quantum.actors.erase(actor);
+    if (auto qit = room.quantum.actors.find(actor); qit != room.quantum.actors.end()) {
+        for (int32_t slot : qit->second.slots) {
+            if (slot < 0 || slot >= 64) continue;
+            uint8_t uSlot = static_cast<uint8_t>(slot);
+            room.quantum.pendingRpcs.erase(uSlot);
+            for (auto inputIt = room.quantum.pendingInputs.begin(); inputIt != room.quantum.pendingInputs.end(); ) {
+                inputIt->second.erase(uSlot);
+                if (inputIt->second.empty()) inputIt = room.quantum.pendingInputs.erase(inputIt);
+                else ++inputIt;
+            }
+        }
+        room.quantum.actors.erase(qit);
+    }
+    {
+        auto& aw = room.quantum.activeSnapshotWaiters;
+        auto& pw = room.quantum.pendingSnapshotWaiters;
+        aw.erase(std::remove(aw.begin(), aw.end(), actor), aw.end());
+        pw.erase(std::remove(pw.begin(), pw.end(), actor), pw.end());
+        if (room.quantum.snapshotRequested && (room.quantum.snapshotRequester == actor || aw.empty())) {
+            room.quantum.snapshotRequested = false;
+            room.quantum.snapshotRequester = 0;
+            if (aw.empty() && !pw.empty()) {
+                aw = std::move(pw);
+                pw.clear();
+            }
+            if (!aw.empty()) {
+                int32_t provider = 0;
+                for (const auto& [nr, st] : room.quantum.actors) {
+                    if (st.started) {
+                        provider = nr;
+                        break;
+                    }
+                }
+                if (provider) {
+                    room.quantum.snapshotRequested = true;
+                    room.quantum.snapshotRequester = provider;
+                    SendQuantumMessage(room, provider, PnQuantum::EV_PROTOCOL,
+                                       PnQuantum::BuildFrameSnapshotRequest(room.quantum.nextTick), true);
+                } else {
+                    for (int32_t waiter : aw) {
+                        if (auto ait = room.quantum.actors.find(waiter); ait != room.quantum.actors.end()) {
+                            ait->second.started = true;
+                        }
+                    }
+                    aw.clear();
+                }
+            }
+        }
+    }
+    if (room.quantum.actors.empty()) {
+        room.quantum.running = false;
+        room.quantum.nextTick = 0;
+        room.quantum.pendingInputs.clear();
+        room.quantum.pendingRpcs.clear();
+        room.quantum.recentTicks.clear();
+        room.quantum.activeSnapshotWaiters.clear();
+        room.quantum.pendingSnapshotWaiters.clear();
+        room.quantum.snapshotRequested = false;
+        room.quantum.snapshotRequester = 0;
+    }
     if (room.quantum.configRequester == actor) {
         room.quantum.configRequester = 0;
         if (!room.quantum.actors.empty() && (!room.quantum.hasSessionConfig || !room.quantum.hasRuntimeConfig)) {

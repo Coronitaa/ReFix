@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -26,12 +27,20 @@ constexpr uint8_t MSG_RUNTIME_CONFIG = 4;
 constexpr uint8_t MSG_SIMULATION_START = 5;
 constexpr uint8_t MSG_RTT_UPDATE = 8;
 constexpr uint8_t MSG_TICK_CHECKSUM = 10;
-constexpr uint8_t MSG_COMMAND = 11;
-constexpr uint8_t MSG_SET_PLAYER_DATA = 14;
+constexpr uint8_t MSG_SET_PLAYER_DATA = 11;
+constexpr uint8_t MSG_FRAME_SNAPSHOT = 13;
+constexpr uint8_t MSG_COMMAND = 14;
+constexpr uint8_t MSG_FRAME_SNAPSHOT_REQUEST = 17;
 
 constexpr int32_t JOIN_STATUS_FAILED = 0;
 constexpr int32_t JOIN_STATUS_CONFIRMED = 1;
 constexpr int32_t JOIN_STATUS_WAIT_FOR_SNAPSHOT = 2;
+
+// Photon.Deterministic.DeterministicInputFlags bitmask (4-bit field in Input.Serialize).
+constexpr uint8_t INPUT_FLAG_REPEATABLE = 0x01;
+constexpr uint8_t INPUT_FLAG_PLAYER_NOT_PRESENT = 0x02;
+constexpr uint8_t INPUT_FLAG_REPLACED_BY_SERVER = 0x04;
+constexpr uint8_t INPUT_FLAG_COMMAND = 0x08;
 
 struct OptionalBytes {
     bool present = false;
@@ -90,6 +99,11 @@ struct ClientInput {
     uint8_t flags = 0;
 };
 
+struct PendingRpc {
+    bool isCommand = false;
+    std::string payload;
+};
+
 struct ServerTickEntry {
     int32_t tick = 0;
     bool verified = true;
@@ -123,6 +137,23 @@ struct RoomState {
     double lastPacketTime = 0.0;
     std::map<int32_t, ActorState> actors;
     std::map<int32_t, std::map<uint8_t, ClientInput>> pendingInputs; // tick -> (slot -> input)
+    std::map<uint8_t, std::deque<PendingRpc>> pendingRpcs;           // slot -> FIFO queued commands/playerData
+    std::deque<ServerTickEntry> recentTicks;                         // rolling history for late-join snapshot catch-up
+    std::vector<int32_t> activeSnapshotWaiters;
+    std::vector<int32_t> pendingSnapshotWaiters;
+    bool snapshotRequested = false;
+    int32_t snapshotRequester = 0;
+};
+
+struct FrameSnapshotRequestMsg {
+    int32_t referenceTick = 0;
+};
+
+struct FrameSnapshotMsg {
+    int32_t tick = 0;
+    int32_t totalSize = 0;
+    bool last = false;
+    OptionalBytes data;
 };
 
 // Maps a Quantum ProtocolVersion string (e.g. "2.2.0.0") to the internal version integer
@@ -134,11 +165,15 @@ bool DetectStartRequest(const std::string& buffer, std::string& versionOut);
 
 struct ParsedMessage {
     uint8_t msgId = 0;
-    std::string rawSlice; // byte-aligned slice for forwarding (e.g. Command / SetPlayerData)
+    std::string rawSlice; // byte-aligned slice for forwarding
     StartRequest startReq;
     SessionConfigMsg sessionCfg;
     RuntimeConfigMsg runtimeCfg;
     int32_t rtt = 0;
+    int32_t player = 0;
+    OptionalBytes payload;
+    FrameSnapshotRequestMsg snapshotReq;
+    FrameSnapshotMsg frameSnapshot;
 };
 
 // Decodes one or more Serializer messages from an Event 100 or Event 101 payload.
@@ -152,6 +187,8 @@ std::string BuildSessionConfigRequest();
 std::string BuildRuntimeConfigRequest();
 std::string BuildSimulationStart(const SimulationStart& msg);
 std::string BuildRttUpdate(int32_t rtt);
+std::string BuildFrameSnapshotRequest(int32_t referenceTick);
+std::string BuildFrameSnapshot(const FrameSnapshotMsg& msg);
 
 // Builds a server->client Event 102 input/tick packet matching DequeueNetworkRecvQueue.
 std::string BuildServerTickPacket(int32_t rttMs, int32_t playerCount, double serverTimeSec,

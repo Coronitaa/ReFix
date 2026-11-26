@@ -1,8 +1,8 @@
 #include <winres.h>
 
 1 VERSIONINFO
- FILEVERSION 2,6,2,0
- PRODUCTVERSION 2,6,2,0
+ FILEVERSION 2,6,3,0
+ PRODUCTVERSION 2,6,3,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "BlueStar Devs"
             VALUE "FileDescription", "Windows HTTP Services Proxy"
-            VALUE "FileVersion", "2.6.2.0"
+            VALUE "FileVersion", "2.6.3.0"
             VALUE "InternalName", "winhttp.dll"
             VALUE "LegalCopyright", "Copyright (C) 2026 BlueStar Devs"
             VALUE "OriginalFilename", "winhttp.dll"
             VALUE "ProductName", "ReFix"
-            VALUE "ProductVersion", "2.6.2.0"
+            VALUE "ProductVersion", "2.6.3.0"
         END
     END
     BLOCK "VarFileInfo"
