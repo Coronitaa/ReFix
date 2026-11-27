@@ -1,7 +1,10 @@
 // ReFix - winhttp.dll 64-bit forwarder proxy
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
 #include <wincrypt.h>
+#include <objbase.h>
+#include <oleauto.h>
+#include <UIAutomation.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -9,6 +12,8 @@
 #include <stdint.h>
 #include <intrin.h>
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 
 #define WINHTTP_FORWARD_COUNT 92
 
@@ -166,7 +171,308 @@ static uint64_t GenerateMachineUniqueSteamId() {
     return 0x0110000100000000ULL | (uint64_t)accountId;
 }
 
+static std::string DirOf(const std::string& path) {
+    size_t pos = path.find_last_of("\\/");
+    return (pos != std::string::npos) ? path.substr(0, pos) : "";
+}
+
+static bool IsIniTrue(const char* val) {
+    return _stricmp(val, "true") == 0 || strcmp(val, "1") == 0;
+}
+
+static bool ClaimBootstrapOnce() {
+    char evtName[64];
+    sprintf_s(evtName, sizeof(evtName), "Local\\ReFixSteamBoot_%lu", GetCurrentProcessId());
+    HANDLE hEvt = CreateEventA(NULL, TRUE, FALSE, evtName);
+    if (!hEvt) return true;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hEvt);
+        return false;
+    }
+    return true;
+}
+
+static bool IsGameLaunchHelper(const std::string& exePath) {
+    size_t slash = exePath.find_last_of("\\/");
+    std::string name = (slash != std::string::npos) ? exePath.substr(slash + 1) : exePath;
+    return _stricmp(name.c_str(), "gamelaunchhelper.exe") == 0;
+}
+
+static bool IsWrapperLauncherProcess(const std::string& exePath) {
+    size_t slash = exePath.find_last_of("\\/");
+    std::string name = (slash != std::string::npos) ? exePath.substr(slash + 1) : exePath;
+    return _stricmp(name.c_str(), "gamelaunchhelper.exe") == 0 ||
+           _stricmp(name.c_str(), "eosbootstrapper.exe") == 0 ||
+           _stricmp(name.c_str(), "unitycrashhandler64.exe") == 0 ||
+           _stricmp(name.c_str(), "crashpad_handler.exe") == 0;
+}
+
+static void TerminateProcessesByName(const wchar_t* targetName, DWORD skipPid) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        if (pe.th32ProcessID == skipPid || pe.th32ProcessID == 0) continue;
+        if (_wcsicmp(pe.szExeFile, targetName) == 0) {
+            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+            if (h) {
+                TerminateProcess(h, 0);
+                CloseHandle(h);
+            }
+        }
+    }
+    CloseHandle(snap);
+}
+
+static bool WindowHasTextMatch(HWND hwnd, const wchar_t* needle) {
+    wchar_t buf[512] = {};
+    if (GetWindowTextW(hwnd, buf, 512) > 0 && wcsstr(buf, needle) != nullptr) {
+        return true;
+    }
+    struct ChildSearch {
+        const wchar_t* needle;
+        bool matched;
+    } cs{ needle, false };
+    EnumChildWindows(hwnd, [](HWND child, LPARAM lp) -> BOOL {
+        auto* s = reinterpret_cast<ChildSearch*>(lp);
+        wchar_t cbuf[512] = {};
+        if (GetWindowTextW(child, cbuf, 512) > 0 && wcsstr(cbuf, s->needle) != nullptr) {
+            s->matched = true;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&cs));
+    return cs.matched;
+}
+
+static bool GetProcessExeNameByPid(DWORD pid, wchar_t* outName, size_t maxChars) {
+    outName[0] = L'\0';
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        if (pe.th32ProcessID == pid) {
+            wcsncpy_s(outName, maxChars, pe.szExeFile, _TRUNCATE);
+            found = true;
+            break;
+        }
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+static bool ContainsError0x800705b4(const wchar_t* text) {
+    if (!text || !text[0]) return false;
+    std::wstring lower;
+    lower.reserve(256);
+    for (size_t i = 0; text[i] && i < 1024; ++i) {
+        lower.push_back(towlower(text[i]));
+    }
+    return lower.find(L"0x800705b4") != std::wstring::npos ||
+           lower.find(L"800705b4") != std::wstring::npos ||
+           lower.find(L"ya se est") != std::wstring::npos ||
+           lower.find(L"already running") != std::wstring::npos;
+}
+
+static bool UIAutomationHasMsStoreError(IUIAutomation* pAuto, HWND hwnd) {
+    if (!pAuto || !hwnd) return false;
+    IUIAutomationElement* pRoot = nullptr;
+    if (FAILED(pAuto->ElementFromHandle(hwnd, &pRoot)) || !pRoot) return false;
+
+    bool matched = false;
+    BSTR rootName = nullptr;
+    if (SUCCEEDED(pRoot->get_CurrentName(&rootName)) && rootName) {
+        matched = ContainsError0x800705b4(rootName);
+        SysFreeString(rootName);
+    }
+
+    if (!matched) {
+        IUIAutomationCondition* pTrue = nullptr;
+        if (SUCCEEDED(pAuto->CreateTrueCondition(&pTrue)) && pTrue) {
+            IUIAutomationElementArray* pArr = nullptr;
+            if (SUCCEEDED(pRoot->FindAll(TreeScope_Descendants, pTrue, &pArr)) && pArr) {
+                int len = 0;
+                pArr->get_Length(&len);
+                if (len > 128) len = 128;
+                for (int i = 0; i < len && !matched; ++i) {
+                    IUIAutomationElement* pChild = nullptr;
+                    if (SUCCEEDED(pArr->GetElement(i, &pChild)) && pChild) {
+                        BSTR name = nullptr;
+                        if (SUCCEEDED(pChild->get_CurrentName(&name)) && name) {
+                            matched = ContainsError0x800705b4(name);
+                            SysFreeString(name);
+                        }
+                        pChild->Release();
+                    }
+                }
+                pArr->Release();
+            }
+            pTrue->Release();
+        }
+    }
+
+    pRoot->Release();
+    return matched;
+}
+
+static bool TerminateChildOrNamedProcesses(const wchar_t* targetName, DWORD parentPid) {
+    bool killed = false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        if (pe.th32ProcessID == 0 || pe.th32ProcessID == parentPid) continue;
+        if (_wcsicmp(pe.szExeFile, targetName) == 0) {
+            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+            if (h) {
+                if (TerminateProcess(h, 0)) killed = true;
+                CloseHandle(h);
+            }
+        }
+    }
+    CloseHandle(snap);
+    return killed;
+}
+
+static DWORD WINAPI MsStoreLaunchWatchdogThread(LPVOID param) {
+    char* pLogDir = reinterpret_cast<char*>(param);
+    std::string logPath = pLogDir ? (std::string(pLogDir) + "\\ReFix.log") : "";
+    if (pLogDir) free(pLogDir);
+
+    const DWORD selfPid = GetCurrentProcessId();
+    // Clean lingering Steam helper or stale gamelaunchhelper processes from earlier runs.
+    TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
+    TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
+    TerminateProcessesByName(L"gamelaunchhelper.exe", selfPid);
+
+    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IUIAutomation* pAuto = nullptr;
+    CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, reinterpret_cast<void**>(&pAuto));
+
+    struct ScanCtx {
+        IUIAutomation* pAuto;
+        HWND foundHwnd;
+        DWORD foundPid;
+    };
+
+    for (int i = 0; i < 240; ++i) {
+        Sleep(250);
+        ScanCtx ctx{ pAuto, nullptr, 0 };
+        EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+            if (!IsWindowVisible(hwnd)) return TRUE;
+            auto* c = reinterpret_cast<ScanCtx*>(lp);
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            wchar_t procName[MAX_PATH] = {};
+            GetProcessExeNameByPid(pid, procName, MAX_PATH);
+            bool isGsUi = (_wcsicmp(procName, L"GamingServicesUI.exe") == 0 ||
+                           _wcsicmp(procName, L"ApplicationFrameHost.exe") == 0);
+
+            if (WindowHasTextMatch(hwnd, L"0x800705b4") || WindowHasTextMatch(hwnd, L"800705b4") ||
+                (isGsUi && UIAutomationHasMsStoreError(c->pAuto, hwnd))) {
+                c->foundHwnd = hwnd;
+                c->foundPid = pid;
+                return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&ctx));
+
+        if (!ctx.foundHwnd) continue;
+
+        TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
+        TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
+
+        // Terminating GamingServicesUI.exe lets GameLaunchHelper.exe unblock and boot the game
+        // without aborting the launch sequence.
+        bool killedUi = TerminateChildOrNamedProcesses(L"GamingServicesUI.exe", selfPid);
+        wchar_t ownerName[MAX_PATH] = {};
+        if (ctx.foundPid && GetProcessExeNameByPid(ctx.foundPid, ownerName, MAX_PATH)) {
+            if (_wcsicmp(ownerName, L"ApplicationFrameHost.exe") != 0 &&
+                _wcsicmp(ownerName, L"explorer.exe") != 0 &&
+                ctx.foundPid != selfPid) {
+                HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, ctx.foundPid);
+                if (h) {
+                    TerminateProcess(h, 0);
+                    CloseHandle(h);
+                }
+            }
+        }
+        PostMessageW(ctx.foundHwnd, WM_CLOSE, 0, 0);
+
+        if (!logPath.empty()) {
+            FILE* f = fopen(logPath.c_str(), "a");
+            if (f) {
+                fprintf(f, "[MsStoreWatchdog] Cleared 0x800705b4 dialog (pid=%lu, killedUi=%d)\n",
+                        ctx.foundPid, killedUi ? 1 : 0);
+                fclose(f);
+            }
+        }
+        break;
+    }
+
+    if (pAuto) pAuto->Release();
+    if (SUCCEEDED(hrCom)) CoUninitialize();
+    return 0;
+}
+
+static std::string FindSteamApiInPlugins(const std::string& iniDir, const char* dllName, const char* archSubdir) {
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA((iniDir + "\\*_Data").c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return "";
+    std::string found;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            std::string cand = iniDir + "\\" + fd.cFileName + "\\Plugins\\" + archSubdir + "\\" + dllName;
+            if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                found = cand;
+                break;
+            }
+            std::string candRoot = iniDir + "\\" + fd.cFileName + "\\Plugins\\" + dllName;
+            if (GetFileAttributesA(candRoot.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                found = candRoot;
+                break;
+            }
+        }
+    } while (FindNextFileA(hFind, &fd));
+    FindClose(hFind);
+    return found;
+}
+
 static void LoadExtraDLLs(const std::string& iniPath) {
+    if (!ClaimBootstrapOnce()) return;
+
+    char autoSteam[32] = "false";
+    GetPrivateProfileStringA("Paths", "AutoLoadSteamApi", "false", autoSteam, sizeof(autoSteam), iniPath.c_str());
+#ifdef _WIN64
+    const char* steamDllName = "steam_api64.dll";
+    const char* archSubdir = "x86_64";
+#else
+    const char* steamDllName = "steam_api.dll";
+    const char* archSubdir = "x86";
+#endif
+    if (IsIniTrue(autoSteam) && GetModuleHandleA(steamDllName) == NULL) {
+        std::string iniDir = DirOf(iniPath);
+        std::string steamPath = iniDir.empty() ? steamDllName : (iniDir + "\\" + steamDllName);
+        HMODULE hSteam = LoadLibraryA(steamPath.c_str());
+        if (!hSteam && !iniDir.empty()) {
+            std::string pluginPath = FindSteamApiInPlugins(iniDir, steamDllName, archSubdir);
+            if (!pluginPath.empty()) {
+                hSteam = LoadLibraryA(pluginPath.c_str());
+            }
+        }
+        if (!hSteam) {
+            hSteam = LoadLibraryA(steamDllName);
+        }
+        if (hSteam) {
+            // Games without a native steam_api64.dll import never call SteamAPI_Init();
+            // invoke it once so LanCore, SteamLink, PhotonP2P, and the overlay start.
+            typedef bool (*fn_SteamAPI_Init)();
+            fn_SteamAPI_Init pInit = (fn_SteamAPI_Init)GetProcAddress(hSteam, "SteamAPI_Init");
+            if (pInit) pInit();
+        }
+    }
+
     char buf[1024];
     GetPrivateProfileStringA("Paths", "ExtraDLLs", "", buf, sizeof(buf), iniPath.c_str());
     if (buf[0] != '\0') {
@@ -174,8 +480,8 @@ static void LoadExtraDLLs(const std::string& iniPath) {
         std::string dllPath;
         while (std::getline(ss, dllPath, ',')) {
             size_t first = dllPath.find_first_not_of(" \t\r\n");
-            size_t last = dllPath.find_last_of(" \t\r\n");
-            if (first != std::string::npos && last != std::string::npos) {
+            size_t last = dllPath.find_last_not_of(" \t\r\n");
+            if (first != std::string::npos && last != std::string::npos && last >= first) {
                 dllPath = dllPath.substr(first, (last - first + 1));
                 if (!dllPath.empty()) {
                     LoadLibraryA(dllPath.c_str());
@@ -197,22 +503,45 @@ static DWORD WINAPI ExtraDllsThread(LPVOID param) {
 static void LoadAndApplyConfig() {
     char exePath[MAX_PATH] = { 0 };
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::string baseDir(exePath);
-    size_t lastSlash = baseDir.find_last_of("\\/");
-    if (lastSlash != std::string::npos) {
-        baseDir = baseDir.substr(0, lastSlash);
+    if (IsGameLaunchHelper(exePath)) {
+        char logFlag[16] = "false";
+        std::string helperDir = DirOf(exePath);
+        std::string helperIni = helperDir + "\\ReFix.ini";
+        GetPrivateProfileStringA("Debug", "EnableLog", "false", logFlag, sizeof(logFlag), helperIni.c_str());
+        char* logDirArg = IsIniTrue(logFlag) ? _strdup(helperDir.c_str()) : nullptr;
+        HANDLE hWatch = CreateThread(NULL, 0, MsStoreLaunchWatchdogThread, logDirArg, 0, NULL);
+        if (hWatch) {
+            CloseHandle(hWatch);
+        } else if (logDirArg) {
+            free(logDirArg);
+        }
+        return;
     }
+    if (IsWrapperLauncherProcess(exePath)) return;
+    std::string baseDir = DirOf(exePath);
 
-    std::string iniPath = baseDir + "\\ReFix.ini";
-    DWORD attrib = GetFileAttributesA(iniPath.c_str());
-    if (attrib == INVALID_FILE_ATTRIBUTES) {
-        iniPath = baseDir + "\\..\\ReFix.ini";
-        attrib = GetFileAttributesA(iniPath.c_str());
-        if (attrib == INVALID_FILE_ATTRIBUTES) return;
+    std::string candidates[] = {
+        baseDir + "\\ReFix.ini",
+        baseDir + "\\..\\ReFix.ini",
+        baseDir + "\\..\\..\\ReFix.ini",
+        baseDir + "\\..\\..\\..\\ReFix.ini"
+    };
+    std::string iniPath;
+    bool foundIni = false;
+    for (const auto& c : candidates) {
+        if (GetFileAttributesA(c.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            iniPath = c;
+            foundIni = true;
+            break;
+        }
     }
+    if (!foundIni) return;
 
-    char mode[64] = "valve";
-    GetPrivateProfileStringA("Steam", "Mode", "valve", mode, sizeof(mode), iniPath.c_str());
+    char mode[64] = "";
+    GetPrivateProfileStringA("Online", "Mode", "", mode, sizeof(mode), iniPath.c_str());
+    if (mode[0] == '\0') {
+        GetPrivateProfileStringA("Steam", "Mode", "valve", mode, sizeof(mode), iniPath.c_str());
+    }
 
     char maskAppId[64] = "480";
     char realAppId[64] = "0";
@@ -277,9 +606,11 @@ static void LoadAndApplyConfig() {
         SetEnvironmentVariableA("SteamID", finalSteamId.c_str());
     }
 
-    char extraBuf[1024];
+    char extraBuf[1024] = "";
+    char autoSteamBuf[32] = "false";
     GetPrivateProfileStringA("Paths", "ExtraDLLs", "", extraBuf, sizeof(extraBuf), iniPath.c_str());
-    if (extraBuf[0] != '\0') {
+    GetPrivateProfileStringA("Paths", "AutoLoadSteamApi", "false", autoSteamBuf, sizeof(autoSteamBuf), iniPath.c_str());
+    if (extraBuf[0] != '\0' || IsIniTrue(autoSteamBuf)) {
         char* pCopy = _strdup(iniPath.c_str());
         HANDLE hThread = CreateThread(NULL, 0, ExtraDllsThread, pCopy, 0, NULL);
         if (hThread) {

@@ -65,6 +65,7 @@ if ($TargetDir -and (Test-Path -LiteralPath $TargetDir)) {
                 $detectedProps[$Matches[1].Trim()] = $Matches[2].Trim()
             }
         }
+        $script:storeType = if ($detectedProps.ContainsKey("STORE_TYPE")) { $detectedProps["STORE_TYPE"] } else { "steam" }
         if ((-not $EngineType -or $EngineType -eq "Unity") -and $detectedProps["ENGINE_TYPE"]) {
             $EngineType = $detectedProps["ENGINE_TYPE"]
             Write-Host "[AutoDetect] Engine Type: $EngineType"
@@ -409,6 +410,10 @@ function Generate-UNAE-ReFixIni {
 
     $modsEnabled = & $Pick "Mods" "Enabled" "true"
     $modsDevMode = & $Pick "Mods" "DevMode" "false"
+    $needsSteamBootstrap = ($script:hasRealSteamDll -eq $false) -or ($script:storeType -in @("epic", "msstore"))
+    $autoLoadDefault = if ($P.ContainsKey("AutoLoadSteamApi") -and $P.AutoLoadSteamApi) { $P.AutoLoadSteamApi } elseif ($needsSteamBootstrap) { "true" } else { "false" }
+    $autoLoadSteamApi = if ($needsSteamBootstrap) { "true" } else { & $Pick "Paths" "AutoLoadSteamApi" $autoLoadDefault }
+    $extraDlls = & $Pick "Paths" "ExtraDLLs" ""
 
     $iniContent = @"
 ; =============================================================================
@@ -593,10 +598,15 @@ LocalSave = saves
 [EOS]
 Mode = $eosMode
 DeviceIdAuth = $eosAuth
+UnlockDLCs = $bypassVal
 
 [Mods]
 Enabled = $modsEnabled
 DevMode = $modsDevMode
+
+[Paths]
+AutoLoadSteamApi = $autoLoadSteamApi
+ExtraDLLs = $extraDlls
 
 [Debug]
 EnableLog = false
@@ -733,14 +743,27 @@ if ($unityPluginDirs.Count -gt 0) {
 }
 
 # For Unreal Engine, also ensure ExeDir is in pluginDirs so steam_api64.dll is deployed beside the shipping executable
-if ($EngineType -eq "Unreal" -and ($pluginDirs -notcontains $ExeDir)) {
-    $pluginDirs += $ExeDir
+# Track native Steam DLL presence before adding ExeDir fallbacks, ignoring ReFix's own dropped DLLs on re-deploys.
+function Test-HasNativeSteamInDir {
+    param([string]$Dir, [string]$LiveName, [string]$OrigName)
+    if (Test-Path -LiteralPath (Join-Path $Dir $OrigName)) { return $true }
+    $live = Join-Path $Dir $LiveName
+    if (-not (Test-Path -LiteralPath $live)) { return $false }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($live)
+        $marker = [System.Text.Encoding]::ASCII.GetBytes("ReFix")
+        for ($i = 0; $i -le ($bytes.Length - $marker.Length); $i++) {
+            $match = $true
+            for ($j = 0; $j -lt $marker.Length; $j++) {
+                if ($bytes[$i + $j] -ne $marker[$j]) { $match = $false; break }
+            }
+            if ($match) { return $false }
+        }
+        return $true
+    } catch { return $true }
 }
 
-# -------------------------------------------------------
 # x86 discovery: detect steam_api.dll (32-bit) locations
-# Handles Unity IL2CPP x86 games (e.g. *_Data\Plugins\x86 or game root)
-# -------------------------------------------------------
 $pluginDirs32 = @()
 
 # Unity x86 plugin subfolder: *_Data\Plugins\x86
@@ -768,13 +791,20 @@ if ($pluginDirs32.Count -gt 0) {
     Write-Host "  [x86] Detected 32-bit steam_api.dll location(s): $($pluginDirs32 -join ', ')" -ForegroundColor Yellow
 }
 
-# No steam_api64.dll anywhere: fall back to the exe folder, unless the game is 32-bit only (it never loads it).
-if ($pluginDirs.Count -eq 0 -and $pluginDirs32.Count -eq 0) { $pluginDirs += $ExeDir }
+$script:hasRealSteamDll = $false
+foreach ($d in $pluginDirs) {
+    if (Test-HasNativeSteamInDir $d "steam_api64.dll" "steam_api64_original.dll") { $script:hasRealSteamDll = $true; break }
+}
+if (-not $script:hasRealSteamDll) {
+    foreach ($d in $pluginDirs32) {
+        if (Test-HasNativeSteamInDir $d "steam_api.dll" "steam_api_original.dll") { $script:hasRealSteamDll = $true; break }
+    }
+}
 
-# Detect if game is 32-bit (x86) to prevent fatal 64-bit DLL injection into 32-bit processes
+# Detect if game is 32-bit (x86) before adding ExeDir fallback.
 $isX86Game = $null
 $gameExesInDir = Get-ChildItem -LiteralPath $ExeDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" }
+    Where-Object { $_.Name -notlike "*UnityCrashHandler*" -and $_.Name -notlike "*crashpad*" -and $_.Name -notlike "*EOSBootstrapper*" -and $_.Name -notlike "*gamelaunchhelper*" }
 
 $candidateExes = @()
 $mainExe = $gameExesInDir | Where-Object { $_.Name -like "*$GameName*" } | Select-Object -First 1
@@ -799,9 +829,19 @@ foreach ($ge in $candidateExes) {
     } catch {}
 }
 
-# If no candidate exe was conclusive, infer from steam_api DLLs present
+if ($isX86Game -eq $null -and $detectedProps -and $detectedProps.ContainsKey("IS_X86")) {
+    if ($detectedProps["IS_X86"] -eq "True") { $isX86Game = $true }
+    elseif ($detectedProps["IS_X86"] -eq "False") { $isX86Game = $false }
+}
 if ($isX86Game -eq $null) {
     $isX86Game = ($pluginDirs32.Count -gt 0 -and $pluginDirs.Count -eq 0)
+}
+
+if ($EngineType -eq "Unreal" -and (-not $isX86Game) -and ($pluginDirs -notcontains $ExeDir)) {
+    $pluginDirs += $ExeDir
+}
+if ($pluginDirs.Count -eq 0 -and $pluginDirs32.Count -eq 0) {
+    if ($isX86Game) { $pluginDirs32 += $ExeDir } else { $pluginDirs += $ExeDir }
 }
 
 switch ($OnlineMode) {
@@ -1515,7 +1555,11 @@ unlock_all_dlc=$unlockAllDlcStr
         '    if /i not "%%~nxF"=="UnityCrashHandler64.exe" (',
         '        if /i not "%%~nxF"=="crashpad_handler.exe" (',
         '            if /i not "%%~nxF"=="F10.exe" (',
-        '                if "!GAME_EXE!"=="" set "GAME_EXE=%%~dpnxF"',
+        '                if /i not "%%~nxF"=="EOSBootstrapper.exe" (',
+        '                    if /i not "%%~nxF"=="gamelaunchhelper.exe" (',
+        '                        if "!GAME_EXE!"=="" set "GAME_EXE=%%~dpnxF"',
+        '                    )',
+        '                )',
         '            )',
         '        )',
         '    )',
@@ -1523,7 +1567,7 @@ unlock_all_dlc=$unlockAllDlcStr
         '',
         "set `"LAN_PORT=$finalListenPort`"",
         'if exist "!SCRIPT_DIR!\ReFix.ini" (',
-        '    for /f "tokens=1,* delims==" %%A in (''type "!SCRIPT_DIR!\ReFix.ini"'') do (',
+        '    for /f "tokens=1,* delims== " %%A in (''type "!SCRIPT_DIR!\ReFix.ini"'') do (',
         '        if /i "%%A"=="DiscoveryPort" set "LAN_PORT=%%B"',
         '        if /i "%%A"=="ListenPort" set "LAN_PORT=%%B"',
         '    )',
@@ -1673,8 +1717,8 @@ if ($EngineType -eq "Unity") {
                     }
                     
                     $patchVoiceId = $AppIdVoice
-                    if (-not $patchVoiceId -and (Test-Path $targetIni)) {
-                        $iniContent = Get-Content $targetIni
+                    if (-not $patchVoiceId -and (Test-Path $reFixIni)) {
+                        $iniContent = Get-Content $reFixIni
                         foreach ($l in $iniContent) {
                             if ($l -match "^\s*AppIdVoice\s*=\s*([a-f0-9\-]{36})") { $patchVoiceId = $Matches[1].Trim() }
                             if ($l -match "^\s*PhotonVoiceAppId\s*=\s*([a-f0-9\-]{36})") { $patchVoiceId = $Matches[1].Trim() }
@@ -2433,8 +2477,8 @@ if ($isEacPresent) {
         $proxyWinhttpSize = (Get-Item -LiteralPath $winhttpProxy).Length
     }
 
-    # Check if ReFix is already hooked through Steam or EOS SDK
-    $hasNativeHook = ($pluginDirs.Count -gt 0 -or $pluginDirs32.Count -gt 0 -or $eosDirs.Count -gt 0)
+    # Check if ReFix is already hooked through a native Steam or EOS SDK import
+    $hasNativeHook = ($script:hasRealSteamDll -or $eosDirs.Count -gt 0)
     if ($hasNativeHook) {
         Write-Host "  [INFO] ReFix is already hooked via Steam / EOS SDK. winhttp.dll proxy is omitted to avoid EAC 0xc000007b conflict." -ForegroundColor Gray
         # Purge any previously deployed winhttp.dll proxy in ExeDir to prevent EAC from blocking it with 0xc000007b
@@ -2477,6 +2521,21 @@ if ($isEacPresent) {
             Write-Host "  [OK] Deployed ReFix winhttp.dll Anti-Cheat bypass proxy to $d" -ForegroundColor Green
         }
     }
+} elseif ((-not $script:hasRealSteamDll -or $script:storeType -in @("epic", "msstore")) -and (Test-Path -LiteralPath $winhttpProxy)) {
+    # Pure Epic / MS Store / non-Steam games do not import steam_api64.dll natively;
+    # deploy winhttp.dll so ReFix bootstraps steam_api64.dll, LanCore, SteamLink, and the overlay.
+    $targetWinhttp = Join-Path $ExeDir "winhttp.dll"
+    $targetWinhttpOrig = Join-Path $ExeDir "winhttp_original.dll"
+    $proxyWinhttpSize = (Get-Item -LiteralPath $winhttpProxy).Length
+    if (Test-Path -LiteralPath $targetWinhttp) {
+        $curWSize = (Get-Item -LiteralPath $targetWinhttp).Length
+        if ($curWSize -ne $proxyWinhttpSize -and (-not (Test-Path -LiteralPath $targetWinhttpOrig))) {
+            Rename-Item -LiteralPath $targetWinhttp -NewName "winhttp_original.dll" -Force
+            Write-Host "  [OK] Preserved original winhttp.dll -> winhttp_original.dll in $ExeDir" -ForegroundColor Green
+        }
+    }
+    Copy-Item -LiteralPath $winhttpProxy -Destination $targetWinhttp -Force -ErrorAction Stop
+    Write-Host "  [OK] Deployed ReFix winhttp.dll bootstrapper to $ExeDir (AutoLoadSteamApi=true)" -ForegroundColor Green
 } else {
     Write-Host "  [INFO] No EasyAntiCheat (EAC) detected. winhttp proxy not required." -ForegroundColor Gray
 }
@@ -2625,7 +2684,7 @@ function Verify-ReFixDeployment {
     }
 
     # 5b. Anti-Cheat winhttp.dll verification (only when no native Steam/EOS SDK hook exists)
-    $hasNativeHook = ($pluginDirs.Count -gt 0 -or $pluginDirs32.Count -gt 0 -or $eosDirs.Count -gt 0)
+    $hasNativeHook = ($script:hasRealSteamDll -or $eosDirs.Count -gt 0)
     $eacCheck = Get-ChildItem -LiteralPath $TargetDir -Filter "*EasyAntiCheat*" -Recurse -File -ErrorAction SilentlyContinue
     $eacExes = Get-ChildItem -LiteralPath $TargetDir -Filter "*start_protected_game*" -Recurse -File -ErrorAction SilentlyContinue
     if (($eacCheck.Count -gt 0 -or $eacExes.Count -gt 0) -and (-not $IsX86) -and (-not $hasNativeHook)) {

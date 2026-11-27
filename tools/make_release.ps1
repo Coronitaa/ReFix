@@ -7,12 +7,13 @@
 # Usage: powershell -ExecutionPolicy Bypass -File tools\make_release.ps1 [-OutDir <folder>]
 
 param(
-    [string]$OutDir = ""
+    [string]$OutDir = "",
+    [string]$Version = "2.6.5"
 )
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v2.5.5" }
+if (-not $OutDir) { $OutDir = Join-Path $repo "release\ReFix_v$Version" }
 $bin = Join-Path $repo "bin"
 
 # Product binaries AutoDeploy.bat / deploy_helper.ps1 cannot run without.
@@ -74,7 +75,7 @@ Get-ChildItem -LiteralPath $OutDir -Recurse -File | Where-Object { $_.Extension 
 }
 
 $readme = @"
-ReFix 2.5.5 - LAN / Online
+ReFix $Version - LAN / Online
 ========================
 
 1. Run AutoDeploy.bat.

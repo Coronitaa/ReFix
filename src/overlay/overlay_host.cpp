@@ -623,8 +623,11 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             if (IsWindow(g_childOf)) SetFocus(g_childOf);
             BecomePopup();
         } else if (giveBack) {
-            if (gw.minimized) ShowWindowAsync(gw.hwnd, SW_RESTORE);
-            SetForegroundWindow(gw.hwnd);
+            const HWND curFg = GetForegroundWindow();
+            if (!curFg || IsOurProcessWindow(curFg)) {
+                if (gw.minimized) ShowWindowAsync(gw.hwnd, SW_RESTORE);
+                SetForegroundWindow(gw.hwnd);
+            }
         }
         if ((m == Mode::Overlay || m == Mode::Dialog) && CanHostAsChild(gw)) {
             BecomeChild(gw.hwnd);
@@ -641,7 +644,12 @@ void ApplyMode(Mode m, const GameWindow& gw) {
                 if (gameThread && gameThread != myThread) AttachThreadInput(gameThread, myThread, TRUE);
             }
         }
-        if (giveBack && !g_childOf && GetForegroundWindow() != gw.hwnd) SetForegroundWindow(gw.hwnd);
+        if (giveBack && !g_childOf) {
+            const HWND curFg = GetForegroundWindow();
+            if ((!curFg || IsOurProcessWindow(curFg)) && curFg != gw.hwnd) {
+                SetForegroundWindow(gw.hwnd);
+            }
+        }
         g_client->OnModeChanged(from, m);
     } else if (!g_childOf && (m == Mode::Overlay || m == Mode::Dialog) && CanHostAsChild(gw)) {
         BecomeChild(gw.hwnd);
@@ -880,12 +888,15 @@ DWORD WINAPI HostThread(LPVOID) {
         }
         if (g_hotkeyPending.exchange(false)) g_client->OnHotkey();
         const GameWindow gw = CurrentGame();
-        Mode m = g_client->DesiredMode();
-        if ((m == Mode::Toast && (!gw.hwnd || gw.minimized)) || (m == Mode::Overlay && (!gw.hwnd || gw.minimized))) m = Mode::Hidden;
-        // Keep the overlay visible even when the game window is inactive; only release game raw input
-        // while another application owns the foreground.
         const HWND fg = GetForegroundWindow();
         const bool fgOurs = !fg || IsOurProcessWindow(fg);
+        Mode m = g_client->DesiredMode();
+        if (m == Mode::Toast && (!gw.hwnd || gw.minimized)) m = Mode::Hidden;
+        // Keep the overlay visible when it holds focus (fullscreen games minimize on WA_INACTIVE);
+        // only hide on minimize if an external window took focus and the overlay wasn't active there.
+        if (m == Mode::Overlay && (!gw.hwnd || (gw.minimized && fg != g_hwnd && !fgOurs))) m = Mode::Hidden;
+        // Keep the overlay visible even when the game window is inactive; only release game raw input
+        // while another application owns the foreground.
         if (!fgOurs) {
             ResumeGameRawInput();
         } else if (m == Mode::Overlay || m == Mode::Dialog) {

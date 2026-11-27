@@ -451,10 +451,71 @@ static void InjectProcessCommandLine(const char* appendCmd) {
     g_cmdLineInjected = true;
 }
 
+static DWORD WINAPI WinmmExtraDllsThread(LPVOID param) {
+    char* pIni = reinterpret_cast<char*>(param);
+    if (!pIni) return 0;
+    std::string iniPath(pIni);
+    free(pIni);
+
+    char evtName[64];
+    sprintf_s(evtName, sizeof(evtName), "Local\\ReFixSteamBoot_%lu", GetCurrentProcessId());
+    HANDLE hEvt = CreateEventA(NULL, TRUE, FALSE, evtName);
+    if (hEvt && GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hEvt);
+        return 0;
+    }
+
+    char autoSteam[32] = "false";
+    GetPrivateProfileStringA("Paths", "AutoLoadSteamApi", "false", autoSteam, sizeof(autoSteam), iniPath.c_str());
+#ifdef _WIN64
+    const char* steamDllName = "steam_api64.dll";
+#else
+    const char* steamDllName = "steam_api.dll";
+#endif
+    if ((_stricmp(autoSteam, "true") == 0 || strcmp(autoSteam, "1") == 0) && GetModuleHandleA(steamDllName) == NULL) {
+        size_t slash = iniPath.find_last_of("\\/");
+        std::string iniDir = (slash != std::string::npos) ? iniPath.substr(0, slash) : "";
+        std::string steamPath = iniDir.empty() ? steamDllName : (iniDir + "\\" + steamDllName);
+        HMODULE hSteam = LoadLibraryA(steamPath.c_str());
+        if (!hSteam) hSteam = LoadLibraryA(steamDllName);
+        if (hSteam) {
+            typedef bool (*fn_SteamAPI_Init)();
+            fn_SteamAPI_Init pInit = (fn_SteamAPI_Init)GetProcAddress(hSteam, "SteamAPI_Init");
+            if (pInit) pInit();
+        }
+    }
+
+    char buf[1024] = "";
+    GetPrivateProfileStringA("Paths", "ExtraDLLs", "", buf, sizeof(buf), iniPath.c_str());
+    if (buf[0] != '\0') {
+        std::stringstream ss(buf);
+        std::string dllPath;
+        while (std::getline(ss, dllPath, ',')) {
+            size_t first = dllPath.find_first_not_of(" \t\r\n");
+            size_t last = dllPath.find_last_not_of(" \t\r\n");
+            if (first != std::string::npos && last != std::string::npos && last >= first) {
+                dllPath = dllPath.substr(first, (last - first + 1));
+                if (!dllPath.empty()) {
+                    LoadLibraryA(dllPath.c_str());
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 static void LoadAndApplyConfig() {
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
     std::string iniPath(exePath);
+    size_t slashPos = iniPath.find_last_of("\\/");
+    std::string exeName = (slashPos != std::string::npos) ? iniPath.substr(slashPos + 1) : iniPath;
+    if (_stricmp(exeName.c_str(), "gamelaunchhelper.exe") == 0 ||
+        _stricmp(exeName.c_str(), "eosbootstrapper.exe") == 0 ||
+        _stricmp(exeName.c_str(), "unitycrashhandler64.exe") == 0 ||
+        _stricmp(exeName.c_str(), "crashpad_handler.exe") == 0) {
+        return;
+    }
     std::string baseDir = "";
     size_t pos = iniPath.find_last_of("\\/");
     if (pos != std::string::npos) {
@@ -503,7 +564,10 @@ static void LoadAndApplyConfig() {
     char enableOverlayStr[64] = "true";
     GetPrivateProfileStringA("Steam", "MaskAppId", "480", maskAppId, sizeof(maskAppId), iniPath.c_str());
     GetPrivateProfileStringA("Steam", "RealAppId", "0", realAppId, sizeof(realAppId), iniPath.c_str());
-    GetPrivateProfileStringA("Overlay", "EnableOverlay", "true", enableOverlayStr, sizeof(enableOverlayStr), iniPath.c_str());
+    GetPrivateProfileStringA("Overlay", "Enabled", "", enableOverlayStr, sizeof(enableOverlayStr), iniPath.c_str());
+    if (enableOverlayStr[0] == '\0') {
+        GetPrivateProfileStringA("Overlay", "EnableOverlay", "true", enableOverlayStr, sizeof(enableOverlayStr), iniPath.c_str());
+    }
     GetPrivateProfileStringA("Overlay", "OverlayAppId", maskAppId, overlayAppId, sizeof(overlayAppId), iniPath.c_str());
 
     bool enableOverlay = (_stricmp(enableOverlayStr, "true") == 0 || strcmp(enableOverlayStr, "1") == 0);
@@ -675,21 +739,15 @@ static void LoadAndApplyConfig() {
         }
     }
 
-    // --- Extra DLLs to Load ---
+    // Load ExtraDLLs / AutoLoadSteamApi off the loader lock
+    char autoSteamBuf[32] = "false";
     GetPrivateProfileStringA("Paths", "ExtraDLLs", "", buf, sizeof(buf), iniPath.c_str());
-    if (buf[0] != '\0') {
-        std::stringstream ss(buf);
-        std::string dllPath;
-        while (std::getline(ss, dllPath, ',')) {
-            size_t first = dllPath.find_first_not_of(" \t\r\n");
-            size_t last = dllPath.find_last_of(" \t\r\n");
-            if (first != std::string::npos && last != std::string::npos) {
-                dllPath = dllPath.substr(first, (last - first + 1));
-                if (!dllPath.empty()) {
-                    LoadLibraryA(dllPath.c_str());
-                }
-            }
-        }
+    GetPrivateProfileStringA("Paths", "AutoLoadSteamApi", "false", autoSteamBuf, sizeof(autoSteamBuf), iniPath.c_str());
+    if (buf[0] != '\0' || _stricmp(autoSteamBuf, "true") == 0 || strcmp(autoSteamBuf, "1") == 0) {
+        char* pCopy = _strdup(iniPath.c_str());
+        HANDLE hThread = CreateThread(NULL, 0, WinmmExtraDllsThread, pCopy, 0, NULL);
+        if (hThread) CloseHandle(hThread);
+        else free(pCopy);
     }
 }
 

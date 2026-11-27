@@ -33,6 +33,10 @@
 #include "photon/pn_p2p.h"
 #include "refix_steam_flat.h"
 #include "overlay/refix_overlay.h"
+#include "entitlements/xstore_hook.h"
+#if REFIX_STEAM_LINK
+#include "steam_link/steam_link.h"
+#endif
 #include "overlay/save_swap.h"
 #if REFIX_LAN_EDITION
 #include "mods/mod_host.h"
@@ -5542,6 +5546,7 @@ static void ReFixInitializePost(bool success) {
         ReFixPhotonP2P::Initialize(); // Photon Cloud replaced by the local emulator over LanCore (no-op without Photon)
         ReFixOverlay::Start();        // Shift+Tab overlay, LAN presence and invites
         ReFixIL2CPP::Initialize();     // Generic IL2CPP bridge and hooks (no-op without GameAssembly.dll)
+        refix::entitlements::InstallXStoreHooks(g_config.bypassLicenseCheck);
         // Game-specific built-ins run only when the game's own mod asks for them (signed manifest "features").
         if (refix::mods::GameFeatureRequested("csgo.operation_patch")) {
             refix::csgo::ApplyOperationPatch(); // later operation missions, before the game reads items_game
@@ -7074,6 +7079,20 @@ extern "C" __declspec(dllexport) uint64_t ReFix_GetLastRemoteClientSteamID() {
     return g_lastRemoteClientSteamID.load();
 }
 
+extern "C" __declspec(dllexport) bool ReFix_PromptPurchase(uint32_t appId, const char* itemName, const char* itemDesc, void (*onComplete)(bool approved, void* ctx), void* ctx) {
+#if REFIX_LAN_EDITION
+    if (!ReFixOverlay::IsEnabled()) return false;
+    std::string name = (itemName && itemName[0]) ? itemName : "Item";
+    std::string desc = itemDesc ? itemDesc : "";
+    ReFixOverlay::PromptPurchase(appId, 0, name, desc, false, [onComplete, ctx](bool approved) {
+        if (onComplete) onComplete(approved, ctx);
+    });
+    return true;
+#else
+    return false;
+#endif
+}
+
 extern "C" __declspec(dllexport) uint64_t SteamGameServer_GetSteamID() {
     if (!ReFix::NetworkModeManager::IsOnline()) {
         return UnrealSteamEmu::GameServer_GetSteamID();
@@ -7610,6 +7629,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 refix::mods::ModHost::GetInstance().Shutdown();
 #endif
             }
+#if REFIX_LAN_EDITION && REFIX_STEAM_LINK
+            refix::steamlink::ForceTerminateHelpersOnExit();
+#endif
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary
             // during DLL_PROCESS_DETACH. Calling COM/FreeLibrary in DllMain violates loader lock
             // and causes crashes on process exit. OS cleans up process memory safely.

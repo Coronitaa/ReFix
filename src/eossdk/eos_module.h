@@ -33,5 +33,6 @@ void RegisterSessionsApi(Registrar&);
 void RegisterP2PApi(Registrar&);
 void RegisterStorageApi(Registrar&);
 void RegisterAntiCheatApi(Registrar&);
+void RegisterEcomApi(Registrar&);
 
 } // namespace refix

@@ -25,6 +25,7 @@ bool MaskOnline();
 void SetSteamOverlay(bool on);       // ReFix.ini [Overlay] BlockSteamOverlay=false: load Steam's overlay too
 void Enable();                       // asynchronous; State() goes Starting -> Online or Failed
 void Disable();                      // back to LAN only
+void ForceTerminateHelpersOnExit();  // loader-lock-safe teardown for MSIX/GamingServices job objects
 State GetState();
 enum class Step { None, OpeningSteam, SigningIn, Connecting };
 Step CurrentStep();                  // what Starting is waiting for

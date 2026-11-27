@@ -381,6 +381,9 @@ std::wstring BuildCleanHostEnv() {
     return env;
 }
 
+std::atomic<HANDLE> g_activeHostProc{ nullptr };
+std::atomic<HANDLE> g_activeMaskProc{ nullptr };
+
 // Preserve Proton's Steam connection environment; the helper sets its own app identity.
 HANDLE StartHost(uint16_t port, const std::string& token, uint32_t overrideAppId = 0, bool maskMode = false) {
     const std::wstring dir = ModuleDir();
@@ -398,10 +401,16 @@ HANDLE StartHost(uint16_t port, const std::string& token, uint32_t overrideAppId
     if (maskMode) cmd += L" --mask";
     STARTUPINFOW si{ sizeof(si) };
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+    const DWORD baseFlags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+    // Break away from GamingServices/MSIX job objects so a slow helper exit
+    // never triggers Microsoft Store error 0x800705b4 ("already running").
+    if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, baseFlags | CREATE_BREAKAWAY_FROM_JOB,
                         env.data(), dllDir.c_str(), &si, &pi)) {
-        if (!maskMode) SetError("Could not start refix_steamhost");
-        return nullptr;
+        if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, baseFlags,
+                            env.data(), dllDir.c_str(), &si, &pi)) {
+            if (!maskMode) SetError("Could not start refix_steamhost");
+            return nullptr;
+        }
     }
     CloseHandle(pi.hThread);
     return pi.hProcess;
@@ -769,6 +778,7 @@ void LinkThread() {
     }
     const std::string token = NewToken();
     HANDLE host = StartHost(port, token);
+    g_activeHostProc.store(host, std::memory_order_release);
     const ULONGLONG started = GetTickCount64();
     HANDLE maskProc = nullptr;
     uint32_t runningMaskApp = 0;
@@ -792,6 +802,7 @@ void LinkThread() {
                 if (OpenIpcSock(g_maskIpc, maskPort)) {
                     maskToken = NewToken();
                     maskProc = StartHost(maskPort, maskToken, effectiveMask, true);
+                    g_activeMaskProc.store(maskProc, std::memory_order_release);
                     if (maskProc) {
                         runningMaskApp = effectiveMask;
                     } else {
@@ -844,12 +855,14 @@ void LinkThread() {
             break;
         }
     }
+    g_activeMaskProc.store(nullptr, std::memory_order_release);
     StopMaskHelper(maskProc);
     {
         std::lock_guard<std::mutex> lock(g_statMu);
         g_statQueue.clear();
     }
     // Off or failed: the helper signs out of Steam and exits, so Steam stops showing Spacewar.
+    g_activeHostProc.store(nullptr, std::memory_order_release);
     if (host) {
         ToHost(proto::Writer(proto::kQuit));
         if (WaitForSingleObject(host, kQuitWaitMs) != WAIT_OBJECT_0) TerminateProcess(host, 0);
@@ -969,9 +982,15 @@ bool ProbeLicensesSync(uint32_t currentGameAppId, uint32_t customAppId, LicenseP
     si.hStdError = hWrite;
     PROCESS_INFORMATION pi{};
     const std::wstring dllDir = dir.substr(0, dir.size() - 1);
-    const BOOL ok = CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, TRUE,
-                                   CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                                   env.data(), dllDir.c_str(), &si, &pi);
+    const DWORD probeFlags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+    BOOL ok = CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, TRUE,
+                             probeFlags | CREATE_BREAKAWAY_FROM_JOB,
+                             env.data(), dllDir.c_str(), &si, &pi);
+    if (!ok) {
+        ok = CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, TRUE,
+                            probeFlags,
+                            env.data(), dllDir.c_str(), &si, &pi);
+    }
     CloseHandle(hWrite);
     if (!ok) {
         CloseHandle(hRead);
@@ -1145,6 +1164,13 @@ void Enable() {
 // The link thread notices within one pump tick (or 500 ms while waiting for Steam) and shuts Steam down
 // itself, so the UI thread never blocks; Enable() joins it before starting again.
 void Disable() { g_wanted = false; }
+
+void ForceTerminateHelpersOnExit() {
+    HANDLE h = g_activeHostProc.exchange(nullptr, std::memory_order_acq_rel);
+    if (h) TerminateProcess(h, 0);
+    HANDLE m = g_activeMaskProc.exchange(nullptr, std::memory_order_acq_rel);
+    if (m) TerminateProcess(m, 0);
+}
 
 State GetState() { return g_state; }
 

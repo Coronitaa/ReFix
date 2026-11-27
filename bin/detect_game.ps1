@@ -24,6 +24,7 @@ $ignorePatterns = @(
     "*.unpacked.exe*", "*.steamstub.exe*", "*.original.exe*", "*redist*",
     "*EasyAntiCheat*", "*eac_server*", "*BEService*", "*BattlEye*", "*cefprocess*",
     "*CefSharp*", "*QtWebEngineProcess*", "*createdump*",
+    "*EOSBootstrapper*", "*gamelaunchhelper*",
     # ReFix's own helpers (Steam host, Fusion Shared server, mods tool) are never the game
     "*refix_steamhost*", "*ReFixFusionShared*", "*refixmod*"
 )
@@ -32,7 +33,8 @@ $deprioritizePatterns = @(
     "*dedicated*", "*nullrenderer*", "*server*", "*cmd.exe*", "*cli.exe*",
     "*benchmark*", "*test*.exe*", "*tool*.exe*", "*editor*", "*config*.exe*",
     "*helper*.exe*", "*report*.exe*",
-    "*_eac.exe*", "*_eac_*.exe*", "*eac_launcher*.exe*", "*start_protected_game*.exe*"
+    "*_eac.exe*", "*_eac_*.exe*", "*eac_launcher*.exe*", "*start_protected_game*.exe*",
+    "*eosbootstrapper*", "*gamelaunchhelper*"
 )
 
 # 1. Detect Engine Type
@@ -258,6 +260,87 @@ if (($eacDirs.Count -gt 0) -or ($eacFiles.Count -gt 0) -or ($eacSetup.Count -gt 
     $hasEac = $true
 }
 
+# 4c. Detect Store Platform (steam | epic | msstore) and GDK runtime
+$storeType = "steam"
+$hasGdk = $false
+
+$msConfig = Get-ChildItem -LiteralPath $target -Filter "MicrosoftGame.Config" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+$appxManifest = Get-ChildItem -LiteralPath $target -Filter "appxmanifest.xml" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+$gdkHelper = Get-ChildItem -LiteralPath $target -Filter "gamelaunchhelper.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+$gdkDlls = Get-ChildItem -LiteralPath $target -Filter "*XGamingRuntime*" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+$xboxDlls = Get-ChildItem -LiteralPath $target -Filter "*Microsoft*Xbox*Services*" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($gdkDlls -or $xboxDlls -or $msConfig -or $appxManifest -or $gdkHelper) {
+    $hasGdk = $true
+}
+
+$egStoreDir = Get-ChildItem -LiteralPath $target -Filter ".egstore" -Recurse -Directory -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+$eosBootstrap = Get-ChildItem -LiteralPath $target -Filter "EOSBootstrapper.*" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+
+if ($msConfig -or $appxManifest -or $gdkHelper) {
+    $storeType = "msstore"
+    if ($msConfig) {
+        try {
+            [xml]$mgXml = Get-Content -LiteralPath $msConfig.FullName -Raw -ErrorAction Stop
+            $dispName = $mgXml.Game.ShellVisuals.DefaultDisplayName
+            if ($dispName -and $dispName -notmatch '^ms-resource:') {
+                $gameName = $dispName.Trim()
+            }
+            if (-not $chosenExe) {
+                $mgExeName = $mgXml.Game.ExecutableList.Executable | Select-Object -First 1 -ExpandProperty Name
+                if ($mgExeName) {
+                    $cand = Join-Path $msConfig.DirectoryName $mgExeName
+                    if (Test-Path -LiteralPath $cand) {
+                        $chosenExe = Get-Item -LiteralPath $cand -ErrorAction SilentlyContinue
+                        $gameExePath = $cand
+                        $exeDir = $msConfig.DirectoryName
+                    }
+                }
+            }
+        } catch {}
+    }
+    if ($appxManifest) {
+        try {
+            [xml]$axXml = Get-Content -LiteralPath $appxManifest.FullName -Raw -ErrorAction Stop
+            if (-not $gameName -or $gameName -eq "Content") {
+                $axDisp = $axXml.Package.Properties.DisplayName
+                if ($axDisp -and $axDisp -notmatch '^ms-resource:') {
+                    $gameName = $axDisp.Trim()
+                }
+            }
+        } catch {}
+    }
+} elseif ($egStoreDir -or $eosBootstrap) {
+    $storeType = "epic"
+    $localItems = @()
+    if ($egStoreDir) {
+        $localItems = @(Get-ChildItem -LiteralPath $egStoreDir.FullName -Filter "*.item" -File -Force -ErrorAction SilentlyContinue)
+    }
+    $launcherItems = @()
+    $epicLauncherManifests = "C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests"
+    if (Test-Path -LiteralPath $epicLauncherManifests) {
+        $launcherItems = @(Get-ChildItem -LiteralPath $epicLauncherManifests -Filter "*.item" -File -ErrorAction SilentlyContinue)
+    }
+    foreach ($it in ($localItems + $launcherItems)) {
+        try {
+            $json = Get-Content -LiteralPath $it.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+            $isLocalItem = $egStoreDir -and ($it.DirectoryName -eq $egStoreDir.FullName)
+            $matchesLoc = $json.InstallLocation -and ($json.InstallLocation.TrimEnd('\','/') -ieq $target)
+            if ($isLocalItem -or $matchesLoc) {
+                if ($json.DisplayName) { $gameName = $json.DisplayName.Trim() }
+                if (-not $chosenExe -and $json.LaunchExecutable) {
+                    $cand = Join-Path $target $json.LaunchExecutable
+                    if (Test-Path -LiteralPath $cand) {
+                        $chosenExe = Get-Item -LiteralPath $cand -ErrorAction SilentlyContinue
+                        $gameExePath = $cand
+                        $exeDir = Split-Path -Parent $cand
+                    }
+                }
+                break
+            }
+        } catch {}
+    }
+}
+
 # 5. Architecture detection (x86 vs x64)
 # First inspect chosen executable PE header directly (0x014c = x86, 0x8664 = x64)
 $isX86 = $false
@@ -288,9 +371,19 @@ if (-not $peDetected) {
         Where-Object { $_.Name -notlike "*valve*" -and $_.Name -notlike "*_o.dll*" }
     $pluginsX86Dirs = Get-ChildItem -LiteralPath $target -Directory -Filter "x86" -Recurse -ErrorAction SilentlyContinue |
         Where-Object { $_.Parent.Name -eq "Plugins" }
+    $pluginsX64Dirs = Get-ChildItem -LiteralPath $target -Directory -Filter "x86_64" -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Parent.Name -eq "Plugins" }
 
     if ($steamApi32s.Count -gt 0 -and $steamApi64s.Count -eq 0) { $isX86 = $true }
-    if ($pluginsX86Dirs.Count -gt 0)                              { $isX86 = $true }
+    if ($pluginsX86Dirs.Count -gt 0 -and $pluginsX64Dirs.Count -eq 0) { $isX86 = $true }
+    if ($appxManifest) {
+        try {
+            [xml]$axArch = Get-Content -LiteralPath $appxManifest.FullName -Raw -ErrorAction Stop
+            $procArch = $axArch.Package.Identity.ProcessorArchitecture
+            if ($procArch -eq "x86") { $isX86 = $true }
+            elseif ($procArch -eq "x64") { $isX86 = $false }
+        } catch {}
+    }
 }
 
 # Build candidate exe list for interactive picker (up to top 5)
@@ -309,5 +402,7 @@ Write-Output "DETECTED_APPID=$detectedAppId"
 Write-Output "HAS_STEAM=$hasSteam"
 Write-Output "HAS_EOS=$hasEos"
 Write-Output "HAS_EAC=$hasEac"
+Write-Output "HAS_GDK=$hasGdk"
+Write-Output "STORE_TYPE=$storeType"
 Write-Output "IS_X86=$isX86"
 Write-Output "CANDIDATE_EXES=$candidateListStr"
