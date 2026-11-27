@@ -19,6 +19,7 @@
 
 #include "../imgui/imgui_impl_dx11.h"
 #include "../imgui/imgui_impl_win32.h"
+#include "../minhook/MinHook.h"
 
 extern void ReFixLog(const char* fmt, ...);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -42,7 +43,85 @@ std::atomic<bool> g_running{false};
 std::atomic<bool> g_stopRequested{false};
 std::atomic<bool> g_hotkeyPending{false};
 std::atomic<bool> g_wantHotkeyHook{false};
+std::atomic<bool> g_pauseGameActive{false};
+std::atomic<DWORD> g_gameWindowThreadId{0};
 DWORD g_threadId = 0;
+
+using PeekMessageFn = BOOL(WINAPI*)(LPMSG, HWND, UINT, UINT, UINT);
+PeekMessageFn g_truePeekMessageW = nullptr;
+PeekMessageFn g_truePeekMessageA = nullptr;
+
+bool IsBenignWhilePaused(UINT msg) {
+    switch (msg) {
+    case WM_PAINT:
+    case WM_NCPAINT:
+    case WM_ERASEBKGND:
+    case WM_CLOSE:
+    case WM_QUIT:
+    case WM_DESTROY:
+    case WM_NCDESTROY:
+    case WM_SIZE:
+    case WM_MOVE:
+    case WM_WINDOWPOSCHANGING:
+    case WM_WINDOWPOSCHANGED:
+    case WM_ACTIVATE:
+    case WM_ACTIVATEAPP:
+    case WM_NCACTIVATE:
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    case WM_DISPLAYCHANGE:
+    case WM_DPICHANGED:
+    case WM_GETMINMAXINFO:
+    case WM_SYSCOMMAND:
+    case WM_SHOWWINDOW:
+        return true;
+    default:
+        return false;
+    }
+}
+
+BOOL PausedPeekLoop(PeekMessageFn trueFn, LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg) {
+    if (!g_pauseGameActive.load(std::memory_order_acquire) ||
+        GetCurrentThreadId() != g_gameWindowThreadId.load(std::memory_order_acquire)) {
+        return trueFn(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+    }
+    while (g_pauseGameActive.load(std::memory_order_acquire) &&
+           !g_stopRequested.load(std::memory_order_relaxed)) {
+        BOOL got = trueFn(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+        if (got) {
+            if (IsBenignWhilePaused(lpMsg->message)) return TRUE;
+            if (wRemoveMsg & PM_REMOVE) continue; // drop input/timer while paused
+        }
+        Sleep(15);
+    }
+    return trueFn(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+}
+
+BOOL WINAPI Hook_PeekMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg) {
+    return PausedPeekLoop(g_truePeekMessageW, lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+}
+
+BOOL WINAPI Hook_PeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg) {
+    return PausedPeekLoop(g_truePeekMessageA, lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+}
+
+void InstallPauseHooks() {
+    static std::atomic<bool> installed{false};
+    if (installed.exchange(true)) return;
+    MH_Initialize();
+    if (HMODULE u32 = GetModuleHandleW(L"user32.dll")) {
+        if (void* pw = (void*)GetProcAddress(u32, "PeekMessageW")) {
+            if (MH_CreateHook(pw, (void*)Hook_PeekMessageW, (void**)&g_truePeekMessageW) == MH_OK) {
+                MH_EnableHook(pw);
+            }
+        }
+        if (void* pa = (void*)GetProcAddress(u32, "PeekMessageA")) {
+            if (MH_CreateHook(pa, (void*)Hook_PeekMessageA, (void**)&g_truePeekMessageA) == MH_OK) {
+                MH_EnableHook(pa);
+            }
+        }
+    }
+}
 HANDLE g_ready = nullptr;
 HANDLE g_hostThread = nullptr;
 bool g_initOk = false;
@@ -366,6 +445,7 @@ void ScanGameWindow() {
     }
     HWND fg = GetForegroundWindow();
     gw.foreground = fg && IsOurProcessWindow(fg);
+    g_gameWindowThreadId.store(gw.hwnd ? GetWindowThreadProcessId(gw.hwnd, nullptr) : 0, std::memory_order_release);
     AcquireSRWLockExclusive(&g_gameLock);
     g_game = gw;
     ReleaseSRWLockExclusive(&g_gameLock);
@@ -566,6 +646,19 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     } else if (!g_childOf && (m == Mode::Overlay || m == Mode::Dialog) && CanHostAsChild(gw)) {
         BecomeChild(gw.hwnd);
     }
+    if (!g_childOf && (m == Mode::Overlay || m == Mode::Dialog)) {
+        const HWND fg = GetForegroundWindow();
+        const bool fgOurs = !fg || IsOurProcessWindow(fg);
+        static bool placedTopmost = true;
+        const bool gameTopmost = gw.hwnd && (GetWindowLongPtrW(gw.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        const bool wantTopmost = fgOurs || gameTopmost;
+        if (wantTopmost != placedTopmost) {
+            SetWindowPos(g_hwnd, wantTopmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            placedTopmost = wantTopmost;
+        }
+    }
+
     if (m == Mode::Hidden) return;
     const RECT r = TargetRect(m, gw);
     static RECT placed{};
@@ -573,9 +666,17 @@ void ApplyMode(Mode m, const GameWindow& gw) {
     static Mode placedMode = Mode::Hidden;
     static HWND placedChildOf = nullptr;
 
+    const HWND fg = GetForegroundWindow();
+    const bool fgOurs = !fg || IsOurProcessWindow(fg);
+
+    bool justShown = false;
     if (!EqualRect(&r, &placed) || placedMode != m || placedChildOf != g_childOf || !IsWindowVisible(g_hwnd)) {
-        const UINT flags = SWP_FRAMECHANGED | (m == Mode::Toast ? SWP_NOACTIVATE : 0) | SWP_SHOWWINDOW;
-        SetWindowPos(g_hwnd, g_childOf ? HWND_TOP : HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
+        justShown = !IsWindowVisible(g_hwnd);
+        const bool gameTopmost = gw.hwnd && (GetWindowLongPtrW(gw.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        const HWND zAfter = g_childOf ? HWND_TOP : ((fgOurs || gameTopmost || m == Mode::Toast) ? HWND_TOPMOST : HWND_NOTOPMOST);
+        const bool noActivate = (m == Mode::Toast) || !fgOurs;
+        const UINT flags = SWP_FRAMECHANGED | (noActivate ? SWP_NOACTIVATE : 0) | SWP_SHOWWINDOW;
+        SetWindowPos(g_hwnd, zAfter, r.left, r.top, r.right - r.left, r.bottom - r.top, flags);
         placed = r;
         placedMode = m;
         placedChildOf = g_childOf;
@@ -587,14 +688,22 @@ void ApplyMode(Mode m, const GameWindow& gw) {
             SetFocus(g_hwnd);
             ClipCursor(nullptr);
         }
-    } else if ((m == Mode::Overlay || m == Mode::Dialog) &&
-               (GetForegroundWindow() != g_hwnd || (GetFocus() != g_hwnd && !IsChild(g_hwnd, GetFocus())))) {
-        // Restore focus only when it is lost, preserving browser child focus and dragging.
-        ReleaseCapture();
-        SetForegroundWindow(g_hwnd);
-        SetActiveWindow(g_hwnd);
-        SetFocus(g_hwnd);
-        ClipCursor(nullptr);
+    } else if (m == Mode::Overlay || m == Mode::Dialog) {
+        const bool needFg = fg != g_hwnd;
+        const bool needFocus = GetFocus() != g_hwnd && !IsChild(g_hwnd, GetFocus());
+        if (needFg && fgOurs && (justShown || IsOurProcessWindow(fg))) {
+            // Only take foreground while our own process is active; when another app has focus the
+            // overlay remains visible over the game without stealing focus.
+            ReleaseCapture();
+            SetForegroundWindow(g_hwnd);
+            SetActiveWindow(g_hwnd);
+            SetFocus(g_hwnd);
+            ClipCursor(nullptr);
+        } else if (!needFg && needFocus) {
+            SetActiveWindow(g_hwnd);
+            SetFocus(g_hwnd);
+            ClipCursor(nullptr);
+        }
     }
 }
 
@@ -742,6 +851,7 @@ void MaybeRescale(const GameWindow& gw) {
 
 DWORD WINAPI HostThread(LPVOID) {
     g_initOk = InitThread();
+    if (g_initOk) InstallPauseHooks();
     g_running = g_initOk;
     SetEvent(g_ready);
     if (!g_initOk) {
@@ -771,20 +881,19 @@ DWORD WINAPI HostThread(LPVOID) {
         if (g_hotkeyPending.exchange(false)) g_client->OnHotkey();
         const GameWindow gw = CurrentGame();
         Mode m = g_client->DesiredMode();
-        if ((m == Mode::Toast && (!gw.hwnd || gw.minimized)) || (m == Mode::Overlay && !gw.hwnd)) m = Mode::Hidden;
-        // Another app (or another game instance) is in front: our topmost window steps aside without changing
-        // mode, and comes back over its own game when that game is in front again.
+        if ((m == Mode::Toast && (!gw.hwnd || gw.minimized)) || (m == Mode::Overlay && (!gw.hwnd || gw.minimized))) m = Mode::Hidden;
+        // Keep the overlay visible even when the game window is inactive; only release game raw input
+        // while another application owns the foreground.
         const HWND fg = GetForegroundWindow();
-        const bool away = !g_childOf && m != Mode::Hidden && gw.hwnd && fg && !IsOurProcessWindow(fg);
-        if (away) {
+        const bool fgOurs = !fg || IsOurProcessWindow(fg);
+        if (!fgOurs) {
             ResumeGameRawInput();
-            if (IsWindowVisible(g_hwnd)) ShowWindow(g_hwnd, SW_HIDE);
-        } else {
-            if (m == Mode::Overlay || m == Mode::Dialog) SuspendGameRawInput();
-            if (m != Mode::Hidden) MaybeRescale(gw);
-            ApplyMode(m, gw);
+        } else if (m == Mode::Overlay || m == Mode::Dialog) {
+            SuspendGameRawInput();
         }
-        if (g_mode == Mode::Hidden || away) {
+        if (m != Mode::Hidden) MaybeRescale(gw);
+        ApplyMode(m, gw);
+        if (g_mode == Mode::Hidden) {
             // Keep ImGui's frame clock and the client's timers running cheaply.
             MsgWaitForMultipleObjects(0, nullptr, FALSE, kIdleWaitMs, QS_ALLINPUT);
             ImGui_ImplDX11_NewFrame();
@@ -833,10 +942,11 @@ bool Start(Client* client) {
 }
 
 void Stop() {
+    g_pauseGameActive.store(false, std::memory_order_release);
     g_stopRequested.store(true, std::memory_order_relaxed);
     Wake();
     if (g_hostThread) {
-        WaitForSingleObject(g_hostThread, 300);
+        WaitForSingleObject(g_hostThread, 3000);
         CloseHandle(g_hostThread);
         g_hostThread = nullptr;
     }
@@ -845,6 +955,7 @@ void Stop() {
 bool IsRunning() { return g_running; }
 void Wake() { if (g_threadId) PostThreadMessageW(g_threadId, kWakeMsg, 0, 0); }
 void EnableHotkey() { g_wantHotkeyHook = true; Wake(); }
+void SetGamePaused(bool paused) { g_pauseGameActive.store(paused, std::memory_order_release); }
 HWND Window() { return g_hwnd; }
 
 GameWindow CurrentGame() {

@@ -364,6 +364,24 @@ void Emulator::EnterRoom(Peer& peer, uint64_t key, uint8_t op, const Params& par
         m_env.log("[Photon] Room '%s' created (app %.8s..., max %d)", name.c_str(), peer.appId.c_str(), (int)maxPlayers);
     }
     Room& room = *it->second;
+    // If the same userId reconnects on a new socket/port before the old connection times out,
+    // evict the stale ghost actor first so room capacity and Quantum player slots aren't exhausted.
+    // Never evict the room master or local loopback peer when another instance shares the same tunnel ID.
+    if (exists && !peer.userId.empty()) {
+        std::vector<uint64_t> staleKeys;
+        for (const auto& [nr, act] : room.actors) {
+            if (act.peerKey == key || nr == room.master) continue;
+            auto pitOld = m_peers.find(act.peerKey);
+            if (pitOld != m_peers.end() && pitOld->second.role == Role::Game && pitOld->second.userId == peer.userId) {
+                staleKeys.push_back(act.peerKey);
+            }
+        }
+        for (uint64_t sk : staleKeys) {
+            m_env.log("[Photon] Evicting stale connection %llu for rejoining user %s in '%s'",
+                      (unsigned long long)sk, peer.userId.c_str(), room.name.c_str());
+            LeaveRoom(sk, false);
+        }
+    }
     // IsOpen only gates later joins: like Photon Cloud, the creator always enters (Fusion creates rooms closed).
     bool open = true;
     if (const Raw* v = room.props.Find(Byte(GP_IS_OPEN))) AsBool(*v, open);
@@ -506,15 +524,27 @@ bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Ra
         std::vector<PnQuantum::ClientInput> inputs;
         if (!PnQuantum::ParseClientInputs(buffer, inputs)) return true;
         for (const auto& in : inputs) {
-            if (in.tick < room.quantum.nextTick || in.tick > room.quantum.nextTick + 300) continue;
+            if (in.tick > room.quantum.nextTick + 300) continue;
+            int32_t targetTick = in.tick;
+            if (targetTick < room.quantum.nextTick) {
+                // Rescue inputs arriving slightly behind nextTick due to Steam P2P relay jitter (<= 250ms)
+                // instead of dropping movement and leaving remote characters stationary.
+                if (room.quantum.nextTick - targetTick > 15) continue;
+                targetTick = room.quantum.nextTick;
+            }
             if (!ActorOwnsQuantumSlot(room.quantum, peer.actor, static_cast<int32_t>(in.player))) continue;
-            auto& slotEntry = room.quantum.pendingInputs[in.tick][in.player];
-            if (slotEntry.rpc.present && !in.rpc.present) {
-                slotEntry.data = in.data;
-                slotEntry.flags = (slotEntry.flags & PnQuantum::INPUT_FLAG_COMMAND) |
-                                  (in.flags & ~PnQuantum::INPUT_FLAG_COMMAND);
-            } else {
+            auto& slotEntry = room.quantum.pendingInputs[targetTick][in.player];
+            if (targetTick == in.tick) {
+                if (slotEntry.rpc.present && !in.rpc.present) {
+                    slotEntry.data = in.data;
+                    slotEntry.flags = (slotEntry.flags & PnQuantum::INPUT_FLAG_COMMAND) |
+                                      (in.flags & ~PnQuantum::INPUT_FLAG_COMMAND);
+                } else {
+                    slotEntry = in;
+                }
+            } else if (slotEntry.tick == 0 && !slotEntry.rpc.present && slotEntry.data.bytes.empty()) {
                 slotEntry = in;
+                slotEntry.tick = targetTick;
             }
         }
         return true;
@@ -614,7 +644,16 @@ bool Emulator::HandleQuantumEvent(Peer& peer, Room& room, uint8_t code, const Ra
             }
             case PnQuantum::MSG_RTT_UPDATE: {
                 auto ait = room.quantum.actors.find(peer.actor);
-                if (ait != room.quantum.actors.end()) ait->second.lastRttMs = 1;
+                if (ait != room.quantum.actors.end()) {
+                    int32_t rtt = 1;
+                    if (m_env.peerRttMs) {
+                        auto actIt = room.actors.find(peer.actor);
+                        if (actIt != room.actors.end()) {
+                            rtt = std::clamp(m_env.peerRttMs(actIt->second.peerKey), 1, 500);
+                        }
+                    }
+                    ait->second.lastRttMs = rtt;
+                }
                 SendQuantumMessage(room, peer.actor, PnQuantum::EV_UNRELIABLE, PnQuantum::BuildRttUpdate(m.rtt), false);
                 break;
             }

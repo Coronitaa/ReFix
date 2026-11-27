@@ -408,7 +408,7 @@ function Generate-UNAE-ReFixIni {
     $customBroadcasts = & $Pick "Network" "CustomBroadcasts" $P.CustomBroadcasts
 
     $modsEnabled = & $Pick "Mods" "Enabled" "true"
-    $modsDevMode = & $Pick "Mods" "DevMode" "true"
+    $modsDevMode = & $Pick "Mods" "DevMode" "false"
 
     $iniContent = @"
 ; =============================================================================

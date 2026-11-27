@@ -19,4 +19,7 @@ namespace ReFixPhotonP2P {
 
     // Directly registers the SteamID hosting a room name (and its voice room counterpart).
     void RegisterRoomHost(const std::string& roomName, uint64_t hostSteamID);
+
+    // True when the local Photon client is currently hosting or connected to any room.
+    bool InRoom();
 }

@@ -324,6 +324,7 @@ std::optional<Profile> Load(const std::wstring& id) {
     p.nativeSaves = ReadIni(ini, L"Profile", L"NativeSaves") == L"1";
     p.importedFromSteam = ReadIni(ini, L"Profile", L"ImportedFromSteam") == L"1";
     p.lastUsed = _wcstoui64(ReadIni(ini, L"Profile", L"LastUsed").c_str(), nullptr, 10);
+    p.playtimeSeconds = _wcstoui64(ReadIni(ini, L"Profile", L"PlaytimeSeconds").c_str(), nullptr, 10);
     p.favorites = SplitIds(ReadIni(ini, L"Favorites", L"List"));
     p.originGame = ReadIni(ini, L"Profile", L"OriginGame");
     // [Games] key=name, one line per game that used the profile.
@@ -368,6 +369,7 @@ bool Save(const Profile& p) {
     WriteIni(ini, L"Profile", L"NativeSaves", p.nativeSaves ? L"1" : L"0");
     WriteIni(ini, L"Profile", L"ImportedFromSteam", p.importedFromSteam ? L"1" : L"0");
     WriteIni(ini, L"Profile", L"LastUsed", std::to_wstring(p.lastUsed));
+    WriteIni(ini, L"Profile", L"PlaytimeSeconds", std::to_wstring(p.playtimeSeconds));
     WriteIni(ini, L"Favorites", L"List", JoinIds(p.favorites));
     WriteIni(ini, L"Profile", L"OriginGame", p.originGame);
     std::wstring games;
@@ -460,6 +462,14 @@ Profile MakeNew(const std::wstring& name, const std::vector<Profile>& existing) 
 
 void Touch(Profile& p) { p.lastUsed = Now(); }
 
+void AddPlaytime(const std::wstring& id, uint64_t deltaSeconds) {
+    if (deltaSeconds == 0 || !IsValidId(id)) return;
+    if (auto p = Load(id)) {
+        p->playtimeSeconds += deltaSeconds;
+        Save(*p);
+    }
+}
+
 std::wstring GameKey() { return ExeKey(); }
 
 std::wstring DefaultGameName() {
@@ -528,6 +538,18 @@ void SetLastProfileId(const std::wstring& id, const std::wstring& gameKey) {
         WriteIni(IndexPath(), L"LastProfile", gameKey.c_str(), id);
     }
     WriteIni(IndexPath(), L"General", L"LastProfile", id);
+}
+
+bool IsWelcomeDismissed(const std::wstring& gameKey) {
+    if (gameKey.empty()) return false;
+    return ReadIni(IndexPath(), L"WelcomeDismissed", gameKey.c_str()) == L"1";
+}
+
+void SetWelcomeDismissed(const std::wstring& gameKey, bool dismissed) {
+    if (gameKey.empty()) return;
+    EnsureDir(RootDir());
+    EnsureUnicodeIni(IndexPath());
+    WriteIni(IndexPath(), L"WelcomeDismissed", gameKey.c_str(), dismissed ? L"1" : L"0");
 }
 
 bool TryLock(const std::wstring& id) {

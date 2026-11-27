@@ -59,6 +59,7 @@ bool SetStat(const char* name, int32_t value);
 bool SetStat(const char* name, float value);
 bool Store();                                   // StoreStats: writes the profile's file
 void Flush();                                   // shutdown: writes stats changed since the last Store
+void ReloadFromDisk();                          // reloads stats/achievements from disk (e.g. after Cloud Sync)
 void ResetAll(bool achievementsToo);
 uint32_t Count();
 std::string NameAt(uint32_t index);

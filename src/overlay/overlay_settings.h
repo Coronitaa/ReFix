@@ -80,6 +80,25 @@ enum class SteamOnline { Auto, On, Off };
 SteamOnline SteamOnlineChoice();
 void SetSteamOnline(bool on);
 
+// Bridge AppID used when connecting to Steam Online Services (default: Spacewar 480).
+enum class BridgeMode {
+    Spacewar = 0,
+    CurrentGame = 1,
+    Custom = 2,
+};
+
+struct BridgeSettings {
+    BridgeMode mode = BridgeMode::Spacewar;
+    uint32_t customAppId = 0;
+    bool officialServers = false;
+};
+
+BridgeSettings GetBridgeSettings();
+void SetBridgeSettings(const BridgeSettings& b);
+uint32_t EffectiveBridgeAppId(uint32_t currentGameAppId);
+bool IsOfficialServersActive();
+void SetOfficialServersActive(bool active);
+
 // DllMain-safe read of the Reflex setting (no shell APIs): the player's choice, else `iniDefault`.
 bool BlockReflexEarly(bool iniDefault);
 

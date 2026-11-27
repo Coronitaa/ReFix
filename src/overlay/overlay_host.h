@@ -44,6 +44,7 @@ void Stop();
 bool IsRunning();
 void Wake();                                  // re-evaluate the mode now
 void EnableHotkey();                          // start watching Shift+Tab
+void SetGamePaused(bool paused);              // suspend/resume the game's frame pump safely
 HWND Window();
 GameWindow CurrentGame();
 

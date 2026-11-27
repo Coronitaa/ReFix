@@ -39,6 +39,7 @@
 
 // Helper to determine if an IP is local/LAN
 #include "lan_core/refix_lan_firewall.h"
+#include "overlay/overlay_settings.h"
 
 // ReFix LAN reaches every peer directly over the local network, so raw UDP must never be
 // redirected into the emulated relay. Redirecting by IP also breaks several instances on one
@@ -57,7 +58,10 @@ static bool IsAllowedLanEndpoint(const sockaddr* addr) {
 }
 
 static bool IsPhotonEgressAllowed(uint16_t port) {
-    if ((port >= 27000 && port <= 27100) || (port >= 5055 && port <= 5058) || (port >= 9090 && port <= 9093) || port == 443) {
+    if (refix::overlay::settings::IsOfficialServersActive()) return true;
+    if ((port >= 27000 && port <= 27100) || (port >= 5055 && port <= 5065) ||
+        (port >= 4530 && port <= 4533) || (port >= 9090 && port <= 9093) ||
+        (port >= 19090 && port <= 19093) || port == 443 || port == 80 || port == 843) {
         static int s_photonAllowed = -1;
         if (s_photonAllowed == -1) {
             char buf[64] = {0};
@@ -139,6 +143,7 @@ static fn_WSARecvFrom_t g_orig_WSARecvFrom = nullptr;
 static fn_WSAConnect_t  g_orig_WSAConnect  = nullptr;
 static fn_WSASend_t     g_orig_WSASend     = nullptr;
 static fn_WSARecv_t     g_orig_WSARecv     = nullptr;
+static std::atomic<bool> g_hooksActive{ false };
 
 extern "C" void ReFix_OnGamePortVirtualized(uint16_t newPort);
 
@@ -944,6 +949,9 @@ static bool TranslatePeerDestination(const sockaddr* originalTo, int tolen, sock
 static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_sendto ? g_orig_sendto(s, buf, len, flags, to, tolen) : SOCKET_ERROR;
+    }
     try {
         // 1. Bypass any registered internal sockets (LanTransport, UnrealSteamEmu)
         if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
@@ -1055,6 +1063,9 @@ static int WSAAPI Hook_WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCou
     LPDWORD lpNumberOfBytesSent, DWORD dwFlags, const struct sockaddr* lpTo, int iTolen,
     LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_WSASendTo ? g_orig_WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
+    }
     try {
         if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
             return g_orig_WSASendTo ? g_orig_WSASendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
@@ -1104,6 +1115,9 @@ static int WSAAPI Hook_WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCou
 
 // ------ send -----------------------------------------------------------------
 static int WSAAPI Hook_send(SOCKET s, const char* buf, int len, int flags) {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_send ? g_orig_send(s, buf, len, flags) : SOCKET_ERROR;
+    }
     sockaddr_storage peerAddr{};
     int peerLen = sizeof(peerAddr);
     if (getpeername(s, (sockaddr*)&peerAddr, &peerLen) == 0) {
@@ -1118,6 +1132,9 @@ static int WSAAPI Hook_WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount
     LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
     LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_WSASend ? g_orig_WSASend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
+    }
     sockaddr_storage peerAddr{};
     int peerLen = sizeof(peerAddr);
     if (getpeername(s, (sockaddr*)&peerAddr, &peerLen) == 0) {
@@ -1133,6 +1150,9 @@ static int WSAAPI Hook_WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount
 static int WSAAPI Hook_recvfrom(SOCKET s, char* buf, int len, int flags,
     struct sockaddr* from, int* fromlen)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_recvfrom ? g_orig_recvfrom(s, buf, len, flags, from, fromlen) : SOCKET_ERROR;
+    }
     try {
         if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
             return g_orig_recvfrom(s, buf, len, flags, from, fromlen);
@@ -1191,6 +1211,9 @@ static int WSAAPI Hook_WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferC
     LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags, struct sockaddr* lpFrom, LPINT lpFromlen,
     LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_WSARecvFrom ? g_orig_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
+    }
     try {
         if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
             return g_orig_WSARecvFrom ? g_orig_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom, lpFromlen, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
@@ -1257,6 +1280,9 @@ static int WSAAPI Hook_WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferC
 
 // ------ recv -----------------------------------------------------------------
 static int WSAAPI Hook_recv(SOCKET s, char* buf, int len, int flags) {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_recv ? g_orig_recv(s, buf, len, flags) : SOCKET_ERROR;
+    }
     return Hook_recvfrom(s, buf, len, flags, nullptr, nullptr);
 }
 
@@ -1265,12 +1291,18 @@ static int WSAAPI Hook_WSARecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount
     LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
     LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_WSARecv ? g_orig_WSARecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped, lpCompletionRoutine) : SOCKET_ERROR;
+    }
     return Hook_WSARecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, nullptr, nullptr, lpOverlapped, lpCompletionRoutine);
 }
 
 // ------ connect --------------------------------------------------------------
 static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namelen)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_connect ? g_orig_connect(s, name, namelen) : SOCKET_ERROR;
+    }
     try {
         sockaddr_storage translated;
         int translatedLen = namelen;
@@ -1295,6 +1327,9 @@ static int WSAAPI Hook_connect(SOCKET s, const struct sockaddr* name, int namele
 static int WSAAPI Hook_WSAConnect(SOCKET s, const struct sockaddr* name, int namelen,
     LPWSABUF lpCallerData, LPWSABUF lpCalleeData, LPQOS lpSQOS, LPQOS lpGQOS)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_WSAConnect ? g_orig_WSAConnect(s, name, namelen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS) : SOCKET_ERROR;
+    }
     try {
         sockaddr_storage translated;
         int translatedLen = namelen;
@@ -1321,6 +1356,9 @@ static int WSAAPI Hook_WSAConnect(SOCKET s, const struct sockaddr* name, int nam
 static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
     fd_set* exceptfds, const struct timeval* timeout)
 {
+    if (!g_hooksActive.load(std::memory_order_acquire)) {
+        return g_orig_select ? g_orig_select(nfds, readfds, writefds, exceptfds, timeout) : SOCKET_ERROR;
+    }
     fd_set inRead;
     bool hasInRead = false;
     if (readfds && readfds->fd_count > 0) {
@@ -1373,8 +1411,8 @@ static int WSAAPI Hook_select(int nfds, fd_set* readfds, fd_set* writefds,
 // ------ bind (V-04 Port Virtualization) ---------------------------------------
 static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 {
-    if (SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
-        return g_orig_bind(s, name, namelen);
+    if (!g_hooksActive.load(std::memory_order_acquire) || SteamP2PHook::IsInternalSocket((uintptr_t)s)) {
+        return g_orig_bind ? g_orig_bind(s, name, namelen) : SOCKET_ERROR;
     }
 
     if (name && (name->sa_family == AF_INET || name->sa_family == AF_INET6)) {
@@ -1454,13 +1492,15 @@ static int WSAAPI Hook_bind(SOCKET s, const struct sockaddr* name, int namelen)
 // ------ closesocket ----------------------------------------------------------
 static int WSAAPI Hook_closesocket(SOCKET s)
 {
-    try {
-        SteamP2PHook::UnregisterInternalSocket((uintptr_t)s);
-        {
-            std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
-            g_socketContexts.erase(s);
-        }
-    } catch (...) {}
+    if (g_hooksActive.load(std::memory_order_acquire)) {
+        try {
+            SteamP2PHook::UnregisterInternalSocket((uintptr_t)s);
+            {
+                std::lock_guard<std::recursive_mutex> lg(g_socketMutex);
+                g_socketContexts.erase(s);
+            }
+        } catch (...) {}
+    }
     if (g_orig_closesocket) {
         return g_orig_closesocket(s);
     }
@@ -1486,6 +1526,7 @@ uint16_t GetBoundGamePort() {
 }
 
 static std::vector<void*> g_hookTargets;
+static bool g_hooksCreated = false;
 
 void Install(void* hSteamOriginal) {
     if (hSteamOriginal) g_hSteamOriginal = hSteamOriginal;
@@ -1500,37 +1541,46 @@ void Install(void* hSteamOriginal) {
         return;
     }
 
-    HMODULE hWs2 = GetModuleHandleA("ws2_32.dll");
-    if (!hWs2) hWs2 = LoadLibraryA("ws2_32.dll");
-    if (!hWs2) {
-        Log("ERROR: Could not load ws2_32.dll");
-        return;
+    if (!g_hooksCreated) {
+        HMODULE hWs2 = GetModuleHandleA("ws2_32.dll");
+        if (!hWs2) hWs2 = LoadLibraryA("ws2_32.dll");
+        if (!hWs2) {
+            Log("ERROR: Could not load ws2_32.dll");
+            return;
+        }
+
+        g_hookTargets.clear();
+        auto installHook = [&](const char* name, void* detour, void** orig) {
+            void* target = GetProcAddress(hWs2, name);
+            if (target && MH_CreateHook(target, detour, orig) == MH_OK) {
+                MH_QueueEnableHook(target);
+                g_hookTargets.push_back(target);
+            }
+            Log("%s hook: %s", name, *orig ? "OK" : "FAIL");
+        };
+
+        installHook("sendto", (void*)Hook_sendto, (void**)&g_orig_sendto);
+        installHook("recvfrom", (void*)Hook_recvfrom, (void**)&g_orig_recvfrom);
+        installHook("connect", (void*)Hook_connect, (void**)&g_orig_connect);
+        installHook("select", (void*)Hook_select, (void**)&g_orig_select);
+        installHook("bind", (void*)Hook_bind, (void**)&g_orig_bind);
+        installHook("closesocket", (void*)Hook_closesocket, (void**)&g_orig_closesocket);
+        installHook("send", (void*)Hook_send, (void**)&g_orig_send);
+        installHook("recv", (void*)Hook_recv, (void**)&g_orig_recv);
+        installHook("WSASendTo", (void*)Hook_WSASendTo, (void**)&g_orig_WSASendTo);
+        installHook("WSARecvFrom", (void*)Hook_WSARecvFrom, (void**)&g_orig_WSARecvFrom);
+        installHook("WSAConnect", (void*)Hook_WSAConnect, (void**)&g_orig_WSAConnect);
+        installHook("WSASend", (void*)Hook_WSASend, (void**)&g_orig_WSASend);
+        installHook("WSARecv", (void*)Hook_WSARecv, (void**)&g_orig_WSARecv);
+        g_hooksCreated = true;
+    } else {
+        for (void* target : g_hookTargets) {
+            MH_QueueEnableHook(target);
+        }
     }
 
-    g_hookTargets.clear();
-    auto installHook = [&](const char* name, void* detour, void** orig) {
-        void* target = GetProcAddress(hWs2, name);
-        if (target && MH_CreateHook(target, detour, orig) == MH_OK) {
-            MH_EnableHook(target);
-            g_hookTargets.push_back(target);
-        }
-        Log("%s hook: %s", name, *orig ? "OK" : "FAIL");
-    };
-
-    installHook("sendto", (void*)Hook_sendto, (void**)&g_orig_sendto);
-    installHook("recvfrom", (void*)Hook_recvfrom, (void**)&g_orig_recvfrom);
-    installHook("connect", (void*)Hook_connect, (void**)&g_orig_connect);
-    installHook("select", (void*)Hook_select, (void**)&g_orig_select);
-    installHook("bind", (void*)Hook_bind, (void**)&g_orig_bind);
-    installHook("closesocket", (void*)Hook_closesocket, (void**)&g_orig_closesocket);
-    installHook("send", (void*)Hook_send, (void**)&g_orig_send);
-    installHook("recv", (void*)Hook_recv, (void**)&g_orig_recv);
-    installHook("WSASendTo", (void*)Hook_WSASendTo, (void**)&g_orig_WSASendTo);
-    installHook("WSARecvFrom", (void*)Hook_WSARecvFrom, (void**)&g_orig_WSARecvFrom);
-    installHook("WSAConnect", (void*)Hook_WSAConnect, (void**)&g_orig_WSAConnect);
-    installHook("WSASend", (void*)Hook_WSASend, (void**)&g_orig_WSASend);
-    installHook("WSARecv", (void*)Hook_WSARecv, (void**)&g_orig_WSARecv);
-
+    MH_ApplyQueued();
+    g_hooksActive.store(true, std::memory_order_release);
     g_hooksInstalled = true;
 
     // Resolve ISteamNetworking immediately if possible
@@ -1546,20 +1596,21 @@ void Install(void* hSteamOriginal) {
 void Uninstall() {
     if (!g_hooksInstalled) return;
 
+    g_hooksActive.store(false, std::memory_order_release);
     g_pumpRunning.store(false, std::memory_order_relaxed);
 
     if (g_pumpThread) {
-        WaitForSingleObject(g_pumpThread, 100);
+        WaitForSingleObject(g_pumpThread, 1000);
         CloseHandle(g_pumpThread);
         g_pumpThread = nullptr;
     }
 
-    // Disable only our Winsock hooks; other subsystems share MinHook in this process.
+    // Disable only our Winsock hooks WITHOUT MH_RemoveHook: background threads (such as
+    // Photon's SocketUdp.ReceiveLoop) may still be blocked inside g_orig_recvfrom trampolines.
     for (void* target : g_hookTargets) {
-        MH_DisableHook(target);
-        MH_RemoveHook(target);
+        MH_QueueDisableHook(target);
     }
-    g_hookTargets.clear();
+    MH_ApplyQueued();
 
     g_pSteamNetworking = nullptr;
     g_hooksInstalled = false;

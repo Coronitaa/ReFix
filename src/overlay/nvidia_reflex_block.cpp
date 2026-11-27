@@ -78,7 +78,7 @@ void Hook(unsigned int id, T detour, T* orig, const char* name) {
     void* target = g_origQuery(id);
     if (!target) return;
     if (MH_CreateHook(target, reinterpret_cast<void*>(detour), reinterpret_cast<void**>(orig)) == MH_OK &&
-        MH_EnableHook(target) == MH_OK)
+        MH_QueueEnableHook(target) == MH_OK)
         ReFixLog("[NvidiaReflexBlock] Disabled %s", name);
 }
 
@@ -104,8 +104,9 @@ void TryHook() {
     Hook(kIdD3D12SetLatencyMarker, &HookMarker, &g_origMarker12, "NvAPI_D3D12_SetLatencyMarker");
     if (MH_CreateHook(reinterpret_cast<void*>(query), reinterpret_cast<void*>(&HookQuery),
                       reinterpret_cast<void**>(&g_origQuery)) == MH_OK &&
-        MH_EnableHook(reinterpret_cast<void*>(query)) == MH_OK)
+        MH_QueueEnableHook(reinterpret_cast<void*>(query)) == MH_OK)
         ReFixLog("[NvidiaReflexBlock] NVIDIA Reflex hidden from the game");
+    MH_ApplyQueued();
 }
 
 } // namespace

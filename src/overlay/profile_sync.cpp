@@ -8,11 +8,14 @@
 #define NOMINMAX
 #endif
 #include "profile_sync.h"
+#include "achievements.h"
 #include "cloud_account.h"
 #include "overlay_app.h"
 #include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "save_swap.h"
+#include "../mods/mod_host.h"
+#include "../unreal_steam_emu.h"
 
 #include "../mods/crypto/monocypher.h"
 
@@ -32,7 +35,7 @@ namespace refix::overlay::sync {
 namespace {
 
 constexpr DWORD kCheckEveryMs = 60000;
-constexpr DWORD kShutdownWaitMs = 800;
+constexpr DWORD kShutdownWaitMs = 15000;
 constexpr ULONGLONG kAutoSyncQuietMs = 5000;        // the game's save has finished writing
 constexpr ULONGLONG kAutoSyncCooldownMs = 300000;   // at most one autosync upload every 5 minutes
 constexpr int kBackupsKept = 3;
@@ -41,9 +44,12 @@ std::mutex g_mu;                 // everything below
 std::optional<Profile> g_profile;
 Status g_status;
 std::atomic<bool> g_busy{ false };
+std::atomic<bool> g_manualPushPending{ false };
 std::atomic<bool> g_started{ false };
+std::atomic<bool> g_stopLoop{ false };
 std::atomic<bool> g_seenRemote{ false };   // this session read the destination (or knows nothing newer is there)
 HANDLE g_wake = nullptr;
+HANDLE g_loopThread = nullptr;
 uint8_t g_lastPending[32] = {};  // state seen by the previous check (uploads wait until it holds still)
 
 std::mutex g_conflictMu;
@@ -52,6 +58,7 @@ Profile g_conflictProfile;
 FileList g_conflictCloudFiles;
 uint8_t g_conflictRemoteHash[32] = {};
 uint8_t g_conflictLocalHash[32] = {};
+std::string g_conflictRemoteTag;
 
 std::wstring Ini() { return profiles::RootDir() + L"\\profiles.ini"; }
 std::wstring StateIni() { return profiles::RootDir() + L"\\sync.ini"; }
@@ -72,6 +79,38 @@ std::wstring PackageName(const Profile& p) {
 // --- files of a profile ------------------------------------------------------------------------------------
 struct Entry { std::string name; std::wstring path; uint64_t size; uint64_t mtime; };
 
+bool IsVolatileSyncEntry(const std::wstring& n, bool isDir) {
+    if (isDir) {
+        return _wcsicmp(n.c_str(), L"Sentry") == 0 ||
+               _wcsicmp(n.c_str(), L"SentryNative") == 0 ||
+               _wcsicmp(n.c_str(), L"CrashDumps") == 0 ||
+               _wcsicmp(n.c_str(), L"eventcache") == 0 ||
+               _wcsicmp(n.c_str(), L"Unity") == 0 ||
+               _wcsicmp(n.c_str(), L"ShaderCache") == 0 ||
+               _wcsicmp(n.c_str(), L"RfsCache") == 0 ||
+               _wcsicmp(n.c_str(), L"RfsPlayerCache") == 0;
+    }
+    if (_wcsicmp(n.c_str(), L"desktop.ini") == 0 ||
+        _wcsicmp(n.c_str(), L"IconCache.db") == 0 ||
+        _wcsicmp(n.c_str(), L"RemoteConfigCache.json") == 0 ||
+        _wcsicmp(n.c_str(), L"Player.log") == 0 ||
+        _wcsicmp(n.c_str(), L"Player-prev.log") == 0 ||
+        _wcsicmp(n.c_str(), L"output_log.txt") == 0) {
+        return true;
+    }
+    const size_t dot = n.find_last_of(L'.');
+    if (dot != std::wstring::npos) {
+        const std::wstring ext = n.substr(dot);
+        if (_wcsicmp(ext.c_str(), L".log") == 0 ||
+            _wcsicmp(ext.c_str(), L".tmp") == 0 ||
+            _wcsicmp(ext.c_str(), L".lock") == 0 ||
+            _wcsicmp(ext.c_str(), L".dmp") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Walk(const std::wstring& dir, const std::string& prefix, std::vector<Entry>& out) {
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
@@ -80,8 +119,10 @@ void Walk(const std::wstring& dir, const std::string& prefix, std::vector<Entry>
         const std::wstring n = fd.cFileName;
         if (n == L"." || n == L"..") continue;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;   // never follow links out of the folder
+        const bool isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (IsVolatileSyncEntry(n, isDir)) continue;
         const std::string name = prefix + ToUtf8(n);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        if (isDir) {
             Walk(dir + L"\\" + n, name + "/", out);
         } else {
             out.push_back({ name, dir + L"\\" + n, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow,
@@ -92,8 +133,10 @@ void Walk(const std::wstring& dir, const std::string& prefix, std::vector<Entry>
 }
 
 std::vector<Entry> Collect(const Profile& p) {
+    saves::ScopedBypass fsBypass;
     std::vector<Entry> out;
     const std::wstring dir = profiles::ProfileDir(p.id);
+    std::set<std::string> stashedLabels;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -101,27 +144,52 @@ std::vector<Entry> Collect(const Profile& p) {
             const std::wstring n = fd.cFileName;
             if (n == L"." || n == L".." || _wcsicmp(n.c_str(), L"profile.ini") == 0) continue;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                // Saves\<label> is the stash; it goes under Saves/ like the live folders below.
-                Walk(dir + L"\\" + n, (_wcsicmp(n.c_str(), L"Saves") == 0 ? std::string("Saves/") : "Profile/" + ToUtf8(n) + "/"), out);
-            } else {
+                // Saves\<label> is the canonical redirected save stash for the profile.
+                if (_wcsicmp(n.c_str(), L"Saves") == 0) {
+                    const size_t before = out.size();
+                    Walk(dir + L"\\" + n, "Saves/", out);
+                    for (size_t i = before; i < out.size(); ++i) {
+                        const size_t s1 = out[i].name.find('/', 6);
+                        if (s1 != std::string::npos) stashedLabels.insert(out[i].name.substr(6, s1 - 6));
+                    }
+                } else {
+                    Walk(dir + L"\\" + n, "Profile/" + ToUtf8(n) + "/", out);
+                }
+            } else if (!IsVolatileSyncEntry(n, false)) {
                 out.push_back({ "Profile/" + ToUtf8(n), dir + L"\\" + n, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow,
                                 ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime });
             }
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
-    for (const saves::Location& loc : saves::OwnedBy(p.id)) Walk(loc.live, "Saves/" + ToUtf8(loc.label) + "/", out);
+    // Pre-redirection legacy fallback: only pull from live folder if this profile's Saves\<label> stash has no files yet.
+    for (const saves::Location& loc : saves::OwnedBy(p.id)) {
+        const std::string labelUtf8 = ToUtf8(loc.label);
+        if (stashedLabels.count(labelUtf8)) continue;
+        Walk(loc.live, "Saves/" + labelUtf8 + "/", out);
+    }
     std::sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.name < b.name; });
+    out.erase(std::unique(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.name == b.name; }), out.end());
     return out;
 }
 
+bool ReadAll(const std::wstring& path, std::vector<uint8_t>& out);
+
 void StateHash(const std::vector<Entry>& files, uint8_t out[32]) {
+    saves::ScopedBypass fsBypass;
     crypto_blake2b_ctx ctx;
     crypto_blake2b_general_init(&ctx, 32, nullptr, 0);
     for (const Entry& e : files) {
         crypto_blake2b_update(&ctx, (const uint8_t*)e.name.data(), e.name.size() + 1);
         crypto_blake2b_update(&ctx, (const uint8_t*)&e.size, sizeof(e.size));
-        crypto_blake2b_update(&ctx, (const uint8_t*)&e.mtime, sizeof(e.mtime));
+        std::vector<uint8_t> data;
+        if (ReadAll(e.path, data)) {
+            uint8_t fh[32] = {};
+            crypto_blake2b_general(fh, 32, nullptr, 0, data.data(), data.size());
+            crypto_blake2b_update(&ctx, fh, sizeof(fh));
+        } else {
+            crypto_blake2b_update(&ctx, (const uint8_t*)&e.mtime, sizeof(e.mtime));
+        }
     }
     crypto_blake2b_final(&ctx, out);
 }
@@ -170,14 +238,44 @@ std::string LastHash(const Profile& p, uint64_t* when = nullptr) {
     return ToUtf8(buf);
 }
 
-void SetLastHash(const Profile& p, const uint8_t hash[32]) {
+std::string LastRemoteHash(const Profile& p) {
+    wchar_t buf[128] = {};
+    GetPrivateProfileStringW(p.id.c_str(), L"LastRemoteHash", L"", buf, 128, StateIni().c_str());
+    if (buf[0]) return ToUtf8(buf);
+    return LastHash(p);
+}
+
+std::string LastRemoteTag(const Profile& p) {
+    wchar_t buf[512] = {};
+    GetPrivateProfileStringW(p.id.c_str(), L"LastRemoteTag", L"", buf, 512, StateIni().c_str());
+    return ToUtf8(buf);
+}
+
+void SetRemoteTag(const Profile& p, const std::string& tag) {
+    const std::wstring ini = StateIni();
+    const std::wstring wtag = FromUtf8(tag);
+    WritePrivateProfileStringW(p.id.c_str(), L"LastRemoteTag", wtag.empty() ? nullptr : wtag.c_str(), ini.c_str());
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+}
+
+void SetSyncHashes(const Profile& p, const uint8_t localHash[32], const uint8_t remoteHash[32]) {
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
     const uint64_t now = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    WritePrivateProfileStringW(p.id.c_str(), L"LastHash", Hex(hash, 32).c_str(), StateIni().c_str());
-    WritePrivateProfileStringW(p.id.c_str(), L"LastSync", std::to_wstring(now).c_str(), StateIni().c_str());
+    const std::wstring ini = StateIni();
+    WritePrivateProfileStringW(p.id.c_str(), L"LastHash", Hex(localHash, 32).c_str(), ini.c_str());
+    WritePrivateProfileStringW(p.id.c_str(), L"LastRemoteHash", Hex(remoteHash, 32).c_str(), ini.c_str());
+    WritePrivateProfileStringW(p.id.c_str(), L"LastSync", std::to_wstring(now).c_str(), ini.c_str());
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
     std::lock_guard<std::mutex> lock(g_mu);
     g_status.lastSync = now;
+}
+
+void MarkSyncedAfterApply(const Profile& p, const uint8_t remoteHash[32], const std::string& remoteTag = {}) {
+    uint8_t localNow[32];
+    StateHash(Collect(p), localNow);
+    SetSyncHashes(p, localNow, remoteHash);
+    if (!remoteTag.empty()) SetRemoteTag(p, remoteTag);
 }
 
 std::unique_ptr<ISyncTarget> Target() {
@@ -200,6 +298,7 @@ void SetState(State s, const std::string& error = {}) {
 }
 
 bool BuildPackage(const Profile& p, const std::vector<Entry>& files, const uint8_t hash[32], std::vector<uint8_t>& pkg) {
+    saves::ScopedBypass fsBypass;
     FileList list;
     const std::string name = ToUtf8(p.name);   // for "Import": the new profile takes this name
     list.emplace_back("Meta/name.txt", std::vector<uint8_t>(name.begin(), name.end()));
@@ -212,6 +311,12 @@ bool BuildPackage(const Profile& p, const std::vector<Entry>& files, const uint8
     list.emplace_back("Meta/games.txt", std::vector<uint8_t>(gamesStr.begin(), gamesStr.end()));
     const std::string stockAv = std::to_string(p.stockAvatar);
     list.emplace_back("Meta/stock_avatar.txt", std::vector<uint8_t>(stockAv.begin(), stockAv.end()));
+    const std::string ptStr = std::to_string(p.playtimeSeconds);
+    list.emplace_back("Meta/playtime.txt", std::vector<uint8_t>(ptStr.begin(), ptStr.end()));
+    FILETIME ftNow;
+    GetSystemTimeAsFileTime(&ftNow);
+    const std::string savedAt = std::to_string(((uint64_t)ftNow.dwHighDateTime << 32) | ftNow.dwLowDateTime);
+    list.emplace_back("Meta/saved_at.txt", std::vector<uint8_t>(savedAt.begin(), savedAt.end()));
     for (const Entry& e : files) {
         std::vector<uint8_t> data;
         if (!ReadAll(e.path, data)) {
@@ -239,14 +344,12 @@ void Backup(const Profile& p, const std::vector<Entry>& files, const uint8_t has
     for (size_t i = kBackupsKept; i < old.size(); ++i) DeleteFileW(old[i].path.c_str());
 }
 
-// Writes a package's files over the profile on this PC (save folders it owns get them live).
+// Writes a package's files over the profile's canonical stash (SaveSwap redirects live paths here).
 bool Apply(const Profile& p, const FileList& files) {
+    saves::ScopedBypass fsBypass;
     for (const auto& f : files) if (!SafeName(f.first)) return false;
-    std::map<std::wstring, std::wstring> live;   // label -> live folder owned by p on this PC
-    for (const saves::Location& loc : saves::OwnedBy(p.id)) live[loc.label] = loc.live;
     const std::wstring dir = profiles::ProfileDir(p.id);
     for (const wchar_t* sub : { L"\\Cloud", L"\\Stats", L"\\Inventory", L"\\Saves" }) ClearDir(dir + sub);
-    for (const auto& [label, path] : live) ClearDir(path);
     for (const auto& [name, data] : files) {
         std::wstring target;
         if (name.rfind("Profile/", 0) == 0) {
@@ -256,8 +359,7 @@ bool Apply(const Profile& p, const FileList& files) {
             const size_t slash = rest.find('/');
             if (slash == std::string::npos) continue;
             const std::wstring label = FromUtf8(rest.substr(0, slash)), file = FromUtf8(rest.substr(slash + 1));
-            auto it = live.find(label);
-            target = (it != live.end() ? it->second : saves::StashOf(p.id, label)) + L"\\" + file;
+            target = saves::StashOf(p.id, label) + L"\\" + file;
         } else {
             continue;
         }
@@ -277,6 +379,36 @@ void Pull(const Profile& p) {
     const std::vector<Entry> local = Collect(p);
     uint8_t localHash[32];
     StateHash(local, localHash);
+    const std::string lastLocal = LastHash(p), lastRemote = LastRemoteHash(p);
+    const std::string localHex = ToUtf8(Hex(localHash, 32));
+
+    // Fast path: ask destination metadata (etag/md5/mtime) before downloading multi-MB packages on every launch.
+    std::string rawTag;
+    const bool gotTag = target->RemoteTag(PackageName(p), rawTag);
+    const std::string remoteTag = (gotTag && !rawTag.empty()) ? (ToUtf8(target->Name()) + "|" + rawTag) : std::string();
+    if (gotTag) {
+        if (rawTag.empty()) {
+            g_seenRemote = true;
+            SetRemoteTag(p, "");
+            SetState(local.empty() ? State::Synced : State::Pending);
+            return;
+        }
+        if (!remoteTag.empty() && remoteTag == LastRemoteTag(p) && !lastRemote.empty()) {
+            g_seenRemote = true;
+            const bool localMatches = (localHex == lastRemote || localHex == lastLocal);
+            if (localMatches && lastLocal != localHex) {
+                uint8_t rhBytes[32] = {};
+                if (lastRemote.size() == 64) {
+                    for (size_t i = 0; i < 32; ++i)
+                        rhBytes[i] = (uint8_t)strtoul(lastRemote.substr(i * 2, 2).c_str(), nullptr, 16);
+                    SetSyncHashes(p, localHash, rhBytes);
+                }
+            }
+            SetState(localMatches ? State::Synced : State::Pending);
+            return;
+        }
+    }
+
     const bool read = target->Read(PackageName(p), pkg);
     if (read || !target->Failed()) g_seenRemote = true;
     if (!read) {
@@ -292,14 +424,16 @@ void Pull(const Profile& p) {
         SetState(State::Failed, "The saved package is damaged");
         return;
     }
-    const std::string last = LastHash(p), localHex = ToUtf8(Hex(localHash, 32)), remoteHex = ToUtf8(Hex(remoteHash, 32));
-    if (remoteHex == localHex || remoteHex == last) {   // nothing new over there
-        if (remoteHex == localHex) SetLastHash(p, localHash);
-        SetState(remoteHex == localHex ? State::Synced : State::Pending);
+    const std::string remoteHex = ToUtf8(Hex(remoteHash, 32));
+    if (remoteHex == localHex || remoteHex == lastRemote) {   // nothing new over there
+        const bool localMatches = (remoteHex == localHex || lastLocal == localHex);
+        if (localMatches) SetSyncHashes(p, localHash, remoteHash);
+        if (!remoteTag.empty()) SetRemoteTag(p, remoteTag);
+        SetState(localMatches ? State::Synced : State::Pending);
         return;
     }
     // Both local and remote have diverged with un-synced data: prompt user to resolve conflict
-    if (!local.empty() && !last.empty() && last != localHex) {
+    if (!local.empty() && !lastLocal.empty() && lastLocal != localHex) {
         std::lock_guard<std::mutex> lock(g_conflictMu);
         g_conflict.active = true;
         g_conflict.profileId = p.id;
@@ -311,6 +445,7 @@ void Pull(const Profile& p) {
         g_conflictCloudFiles = std::move(files);
         memcpy(g_conflictRemoteHash, remoteHash, 32);
         memcpy(g_conflictLocalHash, localHash, 32);
+        g_conflictRemoteTag = remoteTag;
         SetState(State::Pending, "Sync conflict detected");
         ReFixLog("[Sync] Conflict detected for %s: local=%zu files, cloud=%zu files", ToUtf8(p.name).c_str(), local.size(), g_conflictCloudFiles.size());
         return;
@@ -318,12 +453,10 @@ void Pull(const Profile& p) {
     // Unchanged locally or local had nothing: take remote
     Backup(p, local, localHash);
     if (!Apply(p, files)) { SetState(State::Failed, "Could not write the downloaded saves"); return; }
-    uint8_t now[32];
-    StateHash(Collect(p), now);
-    SetLastHash(p, now);
+    MarkSyncedAfterApply(p, remoteHash, remoteTag);
     SetState(State::Synced);
     ReFixLog("[Sync] Took the newer package of %s (%zu files)%s", ToUtf8(p.id).c_str(), files.size(),
-             last.empty() || last == localHex ? "" : "; this PC's changes kept in SyncBackups");
+             lastLocal.empty() || lastLocal == localHex ? "" : "; this PC's changes kept in SyncBackups");
 }
 
 // Before the first upload of a session whose start could not reach the destination: only when what is there is
@@ -337,30 +470,40 @@ bool RemoteUnchanged(const Profile& p, ISyncTarget& target) {
     }
     FileList files;
     uint8_t remoteHash[32];
-    if (Unpack(pkg, files, nullptr, remoteHash) && ToUtf8(Hex(remoteHash, 32)) == LastHash(p)) return g_seenRemote = true;
+    if (Unpack(pkg, files, nullptr, remoteHash) && ToUtf8(Hex(remoteHash, 32)) == LastRemoteHash(p)) return g_seenRemote = true;
     SetState(State::Failed, "Newer saves from another PC: restart the game to take them");
     return false;
 }
 
 // Upload when the profile changed since the last sync. `force`: now, without waiting for it to hold still.
-void Push(const Profile& p, bool force) {
+// `overwriteRemote`: explicit user conflict resolution ("Local data") that must overwrite the remote package
+// even if local hashes match LastHash or RemoteUnchanged would reject it.
+void Push(const Profile& p, bool force, bool overwriteRemote = false) {
     const std::vector<Entry> files = Collect(p);
     uint8_t hash[32];
     StateHash(files, hash);
-    if (ToUtf8(Hex(hash, 32)) == LastHash(p)) { SetState(State::Synced); return; }
+    if (!overwriteRemote && ToUtf8(Hex(hash, 32)) == LastHash(p)) { SetState(State::Synced); return; }
     const bool steady = memcmp(hash, g_lastPending, 32) == 0;
     memcpy(g_lastPending, hash, 32);
     auto target = Target();
     if (!target->Ready()) { SetState(State::Unavailable, "Destination not available"); return; }
     if (!force && !steady) { SetState(State::Pending); return; }
-    if (!RemoteUnchanged(p, *target)) return;
+    if (!overwriteRemote && !RemoteUnchanged(p, *target)) return;
     SetState(State::Syncing);
     std::vector<uint8_t> pkg;
     if (!BuildPackage(p, files, hash, pkg)) { SetState(State::Failed, "Could not build the package"); return; }
     if (!target->Write(PackageName(p), pkg)) { SetState(State::Failed, "Could not write to the destination"); return; }
-    SetLastHash(p, hash);
+    g_seenRemote = true;
+    SetSyncHashes(p, hash, hash);
+    std::string newRawTag;
+    if (target->RemoteTag(PackageName(p), newRawTag) && !newRawTag.empty()) {
+        SetRemoteTag(p, ToUtf8(target->Name()) + "|" + newRawTag);
+    } else {
+        SetRemoteTag(p, "");
+    }
     SetState(State::Synced);
-    ReFixLog("[Sync] Uploaded %s (%zu files, %zu KB)", ToUtf8(p.id).c_str(), files.size(), pkg.size() / 1024);
+    ReFixLog("[Sync] Uploaded %s (%zu files, %zu KB)%s", ToUtf8(p.id).c_str(), files.size(), pkg.size() / 1024,
+             overwriteRemote ? " [local conflict overwrite]" : "");
 }
 
 void Run(bool force) {
@@ -389,7 +532,7 @@ DWORD WINAPI Loop(LPVOID) {
     std::vector<HANDLE> watches;
     ULONGLONG savedAt = 0, lastAuto = 0;   // last save seen, last autosync upload (GetTickCount64)
     ULONGLONG nextCheck = GetTickCount64() + kCheckEveryMs;
-    for (;;) {
+    for (; !g_stopLoop.load(std::memory_order_acquire);) {
         if (std::vector<std::wstring> now = AutoSync() ? WatchedDirs() : std::vector<std::wstring>{}; now != dirs) {
             for (HANDLE h : watches) FindCloseChangeNotification(h);
             watches.clear();
@@ -406,6 +549,7 @@ DWORD WINAPI Loop(LPVOID) {
         std::vector<HANDLE> waitOn{ g_wake };
         waitOn.insert(waitOn.end(), watches.begin(), watches.end());
         const DWORD r = WaitForMultipleObjects((DWORD)waitOn.size(), waitOn.data(), FALSE, due > t ? (DWORD)(due - t) : 0);
+        if (g_stopLoop.load(std::memory_order_acquire)) break;
         const ULONGLONG now = GetTickCount64();
         if (r == WAIT_OBJECT_0) { Run(true); nextCheck = now + kCheckEveryMs; continue; }
         if (r > WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + waitOn.size()) {
@@ -424,6 +568,8 @@ DWORD WINAPI Loop(LPVOID) {
             nextCheck = now + kCheckEveryMs;
         }
     }
+    for (HANDLE h : watches) FindCloseChangeNotification(h);
+    return 0;
 }
 
 } // namespace
@@ -519,9 +665,9 @@ void Begin(const Profile& active) {
     }
     if (Syncs(active)) Pull(active);
     if (!g_started.exchange(true)) {
+        g_stopLoop.store(false, std::memory_order_release);
         g_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        HANDLE t = CreateThread(nullptr, 0, Loop, nullptr, 0, nullptr);
-        if (t) CloseHandle(t);
+        g_loopThread = CreateThread(nullptr, 0, Loop, nullptr, 0, nullptr);
     }
 }
 
@@ -538,12 +684,20 @@ void SyncNow() {
 }
 
 void Shutdown() {
-    if (!g_started) return;
-    if (Get().state == State::Off) return;
-    SyncNow();
-    for (DWORD waited = 0; waited < kShutdownWaitMs; waited += 50) {
-        Sleep(50);
-        if (!g_busy && Get().state != State::Pending) break;
+    if (!g_started.exchange(false)) return;
+    if (Get().state != State::Off || g_manualPushPending.load()) {
+        SyncNow();
+        for (DWORD waited = 0; waited < kShutdownWaitMs; waited += 50) {
+            Sleep(50);
+            if (!g_busy && !g_manualPushPending.load() && Get().state != State::Pending) break;
+        }
+    }
+    g_stopLoop.store(true, std::memory_order_release);
+    if (g_wake) SetEvent(g_wake);
+    if (g_loopThread) {
+        WaitForSingleObject(g_loopThread, 1500);
+        CloseHandle(g_loopThread);
+        g_loopThread = nullptr;
     }
 }
 
@@ -561,12 +715,14 @@ void ResolveConflictUseCloud() {
     Profile p;
     FileList files;
     uint8_t remoteHash[32];
+    std::string remoteTag;
     {
         std::lock_guard<std::mutex> lock(g_conflictMu);
         if (!g_conflict.active) return;
         p = g_conflictProfile;
         files = std::move(g_conflictCloudFiles);
         memcpy(remoteHash, g_conflictRemoteHash, 32);
+        remoteTag = g_conflictRemoteTag;
         g_conflict.active = false;
     }
     const std::vector<Entry> local = Collect(p);
@@ -574,10 +730,11 @@ void ResolveConflictUseCloud() {
     StateHash(local, localHash);
     Backup(p, local, localHash);
     if (Apply(p, files)) {
-        SetLastHash(p, remoteHash);
+        MarkSyncedAfterApply(p, remoteHash, remoteTag);
         SetState(State::Synced);
         ReFixLog("[Sync] Conflict resolved using cloud data for profile %s", ToUtf8(p.id).c_str());
-        App::Get().RestartWithProfile(p.id);
+        // Skip flushing old in-memory stats so the downloaded cloud stats.ini stays intact on restart.
+        App::Get().RestartWithProfile(p.id, false);
     } else {
         SetState(State::Failed, "Could not write the downloaded saves");
     }
@@ -592,8 +749,18 @@ void ResolveConflictUseLocal() {
         g_conflictCloudFiles.clear();
         g_conflict.active = false;
     }
-    Push(p, true);
-    ReFixLog("[Sync] Conflict resolved using local data for profile %s", ToUtf8(p.id).c_str());
+    g_seenRemote = true;
+    g_manualPushPending = true;
+    SetState(State::Syncing);
+    std::thread([p] {
+        struct Guard {
+            ~Guard() { g_manualPushPending = false; }
+        } guard;
+        while (g_busy.exchange(true)) Sleep(20);
+        Push(p, true, true);
+        g_busy = false;
+        ReFixLog("[Sync] Conflict resolved using local data for profile %s", ToUtf8(p.id).c_str());
+    }).detach();
 }
 
 void ResolveConflictKeepBoth() {
@@ -619,7 +786,7 @@ void ResolveConflictKeepBoth() {
             CopyFileW(profiles::AvatarPath(p.id).c_str(), profiles::AvatarPath(newP.id).c_str(), FALSE);
         }
         Apply(newP, files);
-        SetLastHash(newP, remoteHash);
+        MarkSyncedAfterApply(newP, remoteHash);
         ReFixLog("[Sync] Conflict resolved keeping both: created profile %s (%s)", ToUtf8(newP.id).c_str(), ToUtf8(newP.name).c_str());
         App::Get().Post([] { App::Get().ReloadProfiles(); });
     }
@@ -686,15 +853,19 @@ void SyncAllProfilesFromCloud() {
             const std::vector<Entry> localEntries = Collect(*match);
             uint8_t localHash[32];
             StateHash(localEntries, localHash);
-            const std::string last = LastHash(*match);
+            const std::string lastLocal = LastHash(*match);
+            const std::string lastRemote = LastRemoteHash(*match);
             const std::string localHex = ToUtf8(Hex(localHash, 32));
             const std::string remoteHex = ToUtf8(Hex(remoteHash, 32));
 
-            if (remoteHex == localHex || remoteHex == last) {
+            if (remoteHex == localHex || remoteHex == lastRemote) {
+                if (remoteHex == localHex && lastLocal != localHex) {
+                    SetSyncHashes(*match, localHash, remoteHash);
+                }
                 continue;
             }
 
-            if (!localEntries.empty() && !last.empty() && last != localHex) {
+            if (!localEntries.empty() && !lastLocal.empty() && lastLocal != localHex) {
                 std::lock_guard<std::mutex> lock(g_conflictMu);
                 if (!g_conflict.active) {
                     g_conflict.active = true;
@@ -707,13 +878,18 @@ void SyncAllProfilesFromCloud() {
                     g_conflictCloudFiles = std::move(pkgFiles);
                     memcpy(g_conflictRemoteHash, remoteHash, 32);
                     memcpy(g_conflictLocalHash, localHash, 32);
+                    std::string rTag;
+                    if (target->RemoteTag(file, rTag) && !rTag.empty()) g_conflictRemoteTag = ToUtf8(target->Name()) + "|" + rTag;
+                    else g_conflictRemoteTag.clear();
                     SetState(State::Pending, "Sync conflict detected");
                     ReFixLog("[Sync] Cloud sync conflict for existing profile %s", ToUtf8(match->name).c_str());
                 }
             } else {
                 Backup(*match, localEntries, localHash);
                 if (Apply(*match, pkgFiles)) {
-                    SetLastHash(*match, remoteHash);
+                    std::string rTag;
+                    if (target->RemoteTag(file, rTag) && !rTag.empty()) rTag = ToUtf8(target->Name()) + "|" + rTag;
+                    MarkSyncedAfterApply(*match, remoteHash, rTag);
                     ReFixLog("[Sync] Installed newer cloud saves for %s (%zu files)", ToUtf8(match->name).c_str(), pkgFiles.size());
                     if (g_profile && g_profile->id == match->id) {
                         activeUpdated = true;
@@ -732,13 +908,14 @@ void SyncAllProfilesFromCloud() {
     }
 
     if (activeUpdated && !activeIdToRestart.empty()) {
-        App::Get().RestartWithProfile(activeIdToRestart);
+        App::Get().RestartWithProfile(activeIdToRestart, false);
     }
 }
 
 static std::mutex g_cloudImportMu;
 static bool g_cloudImportActive = false;
 static std::vector<CloudProfileItem> g_cloudImportItems;
+static std::atomic<bool> g_checkingCloud{ false };
 
 bool HasCloudImportModal() {
     std::lock_guard<std::mutex> lock(g_cloudImportMu);
@@ -756,7 +933,11 @@ void DismissCloudImport() {
 }
 
 void CheckCloudForProfiles() {
+    if (HasCloudImportModal() || g_checkingCloud.exchange(true)) return;
     std::thread([] {
+        struct Guard {
+            ~Guard() { g_checkingCloud = false; }
+        } guard;
         auto target = Target();
         if (!target || !target->Ready()) return;
 
@@ -781,20 +962,6 @@ void CheckCloudForProfiles() {
                 fileLocalId = file.substr(6, file.size() - 11);
             }
 
-            // Check if this profile already exists locally
-            bool existsLocally = false;
-            for (const auto& p : allProfiles) {
-                if (fileSteamId != 0 && p.steamId == fileSteamId) {
-                    existsLocally = true;
-                    break;
-                }
-                if (!fileLocalId.empty() && _wcsicmp(p.id.c_str(), fileLocalId.c_str()) == 0) {
-                    existsLocally = true;
-                    break;
-                }
-            }
-            if (existsLocally) continue;
-
             std::vector<uint8_t> pkg;
             if (!target->Read(file, pkg)) continue;
 
@@ -807,6 +974,10 @@ void CheckCloudForProfiles() {
             item.file = file;
             item.steamId = fileSteamId != 0 ? fileSteamId : pkgSteamId;
             memcpy(item.remoteHash, remoteHash, 32);
+            std::string rawTag;
+            if (target->RemoteTag(file, rawTag) && !rawTag.empty()) {
+                item.remoteTag = ToUtf8(target->Name()) + "|" + rawTag;
+            }
             item.selected = true; // All selected by default
 
             // Parse Meta info
@@ -831,14 +1002,88 @@ void CheckCloudForProfiles() {
                     }
                 } else if (n == "Meta/stock_avatar.txt" && !data.empty()) {
                     item.stockAvatar = atoi(std::string(data.begin(), data.end()).c_str());
-                } else if (n == "Profile/avatar.png") {
+                } else if (n == "Meta/playtime.txt" && !data.empty()) {
+                    item.playtimeSeconds = _strtoui64(std::string(data.begin(), data.end()).c_str(), nullptr, 10);
+                } else if (n == "Meta/saved_at.txt" && !data.empty()) {
+                    item.cloudSavedAt = _strtoui64(std::string(data.begin(), data.end()).c_str(), nullptr, 10);
+                } else if (n == "Profile/avatar.png" && !data.empty()) {
                     item.customAvatar = true;
+                    item.avatarBytes = data;
                 }
+            }
+            if (item.cloudSavedAt == 0) {
+                item.cloudSavedAt = target->ModifiedTime(file);
             }
 
             if (item.name.empty()) {
                 item.name = file;
             }
+
+            // Check if this profile already exists locally (by SteamID, local ID, or profile name)
+            const Profile* match = nullptr;
+            for (const auto& p : allProfiles) {
+                if (item.steamId != 0 && p.steamId == item.steamId) {
+                    match = &p;
+                    break;
+                }
+                if (!fileLocalId.empty() && _wcsicmp(p.id.c_str(), fileLocalId.c_str()) == 0) {
+                    match = &p;
+                    break;
+                }
+                if (!p.guest && !item.name.empty() && _wcsicmp(p.name.c_str(), item.name.c_str()) == 0) {
+                    match = &p;
+                    break;
+                }
+            }
+
+            if (match) {
+                const std::vector<Entry> localFiles = Collect(*match);
+                uint8_t localHash[32] = {};
+                StateHash(localFiles, localHash);
+                const std::string localHex = ToUtf8(Hex(localHash, 32));
+                const std::string remoteHex = ToUtf8(Hex(remoteHash, 32));
+                if ((memcmp(localHash, remoteHash, 32) == 0 || remoteHex == LastRemoteHash(*match)) &&
+                    LastHash(*match) == localHex) {
+                    continue; // Identical and already synced
+                }
+                item.hasLocalMatch = true;
+                item.localProfileId = match->id;
+                uint64_t localTime = match->lastUsed;
+                for (const Entry& e : localFiles) {
+                    if (e.mtime > localTime) localTime = e.mtime;
+                }
+                item.localSavedAt = localTime;
+                item.action = (item.cloudSavedAt >= item.localSavedAt) ? CloudImportAction::UseCloud : CloudImportAction::UseLocal;
+            } else {
+                item.action = CloudImportAction::ImportNew;
+            }
+
+            auto cleanGameDisplay = [&](std::wstring raw) -> std::wstring {
+                if (raw.empty()) return {};
+                auto stripPrefix = [&](const wchar_t* pfx) {
+                    const size_t n = wcslen(pfx);
+                    if (raw.size() > n && _wcsnicmp(raw.c_str(), pfx, n) == 0) {
+                        raw = raw.substr(n);
+                        return true;
+                    }
+                    return false;
+                };
+                if (stripPrefix(L"Unity_Roaming_")) {
+                    if (raw.size() > 6 && _wcsicmp(raw.c_str() + raw.size() - 6, L"_Saves") == 0) raw.resize(raw.size() - 6);
+                    else if (raw.size() > 11 && _wcsicmp(raw.c_str() + raw.size() - 11, L"_SavesLocal") == 0) raw.resize(raw.size() - 11);
+                } else if (stripPrefix(L"Unity_")) {
+                    const size_t sep = raw.find(L'_');
+                    if (sep != std::wstring::npos && sep + 1 < raw.size()) {
+                        raw = raw.substr(sep + 1);
+                    }
+                } else {
+                    stripPrefix(L"UE_") || stripPrefix(L"SavedGames_") || stripPrefix(L"MyGames_") ||
+                    stripPrefix(L"LocalLow_") || stripPrefix(L"Local_") || stripPrefix(L"Roaming_");
+                }
+                for (wchar_t& c : raw) if (c == L'_') c = L' ';
+                while (!raw.empty() && raw.back() == L' ') raw.pop_back();
+                return raw;
+            };
 
             // Fallback for older packages
             if (item.originGameKey.empty() && !item.games.empty()) {
@@ -885,14 +1130,82 @@ void CheckCloudForProfiles() {
                 item.originGameName = i18n::Spanish() ? L"Juego desconocido" : L"Unknown Game";
             }
 
+            // Current game AppIDs and save labels for accurate per-game breakdown
+            std::set<uint32_t> curAppIds;
+            if (uint32_t aid = UnrealSteamEmu::GetAppID()) curAppIds.insert(aid);
+            for (uint32_t aid : refix::mods::GameAppIds()) if (aid != 0) curAppIds.insert(aid);
+            std::set<std::string> curSaveLabels;
+            for (const saves::Location& loc : saves::DetectLocations()) curSaveLabels.insert(ToUtf8(loc.label));
+
+            // Compute total weight, save counts, achievements, and stats/inventory counts
+            item.totalBytes = pkg.size();
+            for (const auto& [n, data] : pkgFiles) {
+                item.totalBytes += data.size();
+                if (n.rfind("Meta/", 0) == 0 || n == "Profile/avatar.png") continue;
+                if (n.rfind("Saves/", 0) == 0 && n.size() > 6) {
+                    ++item.totalSaves;
+                    const size_t sl = n.find('/', 6);
+                    const std::string lbl = (sl != std::string::npos) ? n.substr(6, sl - 6) : n.substr(6);
+                    bool isCur = curSaveLabels.count(lbl) > 0;
+                    if (!isCur) {
+                        std::string lowerLbl = lbl, lowerKey = ToUtf8(curGame);
+                        for (char& c : lowerLbl) c = (char)tolower((unsigned char)c);
+                        for (char& c : lowerKey) c = (char)tolower((unsigned char)c);
+                        if (!lowerKey.empty() && lowerLbl.find(lowerKey) != std::string::npos) isCur = true;
+                    }
+                    if (isCur) ++item.currentGameSaves;
+                } else if (n.rfind("Profile/Cloud/", 0) == 0 && n.size() > 14) {
+                    ++item.totalSaves;
+                    const size_t sl = n.find('/', 14);
+                    const uint32_t aid = (uint32_t)strtoul(n.substr(14, sl == std::string::npos ? std::string::npos : sl - 14).c_str(), nullptr, 10);
+                    if (aid != 0 && curAppIds.count(aid)) ++item.currentGameSaves;
+                } else if (n.rfind("Profile/Stats/", 0) == 0 && n.size() > 14) {
+                    const size_t sl = n.find('/', 14);
+                    const uint32_t aid = (uint32_t)strtoul(n.substr(14, sl == std::string::npos ? std::string::npos : sl - 14).c_str(), nullptr, 10);
+                    const bool isCurApp = (aid != 0 && curAppIds.count(aid) > 0);
+                    std::string text(data.begin(), data.end()), line, sec;
+                    size_t pos = 0;
+                    while (pos < text.size()) {
+                        size_t nl = text.find('\n', pos);
+                        if (nl == std::string::npos) nl = text.size();
+                        line = text.substr(pos, nl - pos);
+                        pos = nl + 1;
+                        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+                        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+                        if (line[0] == '[') {
+                            size_t rb = line.find(']');
+                            sec = (rb != std::string::npos) ? line.substr(1, rb - 1) : "";
+                            continue;
+                        }
+                        const size_t eq = line.find('=');
+                        if (eq == std::string::npos || eq == 0) continue;
+                        if (sec == "Achievements") {
+                            std::string v = line.substr(eq + 1);
+                            if (!v.empty() && v != "0") {
+                                ++item.totalAchievements;
+                                if (isCurApp) ++item.currentGameAchievements;
+                            }
+                        } else if (sec == "IntStats" || sec == "FloatStats" || sec == "AchievementProgress") {
+                            ++item.otherDataCount;
+                        }
+                    }
+                } else if (n.rfind("Profile/Inventory/", 0) == 0 || n.rfind("Profile/Data/", 0) == 0) {
+                    ++item.otherDataCount;
+                }
+            }
+
             // Check if profile has data for current game
-            item.hasCurrentGame = false;
+            item.hasCurrentGame = (item.currentGameSaves > 0 || item.currentGameAchievements > 0);
+            std::wstring currentGameDisplay = curGameName;
             if (!item.originGameKey.empty() && _wcsicmp(item.originGameKey.c_str(), curGame.c_str()) == 0) {
                 item.hasCurrentGame = true;
             }
             for (const auto& g : item.games) {
                 if (_wcsicmp(g.key.c_str(), curGame.c_str()) == 0) {
                     item.hasCurrentGame = true;
+                    if (!g.name.empty() && _wcsicmp(g.name.c_str(), curGame.c_str()) != 0) {
+                        currentGameDisplay = g.name;
+                    }
                     break;
                 }
             }
@@ -904,17 +1217,29 @@ void CheckCloudForProfiles() {
                     }
                 }
             }
-
-            // Extra games count
-            if (item.games.size() > 1) {
-                item.extraGamesCount = (int)item.games.size() - 1;
-            } else {
-                item.extraGamesCount = 0;
+            if (item.playtimeSeconds == 0 && match && match->playtimeSeconds > 0) {
+                item.playtimeSeconds = match->playtimeSeconds;
             }
 
-            std::string disp = ToUtf8(item.originGameName);
+            std::set<std::wstring> distinctGames;
+            for (const auto& g : item.games) {
+                std::wstring k = g.key;
+                for (wchar_t& c : k) c = (wchar_t)towlower(c);
+                if (!k.empty()) distinctGames.insert(k);
+            }
+            if (item.hasCurrentGame && !curGame.empty()) {
+                std::wstring k = curGame;
+                for (wchar_t& c : k) c = (wchar_t)towlower(c);
+                distinctGames.insert(k);
+            }
+            item.extraGamesCount = distinctGames.size() > 1 ? (int)distinctGames.size() - 1 : 0;
+
+            const std::wstring primaryName = item.hasCurrentGame
+                ? cleanGameDisplay(currentGameDisplay.empty() ? curGameName : currentGameDisplay)
+                : cleanGameDisplay(item.originGameName);
+            std::string disp = ToUtf8(primaryName.empty() ? item.originGameName : primaryName);
             if (item.extraGamesCount > 0) {
-                disp += " +" + std::to_string(item.extraGamesCount) + (i18n::Spanish() ? " más" : " more");
+                disp += " +" + std::to_string(item.extraGamesCount);
             }
             item.originDisplay = disp;
             item.pkgFiles = std::move(pkgFiles);
@@ -924,28 +1249,86 @@ void CheckCloudForProfiles() {
 
         if (candidates.empty()) return;
 
-        // Sort: current game profiles first, then by name
+        // Sort: current game profiles first, then largest weight (bytes) descending, then name
         std::stable_sort(candidates.begin(), candidates.end(), [](const CloudProfileItem& a, const CloudProfileItem& b) {
             if (a.hasCurrentGame != b.hasCurrentGame) return a.hasCurrentGame > b.hasCurrentGame;
+            if (a.totalBytes != b.totalBytes) return a.totalBytes > b.totalBytes;
             return a.name < b.name;
         });
 
-        std::lock_guard<std::mutex> lock(g_cloudImportMu);
-        g_cloudImportItems = std::move(candidates);
-        g_cloudImportActive = true;
+        {
+            std::lock_guard<std::mutex> lock(g_cloudImportMu);
+            if (g_cloudImportActive) return;
+            g_cloudImportItems = std::move(candidates);
+            g_cloudImportActive = true;
+        }
+        App::Get().Post([] {});
     }).detach();
 }
 
 void ConfirmCloudImport(const std::vector<CloudProfileItem>& items) {
+    const std::vector<CloudProfileItem> selected = items;
     std::vector<Profile> allProfiles = profiles::LoadAll();
     const std::wstring curGame = profiles::GameKey();
     const std::wstring curGameName = profiles::DefaultGameName();
 
-    for (const auto& item : items) {
-        if (!item.selected) continue;
+    struct UploadJob {
+        std::wstring file;
+        Profile profile;
+    };
+    std::vector<UploadJob> uploadJobs;
 
-        Profile newP = profiles::MakeNew(item.name, allProfiles);
-        if (item.steamId != 0) newP.steamId = item.steamId;
+    for (const auto& item : selected) {
+        if (!item.selected || item.action == CloudImportAction::Skip) continue;
+
+        if (item.action == CloudImportAction::UseLocal && item.hasLocalMatch) {
+            auto it = std::find_if(allProfiles.begin(), allProfiles.end(), [&](const Profile& p) {
+                return p.id == item.localProfileId;
+            });
+            if (it != allProfiles.end()) {
+                uploadJobs.push_back({ item.file, *it });
+            }
+            continue;
+        }
+
+        if (item.action == CloudImportAction::UseCloud && item.hasLocalMatch) {
+            auto it = std::find_if(allProfiles.begin(), allProfiles.end(), [&](const Profile& p) {
+                return p.id == item.localProfileId;
+            });
+            if (it != allProfiles.end()) {
+                Profile updated = *it;
+                updated.name = item.name;
+                updated.stockAvatar = item.stockAvatar;
+                updated.customAvatar = item.customAvatar;
+                for (const auto& g : item.games) {
+                    profiles::AddGame(updated, g.key, g.name, false);
+                }
+                if (item.hasCurrentGame) {
+                    profiles::AddGame(updated, curGame, curGameName, false);
+                }
+                if (profiles::Save(updated)) {
+                    Apply(updated, item.pkgFiles);
+                    MarkSyncedAfterApply(updated, item.remoteHash, item.remoteTag);
+                    *it = updated;
+                    ReFixLog("[Sync] Cloud overwrote local profile %s (%s)",
+                             ToUtf8(updated.id).c_str(), ToUtf8(updated.name).c_str());
+                    if (g_profile && g_profile->id == updated.id) {
+                        ach::ReloadFromDisk();
+                        App::Get().Post([id = updated.id] { App::Get().RestartWithProfile(id, false); });
+                    }
+                }
+                continue;
+            }
+        }
+
+        // ImportNew or KeepBoth
+        const std::wstring newName = (item.action == CloudImportAction::KeepBoth && item.hasLocalMatch)
+                                         ? (item.name + L" (Cloud)")
+                                         : item.name;
+        Profile newP = profiles::MakeNew(newName, allProfiles);
+        if (item.steamId != 0 && !(item.action == CloudImportAction::KeepBoth && item.hasLocalMatch)) {
+            newP.steamId = item.steamId;
+        }
         newP.stockAvatar = item.stockAvatar;
         newP.customAvatar = item.customAvatar;
         newP.originGame = item.originGameKey.empty() ? curGame : item.originGameKey;
@@ -956,18 +1339,43 @@ void ConfirmCloudImport(const std::vector<CloudProfileItem>& items) {
             newP.games = { { newP.originGame, item.originGameName } };
         }
 
-        // Only add curGame if the profile actually had data for curGame!
         if (item.hasCurrentGame) {
             profiles::AddGame(newP, curGame, curGameName, false);
         }
 
         if (profiles::Save(newP)) {
             Apply(newP, item.pkgFiles);
-            SetLastHash(newP, item.remoteHash);
+            MarkSyncedAfterApply(newP, item.remoteHash, item.remoteTag);
             allProfiles.push_back(newP);
             ReFixLog("[Sync] Cloud imported profile %s (%s, origin: %s, hasCurrent: %d)",
                      ToUtf8(newP.id).c_str(), ToUtf8(newP.name).c_str(), ToUtf8(newP.originGame).c_str(), (int)item.hasCurrentGame);
         }
+    }
+
+    if (!uploadJobs.empty()) {
+        g_manualPushPending = true;
+        std::thread([jobs = std::move(uploadJobs)] {
+            struct Guard {
+                ~Guard() { g_manualPushPending = false; }
+            } guard;
+            auto target = Target();
+            if (!target || !target->Ready()) return;
+            for (const auto& job : jobs) {
+                const std::vector<Entry> local = Collect(job.profile);
+                uint8_t localHash[32] = {};
+                StateHash(local, localHash);
+                std::vector<uint8_t> pkg;
+                if (BuildPackage(job.profile, local, localHash, pkg) && target->Write(job.file, pkg)) {
+                    SetSyncHashes(job.profile, localHash, localHash);
+                    std::string rTag;
+                    if (target->RemoteTag(job.file, rTag) && !rTag.empty()) {
+                        SetRemoteTag(job.profile, ToUtf8(target->Name()) + "|" + rTag);
+                    }
+                    ReFixLog("[Sync] Local overwrote cloud profile %s (%s)",
+                             ToUtf8(job.profile.id).c_str(), ToUtf8(job.file).c_str());
+                }
+            }
+        }).detach();
     }
 
     DismissCloudImport();

@@ -606,6 +606,7 @@ static HANDLE g_profileGateEvent = nullptr;
 static std::atomic<bool> g_gateActive{ false };
 static std::atomic<DWORD> g_gateOwnerThreadId{ 0 };
 static std::wstring g_activeProfileId;
+static thread_local int t_bypassCount = 0;
 
 std::wstring NormalizePath(const wchar_t* in) {
     if (!in || !*in) return L"";
@@ -644,7 +645,7 @@ static bool IsExcludedRoot(const std::wstring& folder) {
         L"nvidia", L"nvidia corporation", L"amd", L"ati", L"intel",
         // Sistema / Temp
         L"microsoft", L"windows", L"temp", L"packages", L"connecteddevicesplatform",
-        L"d3dscache", L"crashdumps", L"crashreportclient", L"backtrace",
+        L"d3dscache", L"crashdumps", L"crashreportclient", L"backtrace", L"programs",
         // Engines y launchers
         L"unity", L"unrealengine", L"steam", L"valve", L"epic", L"epic games",
         L"epicgameslauncher", L"eos", L"discord",
@@ -736,6 +737,7 @@ static void PatchPlayerConfigXml(const std::wstring& filePath, const std::string
 }
 
 bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
+    if (t_bypassCount > 0) return false;
     if (!originalPath || !*originalPath) return false;
     std::wstring s = originalPath;
     bool hasLong = false;
@@ -788,7 +790,8 @@ bool CheckAndRedirect(const wchar_t* originalPath, std::wstring& out) {
             if (s[bf.base.size()] == L'\\') {
                 std::wstring sub = s.substr(bf.base.size() + 1);
                 size_t slash = sub.find(L'\\');
-                std::wstring firstPart = (slash == std::wstring::npos) ? sub : sub.substr(0, slash);
+                if (slash == std::wstring::npos) continue; // Ignore root files like desktop.ini / IconCache.db
+                std::wstring firstPart = sub.substr(0, slash);
                 if (firstPart.empty() || (IsExcludedRoot(firstPart) && !refix::mods::IsOwnSaveRoot(firstPart))) continue;
 
                 // Candidate save path: wait for profile gate if active
@@ -1361,6 +1364,11 @@ void InstallFileSystemHooks() {
 
     g_hooksInstalled = true;
     ReFixLog("[Saves] Multi-instance filesystem redirection hooks installed successfully");
+}
+
+ScopedBypass::ScopedBypass() { ++t_bypassCount; }
+ScopedBypass::~ScopedBypass() {
+    if (t_bypassCount > 0) --t_bypassCount;
 }
 
 void InitEarly() {

@@ -9,6 +9,7 @@
 #include "../refix_steam_flat.h"
 #include <steamnetworkingtypes.h>
 #include "../steam_p2p_hook.h"
+#include "../overlay/overlay_settings.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
@@ -73,6 +74,7 @@ struct Forwarder {
 
 std::atomic<bool> g_started{ false };
 std::atomic<bool> g_stopRequested{ false };
+std::atomic<bool> g_inRoom{ false };
 HANDLE g_thread = nullptr;
 std::atomic<bool> g_photonActive{ false };  // true once the game actually uses Photon (hit our
                                             // loopback listeners or hosts a room); gates all background
@@ -538,7 +540,9 @@ bool IsReliableENet(const char* data, size_t size) {
 void SendSteam(uint64_t steamId, uint8_t kind, uint16_t clientPort, const char* data, size_t size) {
     std::string envelope{ (char)kind, (char)(clientPort >> 8), (char)clientPort };
     envelope.append(data, size);
-    bool reliable = (kind != kToHost && kind != kToClient) || size > 300 || IsReliableENet(data, size);
+    // kToHost/kToClient carry ENet datagrams which already run ENet reliability and ARQ;
+    // wrapping them in a second LanTransport ARQ layer causes packet-storm retransmissions (EResult 25) over Steam P2P.
+    bool reliable = (kind != kToHost && kind != kToClient);
     bool sent = ReFixSteamFlat::SendMessage(steamId, envelope.data(), (uint32_t)envelope.size(), g_channel, reliable);
     {
         std::lock_guard<std::mutex> lock(g_discoveryMutex);
@@ -716,7 +720,8 @@ void OnSteamMessage(uint64_t from, const uint8_t* data, uint32_t size) {
     }
     uint16_t port = (uint16_t)(data[1] << 8 | data[2]);
     if (data[0] == kToHost) {
-        Connection& c = Connect(RemoteKey(from, port), PnServer::Role::Game, std::to_string(from), [from, port](const std::string& d) {
+        std::string peerUid = (from == g_self) ? (std::to_string(from) + "#" + std::to_string(port)) : std::to_string(from);
+        Connection& c = Connect(RemoteKey(from, port), PnServer::Role::Game, peerUid, [from, port](const std::string& d) {
             SendSteam(from, kToClient, port, d.data(), d.size());
         });
         c.enet->OnDatagram(data + 3, size - 3, GetTickCount());
@@ -792,6 +797,7 @@ void Pump() {
             ++it;
         }
     }
+    g_inRoom.store((g_emulator && g_emulator->HasActiveRooms()) || !g_forwarders.empty(), std::memory_order_relaxed);
     // Incoming P2P sessions are accepted reactively: Steam posts SteamNetworkingMessagesSessionRequest_t
     // (callback 1251), handled on the game's own thread in steam_proxy via ReFixSteamFlat::OnSessionRequestCallback.
     // We must NOT enumerate the Steam friends list from this background pump thread: doing so races the game's
@@ -840,6 +846,10 @@ DWORD WINAPI Thread(LPVOID) {
     env.newRoomName = NewRoomName;
     env.joinableRooms = JoinableRooms;
     env.roomHosted = RoomHosted;
+    env.peerRttMs = [](uint64_t peerKey) -> int32_t {
+        auto it = g_connections.find(peerKey);
+        return (it != g_connections.end() && it->second.enet) ? it->second.enet->RttMs() : 1;
+    };
     env.publicLobbies = []() {
         if (BroadcastLobbyQuery()) {
             // Runs on the pump thread: collect the answers here (they are applied by OnSteamMessage).
@@ -969,6 +979,10 @@ bool DetectPhotonStack() {
 void Initialize() {
     if (g_started.exchange(true)) return;
     g_stopRequested.store(false, std::memory_order_relaxed);
+    if (refix::overlay::settings::IsOfficialServersActive()) {
+        Log("[Photon] Official servers enabled; local Photon emulator off (OfficialPhoton)");
+        return;
+    }
     std::string ini = IniPath();
     char backend[64] = { 0 };
     // Off unless ReFix.ini selects it: deploy_helper writes Backend=ReFixCloud only for games where it detected
@@ -1009,7 +1023,7 @@ void Shutdown() {
     if (g_socketEvent != WSA_INVALID_EVENT) WSASetEvent(g_socketEvent);
     bool joined = true;
     if (g_thread) {
-        joined = (WaitForSingleObject(g_thread, 300) == WAIT_OBJECT_0);
+        joined = (WaitForSingleObject(g_thread, 2000) == WAIT_OBJECT_0);
         CloseHandle(g_thread);
         g_thread = nullptr;
     }
@@ -1043,6 +1057,10 @@ void RegisterRoomHost(const std::string& roomName, uint64_t hostSteamID) {
         g_resolvedRooms[roomName + "_voice"] = hostSteamID;
     }
     Log("[Photon] RegisterRoomHost: '%s' mapped to host %llu", roomName.c_str(), (unsigned long long)hostSteamID);
+}
+
+bool InRoom() {
+    return g_started.load(std::memory_order_relaxed) && g_inRoom.load(std::memory_order_relaxed);
 }
 
 } // namespace ReFixPhotonP2P

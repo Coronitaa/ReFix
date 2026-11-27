@@ -156,26 +156,28 @@ bool NavItem(const NavEntry& e, bool active, float width) {
     }
     const ImU32 ink = active ? ui::color::Accent : (hover ? ui::color::Text : ui::color::Muted);
     const float cy = p0.y + h * 0.5f;
-    dl->AddText(f.body, f.body->FontSize, ImVec2(p0.x + ui::S(14), cy - f.body->FontSize * 0.5f), ink, e.glyph);
-    dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + ui::S(44), cy - f.strong->FontSize * 0.55f), active ? ui::color::Accent : ui::color::Text,
-                i18n::T(e.en, e.es));
+    ui::GlyphCentered(dl, f.body, f.body->FontSize, ImVec2(p0.x + ui::S(22), cy), ink, e.glyph);
+    dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + ui::S(42), cy - f.strong->FontSize * 0.5f),
+                active ? ui::color::Accent : ui::color::Text, i18n::T(e.en, e.es));
     ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + ui::S(4)));
     ImGui::Dummy(ImVec2(0, 0));
     return clicked;
 }
 
-enum SettingsSection { kGeneral, kNotifications, kSound, kLanguage, kPerformance, kSync };   // App::settingsSection_
+enum SettingsSection { kGeneral, kNotifications, kSound, kLanguage, kPerformance, kEmulation, kSync };   // App::settingsSection_
 
 void SyncSection(const char* glyph, const char* text) {
     const ui::Fonts& f = ui::F();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImGui::Dummy(ImVec2(0, ui::S(10)));
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
-    const float w = ImGui::GetContentRegionAvail().x, h = f.strong->FontSize;
-    dl->AddText(f.body, f.body->FontSize, ImVec2(p0.x, p0.y + (h - f.body->FontSize) * 0.5f), ui::color::Accent, glyph);
-    dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + ui::S(26), p0.y), ui::color::Text, text);
+    const float w = ImGui::GetContentRegionAvail().x;
+    const float h = std::max(f.strong->FontSize, f.body->FontSize);
+    const float cy = p0.y + h * 0.5f;
+    ui::GlyphCentered(dl, f.body, f.body->FontSize, ImVec2(p0.x + ui::S(9), cy), ui::color::Accent, glyph);
+    dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + ui::S(26), cy - f.strong->FontSize * 0.5f), ui::color::Text, text);
     const float tx = p0.x + ui::S(26) + f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, 0, text).x + ui::S(12);
-    dl->AddLine(ImVec2(tx, p0.y + h * 0.55f), ImVec2(p0.x + w, p0.y + h * 0.55f), ui::color::Border);
+    dl->AddLine(ImVec2(tx, cy), ImVec2(p0.x + w, cy), ui::color::Border);
     ImGui::Dummy(ImVec2(w, h + ui::S(8)));
 }
 
@@ -183,6 +185,7 @@ enum class OverlayAction { None, Steam, DisableAll };
 static OverlayAction g_pendingOverlayAction = OverlayAction::None;
 static bool g_overlayWarn1Open = false;
 static bool g_overlayWarn2Open = false;
+static bool g_officialWarnOpen = false;
 static float g_overlayHoldTime = 0.0f;
 
 bool ComboRow(const char* id, const char* title, const char* desc, const char* currentLabel,
@@ -200,7 +203,7 @@ bool ComboRow(const char* id, const char* title, const char* desc, const char* c
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const ImVec2 p1(p0.x + width, p0.y + h);
 
-    dl->AddRectFilled(p0, p1, ui::color::Row, ui::S(8));
+    dl->AddRectFilled(p0, p1, ui::color::Row, ui::S(12));
     float y = p0.y + pad;
     dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + pad, y), ui::color::Text, title);
     y += f.strong->FontSize + ui::S(4);
@@ -396,7 +399,12 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         g_draftPerGameDisplay = cur.perGameDisplay;
     }
     if (!settingsOpen_) return;
-    if (!ImGui::IsPopupOpen("##settings")) ImGui::OpenPopup("##settings");
+    // Yield while a higher-priority sync modal is active so two modals never fight over OpenPopupStack[0].
+    if (sync::HasConflict() || sync::HasCloudImportModal()) return;
+    if (!ImGui::IsPopupOpen("##settings")) {
+        if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
+        ImGui::OpenPopup("##settings");
+    }
     const ImVec2 size(std::min(ui::S(kWidth), viewport.x - 2 * ui::S(kMarginX)),
                       std::min(ui::S(kMaxHeight), viewport.y - 2 * ui::S(kMarginY)));
     const float intro = EaseOut((float)(GetTickCount64() - settingsOpenedAt_) / kIntroMs);
@@ -449,7 +457,8 @@ void App::DrawSettingsModal(ImVec2 viewport) {
                                   { kNotifications, ui::icon::Bell, "Notifications", "Notificaciones" },
                                   { kSound, ui::icon::Volume, "Sound", "Sonido" },
                                   { kLanguage, ui::icon::Globe, "Language", "Idioma" } }, 4 },
-        { "GAME", "JUEGO", { { kPerformance, ui::icon::Speed, "Performance", "Rendimiento" } }, 1 },
+        { "GAME", "JUEGO", { { kPerformance, ui::icon::Speed, "Performance", "Rendimiento" },
+                             { kEmulation, ui::icon::Switch, "Emulation", "Emulación" } }, 2 },
         { "PROFILES", "PERFILES", { { kSync, ui::icon::Refresh, "Syncing", "Sincronización" } }, 1 },
     };
     ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + headerH));
@@ -678,53 +687,11 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         break;
     case kLanguage: {
         SectionHeader(i18n::T("Language", "Idioma"),
-                      i18n::T("Language of the ReFix overlay and the game.",
-                              "Idioma del overlay de ReFix y del juego."));
+                      i18n::T("Language of the ReFix overlay.",
+                              "Idioma del overlay de ReFix."));
         SyncSection(ui::icon::Globe, i18n::T("Overlay Interface", "Interfaz del overlay"));
         if (ChoiceRow("en", "English", "Overlay in English.", i18n::Current() == i18n::Lang::En)) i18n::Set(i18n::Lang::En);
         if (ChoiceRow("es", "Español", "Overlay en español.", i18n::Current() == i18n::Lang::Es)) i18n::Set(i18n::Lang::Es);
-
-        SyncSection(ui::icon::Game, i18n::T("Game Language", "Idioma del juego"));
-        struct SteamLang {
-            const char* code;
-            const char* en;
-            const char* es;
-        };
-        static const SteamLang kSteamLangs[] = {
-            { "english", "English", "Inglés" },
-            { "spanish", "Spanish (Spain)", "Español (España)" },
-            { "latam", "Spanish (Latin America)", "Español (Latinoamérica)" },
-            { "brazilian", "Portuguese (Brazil)", "Portugués (Brasil)" },
-            { "portuguese", "Portuguese (Portugal)", "Portugués (Portugal)" },
-            { "french", "French", "Francés" },
-            { "german", "German", "Alemán" },
-            { "italian", "Italian", "Italiano" },
-            { "russian", "Russian", "Ruso" },
-            { "japanese", "Japanese", "Japonés" },
-            { "koreana", "Korean", "Coreano" },
-            { "schinese", "Simplified Chinese", "Chino simplificado" },
-            { "tchinese", "Traditional Chinese", "Chino tradicional" },
-            { "polish", "Polish", "Polaco" },
-            { "turkish", "Turkish", "Turco" }
-        };
-
-        const char* curGameLang = UnrealSteamEmu::GetGameLanguage();
-        int curLangIdx = 0;
-        std::vector<std::string> langItems;
-        for (size_t i = 0; i < sizeof(kSteamLangs) / sizeof(kSteamLangs[0]); ++i) {
-            std::string label = std::string(i18n::T(kSteamLangs[i].en, kSteamLangs[i].es)) + " (" + kSteamLangs[i].code + ")";
-            langItems.push_back(label);
-            if (curGameLang && _stricmp(curGameLang, kSteamLangs[i].code) == 0) {
-                curLangIdx = (int)i;
-            }
-        }
-
-        if (ComboRow("game_lang_combo", i18n::T("Game language", "Idioma del juego"),
-                     i18n::T("Language reported to the game by Steam. Reactive to in-game changes.",
-                             "Idioma reportado al juego por Steam. Reactivo a cambios dentro del juego."),
-                     langItems[curLangIdx].c_str(), langItems, &curLangIdx)) {
-            UnrealSteamEmu::SetGameLanguage(kSteamLangs[curLangIdx].code);
-        }
         break;
     }
     case kPerformance: {
@@ -746,6 +713,10 @@ void App::DrawSettingsModal(ImVec2 viewport) {
             &v.blockReflex, true, reflexNote);
         break;
     }
+    case kEmulation:
+        DrawEmulationSettings();
+        if (langRestartPending_ || g_officialWarnOpen) close = true;
+        break;
     default:
         DrawSyncSettings();
         break;
@@ -760,6 +731,18 @@ void App::DrawSettingsModal(ImVec2 viewport) {
         g_draftWindowH = v.windowHeight;
         g_draftPerGameDisplay = v.perGameDisplay;
         settings::Set(v);
+        settings::SetBridgeSettings(settings::BridgeSettings{ settings::BridgeMode::Spacewar, 0 });
+#if REFIX_STEAM_LINK
+        steamlink::SetMaskAppId(0);
+        if (steamlink::BridgeAppId() != 480) {
+            steamlink::SetBridgeAppId(480);
+            if (steamlink::GetState() != steamlink::State::Off) {
+                steamlink::Disable();
+                steamlink::SetLocalGame(appId_);
+                steamlink::Enable();
+            }
+        }
+#endif
         settings::MarkDisplayCustomized(false);
         settings::ApplyDisplayToWindow(host::CurrentGame().hwnd, v);
         changed = false;
@@ -776,7 +759,70 @@ void App::DrawSettingsModal(ImVec2 viewport) {
     ImGui::EndPopup();
 }
 
+void DrawModalHeading(const char* glyph, ImU32 glyphCol, const char* title) {
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const float iconSize = f.heading->FontSize;
+    const float textX = p0.x + ui::S(28);
+    const float wrapW = std::max(ui::S(60), ImGui::GetContentRegionAvail().x - ui::S(28));
+    const ImVec2 sz = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, wrapW, title);
+    const float lineH = f.heading->FontSize;
+    ui::GlyphCentered(dl, f.body, iconSize, ImVec2(p0.x + ui::S(10), p0.y + lineH * 0.5f), glyphCol, glyph);
+    dl->AddText(f.heading, f.heading->FontSize, ImVec2(textX, p0.y), ui::color::Text, title, nullptr, wrapW);
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, std::max(lineH, sz.y)));
+}
+
 void App::DrawOverlayCautionModals(ImVec2 viewport) {
+    if (g_officialWarnOpen && ui::BeginCenteredModal("##official_warn", 520.0f)) {
+        const float availW = ImGui::GetContentRegionAvail().x;
+        DrawModalHeading(ui::icon::Warning, IM_COL32(245, 185, 66, 255),
+                         i18n::T("Enable experimental official servers?",
+                                 "¿Activar servidores oficiales (experimental)?"));
+        ImGui::Dummy(ImVec2(0, ui::S(10)));
+
+        DrawFormattedNotice(
+            i18n::T("• This is an **experimental feature**.\n\n"
+                    "• You will **not** be able to connect with players on the **ReFix network** or your **LAN**, "
+                    "unless they also own the game on Steam.\n\n"
+                    "• It is **impossible to play together with another instance on the same PC** while this option is enabled.",
+                    "• Esta es una **función experimental**.\n\n"
+                    "• **No podrás conectarte** con jugadores de la **red de ReFix** ni de tu **LAN**, "
+                    "a menos que también tengan el juego comprado.\n\n"
+                    "• Es **imposible jugar junto con otra instancia en la misma PC** mientras esta opción esté activa."),
+            availW);
+
+        ImGui::Dummy(ImVec2(0, ui::S(16)));
+        const float gap = ui::S(10);
+        const float btnW = (availW - gap) * 0.5f;
+        const ImVec2 bs(btnW, ui::S(40));
+        if (ui::PrimaryButton(i18n::T("Enable anyway", "Activar de todos modos"), bs)) {
+            g_officialWarnOpen = false;
+            ImGui::CloseCurrentPopup();
+            settings::BridgeSettings bsNext = settings::GetBridgeSettings();
+            bsNext.mode = settings::BridgeMode::CurrentGame;
+            bsNext.officialServers = true;
+            settings::SetBridgeSettings(bsNext);
+            if (!settings::IsOfficialServersActive()) {
+                langRestartPending_ = true;
+                restartIsEmulation_ = true;
+                restartToOfficial_ = true;
+                langRestartLabel_ = i18n::T("Official servers selected", "Servidores oficiales seleccionados");
+            }
+        }
+        ImGui::SameLine(0, gap);
+        if (ui::SecondaryButton(i18n::T("Cancel", "Cancelar"), bs) ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+            g_officialWarnOpen = false;
+            ImGui::CloseCurrentPopup();
+            settingsRequested_ = true;
+        }
+        ImGui::EndPopup();
+        return;
+    }
+
     if (!g_overlayWarn1Open && !g_overlayWarn2Open && !ImGui::IsPopupOpen("##overlay_warn1") && !ImGui::IsPopupOpen("##overlay_warn2")) {
         return;
     }
@@ -1169,6 +1215,59 @@ void App::DrawDisplayConfirmModal(ImVec2 viewport) {
     ImGui::EndPopup();
 }
 
+void App::DrawLangRestartModal(ImVec2 viewport) {
+    if (!langRestartPending_) return;
+    if (!ui::BeginCenteredModal("##langrestart", 460.0f)) return;
+
+    const ui::Fonts& f = ui::F();
+    DrawModalHeading(restartIsEmulation_ ? ui::icon::Switch : ui::icon::Globe, ui::color::Accent,
+                     restartIsEmulation_
+                         ? (restartToOfficial_
+                             ? i18n::T("Restart to use official servers?", "¿Reiniciar para usar servidores oficiales?")
+                             : i18n::T("Restart to switch back to ReFix LAN?", "¿Reiniciar para volver a ReFix LAN?"))
+                         : i18n::T("Restart game to apply language?", "¿Reiniciar el juego para aplicar el idioma?"));
+
+    ImGui::Dummy(ImVec2(0, ui::S(6)));
+    if (!langRestartLabel_.empty()) {
+        ImGui::PushFont(f.strong);
+        ui::TextColored(ui::color::Text, langRestartLabel_.c_str());
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0, ui::S(4)));
+    }
+    ImGui::PushFont(f.body);
+    ImGui::PushTextWrapPos(0.0f);
+    ui::TextColored(ui::color::Muted,
+                    restartIsEmulation_
+                        ? (restartToOfficial_
+                            ? i18n::T("Official server authentication and routing take effect when the game starts. Save your progress first.",
+                                      "La autenticación y el enrutamiento de servidores oficiales se aplican al iniciar el juego. Guarda tu progreso primero.")
+                            : i18n::T("Local LAN emulation takes effect when the game starts. Save your progress first.",
+                                      "La emulación LAN local se aplica al iniciar el juego. Guarda tu progreso primero."))
+                        : i18n::T("Most games only read the Steam language at startup. Save your game before restarting.",
+                                  "La mayoría de los juegos solo leen el idioma de Steam al iniciar. Guarda tu partida antes de reiniciar."));
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+
+    ImGui::Dummy(ImVec2(0, ui::S(14)));
+    const float gap = ui::S(10);
+    const float btnW = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+    const ImVec2 bs(btnW, ui::S(40));
+    if (ui::PrimaryButton(i18n::T("Restart now", "Reiniciar ahora"), bs)) {
+        langRestartPending_ = false;
+        ImGui::CloseCurrentPopup();
+        RestartGame();
+    }
+    ImGui::SameLine(0, gap);
+    if (ui::SecondaryButton(i18n::T("Later", "Más tarde"), bs) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+        langRestartPending_ = false;
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
 namespace {
 
 std::string Clock(uint64_t filetime) {
@@ -1358,8 +1457,8 @@ void App::DrawSyncSettings() {
                          bool selected, const char* button) -> bool {
         ImGui::PushID(id);
         const Card c = BeginCard(ui::S(62), selected);
-        dl->AddText(f.heading, f.heading->FontSize, ImVec2(c.p0.x + pad, c.cy - f.heading->FontSize * 0.5f),
-                    selected ? ui::color::Accent : ui::color::Muted, glyph);
+        ui::GlyphCentered(dl, f.heading, f.heading->FontSize, ImVec2(c.p0.x + pad + ui::S(10), c.cy),
+                          selected ? ui::color::Accent : ui::color::Muted, glyph);
         bool clicked = false;
         float x = c.p1.x - pad;
         if (selected) {
@@ -1367,7 +1466,7 @@ void App::DrawSyncSettings() {
             const float w = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, 0, inUse).x;
             dl->AddText(f.caption, f.caption->FontSize, ImVec2(x - w, c.cy - f.caption->FontSize * 0.5f), ui::color::Accent, inUse);
             x -= w + ui::S(8);
-            dl->AddText(f.body, f.body->FontSize, ImVec2(x - ui::S(14), c.cy - f.body->FontSize * 0.5f), ui::color::Accent, ui::icon::Check);
+            ui::GlyphCentered(dl, f.body, f.body->FontSize, ImVec2(x - ui::S(7), c.cy), ui::color::Accent, ui::icon::Check);
             x -= ui::S(22);
         } else if (button) {
             x -= bs.x;
@@ -1477,6 +1576,361 @@ void App::DrawSyncSettings() {
     if (!syncError_.empty()) ui::TextColored(ui::color::Danger, syncError_.c_str());
     ImGui::PopTextWrapPos();
     ImGui::PopFont();
+}
+
+void App::DrawEmulationSettings() {
+    const ui::Fonts& f = ui::F();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    SectionHeader(i18n::T("Emulation", "Emulación"),
+                  i18n::T("Configure which Steam AppID acts as the bridge for Steam Online Services.",
+                          "Configura qué AppID de Steam funciona como puente para los servicios online de Steam."));
+
+#if !REFIX_STEAM_LINK
+    ImGui::PushFont(f.body);
+    ui::TextColored(ui::color::Muted, i18n::T("Steam Online Services are not enabled in this build.",
+                                            "Los servicios online de Steam no están habilitados en esta compilación."));
+    ImGui::PopFont();
+    return;
+#else
+    settings::BridgeSettings bs = settings::GetBridgeSettings();
+    static bool s_customModeOpen = false;
+    static char s_customInput[16] = {};
+    static uint32_t s_customCheckTarget = 0;
+    static std::wstring s_initForGame;
+    if (s_initForGame != profiles::GameKey()) {
+        s_initForGame = profiles::GameKey();
+        s_customModeOpen = (bs.mode == settings::BridgeMode::Custom);
+        s_customCheckTarget = 0;
+        if (bs.customAppId != 0) snprintf(s_customInput, sizeof(s_customInput), "%u", bs.customAppId);
+        else s_customInput[0] = '\0';
+        steamlink::ProbeLicenses(appId_, bs.customAppId);
+    }
+
+    steamlink::LicenseProbe probe = steamlink::GetLicenseProbe();
+    if (!probe.done && !probe.probing) {
+        steamlink::ProbeLicenses(appId_, bs.customAppId);
+        probe = steamlink::GetLicenseProbe();
+    }
+
+    // Active Steam account & license check banner
+    SyncSection(ui::icon::People, i18n::T("Active Steam Account", "Cuenta de Steam activa"));
+    {
+        const float w = ImGui::GetContentRegionAvail().x;
+        const float pad = ui::S(kRowPad);
+
+        std::string accTitle;
+        std::string accDesc;
+        ImU32 accCol = ui::color::Text;
+        if (probe.probing) {
+            accTitle = i18n::T("Checking Steam account and licenses...", "Comprobando cuenta de Steam y licencias...");
+            accDesc = i18n::T("Querying your signed-in Steam client.", "Consultando tu cliente de Steam iniciado.");
+            accCol = ui::color::Accent;
+        } else if (probe.steamSignedIn) {
+            std::string displayName = probe.steamName;
+            if (displayName.empty() && probe.steamId != 0) {
+                static uint64_t s_cachedSid = 0;
+                static std::string s_cachedName;
+                if (s_cachedSid != probe.steamId) {
+                    s_cachedSid = probe.steamId;
+                    s_cachedName.clear();
+                    std::wstring dummyErr;
+                    if (auto sess = profiles::ReadSteamSession(dummyErr); sess && sess->steamId == probe.steamId && !sess->name.empty()) {
+                        s_cachedName = ToUtf8(sess->name);
+                    } else {
+                        for (const auto& acc : profiles::ReadSteamAccounts()) {
+                            if (acc.steamId == probe.steamId && !acc.name.empty()) {
+                                s_cachedName = ToUtf8(acc.name);
+                                break;
+                            }
+                        }
+                    }
+                }
+                displayName = s_cachedName;
+            }
+            const std::string accLabel = displayName.empty()
+                ? std::to_string(probe.steamId)
+                : (displayName + " (" + std::to_string(probe.steamId) + ")");
+            accTitle = std::string(i18n::T("Signed in to Steam: ", "Sesión activa en Steam: ")) + accLabel;
+            accDesc = i18n::T("ReFix verifies licenses against this Steam account before connecting.",
+                              "ReFix verifica las licencias con esta cuenta de Steam antes de conectar.");
+            accCol = ui::color::SteamOnline;
+        } else {
+            accTitle = i18n::T("No active Steam account detected", "No se detectó sesión activa de Steam");
+            accDesc = i18n::T("Open Steam and sign in to verify game licenses. Spacewar (480) works anytime.",
+                              "Abre Steam e inicia sesión para verificar licencias. Spacewar (480) funciona siempre.");
+            accCol = ui::color::Muted;
+        }
+
+        const char* refreshLbl = i18n::T("Refresh", "Actualizar");
+        const float btnW = std::max(ui::S(104), f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, 0, refreshLbl).x + ui::S(28));
+        const float btnH = ui::S(34);
+        const float textW = std::max(ui::S(80), w - pad * 3 - btnW);
+        const ImVec2 titleSize = f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, textW, accTitle.c_str());
+        const ImVec2 descSize = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, textW, accDesc.c_str());
+        const float h = std::max(pad * 2 + titleSize.y + ui::S(4) + descSize.y, pad * 2 + btnH);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const ImVec2 p1(p0.x + w, p0.y + h);
+        dl->AddRectFilled(p0, p1, ui::color::Row, ui::S(12));
+
+        dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + pad, p0.y + pad), accCol, accTitle.c_str(), nullptr, textW);
+        dl->AddText(f.caption, f.caption->FontSize, ImVec2(p0.x + pad, p0.y + pad + titleSize.y + ui::S(4)),
+                    ui::color::Muted, accDesc.c_str(), nullptr, textW);
+
+        ImGui::SetCursorScreenPos(ImVec2(p1.x - pad - btnW, p0.y + (h - btnH) * 0.5f));
+        if (ui::SecondaryButton(refreshLbl, ImVec2(btnW, btnH), !probe.probing)) {
+            const uint32_t customQ = (uint32_t)strtoul(s_customInput, nullptr, 10);
+            steamlink::ProbeLicenses(appId_, customQ ? customQ : bs.customAppId);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y));
+        ImGui::Dummy(ImVec2(w, ui::S(kRowGap)));
+    }
+
+    // Bridge selection dropdown
+    SyncSection(ui::icon::Switch, i18n::T("Steam Online Bridge", "Puente de Steam Online"));
+    const bool hasCurrentGameOption = (appId_ != 0 && appId_ != 480);
+    const bool curGameLicensed = hasCurrentGameOption && probe.done && probe.steamSignedIn &&
+                                 probe.currentGameAppId == appId_ && probe.currentGameOwned;
+
+    std::string curGameName = gameTitle_.empty() ? i18n::T("Current game", "Juego actual") : ToUtf8(gameTitle_);
+    const std::string curGameLabel = curGameName + " (" + std::to_string(appId_) + ")";
+    const std::string spacewarLabel = "Spacewar (480)";
+    const std::string customMenuLabel = i18n::T("Custom AppID...", "AppID personalizado...");
+
+    std::string activeComboLabel;
+    if (s_customModeOpen || bs.mode == settings::BridgeMode::Custom) {
+        if (bs.mode == settings::BridgeMode::Custom && bs.customAppId != 0) {
+            activeComboLabel = std::string(i18n::T("Custom: ", "Personalizado: ")) + std::to_string(bs.customAppId);
+        } else {
+            activeComboLabel = customMenuLabel;
+        }
+    } else if (bs.mode == settings::BridgeMode::CurrentGame && hasCurrentGameOption) {
+        activeComboLabel = curGameLabel;
+    } else {
+        activeComboLabel = spacewarLabel;
+    }
+
+    auto applyBridge = [&](settings::BridgeSettings nextBs) {
+        settings::SetBridgeSettings(nextBs);
+        const uint32_t nextSelected = settings::EffectiveBridgeAppId(appId_);
+        const bool wantOfficial = hasCurrentGameOption &&
+                                  nextBs.mode == settings::BridgeMode::CurrentGame &&
+                                  nextBs.officialServers;
+        if (wantOfficial != settings::IsOfficialServersActive()) {
+            langRestartPending_ = true;
+            restartIsEmulation_ = true;
+            restartToOfficial_ = wantOfficial;
+            langRestartLabel_ = wantOfficial
+                ? i18n::T("Official servers selected", "Servidores oficiales seleccionados")
+                : i18n::T("ReFix LAN emulation selected", "Emulación LAN de ReFix seleccionada");
+            return;
+        }
+        // Spacewar (480) remains the base network while the selected AppID acts as Steam mask + achievement target.
+        const uint32_t prevMask = steamlink::MaskAppId();
+        const uint32_t nextMask = (nextSelected != 0 && nextSelected != 480) ? nextSelected : 0;
+        steamlink::SetBridgeAppId(settings::IsOfficialServersActive() && appId_ != 0 && appId_ != 480 ? appId_ : 480);
+        steamlink::SetMaskAppId(nextMask);
+        if (nextMask != prevMask && steamlink::GetState() != steamlink::State::Off) {
+            ShowInfo(i18n::T("Steam mask updated", "Máscara de Steam actualizada"),
+                     nextMask != 0
+                         ? i18n::T("Spacewar remains active for networking while your selected game syncs achievements and presence.",
+                                   "Spacewar sigue activo para la red mientras el juego seleccionado sincroniza logros y presencia.")
+                         : i18n::T("Running on Spacewar (480) only.",
+                                   "Ejecutando únicamente en Spacewar (480)."));
+        }
+    };
+
+    {
+        const float width = ImGui::GetContentRegionAvail().x;
+        const float pad = ui::S(kRowPad);
+        const float comboW = ui::S(240);
+        const float textW = width - comboW - pad * 3;
+        const char* title = i18n::T("Bridge game", "Juego puente");
+        const char* desc = i18n::T("AppID shown to Steam while using Steam Online Services. Spacewar (480) works for everyone.",
+                                   "AppID que ve Steam al usar servicios online. Spacewar (480) funciona para todos.");
+        const ImVec2 descSize = f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, textW, desc);
+        const float comboH = ui::S(36);
+        const float h = std::max(pad * 2 + f.strong->FontSize + ui::S(4) + descSize.y, pad * 2 + comboH);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const ImVec2 p1(p0.x + width, p0.y + h);
+        dl->AddRectFilled(p0, p1, ui::color::Row, ui::S(12));
+        dl->AddText(f.strong, f.strong->FontSize, ImVec2(p0.x + pad, p0.y + pad), ui::color::Text, title);
+        dl->AddText(f.caption, f.caption->FontSize, ImVec2(p0.x + pad, p0.y + pad + f.strong->FontSize + ui::S(4)),
+                    ui::color::Muted, desc, nullptr, textW);
+
+        ImGui::SetCursorScreenPos(ImVec2(p1.x - pad - comboW, p0.y + (h - comboH) * 0.5f));
+        ImGui::SetNextItemWidth(comboW);
+        ImGui::PushID("bridge_combo");
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::color::PanelRaised);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ui::color::RowHover);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ui::color::AccentSoft);
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ui::color::PanelRaised);
+        ImGui::PushStyleColor(ImGuiCol_Border, ui::color::Border);
+        ImGui::PushStyleColor(ImGuiCol_Header, ui::color::AccentSoft);
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ui::color::RowHover);
+        ImGui::PushStyleColor(ImGuiCol_Text, ui::color::Text);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, ui::S(8));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, ui::S(8));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ui::S(12), ui::S(7)));
+
+        if (ImGui::BeginCombo("##combo", activeComboLabel.c_str())) {
+            // Option 0: Spacewar (480)
+            const bool selSpacewar = (!s_customModeOpen && bs.mode == settings::BridgeMode::Spacewar);
+            if (ImGui::Selectable(spacewarLabel.c_str(), selSpacewar)) {
+                s_customModeOpen = false;
+                s_customCheckTarget = 0;
+                bs.mode = settings::BridgeMode::Spacewar;
+                applyBridge(bs);
+            }
+            if (selSpacewar) ImGui::SetItemDefaultFocus();
+
+            // Option 1: Current Game (disabled + warning icon when no license)
+            if (hasCurrentGameOption) {
+                const bool selCur = (!s_customModeOpen && bs.mode == settings::BridgeMode::CurrentGame);
+                if (!curGameLicensed) ImGui::BeginDisabled(true);
+                const std::string itemText = curGameLicensed ? curGameLabel : (std::string(ui::icon::Warning) + "  " + curGameLabel);
+                if (ImGui::Selectable(itemText.c_str(), selCur) && curGameLicensed) {
+                    s_customModeOpen = false;
+                    s_customCheckTarget = 0;
+                    bs.mode = settings::BridgeMode::CurrentGame;
+                    applyBridge(bs);
+                }
+                if (!curGameLicensed) {
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ui::Tooltip(!probe.steamSignedIn
+                            ? i18n::T("No active Steam session detected to verify license.",
+                                      "No hay sesión activa en Steam para verificar la licencia.")
+                            : i18n::T("No license detected on the active Steam account for this game.",
+                                      "No se detectó licencia para este juego en la cuenta activa de Steam."));
+                    }
+                }
+            }
+
+            // Option 2: Custom AppID...
+            const bool selCustom = (s_customModeOpen || bs.mode == settings::BridgeMode::Custom);
+            if (ImGui::Selectable(customMenuLabel.c_str(), selCustom)) {
+                s_customModeOpen = true;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(8);
+        ImGui::PopID();
+
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y));
+        ImGui::Dummy(ImVec2(width, ui::S(kRowGap)));
+    }
+
+    // Custom AppID box (shown when Custom AppID... is selected)
+    if (s_customModeOpen || bs.mode == settings::BridgeMode::Custom) {
+        const float w = ImGui::GetContentRegionAvail().x;
+        const float pad = ui::S(kRowPad);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        dl->ChannelsSplit(2);
+        dl->ChannelsSetCurrent(1);
+        ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad));
+        ImGui::BeginGroup();
+
+        ImGui::PushFont(f.strong);
+        ui::TextColored(ui::color::Text, i18n::T("Custom Bridge AppID", "AppID puente personalizado"));
+        ImGui::PopFont();
+        ImGui::PushFont(f.caption);
+        ui::TextColored(ui::color::Muted, i18n::T("Enter a Steam AppID owned by your active Steam account (e.g. 550 for Left 4 Dead 2).",
+                                                  "Ingresa un AppID de Steam que posea tu cuenta activa (ej. 550 para Left 4 Dead 2)."));
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0, ui::S(6)));
+
+        const float btnW = ui::S(170);
+        const float ctrlH = f.body->FontSize + ui::S(14);
+        const float inputW = std::min(ui::S(220), w - pad * 2 - btnW - ui::S(10));
+        ImGui::SetNextItemWidth(inputW);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ui::color::PanelRaised);
+        ImGui::PushStyleColor(ImGuiCol_Border, ui::color::Border);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, ui::S(8));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ui::S(10), ui::S(7)));
+        const bool enterPressed = ImGui::InputText("##custom_appid", s_customInput, sizeof(s_customInput),
+                                                   ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+
+        const uint32_t typedId = (uint32_t)strtoul(s_customInput, nullptr, 10);
+        ImGui::SameLine(0, ui::S(10));
+        if ((ui::PrimaryButton(i18n::T("Verify & Apply", "Verificar y aplicar"), ImVec2(btnW, ctrlH), typedId != 0 && !probe.probing) || enterPressed) && typedId != 0) {
+            s_customCheckTarget = typedId;
+            steamlink::ProbeLicenses(appId_, typedId);
+        }
+
+        // React once custom AppID verification finishes
+        if (s_customCheckTarget != 0 && probe.done && !probe.probing && probe.customAppId == s_customCheckTarget) {
+            if (probe.steamSignedIn && probe.customAppOwned) {
+                if (bs.mode != settings::BridgeMode::Custom || bs.customAppId != s_customCheckTarget) {
+                    bs.mode = settings::BridgeMode::Custom;
+                    bs.customAppId = s_customCheckTarget;
+                    applyBridge(bs);
+                }
+            }
+        }
+
+        ImGui::PushFont(f.caption);
+        ImGui::PushTextWrapPos(p0.x + w - pad);
+        if (s_customCheckTarget != 0 && probe.probing && probe.customAppId == s_customCheckTarget) {
+            ui::TextColored(ui::color::Accent, i18n::T("Verifying license on active Steam account...",
+                                                       "Verificando licencia en la cuenta activa de Steam..."));
+        } else if (s_customCheckTarget != 0 && probe.done && probe.customAppId == s_customCheckTarget) {
+            if (!probe.steamSignedIn) {
+                ui::TextColored(ui::color::Danger,
+                                i18n::T("Steam is not signed in. Open Steam and sign in to verify whether your account owns this AppID.",
+                                        "No hay sesión iniciada en Steam. Abre Steam e inicia sesión para verificar si tu cuenta posee este AppID."));
+            } else if (!probe.customAppOwned) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         i18n::T("The active Steam account does not own a license for AppID %u. Spacewar (480) remains in use.",
+                                 "La cuenta activa de Steam no tiene licencia para el AppID %u. Se mantiene Spacewar (480)."),
+                         s_customCheckTarget);
+                ui::TextColored(ui::color::Danger, msg);
+            } else {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         i18n::T("License verified! Bridge configured to AppID %u.",
+                                 "¡Licencia verificada! Puente configurado al AppID %u."),
+                         s_customCheckTarget);
+                ui::TextColored(ui::color::Accent, msg);
+            }
+        } else if (bs.mode == settings::BridgeMode::Custom && bs.customAppId != 0) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     i18n::T("Currently configured: Custom AppID %u.", "Configurado actualmente: AppID personalizado %u."),
+                     bs.customAppId);
+            ui::TextColored(ui::color::Accent, msg);
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::PopFont();
+
+        ImGui::EndGroup();
+        const ImVec2 p1(p0.x + w, ImGui::GetItemRectMax().y + pad);
+        dl->ChannelsSetCurrent(0);
+        dl->AddRectFilled(p0, p1, ui::color::Row, ui::S(12));
+        dl->ChannelsMerge();
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y));
+        ImGui::Dummy(ImVec2(w, ui::S(kRowGap)));
+    }
+
+    if (hasCurrentGameOption && bs.mode == settings::BridgeMode::CurrentGame) {
+        bool official = bs.officialServers;
+        if (SettingRow("official_servers",
+                       i18n::T("Play on official servers", "Jugar en servidores oficiales"),
+                       i18n::T("Allows connecting to the game's official servers with your active Steam account.",
+                               "Permite conectarse a los servidores oficiales del juego con tu cuenta activa de Steam."),
+                       &official, true)) {
+            if (official && !bs.officialServers) {
+                g_officialWarnOpen = true;
+            } else {
+                bs.officialServers = official;
+                applyBridge(bs);
+            }
+        }
+    }
+#endif
 }
 
 } // namespace refix::overlay

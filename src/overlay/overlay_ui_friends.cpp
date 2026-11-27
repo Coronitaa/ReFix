@@ -261,11 +261,27 @@ void App::DrawSteamConfirm() {
         settings::SetSteamOnline(turningOn);
         if (turningOn) {
             steamlink::Disable();   // a failed attempt is retried from scratch
+            const uint32_t selected = settings::EffectiveBridgeAppId(appId_);
+            if (settings::IsOfficialServersActive() && appId_ != 0 && appId_ != 480) {
+                steamlink::SetBridgeAppId(appId_);
+                steamlink::SetMaskAppId(0);
+            } else {
+                steamlink::SetBridgeAppId(480);
+                steamlink::SetMaskAppId((selected != 0 && selected != 480) ? selected : 0);
+            }
             steamlink::SetLocalGame(appId_);
             steamlink::SetLocalGameName(ToUtf8(gameTitle_));
             steamlink::Enable();
         } else {
+            const bool wasOfficial = settings::IsOfficialServersActive();
+            steamlink::SetMaskAppId(0);
             steamlink::Disable();
+            if (wasOfficial) {
+                langRestartPending_ = true;
+                restartIsEmulation_ = true;
+                restartToOfficial_ = false;
+                langRestartLabel_ = T("Steam online services turned off", "Servicios online de Steam desactivados");
+            }
         }
     }
     if (confirm || cancel) {
@@ -606,6 +622,8 @@ void App::DrawFriends(ImVec2 pos, ImVec2 size) {
             ImGui::Dummy(ImVec2(0, ui::S(6)));
             if (ui::SecondaryButton(T("Try again", "Reintentar"))) {
                 steamlink::Disable();
+                steamlink::SetBridgeAppId(settings::EffectiveBridgeAppId(appId_));
+                steamlink::SetLocalGame(appId_);
                 steamlink::Enable();
             }
         }

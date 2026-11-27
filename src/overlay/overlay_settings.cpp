@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <string>
 
 namespace refix::overlay::settings {
@@ -325,6 +326,55 @@ SteamOnline SteamOnlineChoice() {
 void SetSteamOnline(bool on) {
     CreateDirectoryW(profiles::RootDir().c_str(), nullptr);
     WritePrivateProfileStringW(kSection, L"SteamOnline", on ? L"1" : L"0", Ini().c_str());
+}
+
+namespace {
+
+std::wstring BridgeSectionForGame() {
+    const std::wstring gk = profiles::GameKey();
+    return gk.empty() ? std::wstring(L"SteamBridge") : (std::wstring(L"SteamBridge.") + gk);
+}
+
+std::atomic<bool> g_officialServersActive{ false };
+
+} // namespace
+
+BridgeSettings GetBridgeSettings() {
+    const std::wstring ini = Ini();
+    const std::wstring sec = BridgeSectionForGame();
+    BridgeSettings b;
+    int m = ReadInt(ini, sec.c_str(), L"Mode", (int)BridgeMode::Spacewar);
+    if (m >= (int)BridgeMode::Spacewar && m <= (int)BridgeMode::Custom) {
+        b.mode = static_cast<BridgeMode>(m);
+    }
+    b.customAppId = (uint32_t)ReadInt(ini, sec.c_str(), L"CustomAppId", 0);
+    const int off = ReadBool(ini, sec.c_str(), L"OfficialServers");
+    b.officialServers = (off == 1);
+    return b;
+}
+
+void SetBridgeSettings(const BridgeSettings& b) {
+    CreateDirectoryW(profiles::RootDir().c_str(), nullptr);
+    const std::wstring ini = Ini();
+    const std::wstring sec = BridgeSectionForGame();
+    WritePrivateProfileStringW(sec.c_str(), L"Mode", std::to_wstring((int)b.mode).c_str(), ini.c_str());
+    WritePrivateProfileStringW(sec.c_str(), L"CustomAppId", std::to_wstring(b.customAppId).c_str(), ini.c_str());
+    WritePrivateProfileStringW(sec.c_str(), L"OfficialServers", b.officialServers ? L"1" : L"0", ini.c_str());
+}
+
+bool IsOfficialServersActive() {
+    return g_officialServersActive.load(std::memory_order_acquire);
+}
+
+void SetOfficialServersActive(bool active) {
+    g_officialServersActive.store(active, std::memory_order_release);
+}
+
+uint32_t EffectiveBridgeAppId(uint32_t currentGameAppId) {
+    const BridgeSettings b = GetBridgeSettings();
+    if (b.mode == BridgeMode::CurrentGame && currentGameAppId != 0) return currentGameAppId;
+    if (b.mode == BridgeMode::Custom && b.customAppId != 0) return b.customAppId;
+    return 480;
 }
 
 bool BlockReflexEarly(bool iniDefault) {

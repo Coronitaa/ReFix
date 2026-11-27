@@ -13,6 +13,7 @@
 #include "cloud_account.h"
 #include "cloud_keys.h"
 #include "mini_json.h"
+#include "overlay_i18n.h"
 #include "overlay_text.h"
 #include "profile_store.h"
 
@@ -285,9 +286,10 @@ const Msg kErrToken{ "Could not finish signing in. Check your connection and try
                      "No se pudo terminar el inicio de sesión. Revisa tu conexión y vuelve a intentarlo." };
 const Msg kErrLocal{ "Could not start the sign-in on this PC.", "No se pudo iniciar sesión en este PC." };
 
-// The page the browser shows when it comes back from the sign-in: compact, in the player's browser language.
+// The page the browser shows when it comes back from the sign-in: compact, in ReFix's selected language.
 std::string ResultPage(bool ok, const char* provider) {
-    std::string page = R"(<!doctype html><html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+    const bool es = i18n::Spanish();
+    std::string page = R"(<!doctype html><html lang="%LANG%"><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>ReFix</title><style>
 :root{color-scheme:dark}*{box-sizing:border-box;margin:0}
 body{min-height:100vh;display:grid;place-items:center;background:radial-gradient(900px 520px at 50% -12%,#10392f 0,#0b0f14 60%) #0b0f14;
@@ -306,7 +308,7 @@ color:#c9d2da;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255
 </style><body><main class=card style="%STYLE%"><div class=mark><svg viewBox="0 0 24 24"><path d="%PATH%"/></svg></div>
 <h1 id=t></h1><p class=sub id=s></p><div class=pill><span class=dot></span><span id=p></span></div>
 <p class=foot><span class=brand>REFIX</span> &middot; <span id=f></span></p></main><script>
-const P="%PROVIDER%",ok=%OK%,es=(navigator.language||"").toLowerCase().startsWith("es");
+const P="%PROVIDER%",ok=%OK%,es=%ES%;
 const T=ok?(es?["Sesión iniciada",P+" quedó conectado a ReFix. Tus partidas se sincronizarán ahí.","Solo la carpeta de ReFix, nada más","Ya puedes cerrar esta pestaña y volver al juego."]
 :["You're signed in",P+" is now connected to ReFix. Your saves will sync to it.","Only ReFix's own folder, nothing else","You can close this tab and go back to the game."])
 :(es?["No se completó el inicio de sesión","Vuelve al juego e inténtalo de nuevo.",P,"Puedes cerrar esta pestaña."]
@@ -316,11 +318,13 @@ const T=ok?(es?["Sesión iniciada",P+" quedó conectado a ReFix. Tus partidas se
     auto put = [&](const char* key, const std::string& value) {
         for (size_t at; (at = page.find(key)) != std::string::npos;) page.replace(at, strlen(key), value);
     };
+    put("%LANG%", es ? "es" : "en");
     put("%STYLE%", ok ? "--c:#2bd4a4;--soft:rgba(43,212,164,.14);--ring:rgba(43,212,164,.06)"
                       : "--c:#f05a5a;--soft:rgba(240,90,90,.14);--ring:rgba(240,90,90,.06)");
     put("%PATH%", ok ? "M5 12.5l4.5 4.5L19 7" : "M7 7l10 10M17 7L7 17");
     put("%PROVIDER%", provider);   // one of our own labels, never input from the request
     put("%OK%", ok ? "true" : "false");
+    put("%ES%", es ? "true" : "false");
     return page;
 }
 
@@ -392,11 +396,15 @@ bool Connect(Provider p, Msg& err) {
     const std::string redirect = std::string("http://") + s.redirectHost + ":" + std::to_string(ntohs(a4.sin_port));
     if (!ok) err = kErrLocal;
     if (ok) {
+        const std::string lang = i18n::Spanish() ? "es" : "en";
         const std::string url = std::string(s.authUrl) + "?client_id=" + UrlEncode(s.clientId) + "&redirect_uri=" +
                                 UrlEncode(redirect) + "&response_type=code&scope=" + UrlEncode(s.scope) +
                                 "&code_challenge=" + Sha256Url(verifier) + "&code_challenge_method=S256&state=" + state +
-                                (p == Provider::Google ? "&access_type=offline&prompt=consent" : "&prompt=select_account");
+                                (p == Provider::Google ? "&access_type=offline&prompt=consent&hl=" + lang
+                                                       : "&prompt=select_account&ui_locales=" + lang);
+        const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         ok = (INT_PTR)ShellExecuteW(nullptr, L"open", FromUtf8(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
+        if (SUCCEEDED(comHr)) CoUninitialize();
         if (!ok) err = kErrNoBrowser;
     }
     if (ok) ok = WaitForCode(l4, l6, state, s.label, code, err);
@@ -481,22 +489,57 @@ public:
 
     std::vector<std::wstring> ListFiles() override {
         std::vector<std::wstring> out;
+        modifiedTimes_.clear();
         const std::string q = "trashed=false";
         Resp r;
-        if (!Call(L"GET", L"https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name)&q=" +
+        if (!Call(L"GET", L"https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime)&q=" +
                               FromUtf8(UrlEncode(q)), L"", {}, r) || r.status != 200) return out;
         const json::Value v = json::Parse(r.body);
         const json::Value& files = v["files"];
         for (const auto& item : files.items) {
             std::string name = item.Str("name");
             if (name.size() > 5 && name.substr(name.size() - 5) == ".rfxp") {
-                out.push_back(FromUtf8(name));
+                std::wstring wname = FromUtf8(name);
+                if (std::find(out.begin(), out.end(), wname) != out.end()) continue;
+                out.push_back(wname);
+                std::string mt = item.Str("modifiedTime");
+                if (mt.size() >= 19) {
+                    SYSTEMTIME st = {};
+                    if (sscanf_s(mt.c_str(), "%hu-%hu-%huT%hu:%hu:%hu",
+                                 &st.wYear, &st.wMonth, &st.wDay, &st.wHour, &st.wMinute, &st.wSecond) == 6) {
+                        FILETIME ft = {};
+                        if (SystemTimeToFileTime(&st, &ft)) {
+                            modifiedTimes_[wname] = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+                        }
+                    }
+                }
             }
         }
         return out;
     }
+    uint64_t ModifiedTime(const std::wstring& file) override {
+        auto it = modifiedTimes_.find(file);
+        return it != modifiedTimes_.end() ? it->second : 0;
+    }
+    bool RemoteTag(const std::wstring& file, std::string& outTag) const override {
+        outTag.clear();
+        const std::string q = "name='" + JsonEscape(ToUtf8(file)) + "' and trashed=false";
+        Resp r;
+        failed_ = !Call(L"GET",
+                        L"https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&orderBy=modifiedTime%20desc&fields=files(id,md5Checksum,modifiedTime,size)&q=" +
+                        FromUtf8(UrlEncode(q)), L"", {}, r) || r.status != 200;
+        if (failed_) return false;
+        const json::Value v = json::Parse(r.body);
+        if (v.type != json::Value::Type::Object) { failed_ = true; return false; }
+        const json::Value& files = v["files"];
+        if (files.items.empty()) return true;
+        const auto& item = files.items.front();
+        outTag = item.Str("id") + ":" + item.Str("md5Checksum") + ":" + item.Str("modifiedTime") + ":" + item.Str("size");
+        return true;
+    }
 
 private:
+    std::map<std::wstring, uint64_t> modifiedTimes_;
     static bool Call(const wchar_t* method, const std::wstring& url, const std::wstring& headers, const std::string& body, Resp& r) {
         std::string token;
         if (!AccessToken(Provider::Google, token)) return false;
@@ -508,7 +551,7 @@ private:
     static bool Find(const std::wstring& file, std::string& id) {
         const std::string q = "name='" + JsonEscape(ToUtf8(file)) + "' and trashed=false";
         Resp r;
-        if (!Call(L"GET", L"https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id)&q=" +
+        if (!Call(L"GET", L"https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&orderBy=modifiedTime%20desc&fields=files(id)&q=" +
                               FromUtf8(UrlEncode(q)), L"", {}, r) || r.status != 200) return false;
         const json::Value v = json::Parse(r.body);
         const json::Value& files = v["files"];
@@ -558,20 +601,51 @@ public:
 
     std::vector<std::wstring> ListFiles() override {
         std::vector<std::wstring> out;
+        modifiedTimes_.clear();
         Resp r;
-        if (!Call(L"GET", L"https://graph.microsoft.com/v1.0/me/drive/special/approot/children?$select=name", L"", {}, r) || r.status != 200) return out;
+        if (!Call(L"GET", L"https://graph.microsoft.com/v1.0/me/drive/special/approot/children?$select=name,lastModifiedDateTime", L"", {}, r) || r.status != 200) return out;
         const json::Value v = json::Parse(r.body);
         const json::Value& val = v["value"];
         for (const auto& item : val.items) {
             std::string name = item.Str("name");
             if (name.size() > 5 && name.substr(name.size() - 5) == ".rfxp") {
-                out.push_back(FromUtf8(name));
+                std::wstring wname = FromUtf8(name);
+                out.push_back(wname);
+                std::string mt = item.Str("lastModifiedDateTime");
+                if (mt.size() >= 19) {
+                    SYSTEMTIME st = {};
+                    if (sscanf_s(mt.c_str(), "%hu-%hu-%huT%hu:%hu:%hu",
+                                 &st.wYear, &st.wMonth, &st.wDay, &st.wHour, &st.wMinute, &st.wSecond) == 6) {
+                        FILETIME ft = {};
+                        if (SystemTimeToFileTime(&st, &ft)) {
+                            modifiedTimes_[wname] = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+                        }
+                    }
+                }
             }
         }
         return out;
     }
+    uint64_t ModifiedTime(const std::wstring& file) override {
+        auto it = modifiedTimes_.find(file);
+        return it != modifiedTimes_.end() ? it->second : 0;
+    }
+    bool RemoteTag(const std::wstring& file, std::string& outTag) const override {
+        outTag.clear();
+        Resp r;
+        failed_ = !Call(L"GET", Item(file) + L"?$select=eTag,cTag,lastModifiedDateTime,size", L"", {}, r);
+        if (failed_) return false;
+        if (r.status == 404) return true;
+        if (r.status != 200) { failed_ = true; return false; }
+        const json::Value v = json::Parse(r.body);
+        if (v.type != json::Value::Type::Object) { failed_ = true; return false; }
+        outTag = v.Str("eTag") + "|" + v.Str("cTag") + "|" + v.Str("lastModifiedDateTime") + "|" +
+                 std::to_string((uint64_t)v.Num("size", 0));
+        return true;
+    }
 
 private:
+    std::map<std::wstring, uint64_t> modifiedTimes_;
     static std::wstring Item(const std::wstring& file) {
         return L"https://graph.microsoft.com/v1.0/me/drive/special/approot:/" + FromUtf8(UrlEncode(ToUtf8(file))) + L":";
     }

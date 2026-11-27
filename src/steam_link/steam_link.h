@@ -17,6 +17,11 @@ enum class State { Off, Starting, Online, Failed };
 bool SteamInstalled();               // a Steam client is installed for this Windows user
 void SetLocalGame(uint32_t appId);   // published to friends so they see which game you play
 void SetLocalGameName(const std::string& utf8Name);   // its display name (window title), also published
+void SetBridgeAppId(uint32_t appId); // Steam AppID used by primary refix_steamhost (480 Spacewar by default)
+uint32_t BridgeAppId();
+void SetMaskAppId(uint32_t appId);   // Companion Steam AppID masked alongside Spacewar (0 = none)
+uint32_t MaskAppId();
+bool MaskOnline();
 void SetSteamOverlay(bool on);       // ReFix.ini [Overlay] BlockSteamOverlay=false: load Steam's overlay too
 void Enable();                       // asynchronous; State() goes Starting -> Online or Failed
 void Disable();                      // back to LAN only
@@ -25,6 +30,26 @@ enum class Step { None, OpeningSteam, SigningIn, Connecting };
 Step CurrentStep();                  // what Starting is waiting for
 std::string LastError();             // UTF-8, English (the overlay translates the common ones)
 uint64_t LocalSteamId();
+
+// License and active-account probe via refix_steamhost --probe (silent, never launches Spacewar).
+struct LicenseProbe {
+    bool probing = false;
+    bool done = false;
+    bool steamSignedIn = false;
+    uint64_t steamId = 0;
+    std::string steamName;
+    uint32_t currentGameAppId = 0;
+    bool currentGameOwned = false;
+    uint32_t customAppId = 0;
+    bool customAppOwned = false;
+};
+void ProbeLicenses(uint32_t currentGameAppId, uint32_t customAppId);
+bool ProbeLicensesSync(uint32_t currentGameAppId, uint32_t customAppId, LicenseProbe& out);
+LicenseProbe GetLicenseProbe();
+uint32_t ActiveRegistryAccountId();
+
+using AccountChangedCb = void (*)(uint64_t newSteamId);
+void SetAccountChangedCallback(AccountChangedCb cb);
 
 // Virtual UDP over Steam P2P.
 // 198.18.0.0/16 (RFC 2544 benchmarking range): never a real LAN. 10.49.0.0/16 was, and a PC on such a LAN sent
@@ -76,5 +101,60 @@ uint32_t VirtualIp(uint64_t steamId); // virtual IP allocated or looked up for t
 uint64_t SteamIdOf(uint32_t virtIp); // 0 when unknown
 // RGBA8 pixels of a Steam image handle (Friend::avatar). False while Steam has not downloaded it.
 bool AvatarRgba(int image, int& width, int& height, std::vector<uint8_t>& rgba);
+
+// Requests a genuine Valve auth ticket from the running Steam helper (for official servers).
+bool RequestRealAuthTicket(bool webApi, const char* identity, std::vector<uint8_t>& outTicket, uint32_t& outHostHandle);
+void CancelRealAuthTicket(uint32_t hostHandle);
+bool RequestRealEncryptedAppTicket(const void* dataToInclude, int cbDataToInclude, std::vector<uint8_t>& outTicket, int32_t& outResult);
+
+// Forward achievement & stat progress to Valve Steam via the active masked/official helper.
+void ForwardStatSetAchievement(const char* name);
+void ForwardStatClearAchievement(const char* name);
+void ForwardStatIndicateProgress(const char* name, uint32_t cur, uint32_t max);
+void ForwardStatSetInt(const char* name, int32_t value);
+void ForwardStatSetFloat(const char* name, float value);
+void ForwardStatStore();
+void ForwardStatResetAll(bool achievementsToo);
+
+// Official Steam Matchmaking proxy (used when IsOfficialServersActive() is true).
+struct OfficialLobbySnapshot {
+    uint64_t lobbyId = 0;
+    uint64_t owner = 0;
+    int32_t maxMembers = 0;
+    bool hasGameServer = false;
+    uint32_t gsIp = 0;
+    uint16_t gsPort = 0;
+    uint64_t gsSteamId = 0;
+    std::vector<uint64_t> members;
+    std::vector<std::pair<std::string, std::string>> data;
+};
+struct OfficialLobbyFilterStr { std::string key; std::string val; int cmp = 0; };
+struct OfficialLobbyFilterNum { std::string key; int val = 0; int cmp = 0; };
+struct OfficialLobbyFilterNear { std::string key; int val = 0; };
+struct OfficialLobbySearchQuery {
+    uint32_t slotsAvailable = 0;
+    int32_t distanceFilter = -1;
+    uint32_t maxResults = 0;
+    uint64_t compatibleLobby = 0;
+    std::vector<OfficialLobbyFilterStr> stringFilters;
+    std::vector<OfficialLobbyFilterNum> numFilters;
+    std::vector<OfficialLobbyFilterNear> nearFilters;
+};
+using LobbyUpdateCb = void (*)(const OfficialLobbySnapshot& snap);
+using LobbyDataChangedCb = void (*)(uint64_t lobbyId, uint64_t memberId, bool success);
+using LobbyChatChangedCb = void (*)(uint64_t lobbyId, uint64_t userChanged, uint64_t makingChange, uint32_t stateChange);
+
+void SetOfficialLobbyCallbacks(LobbyUpdateCb onSnap, LobbyDataChangedCb onData, LobbyChatChangedCb onChat);
+bool OfficialSearchLobbies(const OfficialLobbySearchQuery& q, std::vector<OfficialLobbySnapshot>& outLobbies);
+bool OfficialCreateLobby(int eLobbyType, int cMaxMembers, int32_t& outResult, uint64_t& outLobbyId, OfficialLobbySnapshot& outSnap);
+bool OfficialJoinLobby(uint64_t lobbyId, uint32_t& outChatPerms, bool& outLocked, uint32_t& outEnterResp, OfficialLobbySnapshot& outSnap);
+void OfficialLeaveLobby(uint64_t lobbyId);
+void OfficialSetLobbyData(uint64_t lobbyId, const char* key, const char* val);
+void OfficialSetLobbyType(uint64_t lobbyId, int eType);
+void OfficialSetLobbyJoinable(uint64_t lobbyId, bool joinable);
+void OfficialSetLobbyMemberLimit(uint64_t lobbyId, int cMax);
+void OfficialSetLobbyOwner(uint64_t lobbyId, uint64_t owner);
+void OfficialSetLobbyGameServer(uint64_t lobbyId, uint32_t ip, uint16_t port, uint64_t gsId);
+void OfficialRequestLobbyData(uint64_t lobbyId);
 
 } // namespace refix::steamlink

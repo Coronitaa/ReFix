@@ -21,7 +21,7 @@
 namespace refix::overlay {
 
 constexpr ULONGLONG kToastFadeMs = 260;
-constexpr float kToastWidth = 380.0f;
+constexpr float kToastWidth = 410.0f;
 constexpr float kToastGap = 10.0f;
 
 // Temporary avatar of the profile editor and the serial that refreshes its preview (overlay_ui_profile.cpp).
@@ -38,6 +38,7 @@ enum class DialogKind { None, FirstRun, Picker };
 struct EditorState {
     bool open = false;
     bool creating = true;
+    bool firstRun = false;
     char name[kMaxNameChars * 4 + 1] = {};
     int stock = 0;
     bool custom = false;
@@ -67,6 +68,7 @@ struct Toast {
 inline float ToastHeight(Toast::Kind kind) {
     return ui::S(kind == Toast::Kind::Invite ? 128.0f : kind == Toast::Kind::Achievement ? 92.0f : 84.0f);
 }
+float ToastHeight(const Toast& t);
 
 // Invitation sent to a player: to which lobby (or connect string) and when.
 struct SentInvite {
@@ -101,7 +103,7 @@ public:
     void Post(std::function<void()> fn);
     // Blocks the calling (game) thread on the profile window. Returns the chosen profile, or none for guest.
     std::optional<Profile> RunDialog(DialogKind kind);
-    void Begin(uint32_t appId, std::optional<Profile> active);   // after SteamAPI init
+    void Begin(uint32_t appId, std::optional<Profile> active, bool allowWelcome = true);   // after SteamAPI init
     void SetAppId(uint32_t appId);
     bool Started() const { return started_; }
 
@@ -123,14 +125,17 @@ public:
     void OpenUrl(const std::wstring& url);   // system browser; closes the overlay
     void OpenWeb(const std::wstring& url);   // page inside the overlay (system browser as fallback)
     void CloseWeb();
-    void RestartWithProfile(const std::wstring& id);
+    void RestartWithProfile(const std::wstring& id, bool flushStats = true);
     void RestartGame();
     void DeferProfile(const std::wstring& id);
     void AcceptInvite(const net::Invite& inv);
     bool DeleteProfile(const std::wstring& id);   // false when it is in use somewhere
     void ReloadProfiles();
     void ShowInfo(const std::string& title, const std::string& body);
+    void HandleSteamAccountChanged(uint64_t newSteamId);
+    void FlushPlaytime();
     bool IsOverlayOpen() const { return overlayOpen_; }
+    bool IsInMultiplayerRoom() const;
 
     // Data for the screens.
     uint32_t appId_ = 0;
@@ -187,6 +192,11 @@ public:
     void ConfirmDisplaySettings();
     void RevertDisplaySettings();
     void DrawDisplayConfirmModal(ImVec2 viewport);
+    bool langRestartPending_ = false;
+    bool restartIsEmulation_ = false;
+    bool restartToOfficial_ = false;
+    std::string langRestartLabel_;
+    void DrawLangRestartModal(ImVec2 viewport);
     void ExecutePurchase(bool authorized);
 
     ui::AvatarRef ProfileAvatar(const Profile& p);
@@ -234,6 +244,7 @@ private:
     float DrawSteamButton(float right, float cy);   // top bar; returns the new left edge
     float DrawSyncButton(float right, float cy);
     void DrawSteamConfirm();
+    void DrawEmulationSettings();
     void DrawSyncSettings();
     void DrawCloudAccounts(const std::wstring& chosen);                      // overlay_ui_settings.cpp
     std::string syncError_;
@@ -257,7 +268,8 @@ private:
     bool DrawEditorBody(bool firstRun);   // true when the editor finished (saved or cancelled)
     void DrawDialog(ImVec2 viewport);
     void DrawPicker();
-    void BeginEditor(bool creating);
+    void BeginEditor(bool creating, bool firstRun = false);
+    bool ShouldShowWelcome() const;
     bool SaveEditor();
     void ImportImage();
     void ImportFromSteam();
@@ -268,6 +280,7 @@ private:
     std::mutex postMu_;
     std::vector<std::function<void()>> posts_;
     bool started_ = false;
+    bool allowWelcome_ = true;
     bool overlayOpen_ = false;
     DialogKind dialog_ = DialogKind::None;
     bool dialogEditing_ = false;
@@ -276,8 +289,12 @@ private:
     std::deque<Toast> toasts_;
     bool welcomed_ = false;
     ULONGLONG lastNvidiaCheck_ = 0;
+    ULONGLONG lastRegAccCheck_ = 0;
+    uint32_t lastRegAccount_ = 0;
+    bool regAccInit_ = false;
     ULONGLONG lastToastTick_ = 0;    // last frame, to pause notification timers while they cannot be seen
     ULONGLONG lastRefresh_ = 0;
+    ULONGLONG lastPlaytimeTick_ = 0;
     uint32_t avatarKey_ = 0;
     std::wstring avatarKeyFor_;
     int profileVersion_ = 0;

@@ -5,6 +5,7 @@
 #include "refix_pa_backend.h"
 #include "refix_pa_relay.h"
 #include "minhook/MinHook.h"
+#include "overlay/overlay_settings.h"
 #include "overlay/overlay_text.h"
 #include "overlay/save_swap.h"
 #include "overlay/refix_overlay.h"
@@ -1260,7 +1261,7 @@ typedef void (*fn_AuthenticationValues_set_AuthType_t)(void* self, uint8_t value
 static fn_AuthenticationValues_set_AuthType_t g_orig_AuthenticationValues_set_AuthType = nullptr;
 
 static void Hooked_AuthenticationValues_set_AuthType(void* self, uint8_t value, void* method) {
-    if (ReadIniBool("Photon", "ForceAnonymous", true)) {
+    if (!refix::overlay::settings::IsOfficialServersActive() && ReadIniBool("Photon", "ForceAnonymous", true)) {
         value = 255; // CustomAuthenticationType.None
     }
     if (g_orig_AuthenticationValues_set_AuthType) {
@@ -1272,7 +1273,7 @@ typedef void (*fn_ApplyAuthenticationTicketParameters_t)(void* self, void* arg1,
 static fn_ApplyAuthenticationTicketParameters_t g_orig_ApplyAuthenticationTicketParameters = nullptr;
 
 static void Hooked_ApplyAuthenticationTicketParameters(void* self, void* arg1, void* arg2, void* method) {
-    if (ReadIniBool("Photon", "BypassTicket", true)) {
+    if (!refix::overlay::settings::IsOfficialServersActive() && ReadIniBool("Photon", "BypassTicket", true)) {
         ReFixLog("[Photon IL2CPP] Bypassing ApplyAuthenticationTicketParameters for anonymous LAN handshake");
         return;
     }
@@ -1291,7 +1292,8 @@ static fn_CheckAuthCoroutine_MoveNext_t g_orig_CheckAuthCoroutine_MoveNext = nul
 static int g_offset_Status_PhotonAuth = 0;
 
 static bool Hooked_CheckAuthCoroutine_MoveNext(void* self, void* method) {
-    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+    if (!refix::overlay::settings::IsOfficialServersActive() &&
+        (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true))) {
         if (self) {
             void* parent = *(void**)((char*)self + 0x20);
             if (parent && g_offset_Status_PhotonAuth > 0) {
@@ -1310,7 +1312,9 @@ static bool Hooked_CheckAuthCoroutine_MoveNext(void* self, void* method) {
 }
 
 static void* Hooked_CheckAuthenticationViaHTTP(void* self, void* auth, void* method) {
-    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+    const bool bypass = !refix::overlay::settings::IsOfficialServersActive() &&
+                        (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true));
+    if (bypass) {
         ReFixLog("[Photon IL2CPP] CheckAuthenticationViaHTTP called, forcing Status = 2 (Success)");
         if (self && g_offset_Status_PhotonAuth > 0) {
             *(int32_t*)((char*)self + g_offset_Status_PhotonAuth) = 2;
@@ -1321,7 +1325,7 @@ static void* Hooked_CheckAuthenticationViaHTTP(void* self, void* auth, void* met
         }
     }
     void* coro = g_orig_CheckAuthenticationViaHTTP ? g_orig_CheckAuthenticationViaHTTP(self, auth, method) : nullptr;
-    if (coro && (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true))) {
+    if (coro && bypass) {
         // IL2CPP IEnumerator state is stored at offset 0x10; -1 indicates finished/disposed.
         *(int32_t*)((char*)coro + 0x10) = -1;
         ReFixLog("[Photon IL2CPP] Marked coroutine %p as completed (state = -1)", coro);
@@ -1346,7 +1350,8 @@ static fn_AirlockPeer_PhotonAuth_t g_orig_AirlockPeer_PhotonAuth = nullptr;
 
 static void* Hooked_AirlockPeer_PhotonAuth(void* self, void* args, bool requireAuthentication, void* photonAuth, void* method) {
     ReFixLog("[Photon IL2CPP] AirlockPeer.PhotonAuth called (requireAuthentication=%d)", (int)requireAuthentication);
-    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+    if (!refix::overlay::settings::IsOfficialServersActive() &&
+        (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true))) {
         requireAuthentication = false;
         ReFixLog("[Photon IL2CPP] AirlockPeer.PhotonAuth: Overriding requireAuthentication to false for LAN/Offline host/join");
     }
@@ -1361,7 +1366,8 @@ static fn_InternetCheckFailed_t g_orig_InternetCheckFailed = nullptr;
 
 static void Hooked_InternetCheckFailed(void* self, bool fatal, void* message, bool retry, void* method) {
     ReFixLog("[IL2CPP] CheckInternetConnection.InternetCheckFailed called! fatal=%d, retry=%d", fatal, retry);
-    if (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true)) {
+    if (!refix::overlay::settings::IsOfficialServersActive() &&
+        (ReadIniBool("Photon", "BypassCustomAuth", true) || ReadIniBool("Photon", "ForceAnonymous", true))) {
         if (self && g_offset_Status_PhotonAuth > 0) {
             *(int32_t*)((char*)self + g_offset_Status_PhotonAuth) = 2; // Force success
         }

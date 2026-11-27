@@ -45,6 +45,15 @@ void SignalProfileGate();
 void SetGateActive(bool active);
 void InstallFileSystemHooks();
 
+// Thread-local bypass for internal ReFix operations (sync package collection/extraction)
+// so reading/writing real save roots does not trigger game-profile redirection.
+struct ScopedBypass {
+    ScopedBypass();
+    ~ScopedBypass();
+    ScopedBypass(const ScopedBypass&) = delete;
+    ScopedBypass& operator=(const ScopedBypass&) = delete;
+};
+
 std::wstring GetActiveSaveDir(const std::wstring& label = L"");
 
 // A deleted profile no longer owns any folder; whatever is in place is treated as data from before profiles.

@@ -77,6 +77,7 @@
 #include "include/steam/isteamapps.h"
 #include "include/steam/isteamuser.h"
 #include "overlay/refix_overlay.h"
+#include "overlay/overlay_settings.h"
 #include "overlay/achievements.h"
 #include "overlay/presence_net.h"
 #if REFIX_STEAM_LINK
@@ -122,6 +123,12 @@ namespace UnrealSteamEmu {
     static bool g_bInitialized = false;
     static bool g_bGameServerInitialized = false;
     static std::recursive_mutex g_emuMutex;
+    static std::atomic<bool> g_shuttingDown{ false };
+    static std::atomic<int> g_detachedWorkers{ 0 };
+    struct WorkerScope {
+        WorkerScope() { g_detachedWorkers.fetch_add(1, std::memory_order_acq_rel); }
+        ~WorkerScope() { g_detachedWorkers.fetch_sub(1, std::memory_order_acq_rel); }
+    };
 
     static std::atomic<uint64_t> g_blockedEgressCount{ 0 };
     uint64_t GetBlockedEgressCount() { return g_blockedEgressCount.load(); }
@@ -758,6 +765,7 @@ namespace UnrealSteamEmu {
             noLegacySet ? envNoLegacy : "",
             legacyFallbackActive ? "TRUE" : "FALSE");
 
+        g_language.reserve(32);
         g_activeIniPath = iniPath;
         char bufLang[64] = {};
         GetPrivateProfileStringA("Unreal.Steam", "Language", "", bufLang, sizeof(bufLang), iniPath.c_str());
@@ -769,6 +777,7 @@ namespace UnrealSteamEmu {
         } else {
             g_language = DetectSystemSteamLanguage();
         }
+        SetEnvironmentVariableA("SteamLanguage", g_language.c_str());
 
         // Check force_listen_port.txt in steam_settings if present
         std::vector<std::string> portFiles = {
@@ -1151,6 +1160,66 @@ namespace UnrealSteamEmu {
     static refix::lan::MatchmakingCriteria g_pendingSearchCriteria;
     static std::vector<uint64_t> g_lastMatchmakingResults;
 
+#if REFIX_STEAM_LINK
+    static refix::steamlink::OfficialLobbySearchQuery g_pendingOfficialQuery;
+
+    struct PendingOfficialCall {
+        enum class Kind { Search, Create, Join };
+        Kind kind = Kind::Search;
+        SteamAPICall_t hCall = 0;
+        bool failed = false;
+        std::vector<refix::steamlink::OfficialLobbySnapshot> snaps;
+        int32_t createResult = 2;
+        uint64_t lobbyId = 0;
+        uint32_t chatPerms = 0;
+        bool locked = false;
+        uint32_t enterResp = 2;
+    };
+    static std::vector<PendingOfficialCall> g_pendingOfficialCalls;
+
+    static void ApplyOfficialLobbySnapshotLocked(const refix::steamlink::OfficialLobbySnapshot& snap) {
+        LobbyInfo& lob = g_lobbies[snap.lobbyId];
+        lob.id = snap.lobbyId;
+        lob.owner = snap.owner;
+        lob.maxMembers = snap.maxMembers;
+        lob.joinable = true;
+        lob.members = snap.members;
+        lob.data.clear();
+        for (const auto& [k, v] : snap.data) lob.data[k] = v;
+        if (snap.hasGameServer) {
+            lob.gameServerIP = snap.gsIp;
+            lob.gameServerPort = snap.gsPort;
+            lob.gameServerSteamID = snap.gsSteamId;
+        }
+        lob.lastSeen = std::chrono::steady_clock::now();
+    }
+
+    static void EnsureOfficialLobbyCallbacks() {
+        static std::atomic<bool> s_registered{ false };
+        if (s_registered.exchange(true)) return;
+        refix::steamlink::SetOfficialLobbyCallbacks(
+            [](const refix::steamlink::OfficialLobbySnapshot& snap) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                ApplyOfficialLobbySnapshotLocked(snap);
+            },
+            [](uint64_t lobbyId, uint64_t memberId, bool success) {
+                LobbyDataUpdate_t ldu = {};
+                ldu.m_ulSteamIDLobby = lobbyId;
+                ldu.m_ulSteamIDMember = memberId;
+                ldu.m_bSuccess = success ? 1 : 0;
+                PostCallback(LobbyDataUpdate_t::k_iCallback, &ldu, sizeof(ldu));
+            },
+            [](uint64_t lobbyId, uint64_t userChanged, uint64_t makingChange, uint32_t stateChange) {
+                LobbyChatUpdate_t cu = {};
+                cu.m_ulSteamIDLobby = lobbyId;
+                cu.m_ulSteamIDUserChanged = userChanged;
+                cu.m_ulSteamIDMakingChange = makingChange;
+                cu.m_rgfChatMemberStateChange = stateChange;
+                PostCallback(LobbyChatUpdate_t::k_iCallback, &cu, sizeof(cu));
+            });
+    }
+#endif
+
     static uint32_t ComputeLobbyAccountId(const std::string& coreLobbyId) {
         return refix::steam::ComputeLobbyAccountId(coreLobbyId);
     }
@@ -1356,6 +1425,81 @@ namespace UnrealSteamEmu {
     }
 
     static void DrainPendingSearches(bool forceAll) {
+#if REFIX_STEAM_LINK
+        {
+            std::vector<PendingOfficialCall> officialReady;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                officialReady.swap(g_pendingOfficialCalls);
+            }
+            for (const auto& oc : officialReady) {
+                if (oc.kind == PendingOfficialCall::Kind::Search) {
+                    std::vector<uint64_t> ids;
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                        for (const auto& snap : oc.snaps) {
+                            ApplyOfficialLobbySnapshotLocked(snap);
+                            ids.push_back(snap.lobbyId);
+                        }
+                        g_lastMatchmakingResults = ids;
+                    }
+                    LobbyMatchList_t resp = {};
+                    resp.m_nLobbiesMatching = (uint32_t)ids.size();
+                    PostCallback(LobbyMatchList_t::k_iCallback, &resp, sizeof(resp));
+                    CompleteCallResult(oc.hCall, LobbyMatchList_t::k_iCallback, &resp, sizeof(resp), oc.failed);
+                    for (uint64_t sId : ids) {
+                        LobbyDataUpdate_t ldu = {};
+                        ldu.m_ulSteamIDLobby = sId;
+                        ldu.m_ulSteamIDMember = sId;
+                        ldu.m_bSuccess = 1;
+                        PostCallback(LobbyDataUpdate_t::k_iCallback, &ldu, sizeof(ldu));
+                    }
+                    ReFixLog("[UnrealSteam] Official lobby search hCall=%llu completed: %zu lobby(ies)", oc.hCall, ids.size());
+                } else if (oc.kind == PendingOfficialCall::Kind::Create) {
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                        for (const auto& snap : oc.snaps) ApplyOfficialLobbySnapshotLocked(snap);
+                    }
+                    if (oc.createResult == k_EResultOK && oc.lobbyId != 0) g_activeLobbyID.store(oc.lobbyId);
+                    LobbyCreated_t crResp = {};
+                    crResp.m_eResult = (EResult)oc.createResult;
+                    crResp.m_ulSteamIDLobby = oc.lobbyId;
+                    CompleteCallResult(oc.hCall, LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp), oc.failed);
+                    PostCallback(LobbyCreated_t::k_iCallback, &crResp, sizeof(crResp));
+                    if (oc.createResult == k_EResultOK && oc.lobbyId != 0) {
+                        LobbyEnter_t cbResp = {};
+                        cbResp.m_ulSteamIDLobby = oc.lobbyId;
+                        cbResp.m_rgfChatPermissions = 0xFFFFFFFF;
+                        cbResp.m_bLocked = false;
+                        cbResp.m_EChatRoomEnterResponse = k_EChatRoomEnterResponseSuccess;
+                        PostCallback(LobbyEnter_t::k_iCallback, &cbResp, sizeof(cbResp));
+
+                        LobbyChatUpdate_t cu = {};
+                        cu.m_ulSteamIDLobby = oc.lobbyId;
+                        cu.m_ulSteamIDUserChanged = g_localSteamID;
+                        cu.m_ulSteamIDMakingChange = g_localSteamID;
+                        cu.m_rgfChatMemberStateChange = 0x0001;
+                        PostCallback(LobbyChatUpdate_t::k_iCallback, &cu, sizeof(cu));
+                    }
+                    ReFixLog("[UnrealSteam] Official CreateLobby hCall=%llu: result=%d lobby=%llu", oc.hCall, oc.createResult, oc.lobbyId);
+                } else if (oc.kind == PendingOfficialCall::Kind::Join) {
+                    {
+                        std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                        for (const auto& snap : oc.snaps) ApplyOfficialLobbySnapshotLocked(snap);
+                    }
+                    if (oc.enterResp == k_EChatRoomEnterResponseSuccess && oc.lobbyId != 0) g_activeLobbyID.store(oc.lobbyId);
+                    LobbyEnter_t resp = {};
+                    resp.m_ulSteamIDLobby = oc.lobbyId;
+                    resp.m_rgfChatPermissions = oc.chatPerms;
+                    resp.m_bLocked = oc.locked;
+                    resp.m_EChatRoomEnterResponse = oc.enterResp;
+                    CompleteCallResult(oc.hCall, LobbyEnter_t::k_iCallback, &resp, sizeof(resp), oc.failed);
+                    PostCallback(LobbyEnter_t::k_iCallback, &resp, sizeof(resp));
+                    ReFixLog("[UnrealSteam] Official JoinLobby hCall=%llu: lobby=%llu resp=%u", oc.hCall, oc.lobbyId, oc.enterResp);
+                }
+            }
+        }
+#endif
         auto now = std::chrono::steady_clock::now();
         std::vector<PendingSearch> readySearches;
         {
@@ -3261,10 +3405,12 @@ namespace UnrealSteamEmu {
         if (g_lanPumpStarted.exchange(true)) return;
         g_lanPumpStop.store(false);
         std::thread([]() {
+            WorkerScope ws;
             constexpr int64_t kGameIdleMs = 200;
-            while (!g_lanPumpStop.load()) {
+            while (!g_lanPumpStop.load() && !g_shuttingDown.load(std::memory_order_acquire)) {
                 Sleep(50);
-                if (g_lanPumpStop.load() || g_transportMode.load() != TransportMode::Canonical) continue;
+                if (g_lanPumpStop.load() || g_shuttingDown.load(std::memory_order_acquire) ||
+                    g_transportMode.load() != TransportMode::Canonical) continue;
                 if (NowMs() - g_lastLanTickMs.load() < kGameIdleMs) continue;
                 refix::lan::ILanCore::Get().Tick();
             }
@@ -3644,7 +3790,34 @@ namespace UnrealSteamEmu {
         }
         virtual uint32 GetVoiceOptimalSampleRate() override { return 48000; }
 
+        std::mutex m_realTicketMu;
+        std::unordered_map<HAuthTicket, uint32_t> m_realTicketHandles;
+
         virtual HAuthTicket GetAuthSessionTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket, const SteamNetworkingIdentity *pSteamNetworkingIdentity) override {
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::vector<uint8_t> realTicket;
+                uint32_t hostHandle = 0;
+                if (refix::steamlink::RequestRealAuthTicket(false, nullptr, realTicket, hostHandle) &&
+                    pTicket && cbMaxTicket >= (int)realTicket.size()) {
+                    memcpy(pTicket, realTicket.data(), realTicket.size());
+                    if (pcbTicket) *pcbTicket = (uint32)realTicket.size();
+                    HAuthTicket hTicket = ++g_nextAuthTicket;
+                    {
+                        std::lock_guard<std::mutex> lock(m_realTicketMu);
+                        m_realTicketHandles[hTicket] = hostHandle;
+                    }
+                    SyncTicketToEnvironment((const uint8_t*)pTicket, realTicket.size(), hTicket);
+                    GetAuthSessionTicketResponse_t resp = {};
+                    resp.m_hAuthTicket = hTicket;
+                    resp.m_eResult = k_EResultOK;
+                    PostCallback(GetAuthSessionTicketResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
+                    ReFixLog("[UnrealSteam] GetAuthSessionTicket: Forwarded genuine Steam ticket %u (len=%zu)",
+                             hTicket, realTicket.size());
+                    return hTicket;
+                }
+            }
+#endif
             uint32_t ticketLen = 152;
             if (pTicket && cbMaxTicket >= (int)ticketLen) {
                 uint64_t steam_id = g_localSteamID;
@@ -3704,7 +3877,22 @@ namespace UnrealSteamEmu {
         }
 
         virtual void EndAuthSession(CSteamID steamID) override {}
-        virtual void CancelAuthTicket(HAuthTicket hAuthTicket) override {}
+        virtual void CancelAuthTicket(HAuthTicket hAuthTicket) override {
+#if REFIX_STEAM_LINK
+            uint32_t hostHandle = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_realTicketMu);
+                auto it = m_realTicketHandles.find(hAuthTicket);
+                if (it != m_realTicketHandles.end()) {
+                    hostHandle = it->second;
+                    m_realTicketHandles.erase(it);
+                }
+            }
+            if (hostHandle) refix::steamlink::CancelRealAuthTicket(hostHandle);
+#else
+            (void)hAuthTicket;
+#endif
+        }
 
         virtual EUserHasLicenseForAppResult UserHasLicenseForApp(CSteamID steamID, AppId_t appID) override {
             return k_EUserHasLicenseResultHasLicense;
@@ -3715,13 +3903,87 @@ namespace UnrealSteamEmu {
         virtual bool BIsBehindNAT() override { return false; }
         virtual void AdvertiseGame(CSteamID steamIDGameServer, uint32 unIPServer, uint16 usPortServer) override {}
 
+        std::mutex m_realEncryptedMu;
+        std::vector<uint8_t> m_realEncryptedTicket;
+
         virtual SteamAPICall_t RequestEncryptedAppTicket(void *pDataToInclude, int cbDataToInclude) override {
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::vector<uint8_t> reqData;
+                if (pDataToInclude && cbDataToInclude > 0) {
+                    const size_t n = (std::min)((size_t)cbDataToInclude, (size_t)4096);
+                    reqData.assign((const uint8_t*)pDataToInclude, (const uint8_t*)pDataToInclude + n);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_realEncryptedMu);
+                    m_realEncryptedTicket.clear();
+                }
+                uint64_t hCall = 0;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    hCall = ++g_nextAPICall;
+                    QueuedCallResultItem item;
+                    item.hAPICall = hCall;
+                    item.iCallback = EncryptedAppTicketResponse_t::k_iCallback;
+                    item.completed = false;
+                    item.failed = false;
+                    item.triggerTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    g_callResultMap[hCall] = item;
+                }
+                std::thread([this, hCall, reqData = std::move(reqData)]() {
+                    WorkerScope ws;
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    std::vector<uint8_t> ticket;
+                    int32_t eResult = 2;
+                    const bool ok = refix::steamlink::RequestRealEncryptedAppTicket(
+                        reqData.empty() ? nullptr : reqData.data(), (int)reqData.size(), ticket, eResult);
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    if (ok && !ticket.empty()) {
+                        std::lock_guard<std::mutex> lock(m_realEncryptedMu);
+                        m_realEncryptedTicket = std::move(ticket);
+                    }
+                    EncryptedAppTicketResponse_t resp = {};
+                    resp.m_eResult = ok ? k_EResultOK : (EResult)(eResult ? eResult : k_EResultFail);
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    auto it = g_callResultMap.find(hCall);
+                    if (it != g_callResultMap.end()) {
+                        it->second.data.assign((const uint8_t*)&resp, (const uint8_t*)&resp + sizeof(resp));
+                        it->second.failed = false;
+                        it->second.triggerTime = std::chrono::steady_clock::now();
+                    }
+                }).detach();
+                ReFixLog("[UnrealSteam] RequestEncryptedAppTicket (Official): Scheduled async hCall=%llu", hCall);
+                return hCall;
+            }
+#endif
             EncryptedAppTicketResponse_t resp = {};
             resp.m_eResult = k_EResultOK;
             return PostCallResult(EncryptedAppTicketResponse_t::k_iCallback, &resp, sizeof(resp));
         }
 
         virtual bool GetEncryptedAppTicket(void *pTicket, int cbMaxTicket, uint32 *pcbTicket) override {
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::lock_guard<std::mutex> lock(m_realEncryptedMu);
+                if (m_realEncryptedTicket.empty()) {
+                    if (pcbTicket) *pcbTicket = 0;
+                    return false;
+                }
+                const uint32 need = (uint32)m_realEncryptedTicket.size();
+                if (!pTicket || cbMaxTicket == 0) {
+                    if (pcbTicket) *pcbTicket = need;
+                    return false;
+                }
+                if (cbMaxTicket < (int)need) {
+                    if (pcbTicket) *pcbTicket = need;
+                    return false;
+                }
+                memcpy(pTicket, m_realEncryptedTicket.data(), need);
+                if (pcbTicket) *pcbTicket = need;
+                return true;
+            }
+#endif
             const uint32 kTicketSize = 128;
             if (!pTicket || cbMaxTicket == 0) {
                 if (pcbTicket) *pcbTicket = kTicketSize;
@@ -3751,6 +4013,30 @@ namespace UnrealSteamEmu {
         virtual SteamAPICall_t GetMarketEligibility() override { return 0; }
 
         virtual HAuthTicket GetAuthTicketForWebApi(const char *pchIdentity) override {
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::vector<uint8_t> realTicket;
+                uint32_t hostHandle = 0;
+                if (refix::steamlink::RequestRealAuthTicket(true, pchIdentity, realTicket, hostHandle) &&
+                    realTicket.size() <= (size_t)GetTicketForWebApiResponse_t::k_nCubTicketMaxLength) {
+                    HAuthTicket hTicket = ++g_nextAuthTicket;
+                    {
+                        std::lock_guard<std::mutex> lock(m_realTicketMu);
+                        m_realTicketHandles[hTicket] = hostHandle;
+                    }
+                    SyncTicketToEnvironment(realTicket.data(), realTicket.size(), hTicket);
+                    GetTicketForWebApiResponse_t resp = {};
+                    resp.m_hAuthTicket = hTicket;
+                    resp.m_eResult = k_EResultOK;
+                    resp.m_cubTicket = (int)realTicket.size();
+                    memcpy(resp.m_rgubTicket, realTicket.data(), resp.m_cubTicket);
+                    PostCallback(GetTicketForWebApiResponse_t::k_iCallback, &resp, sizeof(resp), 0.0);
+                    ReFixLog("[UnrealSteam] GetAuthTicketForWebApi: Forwarded genuine Steam WebAPI ticket %u for '%s' (len=%zu)",
+                             hTicket, pchIdentity ? pchIdentity : "null", realTicket.size());
+                    return hTicket;
+                }
+            }
+#endif
             HAuthTicket hTicket = ++g_nextAuthTicket;
             ReFixLog("[UnrealSteam] GetAuthTicketForWebApi: Generating ticket %u for identity '%s'",
                      hTicket, pchIdentity ? pchIdentity : "null");
@@ -4777,6 +5063,41 @@ namespace UnrealSteamEmu {
         virtual bool RemoveFavoriteGame(AppId_t nAppID, uint32 nIP, uint16 nConnPort, uint16 nQueryPort, uint32 unFlags) override { return false; }
 
         virtual SteamAPICall_t RequestLobbyList() override {
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                EnsureOfficialLobbyCallbacks();
+                uint64_t hCall = 0;
+                refix::steamlink::OfficialLobbySearchQuery q;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    hCall = ++g_nextAPICall;
+                    QueuedCallResultItem item;
+                    item.hAPICall = hCall;
+                    item.iCallback = LobbyMatchList_t::k_iCallback;
+                    item.completed = false;
+                    item.failed = false;
+                    item.triggerTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    g_callResultMap[hCall] = item;
+                    q = g_pendingOfficialQuery;
+                    g_pendingOfficialQuery = refix::steamlink::OfficialLobbySearchQuery{};
+                    g_pendingSearchCriteria = refix::lan::MatchmakingCriteria{};
+                }
+                std::thread([hCall, q = std::move(q)]() {
+                    WorkerScope ws;
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    PendingOfficialCall done;
+                    done.kind = PendingOfficialCall::Kind::Search;
+                    done.hCall = hCall;
+                    done.failed = !refix::steamlink::OfficialSearchLobbies(q, done.snaps);
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    if (!g_shuttingDown.load(std::memory_order_acquire))
+                        g_pendingOfficialCalls.push_back(std::move(done));
+                }).detach();
+                ReFixLog("[UnrealSteam] Official RequestLobbyList: Scheduled async search hCall=%llu", hCall);
+                return hCall;
+            }
+#endif
             if (g_transportMode.load() == TransportMode::Canonical) {
                 refix::lan::ILanCore::Get().Matchmaking().RefreshLobbyList();
                 refix::lan::ILanCore::Get().Discovery().BroadcastQuery();
@@ -4810,6 +5131,9 @@ namespace UnrealSteamEmu {
         virtual void AddRequestLobbyListStringFilter(const char *pchKeyToMatch, const char *pchValueToMatch, ELobbyComparison eComparisonType) override {
             if (!pchKeyToMatch) return;
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+#if REFIX_STEAM_LINK
+            g_pendingOfficialQuery.stringFilters.push_back({ pchKeyToMatch, pchValueToMatch ? pchValueToMatch : "", (int)eComparisonType });
+#endif
             refix::lan::SearchFilter f;
             f.key = pchKeyToMatch;
             f.value = refix::lan::AttributeValue(pchValueToMatch ? pchValueToMatch : "");
@@ -4820,6 +5144,9 @@ namespace UnrealSteamEmu {
         virtual void AddRequestLobbyListNumericalFilter(const char *pchKeyToMatch, int nValueToMatch, ELobbyComparison eComparisonType) override {
             if (!pchKeyToMatch) return;
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+#if REFIX_STEAM_LINK
+            g_pendingOfficialQuery.numFilters.push_back({ pchKeyToMatch, nValueToMatch, (int)eComparisonType });
+#endif
             refix::lan::SearchFilter f;
             f.key = pchKeyToMatch;
             f.value = refix::lan::AttributeValue((int64_t)nValueToMatch);
@@ -4828,28 +5155,88 @@ namespace UnrealSteamEmu {
         }
 
         virtual void AddRequestLobbyListNearValueFilter(const char *pchKeyToMatch, int nValueToBeCloseTo) override {
+#if REFIX_STEAM_LINK
+            if (pchKeyToMatch) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                g_pendingOfficialQuery.nearFilters.push_back({ pchKeyToMatch, nValueToBeCloseTo });
+            }
+            if (refix::overlay::settings::IsOfficialServersActive()) return;
+#endif
             ReFixLog("[UnrealSteam] AddRequestLobbyListNearValueFilter: Not supported in offline LAN");
         }
 
         virtual void AddRequestLobbyListFilterSlotsAvailable(int nSlotsAvailable) override {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+#if REFIX_STEAM_LINK
+            g_pendingOfficialQuery.slotsAvailable = (nSlotsAvailable > 0) ? (uint32_t)nSlotsAvailable : 1;
+#endif
             g_pendingSearchCriteria.minAvailableSlots = (nSlotsAvailable > 0) ? (uint32_t)nSlotsAvailable : 1;
         }
 
         virtual void AddRequestLobbyListDistanceFilter(ELobbyDistanceFilter eLobbyDistanceFilter) override {
+#if REFIX_STEAM_LINK
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                g_pendingOfficialQuery.distanceFilter = (int32_t)eLobbyDistanceFilter;
+            }
+            if (refix::overlay::settings::IsOfficialServersActive()) return;
+#endif
             ReFixLog("[UnrealSteam] AddRequestLobbyListDistanceFilter: Not applicable in offline LAN");
         }
 
         virtual void AddRequestLobbyListResultCountFilter(int cMaxResults) override {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+#if REFIX_STEAM_LINK
+            g_pendingOfficialQuery.maxResults = (cMaxResults > 0) ? (uint32_t)cMaxResults : 50;
+#endif
             g_pendingSearchCriteria.maxResults = (cMaxResults > 0) ? (uint32_t)cMaxResults : 50;
         }
 
         virtual void AddRequestLobbyListCompatibleMembersFilter(CSteamID steamIDLobby) override {
+#if REFIX_STEAM_LINK
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                g_pendingOfficialQuery.compatibleLobby = steamIDLobby.ConvertToUint64();
+            }
+            if (refix::overlay::settings::IsOfficialServersActive()) return;
+#endif
             ReFixLog("[UnrealSteam] AddRequestLobbyListCompatibleMembersFilter: Not supported in offline LAN");
         }
 
         virtual SteamAPICall_t CreateLobby(ELobbyType eLobbyType, int cMaxMembers) override {
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                EnsureOfficialLobbyCallbacks();
+                uint64_t hCall = 0;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    hCall = ++g_nextAPICall;
+                    QueuedCallResultItem item;
+                    item.hAPICall = hCall;
+                    item.iCallback = LobbyCreated_t::k_iCallback;
+                    item.completed = false;
+                    item.failed = false;
+                    item.triggerTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    g_callResultMap[hCall] = item;
+                }
+                std::thread([hCall, eLobbyType, cMaxMembers]() {
+                    WorkerScope ws;
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    PendingOfficialCall done;
+                    done.kind = PendingOfficialCall::Kind::Create;
+                    done.hCall = hCall;
+                    refix::steamlink::OfficialLobbySnapshot snap;
+                    done.failed = !refix::steamlink::OfficialCreateLobby((int)eLobbyType, cMaxMembers, done.createResult, done.lobbyId, snap);
+                    if (snap.lobbyId) done.snaps.push_back(std::move(snap));
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    if (!g_shuttingDown.load(std::memory_order_acquire))
+                        g_pendingOfficialCalls.push_back(std::move(done));
+                }).detach();
+                ReFixLog("[UnrealSteam] Official CreateLobby: Scheduled async hCall=%llu (type=%d max=%d)", hCall, (int)eLobbyType, cMaxMembers);
+                return hCall;
+            }
+#endif
             uint32_t initialSlots = (cMaxMembers > 1) ? (uint32_t)cMaxMembers : 10;
             std::string coreLobbyId = refix::lan::ILanCore::Get().Lobby().CreateLobby(
                 initialSlots, refix::lan::LobbyPermissionLevel::PublicAdvertised);
@@ -4957,6 +5344,40 @@ namespace UnrealSteamEmu {
 
         virtual SteamAPICall_t JoinLobby(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                EnsureOfficialLobbyCallbacks();
+                uint64_t hCall = 0;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    hCall = ++g_nextAPICall;
+                    QueuedCallResultItem item;
+                    item.hAPICall = hCall;
+                    item.iCallback = LobbyEnter_t::k_iCallback;
+                    item.completed = false;
+                    item.failed = false;
+                    item.triggerTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    g_callResultMap[hCall] = item;
+                }
+                std::thread([hCall, lID]() {
+                    WorkerScope ws;
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    PendingOfficialCall done;
+                    done.kind = PendingOfficialCall::Kind::Join;
+                    done.hCall = hCall;
+                    done.lobbyId = lID;
+                    refix::steamlink::OfficialLobbySnapshot snap;
+                    done.failed = !refix::steamlink::OfficialJoinLobby(lID, done.chatPerms, done.locked, done.enterResp, snap);
+                    if (snap.lobbyId) done.snaps.push_back(std::move(snap));
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    if (!g_shuttingDown.load(std::memory_order_acquire))
+                        g_pendingOfficialCalls.push_back(std::move(done));
+                }).detach();
+                ReFixLog("[UnrealSteam] Official JoinLobby: Scheduled async hCall=%llu lobby=%llu", hCall, lID);
+                return hCall;
+            }
+#endif
 
             // 1. If already in or hosting this lobby, immediately schedule entry CallResult
             // (PostCallResult defers delivery to RunCallbacks so SteamAPI_RegisterCallResult runs first).
@@ -5078,6 +5499,21 @@ namespace UnrealSteamEmu {
 
         virtual void LeaveLobby(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                refix::steamlink::OfficialLeaveLobby(lID);
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    auto it = g_lobbies.find(lID);
+                    if (it != g_lobbies.end()) {
+                        auto mIt = std::find(it->second.members.begin(), it->second.members.end(), g_localSteamID);
+                        if (mIt != it->second.members.end()) it->second.members.erase(mIt);
+                    }
+                }
+                if (g_activeLobbyID.load() == lID) g_activeLobbyID.store(0);
+                return;
+            }
+#endif
             std::string coreLobbyId = GetCoreLobbyId(lID);
             if (!coreLobbyId.empty()) {
                 refix::lan::ILanCore::Get().Lobby().LeaveLobby(coreLobbyId);
@@ -5104,6 +5540,13 @@ namespace UnrealSteamEmu {
 
         virtual int GetNumLobbyMembers(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                return (it != g_lobbies.end()) ? (int)it->second.members.size() : 0;
+            }
+#endif
             std::string coreLobbyId = GetCoreLobbyId(lID);
             if (!coreLobbyId.empty()) {
                 auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
@@ -5118,6 +5561,16 @@ namespace UnrealSteamEmu {
 
         virtual CSteamID GetLobbyMemberByIndex(CSteamID steamIDLobby, int iMember) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                if (it != g_lobbies.end() && iMember >= 0 && iMember < (int)it->second.members.size()) {
+                    return CSteamID(it->second.members[iMember]);
+                }
+                return CSteamID((uint64)0);
+            }
+#endif
             std::string coreLobbyId = GetCoreLobbyId(lID);
             if (!coreLobbyId.empty()) {
                 auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
@@ -5188,6 +5641,24 @@ namespace UnrealSteamEmu {
         virtual bool SetLobbyData(CSteamID steamIDLobby, const char *pchKey, const char *pchValue) override {
             if (!pchKey) return false;
             uint64_t lID = steamIDLobby.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                refix::steamlink::OfficialSetLobbyData(lID, pchKey, pchValue);
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    LobbyInfo& lob = g_lobbies[lID];
+                    lob.id = lID;
+                    if (pchValue) lob.data[pchKey] = pchValue;
+                    else lob.data.erase(pchKey);
+                }
+                LobbyDataUpdate_t resp = {};
+                resp.m_ulSteamIDLobby = lID;
+                resp.m_ulSteamIDMember = lID;
+                resp.m_bSuccess = 1;
+                PostCallback(LobbyDataUpdate_t::k_iCallback, &resp, sizeof(resp));
+                return true;
+            }
+#endif
 
             std::string actualValue = pchValue ? pchValue : "";
             if (pchValue && (_stricmp(pchKey, "Port") == 0 || _stricmp(pchKey, "GamePort") == 0 || _stricmp(pchKey, "ServerPort") == 0)) {
@@ -5338,6 +5809,14 @@ namespace UnrealSteamEmu {
         // search results by index; with only the local table a remote lobby had no data and was hidden.
         static std::map<std::string, std::string> LobbyDataView(uint64_t lID) {
             std::map<std::string, std::string> view;
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                if (it != g_lobbies.end()) view = it->second.data;
+                return view;
+            }
+#endif
             std::string coreLobbyId = GetCoreLobbyId(lID);
             uint64_t ownerSteamId = 0;
             std::optional<refix::lan::LobbyRecord> recOpt;
@@ -5520,6 +5999,12 @@ namespace UnrealSteamEmu {
         virtual bool RequestLobbyData(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
             if (lID == 0) return false;
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                refix::steamlink::OfficialRequestLobbyData(lID);
+                return true;
+            }
+#endif
 
             auto applyLobbyRecord = [&](const refix::lan::LobbyRecord& rec) {
                 EnsureSteamLobbyID(rec.lobbyId, lID);
@@ -5584,6 +6069,12 @@ namespace UnrealSteamEmu {
                 lob.gameServerPort = unGameServerPort;
                 lob.gameServerSteamID = steamIDGameServer.ConvertToUint64();
             }
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                refix::steamlink::OfficialSetLobbyGameServer(lID, unGameServerIP, unGameServerPort, steamIDGameServer.ConvertToUint64());
+                return;
+            }
+#endif
             // Members on other machines read it through GetLobbyGameServer: Valheim lists a lobby only
             // when it names its game server, so a local-only copy hid every LAN world.
             std::string coreLobbyId = GetCoreLobbyId(lID);
@@ -5603,14 +6094,20 @@ namespace UnrealSteamEmu {
         }
 
         virtual bool GetLobbyGameServer(CSteamID steamIDLobby, uint32 *punGameServerIP, uint16 *punGameServerPort, CSteamID *psteamIDGameServer) override {
-            auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
-            // A P2P host registers only its SteamID (IP and port 0), which is still a game server.
-            if (it != g_lobbies.end() && (it->second.gameServerPort != 0 || it->second.gameServerSteamID != 0)) {
-                if (punGameServerIP) *punGameServerIP = it->second.gameServerIP;
-                if (punGameServerPort) *punGameServerPort = it->second.gameServerPort;
-                if (psteamIDGameServer) *psteamIDGameServer = CSteamID(it->second.gameServerSteamID);
-                return true;
+            {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(steamIDLobby.ConvertToUint64());
+                // A P2P host registers only its SteamID (IP and port 0), which is still a game server.
+                if (it != g_lobbies.end() && (it->second.gameServerIP != 0 || it->second.gameServerPort != 0 || it->second.gameServerSteamID != 0)) {
+                    if (punGameServerIP) *punGameServerIP = it->second.gameServerIP;
+                    if (punGameServerPort) *punGameServerPort = it->second.gameServerPort;
+                    if (psteamIDGameServer) *psteamIDGameServer = CSteamID(it->second.gameServerSteamID);
+                    return true;
+                }
             }
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) return false;
+#endif
             std::string coreLobbyId = GetCoreLobbyId(steamIDLobby.ConvertToUint64());
             if (coreLobbyId.empty()) return false;
             auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
@@ -5631,6 +6128,16 @@ namespace UnrealSteamEmu {
 
         virtual bool SetLobbyMemberLimit(CSteamID steamIDLobby, int cMaxMembers) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                    g_lobbies[lID].maxMembers = cMaxMembers;
+                }
+                refix::steamlink::OfficialSetLobbyMemberLimit(lID, cMaxMembers);
+                return true;
+            }
+#endif
             int effectiveLimit = (cMaxMembers >= 10) ? cMaxMembers : 10;
             {
                 std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
@@ -5666,12 +6173,23 @@ namespace UnrealSteamEmu {
 
         virtual bool SetLobbyType(CSteamID steamIDLobby, ELobbyType eLobbyType) override {
             g_lobbies[steamIDLobby.ConvertToUint64()].type = eLobbyType;
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                refix::steamlink::OfficialSetLobbyType(steamIDLobby.ConvertToUint64(), (int)eLobbyType);
+            }
+#endif
             return true;
         }
 
         virtual bool SetLobbyJoinable(CSteamID steamIDLobby, bool bLobbyJoinable) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
             g_lobbies[lID].joinable = bLobbyJoinable;
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                refix::steamlink::OfficialSetLobbyJoinable(lID, bLobbyJoinable);
+                return true;
+            }
+#endif
             std::string coreLobbyId = GetCoreLobbyId(lID);
             if (!coreLobbyId.empty()) {
                 refix::lan::ILanCore::Get().Lobby().SetJoinable(coreLobbyId, bLobbyJoinable);
@@ -5681,6 +6199,14 @@ namespace UnrealSteamEmu {
 
         virtual CSteamID GetLobbyOwner(CSteamID steamIDLobby) override {
             uint64_t lID = steamIDLobby.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
+                auto it = g_lobbies.find(lID);
+                if (it != g_lobbies.end() && it->second.owner != 0) return CSteamID(it->second.owner);
+                return CSteamID((uint64)0);
+            }
+#endif
             std::string coreLobbyId = GetCoreLobbyId(lID);
             if (!coreLobbyId.empty()) {
                 auto rec = refix::lan::ILanCore::Get().Lobby().GetLobby(coreLobbyId);
@@ -5719,6 +6245,11 @@ namespace UnrealSteamEmu {
 
         virtual bool SetLobbyOwner(CSteamID steamIDLobby, CSteamID steamIDNewOwner) override {
             g_lobbies[steamIDLobby.ConvertToUint64()].owner = steamIDNewOwner.ConvertToUint64();
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) {
+                refix::steamlink::OfficialSetLobbyOwner(steamIDLobby.ConvertToUint64(), steamIDNewOwner.ConvertToUint64());
+            }
+#endif
             return true;
         }
 
@@ -5731,6 +6262,9 @@ namespace UnrealSteamEmu {
                 }
                 return CSteamID((uint64)0);
             }
+#if REFIX_STEAM_LINK
+            if (refix::overlay::settings::IsOfficialServersActive()) return CSteamID((uint64)0);
+#endif
             int idx = 0;
             for (const auto& pair : g_lobbies) {
                 if (idx == iLobby) return CSteamID(pair.first);
@@ -5820,7 +6354,9 @@ namespace UnrealSteamEmu {
 
             if (pResponse) {
                 std::thread([this, hReq, pResponse]() {
+                    WorkerScope ws;
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    if (g_shuttingDown.load(std::memory_order_acquire)) return;
                     std::lock_guard<std::recursive_mutex> lock(m_queryMutex);
                     auto it = m_queries.find(hReq);
                     if (it == m_queries.end() || it->second.response != pResponse) return;
@@ -6065,7 +6601,7 @@ namespace UnrealSteamEmu {
         virtual bool BIsVACBanned() override { return false; }
         virtual const char *GetCurrentGameLanguage() override { return g_language.c_str(); }
         virtual const char *GetAvailableGameLanguages() override {
-            return "english,spanish,french,german,italian,japanese,koreana,schinese,tchinese,russian,latam";
+            return "english,spanish,latam,brazilian,portuguese,french,german,italian,russian,japanese,koreana,schinese,tchinese,polish,turkish";
         }
         virtual bool BIsSubscribedApp(AppId_t appID) override { return true; }
         virtual bool BIsDlcInstalled(AppId_t appID) override {
@@ -7917,7 +8453,7 @@ namespace UnrealSteamEmu {
             return g_steamUserInstance.BeginAuthSession(pAuthTicket, cbAuthTicket, steamID);
         }
         virtual void EndAuthSession(CSteamID steamID) override {}
-        virtual void CancelAuthTicket(HAuthTicket hAuthTicket) override {}
+        virtual void CancelAuthTicket(HAuthTicket hAuthTicket) override { g_steamUserInstance.CancelAuthTicket(hAuthTicket); }
         virtual EUserHasLicenseForAppResult UserHasLicenseForApp(CSteamID steamID, AppId_t appID) override {
             return k_EUserHasLicenseResultHasLicense;
         }
@@ -8994,7 +9530,12 @@ namespace UnrealSteamEmu {
         return info;
     }
 
-    std::string Overlay_ConnectString() { return g_steamFriendsInstance.LocalRichPresence("connect"); }
+    std::string Overlay_ConnectString() {
+        std::string c = g_steamFriendsInstance.LocalRichPresence("connect");
+        if (!c.empty()) return c;
+        std::string photon = g_steamFriendsInstance.LocalRichPresence("refix_photon_room");
+        return photon.empty() ? std::string() : ("refix_photon:" + photon);
+    }
 
     void Overlay_SetPersonaName(const std::string& name) {
         if (name.empty() || name.size() >= kPersonaNameCapacity) return;   // keeps GetPersonaName()'s buffer in place
@@ -9044,9 +9585,51 @@ namespace UnrealSteamEmu {
     void SetGameLanguage(const char* lang) {
         if (!lang || !*lang) return;
         g_language = lang;
+        SetEnvironmentVariableA("SteamLanguage", lang);
         if (!g_activeIniPath.empty()) {
             WritePrivateProfileStringA("Unreal.Steam", "Language", lang, g_activeIniPath.c_str());
             WritePrivateProfileStringA("Steam", "Language", lang, g_activeIniPath.c_str());
+        }
+        char exePath[MAX_PATH] = {};
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string exeDir(exePath);
+        const size_t slash = exeDir.find_last_of("\\/");
+        if (slash != std::string::npos) exeDir.resize(slash + 1);
+        std::vector<std::string> settingsDirs;
+        if (!g_activeIniPath.empty()) {
+            std::string iniDir = g_activeIniPath;
+            const size_t iSlash = iniDir.find_last_of("\\/");
+            if (iSlash != std::string::npos) {
+                iniDir.resize(iSlash + 1);
+                settingsDirs.push_back(iniDir + "steam_settings\\");
+            }
+        }
+        HMODULE hSelf = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)&SetGameLanguage, &hSelf) && hSelf) {
+            char dllPath[MAX_PATH] = {};
+            GetModuleFileNameA(hSelf, dllPath, MAX_PATH);
+            std::string dllDir(dllPath);
+            const size_t dSlash = dllDir.find_last_of("\\/");
+            if (dSlash != std::string::npos) {
+                dllDir.resize(dSlash + 1);
+                settingsDirs.push_back(dllDir + "steam_settings\\");
+            }
+        }
+        std::string up = exeDir;
+        for (int i = 0; i < 4; ++i, up += "..\\") {
+            settingsDirs.push_back(up + "steam_settings\\");
+        }
+        for (const std::string& dir : settingsDirs) {
+            const std::string lf = dir + "force_language.txt";
+            if (GetFileAttributesA(lf.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                std::ofstream out(lf, std::ios::binary | std::ios::trunc);
+                if (out) out.write(lang, (std::streamsize)strlen(lang));
+            }
+            const std::string cfg = dir + "configs.user.ini";
+            if (GetFileAttributesA(cfg.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                WritePrivateProfileStringA("user::general", "language", lang, cfg.c_str());
+            }
         }
     }
 
@@ -9398,6 +9981,7 @@ namespace UnrealSteamEmu {
     }
 
     bool Initialize() {
+        g_shuttingDown.store(false, std::memory_order_release);
         {
             std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
             if (g_bInitialized) return true;
@@ -9746,13 +10330,32 @@ namespace UnrealSteamEmu {
             uint64_t steamLobbyId = EnsureSteamLobbyID(ev.lobbyId);
             if (steamLobbyId == 0) return;
 
+            auto& core = refix::lan::ILanCore::Get();
             uint64_t memberSteamId = 0;
-            auto mInfo = refix::lan::ILanCore::Get().Peers().FindByPeerId(ev.peerId);
+            auto mInfo = core.Peers().FindByPeerId(ev.peerId);
             if (mInfo && mInfo->externalId.numericId != 0) {
                 memberSteamId = mInfo->externalId.numericId;
             }
 
             if (memberSteamId != 0) {
+                // Two instances sharing the same Steam tunnel account share memberSteamId across different PeerIds.
+                // Keep memberSteamId in lob.members and suppress MemberLeft if the local user or another remaining
+                // peer in rec->members still carries that SteamID so leaving B does not tear down A's room.
+                bool stillPresent = (ev.peerId != core.Identity().GetLocalPeerId() && memberSteamId == g_localSteamID);
+                if (!stillPresent) {
+                    if (auto rec = core.Lobby().GetLobby(ev.lobbyId)) {
+                        for (const auto& m : rec->members) {
+                            if (m.peerId == ev.peerId) continue;
+                            auto otherInfo = core.Peers().FindByPeerId(m.peerId);
+                            if (otherInfo && otherInfo->externalId.numericId == memberSteamId) {
+                                stillPresent = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (stillPresent) return;
+
                 {
                     std::lock_guard<std::recursive_mutex> lock(g_emuMutex);
                     auto it = g_lobbies.find(steamLobbyId);
@@ -10022,9 +10625,13 @@ namespace UnrealSteamEmu {
     }
 
     void Shutdown() {
+        g_shuttingDown.store(true, std::memory_order_release);
         g_steamUserStatsInstance.Flush();
         g_lanPumpStop.store(true);
         g_lanPumpStarted.store(false);
+        for (int i = 0; i < 50 && g_detachedWorkers.load(std::memory_order_acquire) > 0; ++i) {
+            Sleep(10);
+        }
         if (g_transportMode.load() == TransportMode::Canonical) {
             refix::lan::ILanCore::Get().Shutdown();
         }

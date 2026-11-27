@@ -500,7 +500,10 @@ void App::DrawAchievementsModal(ImVec2 viewport) {
         achModalOpenedAt_ = GetTickCount64();
     }
     if (!achModalOpen_) return;
-    if (!ImGui::IsPopupOpen("##achall")) ImGui::OpenPopup("##achall");
+    if (!ImGui::IsPopupOpen("##achall")) {
+        if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
+        ImGui::OpenPopup("##achall");
+    }
     const ImVec2 size(std::min(ui::S(kModalMaxWidth), viewport.x - 2 * ui::S(kModalMarginX)),
                       viewport.y - 2 * ui::S(kModalMarginY));
     const float intro = EaseOutCubic((float)(GetTickCount64() - achModalOpenedAt_) / kModalFadeMs);

@@ -32,6 +32,7 @@ void App::DrawWebModal(ImVec2 viewport) {
     // ImGui drops the popup while the overlay is hidden (no window is submitted then): reopen it whenever
     // the browser is open but its popup is not.
     if (webOpenRequested_ || !ImGui::IsPopupOpen("##web")) {
+        if (!ImGui::IsPopupOpen("##web") && ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
         ImGui::OpenPopup("##web");
         webOpenRequested_ = false;
     }

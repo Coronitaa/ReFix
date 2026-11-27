@@ -32,6 +32,7 @@ struct Profile {
     bool importedFromSteam = false;
     bool guest = false;              // "play as a guest": never saved, temporary Cloud folder, no lock
     uint64_t lastUsed = 0;           // FILETIME ticks
+    uint64_t playtimeSeconds = 0;    // accumulated active playtime in seconds
     std::vector<uint64_t> favorites; // SteamIDs, in the order they were starred
     std::wstring originGame;         // key of the game it was created in; empty = from before games were
                                      // tracked, shown in every game
@@ -68,6 +69,7 @@ std::wstring GuestStatsRoot(uint32_t appId);
 std::wstring GuestInventoryRoot(uint32_t appId);
 void CleanupGuestFolders();                      // removes the temporary folders of guests no longer running
 void Touch(Profile& p);                          // lastUsed = now
+void AddPlaytime(const std::wstring& id, uint64_t deltaSeconds);
 
 // This game: key and default name (file name of the exe; the overlay replaces it by the window title).
 std::wstring GameKey();
@@ -81,6 +83,9 @@ std::vector<Profile> FromOtherGames(const std::vector<Profile>& all, const std::
 
 std::wstring LastProfileId(const std::wstring& gameKey = GameKey());
 void SetLastProfileId(const std::wstring& id, const std::wstring& gameKey = GameKey());
+
+bool IsWelcomeDismissed(const std::wstring& gameKey = GameKey());
+void SetWelcomeDismissed(const std::wstring& gameKey, bool dismissed);
 
 // Locks are per game executable: two instances of one game never share a profile, while the same
 // profile can still be used by two different games at once.

@@ -235,6 +235,30 @@ void ArmEarly() {
     if (g_cfg.blockNvidiaReflex) ArmNvidiaReflexBlock();
 }
 
+void StartSteamLinkWithBridge(uint32_t appId, bool blockSteamOverlay) {
+#if REFIX_STEAM_LINK
+    const refix::overlay::settings::BridgeSettings bs = refix::overlay::settings::GetBridgeSettings();
+    const uint32_t selected = refix::overlay::settings::EffectiveBridgeAppId(appId);
+    const bool official = (appId != 0 && appId != 480 && selected == appId &&
+                           bs.mode == refix::overlay::settings::BridgeMode::CurrentGame && bs.officialServers);
+    refix::overlay::settings::SetOfficialServersActive(official);
+    if (official) {
+        refix::steamlink::SetBridgeAppId(appId);
+        refix::steamlink::SetMaskAppId(0);
+    } else {
+        // Spacewar (480) stays the base online network while any selected AppID runs alongside as a Steam mask.
+        refix::steamlink::SetBridgeAppId(480);
+        refix::steamlink::SetMaskAppId((selected != 0 && selected != 480) ? selected : 0);
+    }
+    refix::steamlink::SetLocalGame(appId);
+    refix::steamlink::SetSteamOverlay(!blockSteamOverlay);
+    refix::steamlink::Enable();
+#else
+    (void)appId;
+    (void)blockSteamOverlay;
+#endif
+}
+
 void WaitForRestartParent() {
     wchar_t buf[16] = {};
     if (GetEnvironmentVariableW(L"REFIX_RESTART_PID", buf, 16) == 0) return;
@@ -294,30 +318,22 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
             chosen = App::Get().RunDialog(DialogKind::Picker);
             all = profiles::LoadAll();
         } else if (mine.empty()) {
-            if (g_cfg.firstRunDialog) {
-                ReFixLog("[Overlay] First run with FirstRunDialog=true; showing first-run dialog");
-                chosen = App::Get().RunDialog(DialogKind::FirstRun);
-                all = profiles::LoadAll();
-            } else {
-                ReFixLog("[Overlay] First run for this game: booting directly with machine identity (Shift+Tab to configure profile)");
-                Profile machineGuest;
-                machineGuest.guest = true;
-                machineGuest.id = L"Guest_Slot" + std::to_wstring(UnrealSteamEmu::GetInstanceSlot());
-                machineGuest.name = L"Guest";
-                if (g_cfg.isolateSaves) {
-                    saves::SwitchTo(machineGuest, profiles::ForGame(all, game));
-                    saves::InstallFileSystemHooks();
-                }
-                saves::SignalProfileGate();
-#if REFIX_STEAM_LINK
-                if (enableSteamLink) {
-                    refix::steamlink::SetLocalGame(appId);
-                    refix::steamlink::SetSteamOverlay(!g_cfg.blockSteamOverlay);
-                    refix::steamlink::Enable();
-                }
-#endif
-                return false;
+            // Do not block game startup with the Welcome dialog; when FirstRunDialog=true,
+            // it opens inside the overlay when the player opens Shift+Tab.
+            ReFixLog("[Overlay] First run for this game: booting directly with machine identity (Shift+Tab to configure profile)");
+            Profile machineGuest;
+            machineGuest.guest = true;
+            machineGuest.id = L"Guest_Slot" + std::to_wstring(UnrealSteamEmu::GetInstanceSlot());
+            machineGuest.name = L"Guest";
+            if (g_cfg.isolateSaves) {
+                saves::SwitchTo(machineGuest, profiles::ForGame(all, game));
+                saves::InstallFileSystemHooks();
             }
+            saves::SignalProfileGate();
+#if REFIX_STEAM_LINK
+            if (enableSteamLink) StartSteamLinkWithBridge(appId, g_cfg.blockSteamOverlay);
+#endif
+            return false;
         } else {
             ReFixLog("[Overlay] No free profile; showing profile picker");
             chosen = App::Get().RunDialog(DialogKind::Picker);
@@ -336,11 +352,7 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
         }
         saves::SignalProfileGate();
 #if REFIX_STEAM_LINK
-        if (enableSteamLink) {
-            refix::steamlink::SetLocalGame(appId);
-            refix::steamlink::SetSteamOverlay(!g_cfg.blockSteamOverlay);
-            refix::steamlink::Enable();
-        }
+        if (enableSteamLink) StartSteamLinkWithBridge(appId, g_cfg.blockSteamOverlay);
 #endif
         return false;
     }
@@ -364,26 +376,32 @@ bool ResolveIdentity(uint32_t appId, const std::string& iniPath, Identity& out) 
     }
 
 #if REFIX_STEAM_LINK
-    if (enableSteamLink) {
-        refix::steamlink::SetLocalGame(appId);
-        refix::steamlink::SetSteamOverlay(!g_cfg.blockSteamOverlay);
-        refix::steamlink::Enable();
-    }
+    if (enableSteamLink) StartSteamLinkWithBridge(appId, g_cfg.blockSteamOverlay);
 #endif
     {
         std::lock_guard<std::mutex> lock(g_mu);
         g_active = p;
     }
     out.steamId = p.steamId;
+    if (refix::overlay::settings::IsOfficialServersActive()) {
+#if REFIX_STEAM_LINK
+        if (session && session->steamId != 0) {
+            out.steamId = session->steamId;
+        }
+#endif
+    }
     out.name = ToUtf8(p.name);
-    ReFixLog("[Overlay] %s %s '%s' -> SteamID %llu (app %u)", p.guest ? "Guest" : "Profile", ToUtf8(p.id).c_str(), out.name.c_str(),
-             (unsigned long long)p.steamId, appId);
+    ReFixLog("[Overlay] %s %s '%s' -> SteamID %llu (app %u%s)", p.guest ? "Guest" : "Profile", ToUtf8(p.id).c_str(), out.name.c_str(),
+             (unsigned long long)out.steamId, appId,
+             refix::overlay::settings::IsOfficialServersActive() ? ", official" : "");
     SetEnvironmentVariableW(L"REFIX_RESTART_PID", nullptr);
     return true;
 }
 
 void Shutdown() {
     SetNvidiaOverlayHidden(false);   // never leave NVIDIA's overlay hidden after the game
+    refix::overlay::sound::SetProcessAudioMute(false);
+    refix::overlay::App::Get().FlushPlaytime();
     refix::overlay::host::Stop();
 #if REFIX_STEAM_LINK
     refix::steamlink::Disable();
@@ -455,7 +473,7 @@ void Start() {
     }
     // Mod panels of other games are never registered, so their dialogs, URLs and UI cannot open here.
     refix::overlay::mods::Registry::Get().ActivateBuiltins(UnrealSteamEmu::GetAppID(), refix::mods::CurrentExeName());
-    App::Get().Begin(UnrealSteamEmu::GetAppID(), active);
+    App::Get().Begin(UnrealSteamEmu::GetAppID(), active, g_cfg.firstRunDialog);
     ReFixLog("[Overlay] Started (%s)", active ? "profile" : "no profile");
 }
 

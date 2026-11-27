@@ -195,9 +195,12 @@ int DrawProfileGridModal(const char* popupId, const char* title, const char* sub
         ImGui::SetCursorScreenPos(ImVec2(cardMin.x, cardMax.y));
     } else {
         const float gap = ui::S(kGap), cardH = ui::S(kCardH);
-        const float cardW = (avail - gap * (kColumns - 1)) / kColumns;
         const int rows = std::max(1, ((int)items.size() + kColumns - 1) / kColumns);
-        const float gridH = std::min(rows * (cardH + gap) - gap, vp.y * 0.6f);
+        const float totalH = rows * (cardH + gap) - gap;
+        const float gridH = std::min(totalH, vp.y * 0.6f);
+        const bool hasScroll = totalH > gridH;
+        const float contentW = avail - (hasScroll ? ImGui::GetStyle().ScrollbarSize + ui::S(6) : 0.0f);
+        const float cardW = (contentW - gap * (kColumns - 1)) / kColumns;
         std::string childId = std::string(popupId) + "_grid";
         ImGui::BeginChild(childId.c_str(), ImVec2(avail, gridH), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -233,7 +236,7 @@ int DrawProfileGridModal(const char* popupId, const char* title, const char* sub
                         item.enabled ? item.subtitleColor : ui::color::Muted, sub.c_str());
         }
         ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (cardH + gap) - gap));
-        ImGui::Dummy(ImVec2(avail, 0));
+        ImGui::Dummy(ImVec2(contentW, 0));
         ImGui::EndChild();
     }
 
@@ -433,20 +436,74 @@ void App::DrawImportPopup() {
     if (picked >= 0 && picked < (int)items.size()) ImportProfile(items[picked].profileId);
 }
 
+std::string FormatSavedTime(uint64_t ticks) {
+    if (ticks == 0) return {};
+    FILETIME ft;
+    ft.dwLowDateTime = (DWORD)(ticks & 0xFFFFFFFFULL);
+    ft.dwHighDateTime = (DWORD)(ticks >> 32);
+    FILETIME localFt;
+    SYSTEMTIME st;
+    if (!FileTimeToLocalFileTime(&ft, &localFt) || !FileTimeToSystemTime(&localFt, &st)) return {};
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02u/%02u/%04u %02u:%02u", st.wDay, st.wMonth, st.wYear, st.wHour, st.wMinute);
+    return buf;
+}
+
 void App::DrawCloudImportModal() {
-    if (!sync::HasCloudImportModal()) return;
+    if (sync::HasConflict() || !sync::HasCloudImportModal()) return;
     auto& items = sync::GetCloudImportItems();
     if (items.empty()) return;
 
     if (!ImGui::IsPopupOpen("##cloud_import_modal")) {
+        if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && !ImGui::IsPopupOpen("##settings")) return;
         ImGui::OpenPopup("##cloud_import_modal");
     }
 
+    bool anyConflict = false;
+    for (const auto& item : items) {
+        if (item.hasLocalMatch) {
+            anyConflict = true;
+            break;
+        }
+    }
+
     const ImVec2 vp = ImGui::GetIO().DisplaySize;
-    constexpr float kWidth = 720.0f;
-    constexpr float kCardH = 145.0f;
+    constexpr float kWidth = 820.0f;
+    const float kCardH = anyConflict ? 258.0f : 208.0f;
     constexpr float kGap = 12.0f;
     constexpr int kColumns = 3;
+
+    auto formatPlaytime = [](uint64_t sec) -> std::string {
+        if (sec == 0) return "";
+        const uint64_t mins = sec / 60;
+        const uint64_t hrs = mins / 60;
+        if (hrs > 0) return std::to_string(hrs) + "h " + std::to_string(mins % 60) + "m";
+        if (mins > 0) return std::to_string(mins) + "m";
+        return std::to_string(sec) + "s";
+    };
+    struct Seg { std::string text; ImU32 col; };
+    auto drawCenteredSegments = [&](ImDrawList* drawList, ImFont* font, float cx, float y, float maxW, const std::vector<Seg>& segs) {
+        if (segs.empty()) return;
+        float totalW = 0.0f;
+        std::vector<float> ws;
+        ws.reserve(segs.size());
+        for (const auto& s : segs) {
+            float w = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, s.text.c_str()).x;
+            ws.push_back(w);
+            totalW += w;
+        }
+        if (totalW > maxW && segs.size() == 1) {
+            std::string ell = ui::Ellipsize(segs[0].text, maxW);
+            float w = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, ell.c_str()).x;
+            drawList->AddText(font, font->FontSize, ImVec2(cx - w * 0.5f, y), segs[0].col, ell.c_str());
+            return;
+        }
+        float x = cx - std::min(totalW, maxW) * 0.5f;
+        for (size_t idx = 0; idx < segs.size(); ++idx) {
+            drawList->AddText(font, font->FontSize, ImVec2(x, y), segs[idx].col, segs[idx].text.c_str());
+            x += ws[idx];
+        }
+    };
 
     ImGui::SetNextWindowPos(ImVec2(vp.x * 0.5f, vp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(ui::S(kWidth), vp.x - ui::S(24)), 0));
@@ -474,8 +531,11 @@ void App::DrawCloudImportModal() {
     ImGui::PushFont(f.caption);
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
     ui::TextColored(ui::color::Muted,
-                    T("Existing profiles were detected in your cloud sync. Select which profiles you want to import to this PC:",
-                      "Se detectaron perfiles existentes en la nube. Selecciona cuáles deseas importar a este equipo:"));
+                    anyConflict
+                        ? T("Profiles were found in your cloud sync. For profiles already on this PC, choose whether to use the cloud version (overwrites local), local version (overwrites cloud), or keep both:",
+                            "Se encontraron perfiles en tu nube. Para los que ya están en este PC, elige si usar el de la nube (sobrescribe el local), el local (sobrescribe la nube) o mantener ambos:")
+                        : T("Existing profiles were detected in your cloud sync. Select which profiles you want to import to this PC:",
+                            "Se detectaron perfiles existentes en la nube. Selecciona cuáles deseas importar a este equipo:"));
     ImGui::PopTextWrapPos();
     ImGui::PopFont();
 
@@ -485,11 +545,15 @@ void App::DrawCloudImportModal() {
     const float avail = ImGui::GetContentRegionAvail().x;
     const float gap = ui::S(kGap);
     const float cardH = ui::S(kCardH);
-    const float cardW = (avail - gap * (kColumns - 1)) / kColumns;
     const int rows = std::max(1, ((int)items.size() + kColumns - 1) / kColumns);
-    const float gridH = std::min(rows * (cardH + gap) - gap, vp.y * 0.55f);
+    const float totalH = rows * (cardH + gap) - gap;
+    const float gridH = std::min(totalH, vp.y * 0.58f);
+    const bool hasScroll = totalH > gridH;
+    const float contentW = avail - (hasScroll ? ImGui::GetStyle().ScrollbarSize + ui::S(6) : 0.0f);
+    const float cardW = (contentW - gap * (kColumns - 1)) / kColumns;
 
     ImGui::BeginChild("##cloudgrid", ImVec2(avail, gridH), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
+    ImDrawList* childDl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
 
     for (int i = 0; i < (int)items.size(); ++i) {
@@ -497,57 +561,157 @@ void App::DrawCloudImportModal() {
         const ImVec2 p0(origin.x + (i % kColumns) * (cardW + gap), origin.y + (i / kColumns) * (cardH + gap));
         const ImVec2 p1(p0.x + cardW, p0.y + cardH);
 
-        ImGui::SetCursorScreenPos(p0);
         ImGui::PushID(i);
-        if (ui::Clicked(ui::NavButton("##cloudcard", ImVec2(cardW, cardH)))) {
+
+        // Card background & border
+        const bool cardHovered = ImGui::IsMouseHoveringRect(p0, p1);
+        childDl->AddRectFilled(p0, p1, item.selected ? ui::color::AccentSoft : (cardHovered ? ui::color::RowHover : ui::color::Row), ui::S(14));
+        if (item.selected) {
+            childDl->AddRect(p0, p1, ui::color::Accent, ui::S(14), 0, ui::S(1.5f));
+        } else if (cardHovered) {
+            childDl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.5f), ui::S(14), 0, ui::S(1.0f));
+        } else {
+            childDl->AddRect(p0, p1, ui::color::Border, ui::S(14), 0, 1.0f);
+        }
+
+        // Top-right toggle check circle (click to include/skip)
+        const ImVec2 checkC(p1.x - ui::S(18), p0.y + ui::S(18));
+        ImGui::SetCursorScreenPos(ImVec2(checkC.x - ui::S(12), checkC.y - ui::S(12)));
+        if (ImGui::InvisibleButton("##chk", ImVec2(ui::S(24), ui::S(24)))) {
             item.selected = !item.selected;
         }
-        const bool hover = ImGui::IsItemHovered();
-        ImGui::PopID();
-        if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
-        // Card background
-        dl->AddRectFilled(p0, p1, item.selected ? ui::color::AccentSoft : (hover ? ui::color::RowHover : ui::color::Row), ui::S(14));
         if (item.selected) {
-            dl->AddRect(p0, p1, ui::color::Accent, ui::S(14), 0, ui::S(1.5f));
-        } else if (hover) {
-            dl->AddRect(p0, p1, ui::Fade(ui::color::Accent, 0.5f), ui::S(14), 0, ui::S(1.0f));
-        }
-
-        // Selection badge / check circle at top right
-        const ImVec2 checkC(p1.x - ui::S(18), p0.y + ui::S(18));
-        if (item.selected) {
-            dl->AddCircleFilled(checkC, ui::S(10), ui::color::Accent, 24);
-            dl->AddText(f.caption, f.caption->FontSize, ImVec2(checkC.x - ui::S(6), checkC.y - ui::S(7)), ui::color::AccentInk, ui::icon::Check);
+            childDl->AddCircleFilled(checkC, ui::S(10), ui::color::Accent, 24);
+            childDl->AddText(f.caption, f.caption->FontSize, ImVec2(checkC.x - ui::S(6), checkC.y - ui::S(7)), ui::color::AccentInk, ui::icon::Check);
         } else {
-            dl->AddCircle(checkC, ui::S(10), ui::color::Faint, 24, ui::S(1.5f));
+            childDl->AddCircle(checkC, ui::S(10), ui::color::Faint, 24, ui::S(1.5f));
         }
 
-        // Avatar
-        const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(18 + 30));
+        // Avatar (real custom avatar from package if present)
+        const ImVec2 ac(p0.x + cardW * 0.5f, p0.y + ui::S(16 + 26));
         ui::AvatarRef av;
         av.stock = item.stockAvatar;
         av.steam = (item.steamId != 0);
-        ui::DrawAvatar(dl, ac, ui::S(28), av);
+        if (item.customAvatar && !item.avatarBytes.empty()) {
+            const std::string texKey = "cloud_av:" + ToUtf8(item.file);
+            const std::vector<uint8_t> bytes = item.avatarBytes;
+            av.texture = host::Texture(texKey, [bytes](image::Rgba& img) {
+                return image::DecodeMemory(bytes.data(), bytes.size(), img, 184);
+            });
+        }
+        ui::DrawAvatar(childDl, ac, ui::S(26), av);
 
         // Name
         ImGui::PushFont(f.strong);
-        const std::string name = ui::Ellipsize(ToUtf8(item.name), cardW - ui::S(24));
+        const std::string name = ui::Ellipsize(ToUtf8(item.name), cardW - ui::S(20));
         const ImVec2 ns = ImGui::CalcTextSize(name.c_str());
         ImGui::PopFont();
-        dl->AddText(f.strong, f.strong->FontSize, ImVec2(ac.x - ns.x * 0.5f, p0.y + ui::S(86)), ui::color::Text, name.c_str());
+        childDl->AddText(f.strong, f.strong->FontSize, ImVec2(ac.x - ns.x * 0.5f, p0.y + ui::S(76)), ui::color::Text, name.c_str());
 
-        // Origin game display: "Lethal Company +5 más"
+        // Origin game display
         ImGui::PushFont(f.caption);
-        std::string disp = ui::Ellipsize(item.originDisplay, cardW - ui::S(24));
+        const float lineH = f.caption->FontSize + ui::S(2);
+        const float maxTextW = cardW - ui::S(18);
+        std::string disp = ui::Ellipsize(item.originDisplay, maxTextW);
         const ImVec2 ds = ImGui::CalcTextSize(disp.c_str());
+        float curY = p0.y + ui::S(76) + f.strong->FontSize + ui::S(3);
+        childDl->AddText(f.caption, f.caption->FontSize, ImVec2(ac.x - ds.x * 0.5f, curY),
+                         item.hasCurrentGame ? ui::color::Accent : ui::color::Muted, disp.c_str());
+        curY += lineH + ui::S(2);
+
+        // Playtime + Cloud date
+        const std::string ptStr = formatPlaytime(item.playtimeSeconds);
+        const std::string cloudDate = FormatSavedTime(item.cloudSavedAt);
+        std::string metaLine;
+        if (!ptStr.empty()) metaLine += std::string(T("Playtime: ", "Tiempo: ")) + ptStr + "  ·  ";
+        metaLine += std::string(T("Cloud: ", "Nube: ")) + (cloudDate.empty() ? T("Unknown", "Desconocida") : cloudDate);
+        drawCenteredSegments(childDl, f.caption, ac.x, curY, maxTextW, { { metaLine, ui::color::Muted } });
+        curY += lineH;
+
+        // Saves & Achievements (with current-game breakdown in parentheses & accent color)
+        {
+            std::vector<Seg> segs;
+            segs.push_back({ std::to_string(item.totalSaves) + (item.totalSaves == 1 ? T(" save", " partida") : T(" saves", " partidas")), ui::color::Text });
+            if (item.currentGameSaves > 0) {
+                segs.push_back({ " (" + std::to_string(item.currentGameSaves) + ")", ui::color::Accent });
+            }
+            if (item.totalAchievements > 0) {
+                segs.push_back({ " · " + std::to_string(item.totalAchievements) + (item.totalAchievements == 1 ? T(" ach", " logro") : T(" achs", " logros")), ui::color::Text });
+                if (item.currentGameAchievements > 0) {
+                    segs.push_back({ " (" + std::to_string(item.currentGameAchievements) + ")", ui::color::Accent });
+                }
+            }
+            drawCenteredSegments(childDl, f.caption, ac.x, curY, maxTextW, segs);
+            curY += lineH;
+        }
+
+        // Extra stats/inventory data
+        if (item.otherDataCount > 0) {
+            std::string extra = "+ " + std::to_string(item.otherDataCount) +
+                                (item.otherDataCount == 1 ? T(" other data", " otro dato") : T(" other data", " otros datos"));
+            drawCenteredSegments(childDl, f.caption, ac.x, curY, maxTextW, { { extra, ui::color::Muted } });
+            curY += lineH;
+        }
+
+        if (item.hasLocalMatch) {
+            const std::string localDate = FormatSavedTime(item.localSavedAt);
+            const std::string localLine = std::string(T("Local: ", "Local: ")) + (localDate.empty() ? T("Unknown", "Desconocida") : localDate);
+            drawCenteredSegments(childDl, f.caption, ac.x, curY, maxTextW, { { localLine, ui::color::Muted } });
+
+            // 3-way conflict resolution pills: Cloud / Local / Both
+            struct ChoiceOpt {
+                sync::CloudImportAction act;
+                const char* label;
+            } opts[] = {
+                { sync::CloudImportAction::UseCloud, T("Cloud", "Nube") },
+                { sync::CloudImportAction::UseLocal, T("Local", "Local") },
+                { sync::CloudImportAction::KeepBoth, T("Both", "Ambos") },
+            };
+            const float pillPad = ui::S(8);
+            const float pillGap = ui::S(4);
+            const float pillW = (cardW - pillPad * 2 - pillGap * 2) / 3.0f;
+            const float pillH = ui::S(26);
+            const float pillY = p1.y - pillH - ui::S(10);
+            for (int k = 0; k < 3; ++k) {
+                const ImVec2 b0(p0.x + pillPad + k * (pillW + pillGap), pillY);
+                const ImVec2 b1(b0.x + pillW, b0.y + pillH);
+                ImGui::SetCursorScreenPos(b0);
+                ImGui::PushID(k + 100);
+                if (ImGui::InvisibleButton("##opt", ImVec2(pillW, pillH))) {
+                    item.action = opts[k].act;
+                    item.selected = true;
+                }
+                const bool bHov = ImGui::IsItemHovered();
+                if (bHov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::PopID();
+
+                const bool activeOpt = item.selected && (item.action == opts[k].act);
+                const ImU32 bg = activeOpt ? ui::color::Accent : (bHov ? ui::color::RowHover : ui::color::Panel);
+                const ImU32 fg = activeOpt ? ui::color::AccentInk : ui::color::Text;
+                childDl->AddRectFilled(b0, b1, bg, ui::S(6));
+                if (!activeOpt) childDl->AddRect(b0, b1, ui::color::Border, ui::S(6), 0, 1.0f);
+                const ImVec2 ts = ImGui::CalcTextSize(opts[k].label);
+                childDl->AddText(f.caption, f.caption->FontSize,
+                                 ImVec2(b0.x + (pillW - ts.x) * 0.5f, b0.y + (pillH - f.caption->FontSize) * 0.5f),
+                                 fg, opts[k].label);
+            }
+        } else {
+            // Non-conflict card: clicking the card body toggles selection
+            ImGui::SetCursorScreenPos(p0);
+            if (ui::Clicked(ui::NavButton("##cloudcard", ImVec2(cardW, cardH)))) {
+                item.selected = !item.selected;
+                item.action = item.selected ? sync::CloudImportAction::ImportNew : sync::CloudImportAction::Skip;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
         ImGui::PopFont();
-        dl->AddText(f.caption, f.caption->FontSize, ImVec2(ac.x - ds.x * 0.5f, p0.y + ui::S(86) + f.strong->FontSize + ui::S(4)),
-                    item.hasCurrentGame ? ui::color::Accent : ui::color::Muted, disp.c_str());
+        ImGui::PopID();
     }
 
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rows * (cardH + gap) - gap));
-    ImGui::Dummy(ImVec2(avail, 0));
+    ImGui::Dummy(ImVec2(contentW, 0));
     ImGui::EndChild();
 
     ImGui::Dummy(ImVec2(0, ui::S(12)));
@@ -569,7 +733,9 @@ void App::DrawCloudImportModal() {
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - totalBtnW);
 
     char impBuf[64];
-    snprintf(impBuf, sizeof(impBuf), "%s (%d)", T("Import selected", "Importar seleccionados"), selectedCount);
+    snprintf(impBuf, sizeof(impBuf), "%s (%d)",
+             anyConflict ? T("Apply selected", "Aplicar seleccionados") : T("Import selected", "Importar seleccionados"),
+             selectedCount);
     if (ui::PrimaryButton(impBuf, ImVec2(ui::S(190), ui::S(38)), selectedCount > 0)) {
         sync::ConfirmCloudImport(items);
         ImGui::CloseCurrentPopup();

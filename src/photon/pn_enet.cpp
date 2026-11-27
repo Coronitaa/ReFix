@@ -79,7 +79,14 @@ void PnEnetConnection::HandleCommand(uint8_t type, uint8_t channel, uint8_t flag
         case CT_ACK_UNSEQUENCED: {
             int32_t acked = BE32(extra);
             for (auto it = m_unacked.begin(); it != m_unacked.end(); ++it) {
-                if (it->channel == channel && it->sequence == acked) { m_unacked.erase(it); break; }
+                if (it->channel == channel && it->sequence == acked) {
+                    if (it->sendCount == 1 && m_nowMs >= it->lastSentMs) {
+                        uint32_t sample = std::min<uint32_t>(500, std::max<uint32_t>(1, m_nowMs - it->lastSentMs));
+                        m_rttMs = m_rttMs ? ((m_rttMs * 3 + sample) / 4) : sample;
+                    }
+                    m_unacked.erase(it);
+                    break;
+                }
             }
             break;
         }

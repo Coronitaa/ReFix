@@ -114,6 +114,23 @@ public:
         FindClose(h);
         return out;
     }
+    uint64_t ModifiedTime(const std::wstring& file) override {
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        if (!GetFileAttributesExW((folder_ + L"\\" + file).c_str(), GetFileExInfoStandard, &fad)) return 0;
+        return ((uint64_t)fad.ftLastWriteTime.dwHighDateTime << 32) | fad.ftLastWriteTime.dwLowDateTime;
+    }
+    bool RemoteTag(const std::wstring& file, std::string& outTag) const override {
+        outTag.clear();
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        if (!GetFileAttributesExW((folder_ + L"\\" + file).c_str(), GetFileExInfoStandard, &fad)) {
+            const DWORD err = GetLastError();
+            return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
+        }
+        const uint64_t size = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+        const uint64_t mtime = ((uint64_t)fad.ftLastWriteTime.dwHighDateTime << 32) | fad.ftLastWriteTime.dwLowDateTime;
+        outTag = std::to_string(size) + ":" + std::to_string(mtime);
+        return true;
+    }
 
 private:
     std::wstring folder_;

@@ -29,6 +29,7 @@
 #include "../lan_core/refix_lan_core.h"
 #include "../mods/mod_host.h"
 #include "../gc/lan_rooms.h"
+#include "../photon/pn_p2p.h"
 
 #include <shellapi.h>
 #include <algorithm>
@@ -37,6 +38,25 @@ extern void ReFixLog(const char* fmt, ...);
 
 namespace refix::overlay {
 namespace {
+
+void CopyToClipboardUtf8(const std::string& utf8) {
+    if (utf8.empty()) return;
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return;
+    if (!OpenClipboard(nullptr)) return;
+    EmptyClipboard();
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, (size_t)wlen * sizeof(wchar_t));
+    if (hg) {
+        if (wchar_t* dst = static_cast<wchar_t*>(GlobalLock(hg))) {
+            MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, dst, wlen);
+            GlobalUnlock(hg);
+            SetClipboardData(CF_UNICODETEXT, hg);
+        } else {
+            GlobalFree(hg);
+        }
+    }
+    CloseClipboard();
+}
 
 std::wstring ApplyDisplayModeToCommandLine(const std::wstring& originalCmd) {
     const auto& s = settings::Get();
@@ -180,10 +200,20 @@ void App::FinishDialog(std::optional<Profile> result) {
     if (dialogDone_) SetEvent(dialogDone_);
 }
 
-void App::Begin(uint32_t appId, std::optional<Profile> active) {
-    Post([this, appId, active] {
+void App::Begin(uint32_t appId, std::optional<Profile> active, bool allowWelcome) {
+    // Ensure a previous muted exit/restart never leaves the Windows Audio session muted.
+    sound::SetProcessAudioMute(false);
+    lastPlaytimeTick_ = GetTickCount64();
+#if REFIX_STEAM_LINK
+    steamlink::SetAccountChangedCallback([](uint64_t newSteamId) {
+        App::Get().HandleSteamAccountChanged(newSteamId);
+    });
+    steamlink::ProbeLicenses(appId, settings::GetBridgeSettings().customAppId);
+#endif
+    Post([this, appId, active, allowWelcome] {
         appId_ = appId;
         active_ = active;
+        allowWelcome_ = allowWelcome;
         ReloadProfiles();
         if (!settings::Get().uiSounds) sound::SetEnabled(false);   // the player muted them in the settings
         started_ = true;
@@ -214,7 +244,7 @@ host::Mode App::DesiredMode() {
 
 ImVec2 App::ToastSize() {
     float h = 0;
-    for (const Toast& t : toasts_) h += ToastHeight(t.kind) + ui::S(kToastGap);
+    for (const Toast& t : toasts_) h += ToastHeight(t) + ui::S(kToastGap);
     return ImVec2(ui::S(kToastWidth) + ui::S(16), std::max(h, ui::S(kToastGap)) + ui::S(12));
 }
 
@@ -229,21 +259,42 @@ void App::OnHotkey() {
     else OpenOverlay();
 }
 
+bool App::IsInMultiplayerRoom() const {
+    if (UnrealSteamEmu::Overlay_LocalLobby().lobbyId != 0 || UnrealSteamEmu::GetActiveLobbyID() != 0) return true;
+    if (refix::rooms::Current() != 0) return true;
+    if (ReFixPhotonP2P::InRoom()) return true;
+    return false;
+}
+
 void App::OnModeChanged(host::Mode from, host::Mode to) {
     const auto& s = settings::Get();
     if (to == host::Mode::Overlay) {
+        const bool inRoom = IsInMultiplayerRoom();
         if (s.openBehavior == settings::GameOpenBehavior::KeepActive) {
             sound::SetProcessAudioMute(false);
+            host::SetGamePaused(false);
         } else if (s.openBehavior == settings::GameOpenBehavior::Mute) {
             sound::SetProcessAudioMute(true);
+            host::SetGamePaused(false);
         } else if (s.openBehavior == settings::GameOpenBehavior::Pause) {
-            sound::SetProcessAudioMute(true);
-            PostOverlayActivated(true);
+            if (!inRoom) {
+                sound::SetProcessAudioMute(true);
+                PostOverlayActivated(true);
+                const host::GameWindow gw = host::CurrentGame();
+                if (gw.hwnd) PostMessageW(gw.hwnd, WM_ACTIVATEAPP, FALSE, (LPARAM)GetCurrentThreadId());
+                host::SetGamePaused(true);
+            } else {
+                sound::SetProcessAudioMute(false);
+                host::SetGamePaused(false);
+            }
         }
     } else if (from == host::Mode::Overlay) {
         sound::SetProcessAudioMute(false);
+        host::SetGamePaused(false);
         if (s.openBehavior == settings::GameOpenBehavior::Pause) {
             PostOverlayActivated(false);
+            const host::GameWindow gw = host::CurrentGame();
+            if (gw.hwnd) PostMessageW(gw.hwnd, WM_ACTIVATEAPP, TRUE, (LPARAM)GetCurrentThreadId());
         }
     }
 }
@@ -262,6 +313,14 @@ void App::PostOverlayActivated(bool active) {
     UnrealSteamEmu::PostCallback(GameOverlayActivated_t::k_iCallback, &cb, sizeof(cb));
 }
 
+bool App::ShouldShowWelcome() const {
+    if (!allowWelcome_ || inviteOnly_ || pendingPurchase_.active || settingsOpen_ || editor_.open || !pendingSwitch_.empty())
+        return false;
+    if (active_ && !active_->guest) return false;
+    if (!profiles_.empty()) return false;
+    return !profiles::IsWelcomeDismissed(profiles::GameKey());
+}
+
 void App::OpenOverlay(bool inviteOnly, uint64_t inviteLobby, const std::string& connect) {
     if (!started_) return;
     if (!overlayOpen_) {
@@ -274,6 +333,12 @@ void App::OpenOverlay(bool inviteOnly, uint64_t inviteLobby, const std::string& 
     inviteLobby_ = inviteLobby;
     inviteConnect_ = connect;
     filter_[0] = '\0';
+    if (editor_.open && editor_.firstRun && !profiles_.empty()) {
+        editor_.open = false;
+    }
+    if (ShouldShowWelcome()) {
+        BeginEditor(true, true);
+    }
     host::Wake();
 }
 
@@ -302,6 +367,12 @@ void App::Refresh(const host::GameWindow& game) {
     const ULONGLONG now = GetTickCount64();
     if (now - lastRefresh_ < kRefreshMs) return;
     lastRefresh_ = now;
+    if (active_ && !active_->guest && lastPlaytimeTick_ != 0 && now - lastPlaytimeTick_ >= 60000) {
+        const uint64_t deltaSec = (now - lastPlaytimeTick_) / 1000;
+        lastPlaytimeTick_ += deltaSec * 1000;
+        profiles::AddPlaytime(active_->id, deltaSec);
+        active_->playtimeSeconds += deltaSec;
+    }
     if (!game.title.empty() && game.title != gameTitle_) {
         gameTitle_ = game.title;
         steamlink::SetLocalGameName(ToUtf8(gameTitle_));   // friends see which game you play
@@ -434,6 +505,87 @@ void App::ShowInfo(const std::string& title, const std::string& body) {
     toasts_.push_back(std::move(t));
 }
 
+void App::HandleSteamAccountChanged(uint64_t newSteamId) {
+#if REFIX_STEAM_LINK
+    const uint32_t curApp = appId_;
+    if (newSteamId == 0) {
+        const bool wasOfficial = settings::IsOfficialServersActive();
+        settings::SetSteamOnline(false);
+        settings::SetOfficialServersActive(false);
+        steamlink::SetMaskAppId(0);
+        steamlink::ProbeLicenses(curApp, settings::GetBridgeSettings().customAppId);
+        Post([wasOfficial] {
+            if (wasOfficial) {
+                App::Get().langRestartPending_ = true;
+                App::Get().restartIsEmulation_ = true;
+                App::Get().restartToOfficial_ = false;
+                App::Get().langRestartLabel_ = i18n::T("Steam signed out", "Sesión de Steam cerrada");
+            }
+            App::Get().ShowInfo(
+                i18n::T("Steam signed out", "Sesión de Steam cerrada"),
+                i18n::T("Steam Online Services were stopped because no Steam account is signed in.",
+                        "Se detuvieron los servicios online de Steam porque no hay sesión iniciada."));
+        });
+        return;
+    }
+
+    settings::BridgeSettings bs = settings::GetBridgeSettings();
+    uint32_t targetBridge = settings::EffectiveBridgeAppId(curApp);
+    steamlink::LicenseProbe probe;
+    steamlink::ProbeLicensesSync(curApp, bs.customAppId, probe);
+    const std::string accDisplay = probe.steamName.empty()
+        ? std::to_string(newSteamId)
+        : (probe.steamName + " (" + std::to_string(newSteamId) + ")");
+
+    if (targetBridge != 480) {
+        const bool owned = probe.steamSignedIn &&
+                           ((targetBridge == curApp && probe.currentGameOwned) ||
+                            (targetBridge == bs.customAppId && probe.customAppOwned));
+        if (!owned) {
+            const uint32_t oldBridge = targetBridge;
+            bs.mode = settings::BridgeMode::Spacewar;
+            settings::SetBridgeSettings(bs);
+            settings::SetOfficialServersActive(false);
+            targetBridge = 480;
+            Post([oldBridge, accDisplay] {
+                const std::string en = "Account " + accDisplay + " has no license for AppID " + std::to_string(oldBridge) +
+                                       ". Switched bridge to Spacewar (480) and restarted.";
+                const std::string es = "La cuenta " + accDisplay + " no tiene licencia para AppID " + std::to_string(oldBridge) +
+                                       ". Se cambió el puente a Spacewar (480) y se reinició.";
+                App::Get().ShowInfo(
+                    i18n::T("Steam account changed", "Cuenta de Steam cambiada"),
+                    i18n::T(en.c_str(), es.c_str()));
+            });
+        } else {
+            Post([accDisplay] {
+                const std::string en = "Active account " + accDisplay + ": license verified. Steam Online Services restarted.";
+                const std::string es = "Cuenta activa " + accDisplay + ": licencia verificada. Servicios online de Steam reiniciados.";
+                App::Get().ShowInfo(
+                    i18n::T("Steam account changed", "Cuenta de Steam cambiada"),
+                    i18n::T(en.c_str(), es.c_str()));
+            });
+        }
+    } else {
+        Post([] {
+            App::Get().ShowInfo(
+                i18n::T("Steam account changed", "Cuenta de Steam cambiada"),
+                i18n::T("Steam Online Services restarted on the new Steam account.",
+                        "Servicios online de Steam reiniciados en la nueva cuenta de Steam."));
+        });
+    }
+
+    const bool useOfficial = (curApp != 0 && curApp != 480 && targetBridge == curApp &&
+                              bs.mode == settings::BridgeMode::CurrentGame && bs.officialServers &&
+                              settings::IsOfficialServersActive());
+    steamlink::SetBridgeAppId(useOfficial ? curApp : 480);
+    steamlink::SetMaskAppId((!useOfficial && targetBridge != 480) ? targetBridge : 0);
+    steamlink::SetLocalGame(curApp);
+    steamlink::Enable();
+#else
+    (void)newSteamId;
+#endif
+}
+
 void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
     // The web view is a child window: it shows only while last frame drew the browser modal.
     web::SetVisible(webDrawn_);
@@ -452,6 +604,56 @@ void App::Frame(const host::GameWindow& game, ImVec2 viewport) {
         PollInvites();
         PollAchievements();
         PollNvidiaReflexHooks();
+        if (overlayOpen_) {
+            const auto& beh = settings::Get();
+            if (beh.openBehavior == settings::GameOpenBehavior::KeepActive) {
+                sound::SetProcessAudioMute(false);
+                host::SetGamePaused(false);
+            } else if (beh.openBehavior == settings::GameOpenBehavior::Mute) {
+                sound::SetProcessAudioMute(true);
+                host::SetGamePaused(false);
+            } else if (beh.openBehavior == settings::GameOpenBehavior::Pause) {
+                const bool shouldPause = !IsInMultiplayerRoom();
+                sound::SetProcessAudioMute(shouldPause);
+                host::SetGamePaused(shouldPause);
+            }
+        }
+#if REFIX_STEAM_LINK
+        if (now - lastRegAccCheck_ >= 2500) {
+            lastRegAccCheck_ = now;
+            const uint32_t curAcc = steamlink::ActiveRegistryAccountId();
+            if (!regAccInit_) {
+                regAccInit_ = true;
+                lastRegAccount_ = curAcc;
+            } else if (curAcc != lastRegAccount_) {
+                lastRegAccount_ = curAcc;
+                if (steamlink::GetState() == steamlink::State::Off) {
+                    const settings::BridgeSettings bs = settings::GetBridgeSettings();
+                    steamlink::ProbeLicenses(appId_, bs.customAppId);
+                }
+            }
+            const settings::BridgeSettings bs = settings::GetBridgeSettings();
+            const uint32_t curBridge = settings::EffectiveBridgeAppId(appId_);
+            if (curBridge != 480) {
+                const steamlink::LicenseProbe probe = steamlink::GetLicenseProbe();
+                if (probe.done && !probe.probing && probe.steamSignedIn) {
+                    const bool owned = (curBridge == appId_ && probe.currentGameOwned) ||
+                                       (curBridge == bs.customAppId && probe.customAppOwned);
+                    if (!owned) {
+                        settings::BridgeSettings fallback = bs;
+                        fallback.mode = settings::BridgeMode::Spacewar;
+                        settings::SetBridgeSettings(fallback);
+                        steamlink::SetMaskAppId(0);
+                        steamlink::SetBridgeAppId(480);
+                        ShowInfo(
+                            i18n::T("Steam account changed", "Cuenta de Steam cambiada"),
+                            i18n::T("No license detected for the configured bridge AppID. Reverted to Spacewar (480).",
+                                    "No se detectó licencia para el AppID puente configurado. Se volvió a Spacewar (480)."));
+                    }
+                }
+            }
+        }
+#endif
         if (dialog_ == DialogKind::None && game.hwnd && !game.minimized &&
             !displayConfirm_.active && settings::HasSavedDisplay()) {
             const settings::Values& disp = settings::Get();
@@ -582,10 +784,27 @@ void App::Join(const net::RemotePlayer& p) {
                              "Elige la sala en la lista del juego."));
         }
     } else if (!p.connect.empty()) {
-        GameRichPresenceJoinRequested_t cb = {};
-        cb.m_steamIDFriend = CSteamID(p.steamId);
-        strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
-        UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
+        constexpr const char* kPhotonPrefix = "refix_photon:";
+        if (p.connect.rfind(kPhotonPrefix, 0) == 0) {
+            const std::string roomCode = p.connect.substr(strlen(kPhotonPrefix));
+            if (!roomCode.empty()) {
+                ReFixPhotonP2P::RegisterRoomHost(roomCode, p.steamId);
+                GameRichPresenceJoinRequested_t cb = {};
+                cb.m_steamIDFriend = CSteamID(p.steamId);
+                strncpy_s(cb.m_rgchConnect, roomCode.c_str(), _TRUNCATE);
+                UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
+                if (!UnrealSteamEmu::HasClientCallback(GameRichPresenceJoinRequested_t::k_iCallback)) {
+                    CopyToClipboardUtf8(roomCode);
+                    ShowInfo(i18n::T("Room code copied", "Código de sala copiado"),
+                             std::string(i18n::T("Paste it in Join Room: ", "Pégalo en Unirse a sala: ")) + roomCode);
+                }
+            }
+        } else {
+            GameRichPresenceJoinRequested_t cb = {};
+            cb.m_steamIDFriend = CSteamID(p.steamId);
+            strncpy_s(cb.m_rgchConnect, p.connect.c_str(), _TRUNCATE);
+            UnrealSteamEmu::PostCallback(GameRichPresenceJoinRequested_t::k_iCallback, &cb, sizeof(cb));
+        }
     } else if (p.ip != 0) {
         // Direct IP connect without rich presence connect string: queue to main thread (satisfies R5)
         char ipBuf[64];
@@ -640,12 +859,12 @@ void App::Invite(const net::RemotePlayer& p) {
         }
         return;
     }
+    const std::string connect = inviteOnly_ && !inviteConnect_.empty() ? inviteConnect_ : localConnect_;
     uint64_t lobby = inviteOnly_ && inviteLobby_ ? inviteLobby_ : localLobby_;
-    if (lobby == 0) {
+    if (lobby == 0 && connect.empty()) {
         lobby = UnrealSteamEmu::Matchmaking_CreateLobby(1 /* k_ELobbyTypePublic */, 5);
         localLobby_ = lobby;
     }
-    const std::string connect = inviteOnly_ && !inviteConnect_.empty() ? inviteConnect_ : localConnect_;
     if (lobby == 0 && connect.empty()) return;
     if (lobby != 0 && p.lobbyId == lobby) return;   // already there
     if (net::SendInvite(p.steamId, lobby, connect)) {
@@ -702,7 +921,22 @@ void App::DeferProfile(const std::wstring& id) {
              i18n::T("It will be used the next time you open the game.", "Se usará la próxima vez que abras el juego."));
 }
 
-void App::RestartWithProfile(const std::wstring& id) {
+void App::FlushPlaytime() {
+    if (!active_ || active_->guest || lastPlaytimeTick_ == 0) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now <= lastPlaytimeTick_) return;
+    const uint64_t deltaSec = (now - lastPlaytimeTick_) / 1000;
+    if (deltaSec > 0) {
+        lastPlaytimeTick_ = now;
+        profiles::AddPlaytime(active_->id, deltaSec);
+        active_->playtimeSeconds += deltaSec;
+    }
+}
+
+void App::RestartWithProfile(const std::wstring& id, bool flushStats) {
+    host::SetGamePaused(false);
+    sound::SetProcessAudioMute(false);
+    FlushPlaytime();
     profiles::SetLastProfileId(id, profiles::GameKey());
     RestoreLaunchEnvironment();
     // Clear identity overrides so the newly chosen profile takes effect even if a proxy DLL populated them earlier.
@@ -725,11 +959,14 @@ void App::RestartWithProfile(const std::wstring& id) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     ReFixLog("[Overlay] Restarting with profile %s", ToUtf8(id).c_str());
-    UnrealSteamEmu::FlushUserStats();
+    if (flushStats) UnrealSteamEmu::FlushUserStats();
     TerminateProcess(GetCurrentProcess(), 0);
 }
 
 void App::RestartGame() {
+    host::SetGamePaused(false);
+    sound::SetProcessAudioMute(false);
+    FlushPlaytime();
     RestoreLaunchEnvironment();
     SetEnvironmentVariableW(L"REFIX_RESTART_PID", std::to_wstring(GetCurrentProcessId()).c_str());
     wchar_t exe[MAX_PATH] = {};

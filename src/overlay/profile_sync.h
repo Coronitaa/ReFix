@@ -42,7 +42,9 @@ public:
     virtual bool Read(const std::wstring& file, std::vector<uint8_t>& out) = 0;   // false when missing
     virtual bool Write(const std::wstring& file, const std::vector<uint8_t>& data) = 0;
     virtual bool Failed() const { return false; }   // the last Read could not reach it (not the same as missing)
+    virtual bool RemoteTag(const std::wstring& file, std::string& outTag) const { (void)file; outTag.clear(); return false; }
     virtual std::vector<std::wstring> ListFiles() { return {}; }
+    virtual uint64_t ModifiedTime(const std::wstring& file) { (void)file; return 0; }
 };
 std::unique_ptr<ISyncTarget> MakeFolderTarget(const std::wstring& folder);
 
@@ -67,6 +69,14 @@ using FileList = std::vector<std::pair<std::string, std::vector<uint8_t>>>;   //
 bool Pack(const FileList& files, uint64_t steamId, const uint8_t stateHash[32], std::vector<uint8_t>& out);
 bool Unpack(const std::vector<uint8_t>& pkg, FileList& files, uint64_t* steamId, uint8_t stateHash[32]);
 
+enum class CloudImportAction {
+    ImportNew,
+    UseCloud,
+    UseLocal,
+    KeepBoth,
+    Skip,
+};
+
 struct CloudProfileItem {
     std::wstring file;
     std::wstring name;
@@ -77,11 +87,25 @@ struct CloudProfileItem {
     int extraGamesCount = 0;
     bool hasCurrentGame = false;
     bool customAvatar = false;
+    std::vector<uint8_t> avatarBytes;
     int stockAvatar = 0;
     bool selected = true;
     std::string originDisplay;
     FileList pkgFiles;
     uint8_t remoteHash[32] = {};
+    std::string remoteTag;
+    uint64_t totalBytes = 0;
+    uint64_t playtimeSeconds = 0;
+    int totalSaves = 0;
+    int currentGameSaves = 0;
+    int totalAchievements = 0;
+    int currentGameAchievements = 0;
+    int otherDataCount = 0;
+    uint64_t cloudSavedAt = 0;       // FILETIME ticks
+    bool hasLocalMatch = false;
+    std::wstring localProfileId;
+    uint64_t localSavedAt = 0;       // FILETIME ticks
+    CloudImportAction action = CloudImportAction::ImportNew;
 };
 
 bool HasCloudImportModal();

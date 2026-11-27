@@ -8,6 +8,9 @@
 #include "refix_overlay.h"
 #include "../unreal_steam_emu.h"
 #include "../mods/mod_host.h"
+#if REFIX_STEAM_LINK
+#include "../steam_link/steam_link.h"
+#endif
 
 #include <windows.h>
 #include <winhttp.h>
@@ -52,6 +55,7 @@ bool g_loaded = false;
 uint32_t g_appId = 0;
 std::wstring g_stateFile;                    // stats.ini of the profile (empty: memory only)
 bool g_dirty = false;                        // stats changed since the last save
+bool g_forwardDirty = false;                 // stats/achievements modified since the last StoreStats forward
 std::wstring g_cacheDir;
 std::vector<Def> g_defs;
 std::map<std::string, size_t> g_index;       // api -> g_defs
@@ -576,6 +580,10 @@ bool SetAchievement(const char* name) {
     ++g_version;
     PushEvent({ name, true, 0, 0 });
     SaveStateLocked();
+#if REFIX_STEAM_LINK
+    g_forwardDirty = true;
+    refix::steamlink::ForwardStatSetAchievement(name);
+#endif
     return true;
 }
 
@@ -589,6 +597,10 @@ bool ClearAchievement(const char* name) {
     it->second.unlockTime = 0;
     ++g_version;
     SaveStateLocked();
+#if REFIX_STEAM_LINK
+    g_forwardDirty = true;
+    refix::steamlink::ForwardStatClearAchievement(name);
+#endif
     return true;
 }
 
@@ -598,12 +610,20 @@ bool IndicateProgress(const char* name, uint32_t cur, uint32_t max) {
     std::lock_guard<std::mutex> lock(g_mu);
     AchState& s = g_state[name];
     if (s.unlocked) return false;   // Steam ignores progress of an unlocked achievement
-    s.progress = std::min(cur, max);
+    const uint32_t nextProg = std::min(cur, max);
+    if (s.progressTime != 0 && s.progress == nextProg && s.progressMax == max) {
+        return true;   // Avoid repeating identical progress notifications and Steam forwards
+    }
+    s.progress = nextProg;
     s.progressMax = max;
     s.progressTime = Now();
     ++g_version;
     PushEvent({ name, false, s.progress, max });
     SaveStateLocked();
+#if REFIX_STEAM_LINK
+    g_forwardDirty = true;
+    refix::steamlink::ForwardStatIndicateProgress(name, s.progress, max);
+#endif
     return true;
 }
 
@@ -633,6 +653,10 @@ bool SetStat(const char* name, int32_t value) {
     if (it == g_stats.ints.end() || it->second != value) {
         g_stats.ints[name] = value;
         g_dirty = true;
+#if REFIX_STEAM_LINK
+        g_forwardDirty = true;
+        refix::steamlink::ForwardStatSetInt(name, value);
+#endif
     }
     return true;
 }
@@ -645,6 +669,10 @@ bool SetStat(const char* name, float value) {
     if (it == g_stats.floats.end() || it->second != value) {
         g_stats.floats[name] = value;
         g_dirty = true;
+#if REFIX_STEAM_LINK
+        g_forwardDirty = true;
+        refix::steamlink::ForwardStatSetFloat(name, value);
+#endif
     }
     return true;
 }
@@ -653,12 +681,47 @@ bool Store() {
     Ensure(true);
     std::lock_guard<std::mutex> lock(g_mu);
     SaveStateLocked();
+#if REFIX_STEAM_LINK
+    if (g_forwardDirty) {
+        g_forwardDirty = false;
+        refix::steamlink::ForwardStatStore();
+    }
+#endif
     return true;
 }
 
 void Flush() {
     std::lock_guard<std::mutex> lock(g_mu);
-    if (g_loaded && g_dirty) SaveStateLocked();
+    if (g_loaded && g_dirty) {
+        SaveStateLocked();
+    }
+#if REFIX_STEAM_LINK
+    if (g_loaded && g_forwardDirty) {
+        g_forwardDirty = false;
+        refix::steamlink::ForwardStatStore();
+    }
+#endif
+}
+
+void ReloadFromDisk() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (!g_loaded) return;
+    g_state.clear();
+    g_stats = StatState();
+    LoadStateLocked();
+    for (const uint32_t altAppId : refix::mods::GameAppIds()) {
+        if (altAppId == g_appId) continue;
+        const std::wstring altFolder = ReFixOverlay::StatsFolder(altAppId);
+        if (!altFolder.empty()) {
+            const std::wstring savedFile = g_stateFile;
+            g_stateFile = altFolder + L"\\stats.ini";
+            LoadStateLocked();
+            g_stateFile = savedFile;
+        }
+    }
+    g_dirty = false;
+    g_forwardDirty = false;
+    ++g_version;
 }
 
 void ResetAll(bool achievementsToo) {
@@ -668,6 +731,10 @@ void ResetAll(bool achievementsToo) {
     if (achievementsToo) g_state.clear();
     ++g_version;
     SaveStateLocked();
+#if REFIX_STEAM_LINK
+    g_forwardDirty = true;
+    refix::steamlink::ForwardStatResetAll(achievementsToo);
+#endif
 }
 
 uint32_t Count() {

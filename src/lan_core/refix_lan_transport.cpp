@@ -8,11 +8,40 @@
 #include <vector>
 #include <unordered_set>
 #include <string>
+#include <array>
 #include <cstdio>
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 
 namespace refix::lan {
+
+namespace {
+
+bool IsLocalHostInterfaceIp(uint32_t ipHostOrder) {
+    if (ipHostOrder == 0x7F000001u) return true;
+    static std::mutex s_ipMu;
+    static std::vector<uint32_t> s_localIps;
+    static ULONGLONG s_lastRefresh = 0;
+    const ULONGLONG now = GetTickCount64();
+    std::lock_guard<std::mutex> lock(s_ipMu);
+    if (s_lastRefresh == 0 || now - s_lastRefresh > 10000) {
+        s_lastRefresh = now;
+        s_localIps.clear();
+        ULONG size = 0;
+        if (GetIpAddrTable(nullptr, &size, FALSE) == ERROR_INSUFFICIENT_BUFFER && size > 0) {
+            std::vector<uint8_t> buf(size);
+            auto* table = reinterpret_cast<MIB_IPADDRTABLE*>(buf.data());
+            if (GetIpAddrTable(table, &size, FALSE) == NO_ERROR) {
+                for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+                    s_localIps.push_back(ntohl(table->table[i].dwAddr));
+                }
+            }
+        }
+    }
+    return std::find(s_localIps.begin(), s_localIps.end(), ipHostOrder) != s_localIps.end();
+}
+
+} // namespace
 
 uint32_t ResolveLocalIpv4(std::string* outReason) {
     // 1. Explicit configuration via environment variable (absolute user priority)
@@ -640,9 +669,9 @@ void LanTransport::ProcessInboundWirePacket(const uint8_t* buf, size_t len, cons
     }
 #if REFIX_STEAM_LINK
     // Steam online services bridge: LAN discovery reaches our Steam friends, and the copies of our friends'
-    // discovery that we repeat on the LAN are not taken back in (we already have those friends directly).
+    // discovery that we repeat on the LAN are not taken back in (even if received via another local NIC/VPN).
     if (!steamlink::IsVirtual(fromEp.ipv4)) {
-        const bool fromThisPc = fromEp.ipv4 == 0x7F000001 || fromEp.ipv4 == m_localDataEndpoint.ipv4;
+        const bool fromThisPc = (fromEp.ipv4 == m_localDataEndpoint.ipv4) || IsLocalHostInterfaceIp(fromEp.ipv4);
         if (fromThisPc && steamlink::IsBridgePort(fromEp.port)) return;
         if (hdr->msgType == static_cast<uint8_t>(MsgType::DiscoveryBeacon) ||
             hdr->msgType == static_cast<uint8_t>(MsgType::DiscoveryQuery) ||
@@ -1376,28 +1405,40 @@ void LanTransport::CheckRetransmissionsAndTimeouts() {
         for (auto& [peerId, state] : m_peerStates) {
             if (state.timedOut) continue;
 
+            size_t peerRetransmits = 0;
+            constexpr size_t kMaxPeerRetransmitsPerTick = 16;
+
             for (auto it = state.unackedOutbound.begin(); it != state.unackedOutbound.end();) {
+                if (peerRetransmits >= kMaxPeerRetransmitsPerTick) break;
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->sendTime).count();
-                if (elapsed > 100) { // 100ms retransmission timer
+#if REFIX_STEAM_LINK
+                const bool isVirtual = steamlink::IsVirtual(it->target.ipv4);
+#else
+                const bool isVirtual = false;
+#endif
+                const long long baseRtoMs = isVirtual ? 250LL : 120LL;
+                const uint32_t expShift = (std::min)(static_cast<uint32_t>(it->retries), 3u);
+                const long long rtoMs = (std::min)(2000LL, baseRtoMs << expShift);
+                if (elapsed > rtoMs) {
                     if (it->isSacked) {
                         // Advisory selective ACK: remote peer already holds it in outOfOrderInbound.
                         // Suppress redundant retransmission while awaiting cumulative ACK.
-                        // Bounded anti-stall: if cumulative ACK does not arrive within 1000ms, lapse
-                        // SACK suppression to guard against remote reneging or unrecovered loss.
-                        if (elapsed < 1000) {
+                        if (elapsed < 1200) {
                             ++it;
                             continue;
                         }
                         it->isSacked = false;
                     }
                     it->retries++;
-                    if (it->retries > 40) {
+                    const uint32_t maxRetries = isVirtual ? 24u : 40u;
+                    if (it->retries > maxRetries) {
                         timedOutPeers.emplace_back(peerId, it->target);
                         state.unackedOutbound.clear();
                         state.timedOut = true;
                         break;
                     }
                     it->sendTime = now;
+                    peerRetransmits++;
                     sockaddr_in sin{};
                     sin.sin_family = AF_INET;
                     sin.sin_addr.s_addr = htonl(it->target.ipv4);

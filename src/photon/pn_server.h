@@ -46,6 +46,7 @@ struct Environment {
     std::function<void(const std::string& room, bool open)> roomHosted; // host-side room created / closed
     std::function<std::map<std::string, PnProto18::Table>()> publicLobbies; // remote public rooms announced by peers; optional
     std::function<std::unique_ptr<PnShared::Link>()> startFusionShared; // Fusion Shared-mode server; optional
+    std::function<int32_t(uint64_t peerKey)> peerRttMs;                 // measured transport RTT (ms) for a peerKey; optional
     void (*log)(const char* fmt, ...) = nullptr; // printf-style; required
 };
 
@@ -64,6 +65,7 @@ public:
 
     // True when this machine currently hosts the room (any app id).
     bool HostsRoom(const std::string& name) const;
+    bool HasActiveRooms() const { return !m_rooms.empty(); }
 
     // Normalizes a room name to its canonical code by stripping region prefix (e.g. "eu#123456" -> "123456")
     // and voice suffix (e.g. "123456_voice" -> "123456").

@@ -207,6 +207,7 @@ void App::DrawOverlay(ImVec2 viewport) {
     if (!inviteOnly_) DrawSettingsModal(viewport);
     DrawOverlayCautionModals(viewport);
     DrawDisplayConfirmModal(viewport);
+    DrawLangRestartModal(viewport);
     popupOpenLastFrame_ = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
     ImGui::End();
     DrawToasts(viewport, false);
@@ -597,6 +598,22 @@ void App::DrawInvitePicker(ImVec2 viewport) {
     ui::EndCard();
 }
 
+float ToastHeight(const Toast& t) {
+    const float baseH = ToastHeight(t.kind);
+    if (t.kind != Toast::Kind::Info && t.kind != Toast::Kind::Invite) return baseH;
+    const ui::Fonts& f = ui::F();
+    if (!f.strong || !f.caption || !ImGui::GetCurrentContext()) return baseH;
+    const float textW = ui::S(kToastWidth) - ui::S(18) - ui::S(44) - ui::S(14) - ui::S(16);
+    const ImVec2 titleSz = t.title.empty() ? ImVec2(0, 0) : f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, textW, t.title.c_str());
+    const ImVec2 bodySz = t.body.empty() ? ImVec2(0, 0) : f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, textW, t.body.c_str());
+    const float gap = (!t.title.empty() && !t.body.empty()) ? ui::S(3) : 0.0f;
+    const float textH = titleSz.y + gap + bodySz.y;
+    if (t.kind == Toast::Kind::Invite) {
+        return std::max(baseH, ui::S(18) + textH + ui::S(12) + ui::S(36) + ui::S(14));
+    }
+    return std::max(baseH, textH + ui::S(32));
+}
+
 void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
     if (toasts_.empty()) return;
     const ImVec2 area = ToastSize();
@@ -617,7 +634,7 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
     for (auto it = toasts_.rbegin(); it != toasts_.rend(); ++it, ++index) {
         Toast& t = *it;
         const bool invite = t.kind == Toast::Kind::Invite;
-        const float h = ToastHeight(t.kind);
+        const float h = ToastHeight(t);
         float a = std::min(1.0f, (float)(now - t.born) / kToastFadeInMs);
         if (t.closing) a = std::min(a, 1.0f - std::min(1.0f, (float)(now - t.closingAt) / kToastFadeMs));
         const float slide = (1.0f - a) * ui::S(28);
@@ -640,6 +657,11 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             const std::string s = ui::Ellipsize(text, tw);
             ImGui::PopFont();
             dl->AddText(font, font->FontSize, ImVec2(tx, y), ui::Fade(col, a), s.c_str());
+        };
+        auto wrapped = [&](ImFont* font, float y, ImU32 col, const std::string& text) -> float {
+            if (text.empty()) return 0.0f;
+            dl->AddText(font, font->FontSize, ImVec2(tx, y), ui::Fade(col, a), text.c_str(), nullptr, tw);
+            return font->CalcTextSizeA(font->FontSize, FLT_MAX, tw, text.c_str()).y;
         };
 
         if (t.kind == Toast::Kind::Achievement) {
@@ -675,8 +697,13 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             if (from) av = PlayerAvatar(*from);
             else av.stock = (int)(t.invite.from % (uint64_t)ui::StockCount());
             ui::DrawAvatar(dl, ac, r, av);
-            line(f.strong, ac.y - f.strong->FontSize - ui::S(1), ui::color::Text, t.title);
-            line(f.caption, ac.y + ui::S(2), ui::color::Muted, t.body);
+            const float titleH = t.title.empty() ? 0.0f : f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, tw, t.title.c_str()).y;
+            const float bodyH = t.body.empty() ? 0.0f : f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, tw, t.body.c_str()).y;
+            const float gap = (!t.title.empty() && !t.body.empty()) ? ui::S(3) : 0.0f;
+            float ty = p0.y + ui::S(18);
+            if (titleH + gap + bodyH < r * 2) ty = ac.y - (titleH + gap + bodyH) * 0.5f;
+            wrapped(f.strong, ty, ui::color::Text, t.title);
+            wrapped(f.caption, ty + titleH + gap, ui::color::Muted, t.body);
             const ImVec2 bs(ui::S(118), ui::S(36));
             ImGui::SetCursorScreenPos(ImVec2(p1.x - ui::S(16) - bs.x * 2 - ui::S(8), p1.y - ui::S(14) - bs.y));
             if (ui::SecondaryButton(i18n::T("Ignore", "Ignorar"), bs) && !t.closing) { t.closing = true; t.closingAt = now; }
@@ -690,11 +717,13 @@ void App::DrawToasts(ImVec2 viewport, bool ownWindow) {
             }
         } else {
             dl->AddCircleFilled(ac, r, ui::Fade(ui::color::Accent, 0.16f * a), 32);
-            const ImVec2 gs = f.heading->CalcTextSizeA(f.heading->FontSize, FLT_MAX, 0, ui::icon::Info);
-            dl->AddText(f.heading, f.heading->FontSize, ImVec2(ac.x - gs.x * 0.5f, ac.y - gs.y * 0.5f),
-                        ui::Fade(ui::color::Accent, a), ui::icon::Info);
-            line(f.strong, ac.y - f.strong->FontSize - ui::S(1), ui::color::Text, t.title);
-            line(f.caption, ac.y + ui::S(2), ui::color::Muted, t.body);
+            ui::GlyphCentered(dl, f.heading, f.heading->FontSize, ac, ui::Fade(ui::color::Accent, a), ui::icon::Info);
+            const float titleH = t.title.empty() ? 0.0f : f.strong->CalcTextSizeA(f.strong->FontSize, FLT_MAX, tw, t.title.c_str()).y;
+            const float bodyH = t.body.empty() ? 0.0f : f.caption->CalcTextSizeA(f.caption->FontSize, FLT_MAX, tw, t.body.c_str()).y;
+            const float gap = (!t.title.empty() && !t.body.empty()) ? ui::S(3) : 0.0f;
+            float ty = p0.y + (h - (titleH + gap + bodyH)) * 0.5f;
+            wrapped(f.strong, ty, ui::color::Text, t.title);
+            wrapped(f.caption, ty + titleH + gap, ui::color::Muted, t.body);
         }
         // A click anywhere else on a notification dismisses it.
         if (!invite && !t.closing && ImGui::IsMouseHoveringRect(p0, p1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {

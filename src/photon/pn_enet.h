@@ -29,6 +29,7 @@ public:
     bool IsConnected() const { return m_connected && !m_closed; }
     bool IsClosed() const { return m_closed; }
     uint32_t LastReceiveMs() const { return m_lastReceiveMs; }
+    int32_t RttMs() const { return m_rttMs > 0 ? (int32_t)m_rttMs : 1; }
 
 private:
     struct Outgoing {
@@ -74,6 +75,7 @@ private:
     uint32_t m_lastReceiveMs = 0;
     uint32_t m_lastSendMs = 0;
     uint32_t m_nowMs = 0;
+    uint32_t m_rttMs = 0;
 
     std::vector<std::string> m_acks;
     std::deque<std::string> m_unreliableQueue;

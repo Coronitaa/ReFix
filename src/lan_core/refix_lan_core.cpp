@@ -159,16 +159,12 @@ public:
             m_byEndpoint[info.endpoint] = info.peerId;
         }
 
-        // Collision resolution for new SteamID: if another peer held it, disassociate it
+        // Multiple instances can share the same Steam tunnel account on one PC or LAN;
+        // keep each peer's SteamID intact and keep the first-registered peer in m_bySteamId.
         if (info.externalId.numericId != 0) {
-            auto collSteam = m_bySteamId.find(info.externalId.numericId);
-            if (collSteam != m_bySteamId.end() && collSteam->second != info.peerId) {
-                auto otherIt = m_peers.find(collSteam->second);
-                if (otherIt != m_peers.end()) {
-                    otherIt->second.externalId.numericId = 0;
-                }
+            if (m_bySteamId.find(info.externalId.numericId) == m_bySteamId.end()) {
+                m_bySteamId[info.externalId.numericId] = info.peerId;
             }
-            m_bySteamId[info.externalId.numericId] = info.peerId;
         }
 
         // Collision resolution for new PUID: if another peer held it, disassociate it
@@ -218,16 +214,10 @@ public:
             }
         }
 
-        // Collision handling for SteamID
         if (extId.numericId != 0) {
-            auto collSteam = m_bySteamId.find(extId.numericId);
-            if (collSteam != m_bySteamId.end() && collSteam->second != peerId) {
-                auto otherIt = m_peers.find(collSteam->second);
-                if (otherIt != m_peers.end()) {
-                    otherIt->second.externalId.numericId = 0;
-                }
+            if (m_bySteamId.find(extId.numericId) == m_bySteamId.end()) {
+                m_bySteamId[extId.numericId] = peerId;
             }
-            m_bySteamId[extId.numericId] = peerId;
         }
 
         // Collision handling for PUID
