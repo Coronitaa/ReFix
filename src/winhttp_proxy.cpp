@@ -226,19 +226,23 @@ static bool IsWrapperLauncherProcess(const std::string& exePath) {
     return IsHelperOrToolProcess(exePath);
 }
 
-static void TerminateProcessesByName(const wchar_t* targetName, DWORD skipPid) {
+// Ends other processes running this very executable (same full path), never other games' copies.
+static void TerminateOtherInstancesOfSelf(DWORD selfPid) {
+    wchar_t selfPath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(NULL, selfPath, MAX_PATH)) return;
+    const wchar_t* selfName = wcsrchr(selfPath, L'\\');
+    selfName = selfName ? selfName + 1 : selfPath;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return;
     PROCESSENTRY32W pe{ sizeof(pe) };
     for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
-        if (pe.th32ProcessID == skipPid || pe.th32ProcessID == 0) continue;
-        if (_wcsicmp(pe.szExeFile, targetName) == 0) {
-            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
-            if (h) {
-                TerminateProcess(h, 0);
-                CloseHandle(h);
-            }
-        }
+        if (pe.th32ProcessID == selfPid || _wcsicmp(pe.szExeFile, selfName) != 0) continue;
+        HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!h) continue;
+        wchar_t path[MAX_PATH] = {};
+        DWORD len = MAX_PATH;
+        if (QueryFullProcessImageNameW(h, 0, path, &len) && _wcsicmp(path, selfPath) == 0) TerminateProcess(h, 0);
+        CloseHandle(h);
     }
     CloseHandle(snap);
 }
@@ -266,18 +270,16 @@ static bool WindowHasTextMatch(HWND hwnd, const wchar_t* needle) {
 
 static bool GetProcessExeNameByPid(DWORD pid, wchar_t* outName, size_t maxChars) {
     outName[0] = L'\0';
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32W pe{ sizeof(pe) };
-    bool found = false;
-    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
-        if (pe.th32ProcessID == pid) {
-            wcsncpy_s(outName, maxChars, pe.szExeFile, _TRUNCATE);
-            found = true;
-            break;
-        }
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return false;
+    wchar_t path[MAX_PATH] = {};
+    DWORD len = MAX_PATH;
+    const bool found = QueryFullProcessImageNameW(h, 0, path, &len) != FALSE;
+    CloseHandle(h);
+    if (found) {
+        const wchar_t* name = wcsrchr(path, L'\\');
+        wcsncpy_s(outName, maxChars, name ? name + 1 : path, _TRUNCATE);
     }
-    CloseHandle(snap);
     return found;
 }
 
@@ -385,12 +387,9 @@ static DWORD WINAPI MsStoreLaunchWatchdogThread(LPVOID param) {
     delete args;
 
     const DWORD selfPid = GetCurrentProcessId();
-    if (isHelper) {
-        // Clean lingering Steam helper or stale gamelaunchhelper processes from earlier runs.
-        TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
-        TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
-        TerminateProcessesByName(L"gamelaunchhelper.exe", selfPid);
-    }
+    // A launcher of this same game left from an earlier attempt keeps the package "running" (0x800705b4).
+    // Steam helpers are not touched: each one exits with its own game, and another game's helper is not ours.
+    if (isHelper) TerminateOtherInstancesOfSelf(selfPid);
 
     HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IUIAutomation* pAuto = nullptr;
@@ -428,11 +427,6 @@ static DWORD WINAPI MsStoreLaunchWatchdogThread(LPVOID param) {
         }, reinterpret_cast<LPARAM>(&ctx));
 
         if (!ctx.foundHwnd) continue;
-
-        if (isHelper) {
-            TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
-            TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
-        }
 
         // Terminating GamingServicesUI.exe lets GameLaunchHelper.exe unblock and boot the game
         // without aborting the launch sequence.

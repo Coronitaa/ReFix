@@ -1024,6 +1024,7 @@ static int WSAAPI Hook_sendto(SOCKET s, const char* buf, int len, int flags,
             if (!ReFix::NetworkModeManager::IsInternetEgressAllowed() && !IsAllowedLanEndpoint(effectiveTo) && !IsPhotonEgressAllowed(destPort)) {
                 refix::lan::LanFirewall::Get().RecordBlockedEgress();
                 uint64_t totalBlocked = refix::lan::LanFirewall::Get().GetBlockedEgressCount();
+                if ((totalBlocked & (totalBlocked - 1)) == 0)  // 1, 2, 4, 8...: not one log line per dropped packet
                 SteamP2PHook::Log("[Internet-Zero] BLOCKED sendto to external endpoint %u.%u.%u.%u:%u (synthetic_success, total_blocked=%llu)",
                     (destIP >> 24) & 0xFF, (destIP >> 16) & 0xFF, (destIP >> 8) & 0xFF, destIP & 0xFF, destPort, totalBlocked);
                 return len; // Synthetic success: drop packet under Internet-Zero

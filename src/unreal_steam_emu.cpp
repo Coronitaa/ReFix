@@ -917,16 +917,21 @@ namespace UnrealSteamEmu {
     static std::map<uint64_t, QueuedCallResultItem> g_callResultMap;
     static bool g_bManualDispatchUsed = false;
 
-    static void PushManualCallback(const QueuedCallbackItem& item, bool atFront = false) {
+    // Until the game uses manual dispatch nothing drains these queues: keep only the newest entries.
+    static void PushManualCallbackTo(std::vector<QueuedCallbackItem>& q, const QueuedCallbackItem& item, bool atFront = false) {
         constexpr size_t kIdleManualQueueCap = 256;
-        if (!g_bManualDispatchUsed && g_manualCallbackQueue.size() >= kIdleManualQueueCap) {
-            g_manualCallbackQueue.erase(g_manualCallbackQueue.begin());
+        if (!g_bManualDispatchUsed && q.size() >= kIdleManualQueueCap) {
+            q.erase(q.begin());
         }
         if (atFront) {
-            g_manualCallbackQueue.insert(g_manualCallbackQueue.begin(), item);
+            q.insert(q.begin(), item);
         } else {
-            g_manualCallbackQueue.push_back(item);
+            q.push_back(item);
         }
+    }
+
+    static void PushManualCallback(const QueuedCallbackItem& item, bool atFront = false) {
+        PushManualCallbackTo(g_manualCallbackQueue, item, atFront);
     }
 
     void RegisterCallback(CCallbackBase* pCallback, int iCallback) {
@@ -1056,7 +1061,7 @@ namespace UnrealSteamEmu {
                 QueuedCallbackItem sItem = item;
                 sItem.isGameServer = true;
                 if (delaySeconds <= 0.0) {
-                    g_manualServerCallbackQueue.push_back(sItem);
+                    PushManualCallbackTo(g_manualServerCallbackQueue, sItem);
                 }
                 g_callbackQueue.push_back(sItem);
             }
@@ -1072,7 +1077,7 @@ namespace UnrealSteamEmu {
         item.isGameServer = true;
         if (delaySeconds <= 0.0) {
             item.manualQueued = true;
-            g_manualServerCallbackQueue.push_back(item);
+            PushManualCallbackTo(g_manualServerCallbackQueue, item);
         }
         g_callbackQueue.push_back(item);
 
@@ -3559,7 +3564,7 @@ namespace UnrealSteamEmu {
                     }
                     if (!it->manualQueued) {
                         it->manualQueued = true;
-                        g_manualServerCallbackQueue.push_back(*it);
+                        PushManualCallbackTo(g_manualServerCallbackQueue, *it);
                     }
                     it = g_callbackQueue.erase(it);
                 } else if (!it->isGameServer && now >= it->triggerTime &&
@@ -3626,7 +3631,7 @@ namespace UnrealSteamEmu {
                     }
                     if (!it->manualQueued) {
                         it->manualQueued = true;
-                        g_manualServerCallbackQueue.push_back(*it);
+                        PushManualCallbackTo(g_manualServerCallbackQueue, *it);
                     }
                     it = g_callbackQueue.erase(it);
                 } else {

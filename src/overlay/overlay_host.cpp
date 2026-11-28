@@ -925,7 +925,7 @@ DWORD WINAPI HostThread(LPVOID) {
             return 0;
         }
         Render(gw, padState);
-        MsgWaitForMultipleObjects(0, nullptr, FALSE, 2, QS_ALLINPUT);
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, g_layered ? 16 : 2, QS_ALLINPUT);  // layered fallback has no vsync: ~60 fps
     }
     ResumeGameRawInput();
     if (g_hwnd && IsWindow(g_hwnd)) DestroyWindow(g_hwnd);

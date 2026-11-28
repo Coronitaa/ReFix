@@ -38,6 +38,7 @@
 #include "steam_link/steam_link.h"
 #endif
 #include "overlay/save_swap.h"
+#include "overlay/achievements.h"
 #if REFIX_LAN_EDITION
 #include "mods/mod_host.h"
 #endif
@@ -2040,11 +2041,13 @@ void ReFixLog(const char* fmt, ...) {
 
     if (!g_enableLogAllowed) return;
 
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::string logPath(exePath);
-    size_t pos = logPath.find_last_of("\\/");
-    if (pos != std::string::npos) logPath = logPath.substr(0, pos + 1) + "ReFix.log";
+    static const std::string logPath = [] {
+        char exePath[MAX_PATH] = {};
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        std::string p(exePath);
+        size_t pos = p.find_last_of("\\/");
+        return (pos != std::string::npos) ? p.substr(0, pos + 1) + "ReFix.log" : std::string("ReFix.log");
+    }();
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -2076,8 +2079,17 @@ void ReFixLog(const char* fmt, ...) {
     HANDLE hf = CreateFileA(logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hf == INVALID_HANDLE_VALUE) return;
+    // A log that is never trimmed grows for the whole session: past the cap only one notice is written.
+    constexpr LONGLONG kLogCapBytes = 64LL * 1024 * 1024;
+    LARGE_INTEGER size{};
     DWORD written = 0;
-    WriteFile(hf, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    if (!GetFileSizeEx(hf, &size) || size.QuadPart < kLogCapBytes) {
+        WriteFile(hf, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
+    } else {
+        static std::atomic<bool> s_capNoted{ false };
+        static const char kCapLine[] = "[ReFix] ReFix.log reached 64 MB; further lines are dropped. Delete it to log again.\n";
+        if (!s_capNoted.exchange(true)) WriteFile(hf, kCapLine, sizeof(kCapLine) - 1, &written, nullptr);
+    }
     CloseHandle(hf);
 }
 
@@ -3630,50 +3642,6 @@ extern "C" __declspec(dllexport) bool __cdecl SteamAPI_ISteamRemoteStorage_GetQu
     return true;
 }
 
-// =============================================================================
-// REFIX IN-GAME DEBUG CONSOLE TOGGLE (VK_INSERT / VK_F1)
-// =============================================================================
-static bool g_ConsoleAllocated = false;
-static bool g_ConsoleVisible = false;
-static DWORD g_LastToggleTime = 0;
-
-static void ToggleConsoleWindow() {
-    DWORD now = GetTickCount();
-    if (now - g_LastToggleTime < 300) return;
-    g_LastToggleTime = now;
-
-    if (!g_ConsoleAllocated) {
-        AllocConsole();
-        SetConsoleTitleA("ReFix Internal Debug Console");
-        FILE* fDummy;
-        freopen_s(&fDummy, "CONOUT$", "w", stdout);
-        freopen_s(&fDummy, "CONOUT$", "w", stderr);
-        freopen_s(&fDummy, "CONIN$", "r", stdin);
-        g_ConsoleAllocated = true;
-        g_ConsoleVisible = true;
-        printf("=========================================\n");
-        printf(" ReFix Debug Console (Valve / Goldberg LAN)\n");
-        printf("=========================================\n");
-        return;
-    }
-
-    HWND hCons = GetConsoleWindow();
-    if (!hCons) return;
-    g_ConsoleVisible = !g_ConsoleVisible;
-    ShowWindow(hCons, g_ConsoleVisible ? SW_SHOW : SW_HIDE);
-}
-
-static std::atomic<bool> g_hotkeyRunning{ true };
-static DWORD WINAPI ConsoleHotkeyThread(LPVOID) {
-    while (g_hotkeyRunning) {
-        Sleep(50);
-        if (!g_config.enableConsole) continue;
-        if ((GetAsyncKeyState(VK_INSERT) & 0x8000) || (GetAsyncKeyState(VK_F1) & 0x8000)) {
-            ToggleConsoleWindow();
-        }
-    }
-    return 0;
-}
 
 // =============================================================================
 // CS:GO Panorama UI Hook (Fixes mainmenu.js ItemInfo reference error & enables Right Sidebar)
@@ -3804,10 +3772,6 @@ static DWORD WINAPI Source_PanoramaHookThread(LPVOID) {
         }
     }
     return 0;
-}
-
-static void StartConsoleHotkeyMonitor() {
-    CreateThread(NULL, 0, ConsoleHotkeyThread, NULL, 0, NULL);
 }
 
 static void* Hooked_ISteamMatchmakingServers_RequestInternetServerList(
@@ -5381,8 +5345,58 @@ static bool IsHelperOrToolProcess() {
     return false;
 }
 
+// Microsoft Store (GDK) games: gameplatformservices.dll makes a synchronous COM call to the app-state broker from
+// its DllMain during ExitProcess, when no RPC thread is left to deliver the reply, so the process never ends (same
+// with no ReFix at all). Once the game asks to exit, and while the other threads still run, ReFix closes the GDK
+// runtime itself (XGameRuntimeUninitialize) so Gaming Services learns the game ended; without that, the next launch
+// is refused as "already running". Then it saves its own state and ends the process with the game's exit code.
+using FnRtlExitUserProcess = void(NTAPI*)(LONG);
+static FnRtlExitUserProcess g_origRtlExitUserProcess = nullptr;
+
+static void UninitializeGdkRuntime() {
+    using FnUninit = void(WINAPI*)();
+    HMODULE rt = GetModuleHandleW(L"xgameruntime.dll");
+    auto uninit = rt ? reinterpret_cast<FnUninit>(GetProcAddress(rt, "UninitializeApiImpl")) : nullptr;
+    if (!uninit) return;
+    // On its own thread: the broker call must never be able to block the exit.
+    HANDLE th = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD { reinterpret_cast<FnUninit>(p)(); return 0; },
+                             reinterpret_cast<LPVOID>(uninit), 0, nullptr);
+    if (!th) return;
+    const DWORD wait = WaitForSingleObject(th, 5000);
+    CloseHandle(th);
+    ReFixLog("[Exit] GDK runtime uninitialized%s", wait == WAIT_OBJECT_0 ? "" : " (timed out after 5 s)");
+}
+
+static void NTAPI Hook_RtlExitUserProcess(LONG exitStatus) {
+    if (GetModuleHandleW(L"gameplatformservices.dll")) {
+        ReFixLog("[Exit] GDK runtime loaded: ending the process directly (exit code %ld)", exitStatus);
+        UninitializeGdkRuntime();
+#if REFIX_LAN_EDITION
+#if REFIX_STEAM_LINK
+        refix::steamlink::ForceTerminateHelpersOnExit();
+#endif
+        refix::overlay::ach::Flush();
+#endif
+        TerminateProcess(GetCurrentProcess(), (UINT)exitStatus);
+    }
+    g_origRtlExitUserProcess(exitStatus);
+}
+
+static void InstallGdkExitHook() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        void* target = (void*)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlExitUserProcess");
+        MH_Initialize();
+        if (!target || MH_CreateHook(target, (void*)&Hook_RtlExitUserProcess, (void**)&g_origRtlExitUserProcess) != MH_OK ||
+            MH_EnableHook(target) != MH_OK) {
+            ReFixLog("[Exit] Could not hook RtlExitUserProcess");
+        }
+    });
+}
+
 static void ReFixInitializePre() {
     if (IsHelperOrToolProcess()) return;
+    InstallGdkExitHook();
     ApplySteamEnv();
     ReFix_InstallPortableXAudio2();  // before the engine starts its sound system
     InstallD3D9CompatHook();
@@ -6168,7 +6182,6 @@ extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
     ReFixPhotonP2P::Shutdown();
     SteamNetCompat::Shutdown();
     g_authDispatchRunning.store(false, std::memory_order_relaxed);
-    g_hotkeyRunning.store(false, std::memory_order_relaxed);
     SteamP2PHook::Uninstall();
     {
         std::lock_guard<std::mutex> lg(g_relayCallbackMutex);
@@ -7652,8 +7665,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
             if (ReFix_ModuleDedupeDetach(hModule, lpReserved != nullptr)) return TRUE;
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
-            g_hotkeyRunning.store(false, std::memory_order_relaxed);
-            // Skip thread waits and MinHook teardown during process termination (OS loader lock).
+                    // Skip thread waits and MinHook teardown during process termination (OS loader lock).
             if (lpReserved == nullptr) {
                 SteamP2PHook::Uninstall();
 #if REFIX_LAN_EDITION

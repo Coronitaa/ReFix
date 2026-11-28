@@ -843,7 +843,9 @@ static DWORD WINAPI ConsoleHotkeyThread(LPVOID lpParam) {
 }
 
 static void StartConsoleHotkeyMonitor() {
-    CreateThread(NULL, 0, ConsoleHotkeyThread, NULL, 0, NULL);
+    if (!g_enableConsoleAllowed && !g_enableServerBrowserAllowed) return;  // no hotkey to watch: no polling thread
+    HANDLE h = CreateThread(NULL, 0, ConsoleHotkeyThread, NULL, 0, NULL);
+    if (h) CloseHandle(h);
 }
 
 extern "C" __declspec(dllexport) int ReFix() {
