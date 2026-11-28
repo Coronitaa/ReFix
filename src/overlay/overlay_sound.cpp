@@ -149,9 +149,11 @@ void Play(Cue cue) {
 }
 
 void SetProcessAudioMute(bool mute) {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Balanced: this can run on the game's own thread (from SteamAPI_Init). A COM apartment left behind there made
+    // games that later ask that thread for an STA (Unreal's CoInitializeEx check at startup) quit at once.
+    const HRESULT comInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IMMDeviceEnumerator* enumerator = nullptr;
-    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&enumerator);
     if (SUCCEEDED(hr) && enumerator) {
         IMMDevice* device = nullptr;
         hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
@@ -191,6 +193,7 @@ void SetProcessAudioMute(bool mute) {
         }
         enumerator->Release();
     }
+    if (SUCCEEDED(comInit)) CoUninitialize();
 }
 
 } // namespace refix::overlay::sound

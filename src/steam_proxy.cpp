@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include <thread>
 #include <mutex>
+#include <set>
+#include <intrin.h>
 #include "upnp_firewall.h"
 #include "steam_p2p_hook.h"
 #include "unreal_detect.h"
@@ -4037,13 +4039,23 @@ static void HookInterfaceByVersion(void* iface, const char* pszVersion) {
     }
 }
 
+// Logs each interface version once, with whether it was served: a game that quits right after SteamAPI_Init
+// usually asked for one ReFix did not serve.
+static void* LogInterfaceOnce(const char* how, const char* version, void* iface) {
+    static std::mutex mu;
+    static std::set<std::string> seen;
+    std::lock_guard<std::mutex> lock(mu);
+    if (seen.insert(version).second) ReFixLog("[Interfaces] %s '%s' -> %s", how, version, iface ? "served" : "NULL");
+    return iface;
+}
+
 extern "C" __declspec(dllexport) void* SteamInternal_FindOrCreateUserInterface(uint32_t hSteamUser, const char* pszVersion) {
     if (!pszVersion) return nullptr;
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
-    
+
     // In LAN/offline mode, strictly route through LanSteamProvider (BLOQUEANTE 9 & 10)
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        return provider->FindOrCreateUserInterface(hSteamUser, pszVersion);
+        return LogInterfaceOnce("user", pszVersion, provider->FindOrCreateUserInterface(hSteamUser, pszVersion));
     }
 
     // In Online mode, query provider (which delegates to original Valve DLL)
@@ -4062,7 +4074,7 @@ extern "C" __declspec(dllexport) void* SteamInternal_CreateInterface(const char*
     auto provider = ReFix::ProviderFactory::GetSteamProvider();
     
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        return provider->CreateInterface(pszVersion);
+        return LogInterfaceOnce("create", pszVersion, provider->CreateInterface(pszVersion));
     }
 
     // In Online mode, query provider (which delegates to original Valve DLL)
@@ -6171,7 +6183,19 @@ static void SafeBackendShutdown() {
 }
 
 extern "C" __declspec(dllexport) void SteamAPI_Shutdown() {
-    ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state");
+    {
+        // Who shut Steam down: a game that quits right after SteamAPI_Init is diagnosed from this caller.
+        HMODULE caller = nullptr;
+        void* ret = _ReturnAddress();
+        char mod[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(ret), &caller)) {
+            GetModuleFileNameA(caller, mod, MAX_PATH);
+        }
+        const char* base = strrchr(mod, '\\');
+        ReFixLog("SteamAPI_Shutdown called - cleaning up proxy state (caller %s+0x%llx)", base ? base + 1 : mod,
+                 (unsigned long long)((uintptr_t)ret - (uintptr_t)caller));
+    }
 #if REFIX_LAN_EDITION
     ReFixIL2CPP::Shutdown();
 #endif
@@ -6285,7 +6309,8 @@ extern "C" __declspec(dllexport) void* SteamInternal_ContextInit(void* pContextI
 
 extern "C" __declspec(dllexport) void* SteamInternal_FindOrCreateGameServerInterface(int32_t hUser, const char* pszVersion) {
     if (!ReFix::NetworkModeManager::IsOnline()) {
-        return UnrealSteamEmu::FindOrCreateGameServerInterface(hUser, pszVersion);
+        void* iface = UnrealSteamEmu::FindOrCreateGameServerInterface(hUser, pszVersion);
+        return pszVersion ? LogInterfaceOnce("server", pszVersion, iface) : iface;
     }
     if (EnsureOriginal()) {
         typedef void* (*fn_t)(int32_t, const char*);
