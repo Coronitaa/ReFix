@@ -6454,7 +6454,13 @@ namespace UnrealSteamEmu {
 
     public:
         CSteamUserStatsEmu() = default;
-        ~CSteamUserStatsEmu() { Flush(); }
+        ~CSteamUserStatsEmu() {
+            using FnRtlShutdown = BOOLEAN(NTAPI*)();
+            static FnRtlShutdown pShutdown = reinterpret_cast<FnRtlShutdown>(
+                GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress"));
+            if (pShutdown && pShutdown()) return;
+            Flush();
+        }
 
         void Flush() { refix::overlay::ach::Flush(); }
 

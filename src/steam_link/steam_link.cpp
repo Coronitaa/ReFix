@@ -377,6 +377,9 @@ std::wstring BuildCleanHostEnv() {
         }
         FreeEnvironmentStringsW(block);
     }
+    env.append(L"REFIX_HELPER_PROCESS=1\0", 23);
+    env.append(L"REFIX_NO_BOOTSTRAP=1\0", 21);
+    env.append(L"REFIX_NO_OVERLAY=1\0", 19);
     env.push_back(L'\0');
     return env;
 }

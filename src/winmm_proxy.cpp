@@ -504,16 +504,36 @@ static DWORD WINAPI WinmmExtraDllsThread(LPVOID param) {
     return 0;
 }
 
+static bool IsHelperOrToolProcess(const std::string& exeName) {
+    char envBuf[16] = {};
+    if (GetEnvironmentVariableA("REFIX_HELPER_PROCESS", envBuf, sizeof(envBuf)) > 0 && envBuf[0] == '1') {
+        return true;
+    }
+    if (GetEnvironmentVariableA("REFIX_NO_BOOTSTRAP", envBuf, sizeof(envBuf)) > 0 && envBuf[0] == '1') {
+        return true;
+    }
+    std::string lowerName = exeName;
+    for (char& c : lowerName) c = (char)::tolower((unsigned char)c);
+
+    return lowerName.find("refix_steamhost") != std::string::npos ||
+           lowerName == "refixfusionshared.exe" ||
+           lowerName == "refixmod.exe" ||
+           lowerName == "gamelaunchhelper.exe" ||
+           lowerName == "eosbootstrapper.exe" ||
+           lowerName == "unitycrashhandler64.exe" ||
+           lowerName == "unitycrashhandler.exe" ||
+           lowerName == "crashpad_handler.exe" ||
+           lowerName.find("crashhandler") != std::string::npos ||
+           lowerName.find("crashpad") != std::string::npos;
+}
+
 static void LoadAndApplyConfig() {
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
     std::string iniPath(exePath);
     size_t slashPos = iniPath.find_last_of("\\/");
     std::string exeName = (slashPos != std::string::npos) ? iniPath.substr(slashPos + 1) : iniPath;
-    if (_stricmp(exeName.c_str(), "gamelaunchhelper.exe") == 0 ||
-        _stricmp(exeName.c_str(), "eosbootstrapper.exe") == 0 ||
-        _stricmp(exeName.c_str(), "unitycrashhandler64.exe") == 0 ||
-        _stricmp(exeName.c_str(), "crashpad_handler.exe") == 0) {
+    if (IsHelperOrToolProcess(exeName)) {
         return;
     }
     std::string baseDir = "";

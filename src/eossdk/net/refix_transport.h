@@ -55,6 +55,10 @@ public:
 
 private:
     Transport() = default;
+    ~Transport() {
+        m_running.store(false, std::memory_order_release);
+        if (m_thread.joinable()) m_thread.detach();
+    }
     void ReceiveLoop();
 
     std::atomic<bool> m_running{false};

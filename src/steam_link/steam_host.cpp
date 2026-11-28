@@ -1679,6 +1679,9 @@ int Run(int argc, wchar_t** argv) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    SetEnvironmentVariableW(L"REFIX_HELPER_PROCESS", L"1");
+    SetEnvironmentVariableW(L"REFIX_NO_BOOTSTRAP", L"1");
+    SetEnvironmentVariableW(L"REFIX_NO_OVERLAY", L"1");
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     const int rc = argv ? Run(argc, argv) : 2;

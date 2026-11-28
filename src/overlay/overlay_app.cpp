@@ -513,7 +513,6 @@ void App::HandleSteamAccountChanged(uint64_t newSteamId) {
         settings::SetSteamOnline(false);
         settings::SetOfficialServersActive(false);
         steamlink::SetMaskAppId(0);
-        steamlink::ProbeLicenses(curApp, settings::GetBridgeSettings().customAppId);
         Post([wasOfficial] {
             if (wasOfficial) {
                 App::Get().langRestartPending_ = true;

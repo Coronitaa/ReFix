@@ -5357,7 +5357,32 @@ static void CapturePersonaName() {
 extern "C" void SteamP2PHook_ForceResolve();
 static void InstallD3D9CompatHook();
 
+static bool IsHelperOrToolProcess() {
+    char envBuf[16] = {};
+    if (GetEnvironmentVariableA("REFIX_HELPER_PROCESS", envBuf, sizeof(envBuf)) > 0 && envBuf[0] == '1') {
+        return true;
+    }
+    if (GetEnvironmentVariableA("REFIX_NO_BOOTSTRAP", envBuf, sizeof(envBuf)) > 0 && envBuf[0] == '1') {
+        return true;
+    }
+    char exePath[MAX_PATH] = {};
+    if (GetModuleFileNameA(NULL, exePath, MAX_PATH) > 0) {
+        std::string s(exePath);
+        for (char& c : s) c = (char)::tolower((unsigned char)c);
+        if (s.find("refix_steamhost") != std::string::npos ||
+            s.find("gamelaunchhelper") != std::string::npos ||
+            s.find("refixmod") != std::string::npos ||
+            s.find("refixfusionshared") != std::string::npos ||
+            s.find("crashpad") != std::string::npos ||
+            s.find("crashhandler") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void ReFixInitializePre() {
+    if (IsHelperOrToolProcess()) return;
     ApplySteamEnv();
     ReFix_InstallPortableXAudio2();  // before the engine starts its sound system
     InstallD3D9CompatHook();
@@ -5576,6 +5601,7 @@ static void EnsureReFixPostInitialized() {
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_Init() {
+    if (IsHelperOrToolProcess()) return false;
     ReFixInitializePre();
     ReFixLog("SteamAPI_Init called");
     if (!ReFix::NetworkModeManager::IsOnline()) {
@@ -5614,6 +5640,7 @@ extern "C" __declspec(dllexport) bool SteamAPI_Init() {
 }
 
 extern "C" __declspec(dllexport) bool SteamAPI_InitSafe() {
+    if (IsHelperOrToolProcess()) return false;
     ReFixInitializePre();
     ReFixLog("SteamAPI_InitSafe called");
     if (!ReFix::NetworkModeManager::IsOnline()) {
@@ -7599,6 +7626,7 @@ static void CustomInvalidParameterHandler(
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
         case DLL_PROCESS_ATTACH:
+            if (IsHelperOrToolProcess()) return TRUE;
             // One emulator per process: a second ReFix copy only redirects its exports to the primary.
             if (ReFix_ModuleDedupeAttach(hModule)) return TRUE;
             ReFix_InstallCrashLog();
@@ -7619,6 +7647,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             // In Online mode, EnsureOriginal is explicitly invoked during normal initialization.
             break;
         case DLL_PROCESS_DETACH:
+#if REFIX_LAN_EDITION && REFIX_STEAM_LINK
+            refix::steamlink::ForceTerminateHelpersOnExit();
+#endif
             if (ReFix_ModuleDedupeDetach(hModule, lpReserved != nullptr)) return TRUE;
             g_authDispatchRunning.store(false, std::memory_order_relaxed);
             g_hotkeyRunning.store(false, std::memory_order_relaxed);
@@ -7629,9 +7660,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                 refix::mods::ModHost::GetInstance().Shutdown();
 #endif
             }
-#if REFIX_LAN_EDITION && REFIX_STEAM_LINK
-            refix::steamlink::ForceTerminateHelpersOnExit();
-#endif
             // Note: DO NOT call ReFixNet::UnmapUPnPPort (COM initialization) or FreeLibrary
             // during DLL_PROCESS_DETACH. Calling COM/FreeLibrary in DllMain violates loader lock
             // and causes crashes on process exit. OS cleans up process memory safely.

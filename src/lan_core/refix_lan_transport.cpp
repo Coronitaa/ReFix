@@ -271,7 +271,19 @@ LanTransport::LanTransport() {
 }
 
 LanTransport::~LanTransport() {
-    Stop();
+    // Avoid blocking mutexes or joining threads under the Windows OS loader lock during ExitProcess.
+    m_running.store(false, std::memory_order_release);
+    if (m_reactorThread.joinable()) {
+        m_reactorThread.detach();
+    }
+    if (m_groupSocket != INVALID_SOCKET) {
+        closesocket(m_groupSocket);
+        m_groupSocket = INVALID_SOCKET;
+    }
+    if (m_dataSocket != INVALID_SOCKET) {
+        closesocket(m_dataSocket);
+        m_dataSocket = INVALID_SOCKET;
+    }
 }
 
 

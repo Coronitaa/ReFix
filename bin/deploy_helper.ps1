@@ -2536,6 +2536,11 @@ if ($isEacPresent) {
     }
     Copy-Item -LiteralPath $winhttpProxy -Destination $targetWinhttp -Force -ErrorAction Stop
     Write-Host "  [OK] Deployed ReFix winhttp.dll bootstrapper to $ExeDir (AutoLoadSteamApi=true)" -ForegroundColor Green
+    if ($script:storeType -eq "msstore" -and $TargetDir -ne $ExeDir -and (Test-Path -LiteralPath (Join-Path $TargetDir "gamelaunchhelper.exe"))) {
+        $rootWinhttp = Join-Path $TargetDir "winhttp.dll"
+        Copy-Item -LiteralPath $winhttpProxy -Destination $rootWinhttp -Force -ErrorAction SilentlyContinue
+        Write-Host "  [OK] Deployed ReFix winhttp.dll watchdog alongside gamelaunchhelper.exe in $TargetDir" -ForegroundColor Green
+    }
 } else {
     Write-Host "  [INFO] No EasyAntiCheat (EAC) detected. winhttp proxy not required." -ForegroundColor Gray
 }

@@ -25,6 +25,10 @@ ModHost::ModHost() {
 }
 
 ModHost::~ModHost() {
+    using FnRtlShutdown = BOOLEAN(NTAPI*)();
+    static FnRtlShutdown pShutdown = reinterpret_cast<FnRtlShutdown>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress"));
+    if (pShutdown && pShutdown()) return;
     Shutdown();
 }
 

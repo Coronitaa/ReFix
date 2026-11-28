@@ -313,9 +313,9 @@ bool TryInstallForLoadedModules() {
     std::lock_guard<std::mutex> lock(g_installMu);
     if (g_hooksInstalled.load(std::memory_order_acquire)) return true;
 
-    // XGamingRuntimeThunks.dll / XGamingRuntime.dll expose the flat XStore* C exports;
-    // System32 xgameruntime.dll only exposes COM internals and has no XStore* exports.
-    const char* candidates[] = { "XGamingRuntimeThunks.dll", "XGamingRuntime.dll" };
+    // XGamingRuntimeThunks.dll / XGamingRuntime.dll / XGameRuntime.dll expose the flat XStore* C exports;
+    // System32 xgameruntime.dll only exposes COM internals (QueryApiImpl) and has no XStore* exports.
+    const char* candidates[] = { "XGamingRuntimeThunks.dll", "XGamingRuntime.dll", "XGameRuntime.dll" };
     HMODULE hMod = nullptr;
     for (const char* dllName : candidates) {
         HMODULE m = GetModuleHandleA(dllName);
@@ -324,7 +324,14 @@ bool TryInstallForLoadedModules() {
             break;
         }
     }
-    if (!hMod) return false;
+    if (!hMod) {
+        static bool s_loggedStaticGdk = false;
+        if (!s_loggedStaticGdk && GetModuleHandleA("xgameruntime.dll")) {
+            s_loggedStaticGdk = true;
+            ReFixLog("[XStoreHook] xgameruntime.dll detected without XGamingRuntime*.dll (static GDK thunks)");
+        }
+        return false;
+    }
 
     MH_Initialize();
     g_submitTaskCallback = (Fn_XTaskQueueSubmitCallback)GetProcAddress(hMod, "XTaskQueueSubmitCallback");

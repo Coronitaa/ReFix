@@ -131,6 +131,10 @@ PatchEngine::PatchEngine() {
 }
 
 PatchEngine::~PatchEngine() {
+    using FnRtlShutdown = BOOLEAN(NTAPI*)();
+    static FnRtlShutdown pShutdown = reinterpret_cast<FnRtlShutdown>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress"));
+    if (pShutdown && pShutdown()) return;
     RollbackAll();
     RemoveAllHooks();
     if (minhook_initialized_) {

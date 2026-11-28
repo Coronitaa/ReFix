@@ -107,6 +107,10 @@ public:
 
 private:
     LobbyDirectory() = default;
+    ~LobbyDirectory() {
+        m_running.store(false, std::memory_order_release);
+        if (m_maintenance.joinable()) m_maintenance.detach();
+    }
     void OnDatagram(const PeerRef& from, const uint8_t* data, size_t len);
     void EnsureSteam();
     bool SendToPeer(const PeerRef& to, const void* data, size_t len);

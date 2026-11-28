@@ -192,6 +192,30 @@ static bool ClaimBootstrapOnce() {
     return true;
 }
 
+static bool IsHelperOrToolProcess(const std::string& exePath) {
+    char envBuf[16] = {};
+    if (GetEnvironmentVariableA("REFIX_HELPER_PROCESS", envBuf, sizeof(envBuf)) > 0 && envBuf[0] == '1') {
+        return true;
+    }
+    if (GetEnvironmentVariableA("REFIX_NO_BOOTSTRAP", envBuf, sizeof(envBuf)) > 0 && envBuf[0] == '1') {
+        return true;
+    }
+    size_t slash = exePath.find_last_of("\\/");
+    std::string name = (slash != std::string::npos) ? exePath.substr(slash + 1) : exePath;
+    for (char& c : name) c = (char)::tolower((unsigned char)c);
+
+    return name.find("refix_steamhost") != std::string::npos ||
+           name == "refixfusionshared.exe" ||
+           name == "refixmod.exe" ||
+           name == "gamelaunchhelper.exe" ||
+           name == "eosbootstrapper.exe" ||
+           name == "unitycrashhandler64.exe" ||
+           name == "unitycrashhandler.exe" ||
+           name == "crashpad_handler.exe" ||
+           name.find("crashhandler") != std::string::npos ||
+           name.find("crashpad") != std::string::npos;
+}
+
 static bool IsGameLaunchHelper(const std::string& exePath) {
     size_t slash = exePath.find_last_of("\\/");
     std::string name = (slash != std::string::npos) ? exePath.substr(slash + 1) : exePath;
@@ -199,12 +223,7 @@ static bool IsGameLaunchHelper(const std::string& exePath) {
 }
 
 static bool IsWrapperLauncherProcess(const std::string& exePath) {
-    size_t slash = exePath.find_last_of("\\/");
-    std::string name = (slash != std::string::npos) ? exePath.substr(slash + 1) : exePath;
-    return _stricmp(name.c_str(), "gamelaunchhelper.exe") == 0 ||
-           _stricmp(name.c_str(), "eosbootstrapper.exe") == 0 ||
-           _stricmp(name.c_str(), "unitycrashhandler64.exe") == 0 ||
-           _stricmp(name.c_str(), "crashpad_handler.exe") == 0;
+    return IsHelperOrToolProcess(exePath);
 }
 
 static void TerminateProcessesByName(const wchar_t* targetName, DWORD skipPid) {
@@ -272,7 +291,9 @@ static bool ContainsError0x800705b4(const wchar_t* text) {
     return lower.find(L"0x800705b4") != std::wstring::npos ||
            lower.find(L"800705b4") != std::wstring::npos ||
            lower.find(L"ya se est") != std::wstring::npos ||
-           lower.find(L"already running") != std::wstring::npos;
+           lower.find(L"already running") != std::wstring::npos ||
+           lower.find(L"error al iniciar tu juego") != std::wstring::npos ||
+           lower.find(L"something went wrong launching") != std::wstring::npos;
 }
 
 static bool UIAutomationHasMsStoreError(IUIAutomation* pAuto, HWND hwnd) {
@@ -294,7 +315,7 @@ static bool UIAutomationHasMsStoreError(IUIAutomation* pAuto, HWND hwnd) {
             if (SUCCEEDED(pRoot->FindAll(TreeScope_Descendants, pTrue, &pArr)) && pArr) {
                 int len = 0;
                 pArr->get_Length(&len);
-                if (len > 128) len = 128;
+                if (len > 512) len = 512;
                 for (int i = 0; i < len && !matched; ++i) {
                     IUIAutomationElement* pChild = nullptr;
                     if (SUCCEEDED(pArr->GetElement(i, &pChild)) && pChild) {
@@ -335,16 +356,41 @@ static bool TerminateChildOrNamedProcesses(const wchar_t* targetName, DWORD pare
     return killed;
 }
 
+struct MsStoreWatchdogArgs {
+    std::string logDir;
+    bool isHelper;
+};
+
+static bool IsMsStoreGameProcess(const std::string& exePath, const std::string& baseDir) {
+    std::string lowerExe = exePath;
+    for (char& c : lowerExe) c = (char)::tolower((unsigned char)c);
+    if (lowerExe.find("-wingdk-") != std::string::npos || lowerExe.find("\\windowsapps\\") != std::string::npos) {
+        return true;
+    }
+    const char* rels[] = { "", "\\..", "\\..\\..", "\\..\\..\\.." };
+    for (const char* rel : rels) {
+        std::string dir = baseDir + rel;
+        if (GetFileAttributesA((dir + "\\MicrosoftGame.config").c_str()) != INVALID_FILE_ATTRIBUTES ||
+            GetFileAttributesA((dir + "\\gamelaunchhelper.exe").c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static DWORD WINAPI MsStoreLaunchWatchdogThread(LPVOID param) {
-    char* pLogDir = reinterpret_cast<char*>(param);
-    std::string logPath = pLogDir ? (std::string(pLogDir) + "\\ReFix.log") : "";
-    if (pLogDir) free(pLogDir);
+    MsStoreWatchdogArgs* args = reinterpret_cast<MsStoreWatchdogArgs*>(param);
+    std::string logPath = (args && !args->logDir.empty()) ? (args->logDir + "\\ReFix.log") : "";
+    bool isHelper = args ? args->isHelper : true;
+    delete args;
 
     const DWORD selfPid = GetCurrentProcessId();
-    // Clean lingering Steam helper or stale gamelaunchhelper processes from earlier runs.
-    TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
-    TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
-    TerminateProcessesByName(L"gamelaunchhelper.exe", selfPid);
+    if (isHelper) {
+        // Clean lingering Steam helper or stale gamelaunchhelper processes from earlier runs.
+        TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
+        TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
+        TerminateProcessesByName(L"gamelaunchhelper.exe", selfPid);
+    }
 
     HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IUIAutomation* pAuto = nullptr;
@@ -367,7 +413,10 @@ static DWORD WINAPI MsStoreLaunchWatchdogThread(LPVOID param) {
             wchar_t procName[MAX_PATH] = {};
             GetProcessExeNameByPid(pid, procName, MAX_PATH);
             bool isGsUi = (_wcsicmp(procName, L"GamingServicesUI.exe") == 0 ||
-                           _wcsicmp(procName, L"ApplicationFrameHost.exe") == 0);
+                           _wcsicmp(procName, L"ApplicationFrameHost.exe") == 0 ||
+                           _wcsicmp(procName, L"XboxPcApp.exe") == 0 ||
+                           _wcsicmp(procName, L"XboxPcAppFT.exe") == 0 ||
+                           _wcsicmp(procName, L"XboxAppServices.exe") == 0);
 
             if (WindowHasTextMatch(hwnd, L"0x800705b4") || WindowHasTextMatch(hwnd, L"800705b4") ||
                 (isGsUi && UIAutomationHasMsStoreError(c->pAuto, hwnd))) {
@@ -380,35 +429,39 @@ static DWORD WINAPI MsStoreLaunchWatchdogThread(LPVOID param) {
 
         if (!ctx.foundHwnd) continue;
 
-        TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
-        TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
+        if (isHelper) {
+            TerminateProcessesByName(L"refix_steamhost64.exe", selfPid);
+            TerminateProcessesByName(L"refix_steamhost.exe", selfPid);
+        }
 
         // Terminating GamingServicesUI.exe lets GameLaunchHelper.exe unblock and boot the game
         // without aborting the launch sequence.
         bool killedUi = TerminateChildOrNamedProcesses(L"GamingServicesUI.exe", selfPid);
         wchar_t ownerName[MAX_PATH] = {};
         if (ctx.foundPid && GetProcessExeNameByPid(ctx.foundPid, ownerName, MAX_PATH)) {
-            if (_wcsicmp(ownerName, L"ApplicationFrameHost.exe") != 0 &&
-                _wcsicmp(ownerName, L"explorer.exe") != 0 &&
+            if ((_wcsicmp(ownerName, L"GamingServicesUI.exe") == 0 ||
+                 _wcsicmp(ownerName, L"XboxAppServices.exe") == 0) &&
                 ctx.foundPid != selfPid) {
                 HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, ctx.foundPid);
                 if (h) {
                     TerminateProcess(h, 0);
                     CloseHandle(h);
+                    killedUi = true;
                 }
             }
         }
         PostMessageW(ctx.foundHwnd, WM_CLOSE, 0, 0);
+        PostMessageW(ctx.foundHwnd, WM_SYSCOMMAND, SC_CLOSE, 0);
 
         if (!logPath.empty()) {
             FILE* f = fopen(logPath.c_str(), "a");
             if (f) {
-                fprintf(f, "[MsStoreWatchdog] Cleared 0x800705b4 dialog (pid=%lu, killedUi=%d)\n",
-                        ctx.foundPid, killedUi ? 1 : 0);
+                fprintf(f, "[MsStoreWatchdog] Cleared 0x800705b4 dialog (pid=%lu, killedUi=%d, owner=%ls)\n",
+                        ctx.foundPid, killedUi ? 1 : 0, ownerName);
                 fclose(f);
             }
         }
-        break;
+        Sleep(500);
     }
 
     if (pAuto) pAuto->Release();
@@ -500,24 +553,29 @@ static DWORD WINAPI ExtraDllsThread(LPVOID param) {
     return 0;
 }
 
+static void LaunchMsStoreWatchdog(const std::string& logDir, bool enableLog, bool isHelper) {
+    auto* args = new MsStoreWatchdogArgs{ enableLog ? logDir : "", isHelper };
+    HANDLE hWatch = CreateThread(NULL, 0, MsStoreLaunchWatchdogThread, args, 0, NULL);
+    if (hWatch) {
+        CloseHandle(hWatch);
+    } else {
+        delete args;
+    }
+}
+
 static void LoadAndApplyConfig() {
     char exePath[MAX_PATH] = { 0 };
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    if (IsGameLaunchHelper(exePath)) {
-        char logFlag[16] = "false";
-        std::string helperDir = DirOf(exePath);
-        std::string helperIni = helperDir + "\\ReFix.ini";
-        GetPrivateProfileStringA("Debug", "EnableLog", "false", logFlag, sizeof(logFlag), helperIni.c_str());
-        char* logDirArg = IsIniTrue(logFlag) ? _strdup(helperDir.c_str()) : nullptr;
-        HANDLE hWatch = CreateThread(NULL, 0, MsStoreLaunchWatchdogThread, logDirArg, 0, NULL);
-        if (hWatch) {
-            CloseHandle(hWatch);
-        } else if (logDirArg) {
-            free(logDirArg);
+    if (IsHelperOrToolProcess(exePath)) {
+        if (IsGameLaunchHelper(exePath)) {
+            char logFlag[16] = "false";
+            std::string helperDir = DirOf(exePath);
+            std::string helperIni = helperDir + "\\ReFix.ini";
+            GetPrivateProfileStringA("Debug", "EnableLog", "false", logFlag, sizeof(logFlag), helperIni.c_str());
+            LaunchMsStoreWatchdog(helperDir, IsIniTrue(logFlag), true);
         }
         return;
     }
-    if (IsWrapperLauncherProcess(exePath)) return;
     std::string baseDir = DirOf(exePath);
 
     std::string candidates[] = {
@@ -536,6 +594,12 @@ static void LoadAndApplyConfig() {
         }
     }
     if (!foundIni) return;
+
+    if (IsMsStoreGameProcess(exePath, baseDir)) {
+        char logFlag[16] = "false";
+        GetPrivateProfileStringA("Debug", "EnableLog", "false", logFlag, sizeof(logFlag), iniPath.c_str());
+        LaunchMsStoreWatchdog(DirOf(iniPath), IsIniTrue(logFlag), false);
+    }
 
     char mode[64] = "";
     GetPrivateProfileStringA("Online", "Mode", "", mode, sizeof(mode), iniPath.c_str());
